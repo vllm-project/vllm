@@ -95,6 +95,22 @@ __device__ __forceinline__ float4 get_neg_zero() {
   return vec;
 }
 
+template <int Dim>
+__device__ __forceinline__ float rms_rsqrt(float& v, float eps) {
+  constexpr float kInvDim = 1.0F / static_cast<float>(Dim);
+  v = rsqrtf((v * kInvDim) + eps);
+  return v;
+}
+
+template <int Dim>
+__device__ __forceinline__ float4 rms_rsqrt(float4& v, float eps) {
+  constexpr float kInvDim = 1.0F / static_cast<float>(Dim);
+  v.x = rsqrtf((v.x * kInvDim) + eps);
+  v.y = rsqrtf((v.y * kInvDim) + eps);
+  v.z = rsqrtf((v.z * kInvDim) + eps);
+  v.w = rsqrtf((v.w * kInvDim) + eps);
+  return v;
+}
 __device__ __forceinline__ float4 ld_global_volatile(float4* addr) {
   float4 val;
   asm volatile("ld.volatile.global.v4.f32 {%0, %1, %2, %3}, [%4];"
@@ -109,6 +125,7 @@ __device__ __forceinline__ float ld_global_volatile(float* addr) {
   return val;
 }
 
+// Used by the scalar (non-float4) kernel only
 template <typename T, int NUM>
 __inline__ __device__ T warpReduceSumV2(T* val) {
 #pragma unroll
@@ -146,60 +163,31 @@ __inline__ __device__ T blockReduceSumV2(T* val) {
   return (T)0.0f;
 }
 
-template <typename T, int NUM>
-__device__ __forceinline__ void blockReduceSumRange(T* val, int rangeStart,
-                                                    int rangeEnd) {
-  constexpr int kWarpSize = 32;
-  constexpr unsigned kFullMask = 0xffffffffu;
-  static __shared__ T shared[NUM][33];
-
-  int const activeThreadCount = max(rangeEnd - rangeStart, 0);
-  bool const isActive = threadIdx.x >= rangeStart && threadIdx.x < rangeEnd;
-  int const lane = threadIdx.x & (kWarpSize - 1);
-  unsigned const activeMask = __ballot_sync(kFullMask, isActive);
-
-  if (isActive) {
+// for float4 version
+template <uint32_t kNumThreads, typename T, int ArraySize = 4>
+__device__ __forceinline__ void local_warp_reduce_sum_array(
+    T* value_ptr, uint32_t active_mask = 0xffffffffu) {
+  static_assert(kNumThreads >= 1 &&
+                kNumThreads <= MINIMAX_REDUCE_RMS_WARP_SIZE);
 #pragma unroll
-    for (int i = 0; i < NUM; ++i) {
-      T sum = val[i];
+  for (int i = 0; i < ArraySize; ++i) {
 #pragma unroll
-      for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(activeMask, sum, offset, kWarpSize);
-      }
-      val[i] = sum;
-    }
-  }
-
-  if (isActive && lane == 0) {
-    int const localWarpId = (threadIdx.x - rangeStart) >> 5;
-#pragma unroll
-    for (int i = 0; i < NUM; ++i) {
-      shared[i][localWarpId] = val[i];
-    }
-  }
-
-  __syncthreads();
-
-  int const shiftedTid = threadIdx.x - rangeStart;
-  int const warpCount = (activeThreadCount + kWarpSize - 1) / kWarpSize;
-  bool const inLeaderWarp = shiftedTid >= 0 && shiftedTid < kWarpSize;
-  bool const leaderLaneIsValid = inLeaderWarp && shiftedTid < warpCount;
-  unsigned const leaderMask = __ballot_sync(kFullMask, leaderLaneIsValid);
-
-  if (inLeaderWarp) {
-#pragma unroll
-    for (int i = 0; i < NUM; ++i) {
-      T sum = leaderLaneIsValid ? shared[i][shiftedTid] : static_cast<T>(0);
-#pragma unroll
-      for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(leaderMask, sum, offset, kWarpSize);
-      }
-      if (threadIdx.x == rangeStart) {
-        val[i] = sum;
-      }
+    for (int mask = kNumThreads / 2; mask > 0; mask >>= 1) {
+      value_ptr[i] += __shfl_xor_sync(active_mask, value_ptr[i], mask,
+                                      MINIMAX_REDUCE_RMS_WARP_SIZE);
     }
   }
 }
+
+constexpr int next_pow2(int val) {
+  int result = 1;
+  while (result < val) {
+    result <<= 1;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 
 template <typename DType>
 class IndexHelper {
@@ -254,14 +242,12 @@ __global__ void __launch_bounds__(1024)
   int tot_access = index_helper.tot_access;
   int tot_tokens = params.size_q / params.hidden_dim;
   float4 clear_vec = get_neg_zero();
-  // FusedOp<Pattern, DType> fused_op(params, access_id, access_id_in_token);
 
   LamportComm<NRanks> comm(params.workspace, params.rank);
   int clear_access = comm.clear_size / kElemsPerAccess<DType>;
   for (int idx = access_id; idx < tot_access;
        idx += access_stride, token_id += token_stride) {
     alignas(16) DType vals[kElemsPerAccess<DType>];
-    // we use float to load and store variance sum
     float sum_variance = 0.F;
     *reinterpret_cast<float4*>(vals) =
         reinterpret_cast<float4*>(params.allreduce_in)[idx];
@@ -269,26 +255,18 @@ __global__ void __launch_bounds__(1024)
     for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
       sum_variance += static_cast<float>(vals[i]) * static_cast<float>(vals[i]);
     }
-    // step 1: reduce from single rank to get the variance sum
     blockReduceSumV2<float, 1>(&sum_variance);
     if (is_neg_zero(sum_variance)) {
       sum_variance = 0.F;
     }
-    // step 2: reduce from all ranks to get the variance sum
-    // be careful, we only use float to load and store variance sum
-    // but we use float4 to load input tensor
-    // Push data to other ranks
-    // we only need the first thread to push data to other ranks
     if (threadIdx.x == 0) {
       for (int r = 0; r < NRanks; ++r) {
-        // temp data buffer [nranks, total_tokens, 1]
         reinterpret_cast<float*>(
             comm.data_bufs[r])[(params.rank * tot_tokens) + token_id] =
             (sum_variance);
       }
     }
 
-    // Load data from other ranks
     bool done = false;
     float vars_all_ranks[NRanks];
     while (!done) {
@@ -306,9 +284,6 @@ __global__ void __launch_bounds__(1024)
       sum_variance += vars_all_ranks[r];
     }
 
-    // step 3: calculate the rms norm (input * rsqrt(variance + eps))
-
-    // load norm weight
     DType norm_weight[kElemsPerAccess<DType>];
     *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(norm_weight) =
         reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
@@ -324,12 +299,10 @@ __global__ void __launch_bounds__(1024)
           static_cast<float>(norm_weight[i]));
     }
 
-    // step 4: store the rms norm
     reinterpret_cast<float4*>(params.rms_norm_out)[idx] =
         *reinterpret_cast<float4*>(vals);
   }
   for (int idx = access_id; idx < clear_access; idx += access_stride) {
-    // Clear comm buffer that previous kernel used
     reinterpret_cast<float4*>(comm.clear_buf)[idx] = clear_vec;
   }
   comm.update(params.size_q * NRanks);
@@ -342,27 +315,30 @@ __global__ void __launch_bounds__(1024)
  * zeros; padded rows are not written to rms_norm_out. IsQK: when true, process
  * Q+K in one loop with doubled comm buffer; when false, single-matrix (Q only).
  */
-template <typename DType, int NRanks, bool IsQK>
+template <typename DType, int NRanks, int OriginQDim, int OriginKDim>
 __global__ void __launch_bounds__(1024)
-    minimax_reduce_rms_kernel_lamport_float4(MiniMaxReduceRMSParams params) {
-  int tot_tokens = params.size_q / params.hidden_dim;
-  int tot_groups =
-      (tot_tokens + 3) / 4;  // ceiling: last group may have 1-3 valid rows
-  int access_per_row_q = params.hidden_dim / kElemsPerAccess<DType>;
-  int access_per_row_k =
-      IsQK ? (params.hidden_dim_k / kElemsPerAccess<DType>) : 0;
-  int access_stride_q =
-      (params.stride_q > 0 ? params.stride_q : params.hidden_dim) /
-      kElemsPerAccess<DType>;
-  int access_stride_k =
-      IsQK ? ((params.stride_k > 0 ? params.stride_k : params.hidden_dim_k) /
-              kElemsPerAccess<DType>)
-           : 0;
-  int q_warps = (access_per_row_q + MINIMAX_REDUCE_RMS_WARP_SIZE - 1) /
-                MINIMAX_REDUCE_RMS_WARP_SIZE;
-  int k_warps = IsQK ? ((access_per_row_k + MINIMAX_REDUCE_RMS_WARP_SIZE - 1) /
-                        MINIMAX_REDUCE_RMS_WARP_SIZE)
-                     : 0;
+    minimax_reduce_qk_rms_kernel_lamport_float4(MiniMaxReduceRMSParams params) {
+  // Compile-time per-rank dimensions
+  constexpr int RankQDim = OriginQDim / NRanks;
+  constexpr int RankKDim = OriginKDim / NRanks;
+  // Threads needed to cover one row of Q / K with float4 accesses
+  constexpr int ThreadsPerRowQ = RankQDim / kElemsPerAccess<DType>;
+  constexpr int ThreadsPerRowK = RankKDim / kElemsPerAccess<DType>;
+  // Number of warps dedicated to Q / K
+  constexpr int NumWarpQ = (ThreadsPerRowQ + MINIMAX_REDUCE_RMS_WARP_SIZE - 1) /
+                           MINIMAX_REDUCE_RMS_WARP_SIZE;
+  constexpr int NumWarpK = (ThreadsPerRowK + MINIMAX_REDUCE_RMS_WARP_SIZE - 1) /
+                           MINIMAX_REDUCE_RMS_WARP_SIZE;
+
+  int tot_tokens = params.size_q / RankQDim;
+  int tot_groups = (tot_tokens + 3) / 4;  // ceiling; last group may be partial
+
+  // Memory strides for strided qkv tensors (elements -> float4-access units)
+  int access_stride_q = (params.stride_q > 0 ? params.stride_q : RankQDim) /
+                        kElemsPerAccess<DType>;
+  int access_stride_k = (params.stride_k > 0 ? params.stride_k : RankKDim) /
+                        kElemsPerAccess<DType>;
+
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   namespace cg = cooperative_groups;
   cg::cluster_group cluster = cg::this_cluster();
@@ -375,230 +351,241 @@ __global__ void __launch_bounds__(1024)
   int access_id_in_token = threadIdx.x;
   int group_stride = gridDim.x;
 #endif
-  bool is_q = (access_id_in_token < q_warps * MINIMAX_REDUCE_RMS_WARP_SIZE);
+
+  bool is_q = (access_id_in_token < NumWarpQ * MINIMAX_REDUCE_RMS_WARP_SIZE);
   int k_thread_idx =
-      IsQK ? (access_id_in_token - q_warps * MINIMAX_REDUCE_RMS_WARP_SIZE) : 0;
-  bool is_valid_token = is_q ? (access_id_in_token < access_per_row_q)
-                             : (k_thread_idx < access_per_row_k);
+      access_id_in_token - (NumWarpQ * MINIMAX_REDUCE_RMS_WARP_SIZE);
+  bool is_valid_q = (access_id_in_token < ThreadsPerRowQ);
+  bool is_valid_k = (k_thread_idx >= 0 && k_thread_idx < ThreadsPerRowK);
   float4 clear_vec = get_neg_zero();
+
+  // Shared memory for two-level block reduction and scale broadcast
+  __shared__ float block_reduce_sum[4][MINIMAX_REDUCE_RMS_WARP_SIZE + 1];
+  __shared__ float global_scale_q[4];
+  __shared__ float global_scale_k[4];
 
   LamportComm<NRanks> comm(params.workspace, params.rank);
 
-  for (int g = group_id; g < tot_groups; g += group_stride) {
-    alignas(16) DType vals[4][kElemsPerAccess<DType>]{};
-    float sum_variance[4] = {0.F, 0.F, 0.F, 0.F};
-    float sum_variance_k[4] = {0.F, 0.F, 0.F, 0.F};
-
-    if (is_q) {
-// Q branch: each thread only covers 128bit
-#pragma unroll
-      for (int r = 0; r < 4; ++r) {
-        int token_r = g * 4 + r;
-        if (token_r >= tot_tokens || (!is_valid_token)) {
-          continue;
-        }
-        int idx_r = token_r * access_stride_q + access_id_in_token;
-        *reinterpret_cast<float4*>(&vals[r][0]) =
-            reinterpret_cast<float4 const*>(params.allreduce_in)[idx_r];
-#pragma unroll
-        for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
-          float x = static_cast<float>(vals[r][i]);
-          sum_variance[r] += x * x;
-        }
-      }
-    } else if constexpr (IsQK)  // k branch
-    {
-// K branch: k_thread_idx = threadIdx.x - q_warps, each thread covers 32 K
-// columns
-#pragma unroll
-      for (int r = 0; r < 4; ++r) {
-        int token_r = g * 4 + r;
-        if (token_r >= tot_tokens || k_thread_idx >= access_per_row_k) {
-          continue;
-        }
-
-        int idx_r = token_r * access_stride_k + k_thread_idx;
-        *reinterpret_cast<float4*>(&vals[r][0]) =
-            reinterpret_cast<float4 const*>(params.allreduce_in_k)[idx_r];
-#pragma unroll
-        for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
-          float x = static_cast<float>(vals[r][i]);
-          sum_variance_k[r] += x * x;
-        }
-      }
+  DType norm_weight[kElemsPerAccess<DType>]{};
+  if (is_q) {
+    if (is_valid_q) {
+      *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
+          norm_weight) =
+          reinterpret_cast<typename ElemsPerAccess<DType>::vec_type const*>(
+              params.rms_gamma)[access_id_in_token];
     }
-
-    // Local reduce: only Q segment contributes to sum_variance, only K segment
-    // to sum_variance_k here we use all threads to reduce sum_variance and
-    // sum_variance_k
-    // TODO: we can do local reduce only within q threads and k threads
-    // respectively
-    blockReduceSumV2<float, 4>(sum_variance);
-    if constexpr (IsQK) {
-      int const kStartThread = q_warps * MINIMAX_REDUCE_RMS_WARP_SIZE;
-      int const kEndThread = (q_warps + k_warps) * MINIMAX_REDUCE_RMS_WARP_SIZE;
-      blockReduceSumRange<float, 4>(sum_variance_k, kStartThread, kEndThread);
-    }
-#pragma unroll
-    for (int r = 0; r < 4; ++r) {
-      if (is_neg_zero(sum_variance[r])) {
-        sum_variance[r] = 0.F;
-      }
-      if constexpr (IsQK) {
-        if (is_neg_zero(sum_variance_k[r])) {
-          sum_variance_k[r] = 0.F;
-        }
-      }
-    }
-
-    // Allreduce: write float4(s) to comm (thread 0 has both after broadcast)
-    if (threadIdx.x == 0 ||
-        threadIdx.x == q_warps * MINIMAX_REDUCE_RMS_WARP_SIZE) {
-      if (is_q) {
-        float4 sum4;
-        sum4.x = sum_variance[0];
-        sum4.y = sum_variance[1];
-        sum4.z = sum_variance[2];
-        sum4.w = sum_variance[3];
-#pragma unroll
-        for (int r = 0; r < NRanks; ++r) {
-          if constexpr (IsQK) {
-            reinterpret_cast<float4*>(
-                comm.data_bufs[r])[(params.rank * 2 * tot_groups) + 2 * g] =
-                sum4;
-          } else {
-            reinterpret_cast<float4*>(
-                comm.data_bufs[r])[(params.rank * tot_groups) + g] = sum4;
-          }
-        }
-      } else if constexpr (IsQK) {
-        float4 sum4;
-        sum4.x = sum_variance_k[0];
-        sum4.y = sum_variance_k[1];
-        sum4.z = sum_variance_k[2];
-        sum4.w = sum_variance_k[3];
-#pragma unroll
-        for (int r = 0; r < NRanks; ++r) {
-          reinterpret_cast<float4*>(
-              comm.data_bufs[r])[(params.rank * 2 * tot_groups) + 2 * g + 1] =
-              sum4;
-        }
-      }
-    }
-
-    // Read Q from buffer, sum, then RMS and store Q
-    bool done = false;
-    float4 vars_all_ranks[NRanks];
-    if (is_q) {
-      while (!done) {
-        done = true;
-#pragma unroll
-        for (int r = 0; r < NRanks; ++r) {
-          if constexpr (IsQK) {
-            vars_all_ranks[r] = ld_global_volatile(&reinterpret_cast<float4*>(
-                comm.data_bufs[params.rank])[(r * 2 * tot_groups) + 2 * g]);
-          } else {
-            vars_all_ranks[r] = ld_global_volatile(&reinterpret_cast<float4*>(
-                comm.data_bufs[params.rank])[(r * tot_groups) + g]);
-          }
-          done &= !is_neg_zero(vars_all_ranks[r]);
-        }
-      }
-    } else if constexpr (IsQK) {
-      while (!done) {
-        done = true;
-        for (int r = 0; r < NRanks; ++r) {
-          vars_all_ranks[r] = ld_global_volatile(&reinterpret_cast<float4*>(
-              comm.data_bufs[params.rank])[(r * 2 * tot_groups) + 2 * g + 1]);
-          done &= !is_neg_zero(vars_all_ranks[r]);
-        }
-      }
-    }
-
-    sum_variance[0] = 0.F;
-    sum_variance[1] = 0.F;
-    sum_variance[2] = 0.F;
-    sum_variance[3] = 0.F;
-#pragma unroll
-    for (int r = 0; r < NRanks; ++r) {
-      sum_variance[0] += vars_all_ranks[r].x;
-      sum_variance[1] += vars_all_ranks[r].y;
-      sum_variance[2] += vars_all_ranks[r].z;
-      sum_variance[3] += vars_all_ranks[r].w;
-    }
-
-    // RMS norm and store 4 rows of Q (Q branch only, reload and store per
-    // column)
-    if (is_q) {
-      if (access_id_in_token < access_per_row_q) {
-        DType norm_weight[kElemsPerAccess<DType>];
-        *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
-            norm_weight) =
-            reinterpret_cast<typename ElemsPerAccess<DType>::vec_type const*>(
-                params.rms_gamma)[access_id_in_token];
-#pragma unroll
-        for (int r = 0; r < 4; ++r) {
-          int token_r = g * 4 + r;
-          if (token_r >= tot_tokens) {
-            continue;
-          }
-          float scale =
-              rsqrtf((sum_variance[r] / static_cast<float>(params.hidden_dim) /
-                      NRanks) +
-                     params.rms_eps);
-
-#pragma unroll
-          for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
-            vals[r][i] =
-                static_cast<DType>(static_cast<float>(vals[r][i]) * scale *
-                                   static_cast<float>(norm_weight[i]));
-          }
-          int idx_out = token_r * access_stride_q + access_id_in_token;
-          reinterpret_cast<float4*>(params.rms_norm_out)[idx_out] =
-              *reinterpret_cast<float4*>(&vals[r][0]);
-        }
-      }
-    } else if constexpr (IsQK) {
-      if (k_thread_idx < access_per_row_k) {
-        DType norm_weight_k[kElemsPerAccess<DType>];
-        *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
-            norm_weight_k) =
-            reinterpret_cast<typename ElemsPerAccess<DType>::vec_type const*>(
-                params.rms_gamma_k)[k_thread_idx];
-#pragma unroll
-        for (int r = 0; r < 4; ++r) {
-          int token_r = g * 4 + r;
-          if (token_r >= tot_tokens) {
-            continue;
-          }
-          float scale_k =
-              rsqrtf((sum_variance[r] /
-                      static_cast<float>(params.hidden_dim_k) / NRanks) +
-                     params.rms_eps);
-#pragma unroll
-          for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
-            vals[r][i] =
-                static_cast<DType>(static_cast<float>(vals[r][i]) * scale_k *
-                                   static_cast<float>(norm_weight_k[i]));
-          }
-          int idx_out = token_r * access_stride_k + k_thread_idx;
-          reinterpret_cast<float4*>(params.rms_norm_out_k)[idx_out] =
-              *reinterpret_cast<float4*>(&vals[r][0]);
-        }
-      }
+  } else {
+    if (is_valid_k) {
+      *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
+          norm_weight) =
+          reinterpret_cast<typename ElemsPerAccess<DType>::vec_type const*>(
+              params.rms_gamma_k)[k_thread_idx];
     }
   }
 
-  // Clear comm buffer
+  // Main loop: process one group of 4 tokens per iteration.
+  for (int g = group_id; g < tot_groups; g += group_stride) {
+    alignas(16) DType vals[4][kElemsPerAccess<DType>]{};
+    float warp_sum_variance[4]{0.F, 0.F, 0.F, 0.F};
+
+    if (is_q) {
+#pragma unroll
+      for (int row = 0; row < 4; ++row) {
+        int token_r = g * 4 + row;
+        if (token_r >= tot_tokens || !is_valid_q) {
+          continue;
+        }
+        int idx_r = token_r * access_stride_q + access_id_in_token;
+        *reinterpret_cast<float4*>(&vals[row][0]) =
+            reinterpret_cast<float4 const*>(params.allreduce_in)[idx_r];
+#pragma unroll
+        for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
+          float x = static_cast<float>(vals[row][i]);
+          warp_sum_variance[row] += x * x;
+        }
+      }
+    } else {
+#pragma unroll
+      for (int row = 0; row < 4; ++row) {
+        int token_r = g * 4 + row;
+        if (token_r >= tot_tokens || !is_valid_k) {
+          continue;
+        }
+        int idx_r = token_r * access_stride_k + k_thread_idx;
+        *reinterpret_cast<float4*>(&vals[row][0]) =
+            reinterpret_cast<float4 const*>(params.allreduce_in_k)[idx_r];
+#pragma unroll
+        for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
+          float x = static_cast<float>(vals[row][i]);
+          warp_sum_variance[row] += x * x;
+        }
+      }
+    }
+
+    local_warp_reduce_sum_array<MINIMAX_REDUCE_RMS_WARP_SIZE, float, 4>(
+        warp_sum_variance);
+    // Warp lane 0 writes its warp's partial sum to shared memory
+    int lane = threadIdx.x & (MINIMAX_REDUCE_RMS_WARP_SIZE - 1);
+    if (lane == 0) {
+#pragma unroll
+      for (int t = 0; t < 4; ++t) {
+        block_reduce_sum[t][threadIdx.x / MINIMAX_REDUCE_RMS_WARP_SIZE] =
+            warp_sum_variance[t];
+      }
+    }
+    __syncthreads();
+
+    int tid = threadIdx.x;
+
+    if (tid < MINIMAX_REDUCE_RMS_WARP_SIZE) {
+      constexpr int kNumWarpQPow2 =
+          (next_pow2(NumWarpQ) > NRanks) ? next_pow2(NumWarpQ) : NRanks;
+      float local_sum[4];
+#pragma unroll
+      for (int t = 0; t < 4; ++t) {
+        local_sum[t] = (tid < NumWarpQ) ? block_reduce_sum[t][tid] : 0.F;
+      }
+      // After this, all kNumWarpQPow2 lanes (including tid 0..NRanks-1) have
+      // the total Q sum-of-squares for all 4 tokens.
+      local_warp_reduce_sum_array<kNumWarpQPow2, float, 4>(local_sum);
+
+      if (tid < NRanks) {
+#pragma unroll
+        for (int t = 0; t < 4; ++t) {
+          if (is_neg_zero(local_sum[t])) {
+            local_sum[t] = 0.F;
+          }
+        }
+        // Parallel push: thread tid writes this rank's Q sum to rank tid's buf
+        reinterpret_cast<float4*>(
+            comm.data_bufs[tid])[(params.rank * tot_groups * 2) + (2 * g)] =
+            *reinterpret_cast<float4*>(local_sum);
+
+        // Parallel pull: thread tid reads rank tid's contribution from
+        // this rank's (params.rank's) buffer
+        bool done = false;
+        float4 var_all_ranks;
+        while (!done) {
+          done = true;
+          var_all_ranks = ld_global_volatile(&reinterpret_cast<float4*>(
+              comm.data_bufs[params.rank])[(tid * tot_groups * 2) + (2 * g)]);
+          done &= !is_neg_zero(var_all_ranks);
+        }
+
+        // Warp-level allreduce: each of the NRanks threads holds one rank's
+        // partial sum; after this all NRanks threads have the global total.
+        constexpr uint32_t kQActiveMask = (1u << NRanks) - 1u;
+        local_warp_reduce_sum_array<NRanks, float, 4>(
+            reinterpret_cast<float*>(&var_all_ranks), kQActiveMask);
+
+        // Thread 0 computes rsqrt with compile-time Dim and writes to smem
+        if (tid == 0) {
+          *reinterpret_cast<float4*>(global_scale_q) =
+              rms_rsqrt<OriginQDim>(var_all_ranks, params.rms_eps);
+        }
+      }
+    } else if (tid >= MINIMAX_REDUCE_RMS_WARP_SIZE * NumWarpQ &&
+               tid < MINIMAX_REDUCE_RMS_WARP_SIZE * (NumWarpQ + 1)) {
+      // --- K leader warp ---
+      constexpr int kNumWarpKPow2 =
+          (next_pow2(NumWarpK) > NRanks) ? next_pow2(NumWarpK) : NRanks;
+      float local_sum[4];
+#pragma unroll
+      for (int t = 0; t < 4; ++t) {
+        local_sum[t] = (k_thread_idx < NumWarpK)
+                           ? block_reduce_sum[t][NumWarpQ + k_thread_idx]
+                           : 0.F;
+      }
+      local_warp_reduce_sum_array<kNumWarpKPow2, float, 4>(local_sum);
+
+      if (k_thread_idx < NRanks) {
+#pragma unroll
+        for (int t = 0; t < 4; ++t) {
+          if (is_neg_zero(local_sum[t])) {
+            local_sum[t] = 0.F;
+          }
+        }
+        reinterpret_cast<float4*>(
+            comm.data_bufs[k_thread_idx])[(params.rank * tot_groups * 2) +
+                                          (2 * g + 1)] =
+            *reinterpret_cast<float4*>(local_sum);
+
+        bool done = false;
+        float4 var_all_ranks;
+        while (!done) {
+          done = true;
+          var_all_ranks = ld_global_volatile(&reinterpret_cast<float4*>(
+              comm.data_bufs[params.rank])[(k_thread_idx * tot_groups * 2) +
+                                           (2 * g + 1)]);
+          done &= !is_neg_zero(var_all_ranks);
+        }
+
+        constexpr uint32_t kKActiveMask = (1u << NRanks) - 1u;
+        local_warp_reduce_sum_array<NRanks, float, 4>(
+            reinterpret_cast<float*>(&var_all_ranks), kKActiveMask);
+
+        if (k_thread_idx == 0) {
+          *reinterpret_cast<float4*>(global_scale_k) =
+              rms_rsqrt<OriginKDim>(var_all_ranks, params.rms_eps);
+        }
+      }
+    }
+    __syncthreads();
+
+    if (is_q) {
+#pragma unroll
+      for (int t = 0; t < 4; ++t) {
+        warp_sum_variance[t] = global_scale_q[t];
+      }
+#pragma unroll
+      for (int r = 0; r < 4; ++r) {
+#pragma unroll
+        for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
+          vals[r][i] = static_cast<DType>(static_cast<float>(vals[r][i]) *
+                                          warp_sum_variance[r] *
+                                          static_cast<float>(norm_weight[i]));
+        }
+        int token_r = g * 4 + r;
+        if (token_r >= tot_tokens || !is_valid_q) {
+          continue;
+        }
+        int idx_out = token_r * access_stride_q + access_id_in_token;
+        reinterpret_cast<float4*>(params.rms_norm_out)[idx_out] =
+            *reinterpret_cast<float4*>(&vals[r][0]);
+      }
+    } else {
+#pragma unroll
+      for (int t = 0; t < 4; ++t) {
+        warp_sum_variance[t] = global_scale_k[t];
+      }
+#pragma unroll
+      for (int r = 0; r < 4; ++r) {
+#pragma unroll
+        for (int i = 0; i < kElemsPerAccess<DType>; ++i) {
+          vals[r][i] = static_cast<DType>(static_cast<float>(vals[r][i]) *
+                                          warp_sum_variance[r] *
+                                          static_cast<float>(norm_weight[i]));
+        }
+        int token_r = g * 4 + r;
+        if (token_r >= tot_tokens || !is_valid_k) {
+          continue;
+        }
+        int idx_out = token_r * access_stride_k + k_thread_idx;
+        reinterpret_cast<float4*>(params.rms_norm_out_k)[idx_out] =
+            *reinterpret_cast<float4*>(&vals[r][0]);
+      }
+    }
+  }  // end group loop
+
   int clear_access = static_cast<int>(comm.clear_size / kElemsPerAccess<DType>);
   int clear_stride = group_stride * blockDim.x;
-
   for (int idx = group_id * blockDim.x + threadIdx.x; idx < clear_access;
        idx += clear_stride) {
     reinterpret_cast<float4*>(comm.clear_buf)[idx] = clear_vec;
   }
 
-  comm.update(IsQK ? (2 * tot_groups * 8 * NRanks) : (tot_groups * 8 * NRanks));
+  comm.update(static_cast<int64_t>(2) * tot_groups * kElemsPerAccess<DType> *
+              NRanks);
 }
 
 int get_sm_count() {
@@ -642,7 +629,6 @@ template <typename DType, int NRanks>
 void minimax_reduce_rms_kernel_launcher(MiniMaxReduceRMSParams const& params) {
   static int SM = getSMVersion();
   int token_num = params.size_q / params.hidden_dim;
-  // for current problem size, we only need one cluster
   int sm_count = get_sm_count();
   int cluster_size = 1;
   int cluster_num = token_num;
@@ -665,7 +651,6 @@ void minimax_reduce_rms_kernel_launcher(MiniMaxReduceRMSParams const& params) {
 
   cudaLaunchAttribute attribute[2];
   attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-
   attribute[1].id = cudaLaunchAttributeClusterDimension;
   attribute[1].val.clusterDim.x = cluster_size;
   attribute[1].val.clusterDim.y = 1;
@@ -677,7 +662,7 @@ void minimax_reduce_rms_kernel_launcher(MiniMaxReduceRMSParams const& params) {
       &cfg, minimax_reduce_rms_kernel_lamport<DType, NRanks>, params));
 }
 
-template <typename DType, int NRanks>
+template <typename DType, int NRanks, int OriginQDim, int OriginKDim>
 void minimax_reduce_rms_kernel_launcher_float4(
     MiniMaxReduceRMSParams const& params) {
   TORCH_CHECK(params.size_q % params.hidden_dim == 0);
@@ -685,47 +670,41 @@ void minimax_reduce_rms_kernel_launcher_float4(
   if (params.stride_q > 0) {
     TORCH_CHECK(params.stride_q % kElemsPerAccess<DType> == 0);
   }
-  if (params.allreduce_in_k != nullptr) {
-    TORCH_CHECK(params.hidden_dim >= params.hidden_dim_k);
-    TORCH_CHECK(params.size_k % params.hidden_dim_k == 0);
-    TORCH_CHECK(params.hidden_dim_k % kElemsPerAccess<DType> == 0);
-    TORCH_CHECK(params.size_q / params.hidden_dim ==
-                params.size_k / params.hidden_dim_k);
-    if (params.stride_k > 0) {
-      TORCH_CHECK(params.stride_k % kElemsPerAccess<DType> == 0);
-    }
+  TORCH_CHECK(params.allreduce_in_k != nullptr,
+              "float4 QK kernel requires K input");
+  TORCH_CHECK(params.hidden_dim >= params.hidden_dim_k);
+  TORCH_CHECK(params.size_k % params.hidden_dim_k == 0);
+  TORCH_CHECK(params.hidden_dim_k % kElemsPerAccess<DType> == 0);
+  TORCH_CHECK(params.size_q / params.hidden_dim ==
+              params.size_k / params.hidden_dim_k);
+  if (params.stride_k > 0) {
+    TORCH_CHECK(params.stride_k % kElemsPerAccess<DType> == 0);
   }
+
   int token_num = params.size_q / params.hidden_dim;
-  int tot_groups = (token_num + 3) / 4;  // ceiling
+  int tot_groups = (token_num + 3) / 4;
   if (tot_groups == 0) {
     return;
   }
+
   static int SM = getSMVersion();
   int sm_count = get_sm_count();
   int cluster_size = 1;
   int cluster_num = tot_groups;
+
   int access_per_row_q = params.hidden_dim / kElemsPerAccess<DType>;
-  int access_per_row_k = (params.allreduce_in_k != nullptr)
-                             ? (params.hidden_dim_k / kElemsPerAccess<DType>)
-                             : 0;
-  auto divUp = [](int a, int b) {
-    return (a + b - 1) / b * b;
-  };  // round up to the nearest multiple of b
+  int access_per_row_k = params.hidden_dim_k / kElemsPerAccess<DType>;
+
+  // Round each section up to a warp boundary
+  auto divUp = [](int a, int b) { return (a + b - 1) / b * b; };
   int block_size = divUp(access_per_row_q, MINIMAX_REDUCE_RMS_WARP_SIZE) +
-                   ((params.allreduce_in_k != nullptr)
-                        ? divUp(access_per_row_k, MINIMAX_REDUCE_RMS_WARP_SIZE)
-                        : 0);
+                   divUp(access_per_row_k, MINIMAX_REDUCE_RMS_WARP_SIZE);
 
-  bool is_qk = (params.allreduce_in_k != nullptr);
-  int max_blocks_per_sm =
-      is_qk
-          ? get_max_active_blocks(
-                minimax_reduce_rms_kernel_lamport_float4<DType, NRanks, true>,
-                block_size)
-          : get_max_active_blocks(
-                minimax_reduce_rms_kernel_lamport_float4<DType, NRanks, false>,
-                block_size);
+  auto kfn =
+      minimax_reduce_qk_rms_kernel_lamport_float4<DType, NRanks, OriginQDim,
+                                                  OriginKDim>;
 
+  int max_blocks_per_sm = get_max_active_blocks(kfn, block_size);
   int max_grid = max_blocks_per_sm * sm_count;
   int grid_size =
       (std::min(max_grid, cluster_num * cluster_size) / cluster_size) *
@@ -746,36 +725,37 @@ void minimax_reduce_rms_kernel_launcher_float4(
   cfg.attrs = attribute;
   cfg.numAttrs = SM >= 90 ? 2 : 0;
 
-  if (is_qk) {
-    CUDA_CHECK(cudaLaunchKernelEx(
-        &cfg, minimax_reduce_rms_kernel_lamport_float4<DType, NRanks, true>,
-        params));
-  } else {
-    CUDA_CHECK(cudaLaunchKernelEx(
-        &cfg, minimax_reduce_rms_kernel_lamport_float4<DType, NRanks, false>,
-        params));
-  }
+  CUDA_CHECK(cudaLaunchKernelEx(&cfg, kfn, params));
 }
 
 template <int NRanks>
 void dispatch_dtype(MiniMaxReduceRMSParams const& params) {
-  bool use_float4 = true;
+  // Use the optimized QK float4 kernel when:
+  //  - K input is present, AND
+  //  - the full (NRanks * per-rank) dimensions match the MiniMax M2 shape.
+  // Otherwise fall back to the scalar kernel.
+  bool use_float4 = (params.allreduce_in_k != nullptr) &&
+                    (params.hidden_dim * params.nranks == 6144) &&
+                    (params.hidden_dim_k * params.nranks == 1024);
 
   if (params.dtype == at::ScalarType::Half) {
     if (use_float4) {
-      minimax_reduce_rms_kernel_launcher_float4<half, NRanks>(params);
+      minimax_reduce_rms_kernel_launcher_float4<half, NRanks, 6144, 1024>(
+          params);
     } else {
       minimax_reduce_rms_kernel_launcher<half, NRanks>(params);
     }
   } else if (params.dtype == at::ScalarType::BFloat16) {
     if (use_float4) {
-      minimax_reduce_rms_kernel_launcher_float4<__nv_bfloat16, NRanks>(params);
+      minimax_reduce_rms_kernel_launcher_float4<__nv_bfloat16, NRanks, 6144,
+                                                1024>(params);
     } else {
       minimax_reduce_rms_kernel_launcher<__nv_bfloat16, NRanks>(params);
     }
   } else if (params.dtype == at::ScalarType::Float) {
     if (use_float4) {
-      minimax_reduce_rms_kernel_launcher_float4<float, NRanks>(params);
+      minimax_reduce_rms_kernel_launcher_float4<float, NRanks, 6144, 1024>(
+          params);
     } else {
       minimax_reduce_rms_kernel_launcher<float, NRanks>(params);
     }
