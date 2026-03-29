@@ -71,19 +71,19 @@ The request-indexed gather approach is dramatically cheaper than the per-token b
 
 ### What was built
 
-Four hook points on the residual stream, selectable via `--steering-hook-points`:
+Four hook points on the residual stream, all unconditionally allocated:
 
 - `pre_attn` — after `input_layernorm`, before `self_attn`
 - `post_attn` — after `post_attention_layernorm`, before `pre_feedforward_layernorm`
-- `post_mlp_pre_ln` — after `mlp`, before `post_feedforward_layernorm` **(default, backward compatible)**
+- `post_mlp_pre_ln` — after `mlp`, before `post_feedforward_layernorm`
 - `post_mlp_post_ln` — after `post_feedforward_layernorm`
 
 Key design decisions:
 
-- **Opt-in via CLI**: `--steering-hook-points pre_attn,post_mlp_pre_ln` — only active hook points allocate buffers and register `apply_steering` splitting ops. Default is `post_mlp_pre_ln` only (zero additional overhead vs Phase 2).
-- **`hasattr`-guarded forward calls**: Each hook point uses `if hasattr(self, "steering_table_<hook>")` which is a trace-time constant for torch.compile, so inactive hooks are eliminated during tracing.
-- **Per-hook-point buffers**: Each active hook point gets its own `steering_table_<hook>` and `steering_vector_<hook>` buffer. The shared `steering_index` is reused across all hook points (token→row mapping is the same).
-- **API**: `SamplingParams.steering_hook_vectors: dict[str, dict[int, list[float]]]` and `SetSteeringRequest.hook_vectors` for explicit hook point targeting. Legacy `steering_vectors` field maps to `post_mlp_pre_ln`.
+- **Always-allocated buffers**: All 4 hook point buffers are registered on every decoder layer. Memory cost is trivial (~3.6 MB for 26 layers at `max_steering_configs=4`). Zero rows make unused hook points a no-op.
+- **No graph partitions**: The `apply_steering` custom op is opaque to the torch.compile tracer (preventing constant-folding) but is NOT a splitting op. Steering adds zero graph partitions regardless of hook point count.
+- **Per-hook-point buffers**: Each hook point gets its own `steering_table_<hook>` and `steering_vector_<hook>` buffer. The shared `steering_index` is reused across all hook points (token→row mapping is the same).
+- **API**: `SamplingParams.steering_vectors: dict[str, dict[int, list[float]]]` — hook point name → layer → vector. Same format for `SetSteeringRequest.vectors` (global HTTP API).
 
 ### Gemma 3 Intervention Points
 
@@ -109,14 +109,12 @@ post_feedforward_layernorm(hidden_states)     # hidden_states only
 
 ### Memory
 
-With all 4 hook points active (`--steering-hook-points pre_attn,post_attn,post_mlp_pre_ln,post_mlp_post_ln`):
+All 4 hook points are always allocated:
 
 | Config | Per Layer (Gemma 3 4B, bf16) | 26 Layers |
 |--------|------------------------------|-----------|
 | `max_steering_configs=4` (default) | 4 × 6 rows × 3072 × 2B = ~144 KB | ~3.6 MB |
 | `max_steering_configs=16` | 4 × 18 rows × 3072 × 2B = ~432 KB | ~11.2 MB |
-
-With default (1 hook point), memory is identical to Phase 2.
 
 ---
 

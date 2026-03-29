@@ -12,12 +12,11 @@ never modified.
 **In scope:**
 
 - Global (server-wide) steering via HTTP API
-- Per-request steering via `SamplingParams.steering_vectors` / `steering_hook_vectors`
+- Per-request steering via `SamplingParams.steering_vectors`
+- Four hook points: `pre_attn`, `post_attn`, `post_mlp_pre_ln`, `post_mlp_post_ln`
 - Additive combination: global + per-request vectors are summed
-- Multiple intervention points: `pre_attn`, `post_attn`, `post_mlp_pre_ln`, `post_mlp_post_ln`
-- Opt-in hook point selection via `--steering-hook-points` CLI flag
 - Scheduler admission control for per-request configs
-- CUDA graph and torch.compile compatibility
+- CUDA graph and torch.compile compatibility (zero graph partitions)
 - Gemma 3 model family
 
 **Not in scope (future work):**
@@ -35,21 +34,36 @@ vllm serve google/gemma-3-4b-it
 
 # Per-request steering (allocates larger tables, enables scheduler admission)
 vllm serve google/gemma-3-4b-it --enable-steering --max-steering-configs 4
-
-# Multiple hook points (opt-in, adds graph breaks per active hook point)
-vllm serve google/gemma-3-4b-it --enable-steering \
-  --steering-hook-points pre_attn,post_mlp_pre_ln
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--enable-steering` | `False` | Allocate per-request steering table rows |
 | `--max-steering-configs` | `4` | Max distinct per-request configs in one batch |
-| `--steering-hook-points` | `post_mlp_pre_ln` | Comma-separated list of active hook points. Each adds a `apply_steering` splitting op per decoder layer. Valid: `pre_attn`, `post_attn`, `post_mlp_pre_ln`, `post_mlp_post_ln` |
+
+All four hook point buffers are always allocated on every decoder layer.
+The memory cost is trivial (~3.6 MB for 26 layers at `max_steering_configs=4`).
 
 Without `--enable-steering`, each layer gets a 2-row table (zeros + global).
 Per-request `steering_vectors` in `SamplingParams` are silently ignored by
 the scheduler since there is no `SteeringConfig` to enable admission control.
+
+## Hook Points
+
+Steering vectors can be applied at four positions within each decoder layer,
+all operating on the residual stream:
+
+| Hook Point | Position |
+|-----------|----------|
+| `pre_attn` | After `input_layernorm`, before `self_attn` |
+| `post_attn` | After `post_attention_layernorm`, before `pre_feedforward_layernorm` |
+| `post_mlp_pre_ln` | After `mlp`, before `post_feedforward_layernorm` |
+| `post_mlp_post_ln` | After `post_feedforward_layernorm` |
+
+All four are always active. The `apply_steering` custom op is **not** a
+graph-splitting op — it is opaque to the torch.compile tracer (preventing
+constant-folding) but does not partition the compiled graph. Zero rows
+act as a no-op, so unused hook points add no computational overhead.
 
 ## Usage
 
@@ -58,16 +72,21 @@ the scheduler since there is no `SteeringConfig` to enable admission control.
 Requires `VLLM_SERVER_DEV_MODE=1`.
 
 ```bash
-# Set steering on layer 15 (default hook point: post_mlp_pre_ln)
-curl -X POST http://localhost:8000/v1/steering/set \
-  -H "Content-Type: application/json" \
-  -d '{"vectors": {"15": [0.1, 0.2, ...]}, "scales": {"15": 1.5}}'
-
-# Set steering at specific hook points
+# Set steering on layer 15 at the post_mlp_pre_ln hook point
 curl -X POST http://localhost:8000/v1/steering/set \
   -H "Content-Type: application/json" \
   -d '{
-    "hook_vectors": {
+    "vectors": {
+      "post_mlp_pre_ln": {"15": [0.1, 0.2, ...]}
+    },
+    "scales": {"15": 1.5}
+  }'
+
+# Set steering at multiple hook points
+curl -X POST http://localhost:8000/v1/steering/set \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vectors": {
       "pre_attn": {"15": [0.1, 0.2, ...]},
       "post_mlp_pre_ln": {"15": [0.3, 0.4, ...]}
     },
@@ -94,18 +113,18 @@ llm = LLM(
     max_steering_configs=4,
 )
 
-# Request with steering (default hook point: post_mlp_pre_ln)
+# Request with steering at one hook point
 steered = SamplingParams(
     max_tokens=100,
     temperature=0.7,
-    steering_vectors={15: [0.1, 0.2, ...]},  # layer 15
+    steering_vectors={"post_mlp_pre_ln": {15: [0.1, 0.2, ...]}},
 )
 
-# Request with explicit hook points
+# Request with steering at multiple hook points
 multi_hook = SamplingParams(
     max_tokens=100,
     temperature=0.7,
-    steering_hook_vectors={
+    steering_vectors={
         "pre_attn": {15: [0.1, 0.2, ...]},
         "post_mlp_pre_ln": {15: [0.3, 0.4, ...]},
     },
@@ -114,10 +133,10 @@ multi_hook = SamplingParams(
 # Request without steering (unaffected)
 normal = SamplingParams(max_tokens=100, temperature=0.7)
 
-# Both can run in the same batch
+# All can run in the same batch
 outputs = llm.generate(
-    ["Be creative:", "Summarize this:"],
-    [steered, normal],
+    ["Be creative:", "Summarize this:", "Explain:"],
+    [steered, multi_hook, normal],
 )
 ```
 
@@ -132,7 +151,10 @@ response = client.chat.completions.create(
     model="google/gemma-3-4b-it",
     messages=[{"role": "user", "content": "Hello"}],
     extra_body={
-        "steering_vectors": {15: [0.1, 0.2, ...]},
+        "steering_vectors": {
+            "pre_attn": {15: [0.1, 0.2, ...]},
+            "post_mlp_pre_ln": {15: [0.3, 0.4, ...]},
+        },
     },
 )
 ```
@@ -140,11 +162,11 @@ response = client.chat.completions.create(
 ## Data Flow
 
 ```
-SamplingParams.steering_vectors / steering_hook_vectors
-    │
+SamplingParams.steering_vectors
+    │  {hook_point: {layer_idx: [floats]}}
     ▼
 Request.steering_config_hash  ◄── deterministic SHA-256 hash
-    │                              (includes all hook points)
+    │
     ▼
 Scheduler ── checks capacity against max_steering_configs
     │         (same pattern as LoRA admission control)
@@ -156,12 +178,12 @@ NewRequestData.steering_config_hash
 Model Runner._update_states()
     ├── CachedRequestState.steering_config_hash
     ├── InputBatch.request_steering_config_hash[req_idx]
-    └── SteeringManager.register_config(hash, hook_vectors) → row assignment
+    └── SteeringManager.register_config(hash, vectors) → row assignment
     │
     ▼
 Model Runner._update_steering_buffers()  (called before each forward pass)
     ├── SteeringManager.populate_steering_tables(layers)
-    │     For EACH active hook point's table:
+    │     For EACH hook point's table:
     │       Row 0 = zeros (prefill sentinel)
     │       Row 1 = global vector for that hook point
     │       Rows 2+ = global + per_request (additive)
@@ -172,7 +194,7 @@ Model Runner._update_steering_buffers()  (called before each forward pass)
     │
     ▼
 Gemma3DecoderLayer.forward()
-    # At each active hook point position:
+    # At each hook point position:
     residual = torch.ops.vllm.apply_steering(
         residual, self.steering_table_<hook>, self.steering_index
     )
@@ -181,21 +203,21 @@ Gemma3DecoderLayer.forward()
 
 ## CUDA Graph and torch.compile Compatibility
 
-The `apply_steering` custom op is registered as a **splitting point** for
-torch.compile (`vllm/config/compilation.py`).  This means:
+The `apply_steering` custom op is registered but **not** as a splitting
+op.  It is opaque to the torch.compile tracer (preventing constant-folding
+of buffer values) but does not partition the compiled graph.  This means:
 
-1. The compiled graph is split at each steering call
-2. The Python op runs between compiled segments at runtime
-3. In-place buffer updates (`steering_table`, `steering_index`) are visible
-   across CUDA graph replays
-4. Buffer shapes are fixed at allocation time — only content changes
-
-This is the same mechanism used for KV cache updates.
+1. Steering adds **zero graph partitions** regardless of hook point count
+2. In-place buffer updates (`steering_table_*`, `steering_index`) are
+   visible across CUDA graph replays (same mechanism as KV cache)
+3. Buffer shapes are fixed at allocation time — only content changes
+4. All four hook points are unconditionally present in the compiled graph;
+   zero rows make unused hook points a no-op
 
 ## Steering Table Layout
 
-Each steerable decoder layer has a `steering_table_<hook>` buffer per active
-hook point (e.g., `steering_table_post_mlp_pre_ln`):
+Each decoder layer has a `steering_table_<hook>` buffer per hook point
+(e.g., `steering_table_post_mlp_pre_ln`):
 
 ```
 Row 0:  [0, 0, 0, ..., 0]          ← prefill / no steering
@@ -238,7 +260,7 @@ If `max_steering_configs` slots are occupied by distinct configs:
 | Component | File |
 |-----------|------|
 | Config | `vllm/config/steering.py` |
-| Custom op | `vllm/model_executor/layers/steering.py` |
+| Custom op + hook point enum | `vllm/model_executor/layers/steering.py` |
 | Gemma 3 buffers | `vllm/model_executor/models/gemma3.py` |
 | SteeringManager | `vllm/v1/worker/steering_manager.py` |
 | InputBatch tracking | `vllm/v1/worker/gpu_input_batch.py` |
@@ -258,7 +280,7 @@ If `max_steering_configs` slots are occupied by distinct configs:
 3. **Combined rows are recomputed every step.** `populate_steering_tables()` runs before each forward pass, so changes to global vectors are immediately reflected.
 4. **Buffer shapes are fixed at init.** The table has `max_steering_configs + 2` rows regardless of how many are active. This is required for CUDA graph compatibility.
 5. **The steering_index tensor is shared across all layers and all hook points.** One in-place update is visible to all decoder layers. Token-to-row mapping is independent of hook point.
-6. **Reference counting is exact.** Every `register_config` is balanced by a `release_config` when the request finishes. Rows are only freed at refcount 0.
-7. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all keys and values before any request processing begins.
-8. **Active hook points are fixed at init.** Changing `--steering-hook-points` requires a server restart. This is a compile-time constant for torch.compile.
-9. **Hook point API is additive.** `steering_vectors` (legacy) maps to `post_mlp_pre_ln`. Both `steering_vectors` and `steering_hook_vectors` can be specified; they are merged deterministically.
+6. **All four hook point buffers are always allocated.** The memory cost is trivial. Zero rows make unused hook points a no-op.
+7. **The custom op is not a splitting op.** It prevents constant-folding but does not partition the compiled graph.
+8. **Reference counting is exact.** Every `register_config` is balanced by a `release_config` when the request finishes. Rows are only freed at refcount 0.
+9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all keys and values before any request processing begins.
