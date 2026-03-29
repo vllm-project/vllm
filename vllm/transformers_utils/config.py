@@ -90,6 +90,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     funaudiochat="FunAudioChatConfig",
+    hyperclovax_vlm="HCXVisionConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
@@ -203,12 +204,13 @@ class HFConfigParser(ConfigParserBase):
             )
         else:
             if model_type in _CONFIG_REGISTRY:
-                # Register the config class to AutoConfig to ensure it's used in future
-                # calls to `from_pretrained`
+                # Register the config class to AutoConfig to ensure it's used
+                # in future calls to `from_pretrained` (e.g. from
+                # AutoTokenizer or AutoProcessor).
                 config_class = _CONFIG_REGISTRY[model_type]
                 config_class.model_type = model_type
                 AutoConfig.register(model_type, config_class, exist_ok=True)
-                # Now that it is registered, it is not considered remote code anymore
+                # Now that it is registered, it is not considered remote code
                 trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
