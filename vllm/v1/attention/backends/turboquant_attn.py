@@ -230,29 +230,9 @@ class TurboQuantAttentionImpl(AttentionImpl):
         # Decode compressed uint8 blocks → bf16
         block_table = attn_metadata.block_table
         if hasattr(layer, "_tq_k_state"):
-            # One-shot debug: print cache stats before/after decode
-            if not hasattr(self, "_dbg_fwd_count"):
-                self._dbg_fwd_count = 0
-            self._dbg_fwd_count += 1
-            if self._dbg_fwd_count <= 3:
-                nz = key_cache.count_nonzero().item()
-                print(
-                    f"[FWD#{self._dbg_fwd_count}] "
-                    f"kv_cache={kv_cache.shape} "
-                    f"key_cache_nz={nz}/{key_cache.numel()} "
-                    f"bt={block_table.shape} "
-                    f"seq_lens={attn_metadata.seq_lens}"
-                )
             key_cache, value_cache, block_table = self._decode_turboquant_cache(
                 key_cache, value_cache, layer, block_table
             )
-            if self._dbg_fwd_count <= 3:
-                print(
-                    f"  decoded: k={key_cache.shape} "
-                    f"k_nz={key_cache.count_nonzero().item()} "
-                    f"k_norm={key_cache.float().norm():.2f} "
-                    f"bt={block_table.shape}"
-                )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -311,8 +291,6 @@ class TurboQuantAttentionImpl(AttentionImpl):
         Uses fused Triton kernel for 4-bit (single kernel: unpack → codebook
         → inv Hadamard → norm scale → write bf16 with outlier interleaving).
         """
-        import os
-
         bits = int(layer._tq_k_state.config.bit_width)
 
         flat_bt = block_table.reshape(-1)
@@ -322,8 +300,7 @@ class TurboQuantAttentionImpl(AttentionImpl):
             num_entries, device=block_table.device, dtype=block_table.dtype
         ).reshape(block_table.shape)
 
-        use_fused = not os.environ.get("TQ_UNFUSED", "")
-        if use_fused and bits == 4:
+        if bits == 4:
             return self._decode_fused_4bit(
                 key_cache,
                 value_cache,
@@ -488,14 +465,18 @@ class TurboQuantAttentionImpl(AttentionImpl):
         if not hasattr(layer, "_tq_k_state"):
             return
 
-        # Calibrate outlier channels on first batch
+        # Calibrate outlier channels on first batch with real tokens.
+        # Filter out padding (slot_mapping == -1) which appears during
+        # profiling/warmup runs — calibrating on dummy padding data
+        # produces wrong outlier channels and corrupts output.
         if getattr(layer, "_tq_needs_calibration", False):
-            num_actual = slot_mapping.shape[0]
-            k_flat = key[:num_actual].reshape(-1, key.shape[-1])
-            v_flat = value[:num_actual].reshape(-1, value.shape[-1])
-            layer._tq_k_state.calibrate_outliers(k_flat)
-            layer._tq_v_state.calibrate_outliers(v_flat)
-            layer._tq_needs_calibration = False
+            valid = slot_mapping >= 0
+            if valid.any():
+                k_flat = key[valid].reshape(-1, key.shape[-1])
+                v_flat = value[valid].reshape(-1, value.shape[-1])
+                layer._tq_k_state.calibrate_outliers(k_flat)
+                layer._tq_v_state.calibrate_outliers(v_flat)
+                layer._tq_needs_calibration = False
 
         self._encode_turboquant_cache(key, value, kv_cache, slot_mapping, layer)
 
@@ -509,21 +490,25 @@ class TurboQuantAttentionImpl(AttentionImpl):
         layer: torch.nn.Module,
     ) -> None:
         """Encode K/V with outlier-aware layout into paged uint8 cache."""
-        import os
+        # Only encode valid tokens (slot_mapping >= 0).
+        # Padding tokens (slot_mapping == -1) from profiling/CUDA graph
+        # capture must be skipped to avoid writing garbage to cache slot 0.
+        valid = slot_mapping >= 0
+        if not valid.any():
+            return
+        valid_slots = slot_mapping[valid]
+        valid_key = key[valid]
+        valid_value = value[valid]
 
-        num_actual = slot_mapping.shape[0]
         bits = int(layer._tq_k_state.config.bit_width)
         block_size = kv_cache.shape[2]
+        block_indices = valid_slots // block_size
+        block_offsets = valid_slots % block_size
 
-        clamped_slots = slot_mapping.clamp(min=0)
-        block_indices = clamped_slots // block_size
-        block_offsets = clamped_slots % block_size
-
-        use_fused = not os.environ.get("TQ_UNFUSED", "")
-        if use_fused and bits == 4:
+        if bits == 4:
             self._encode_fused_4bit(
-                key[:num_actual],
-                value[:num_actual],
+                valid_key,
+                valid_value,
                 kv_cache,
                 block_indices,
                 block_offsets,
@@ -531,8 +516,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
             )
         else:
             self._encode_unfused(
-                key[:num_actual],
-                value[:num_actual],
+                valid_key,
+                valid_value,
                 kv_cache,
                 block_indices,
                 block_offsets,
