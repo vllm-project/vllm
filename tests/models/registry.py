@@ -302,7 +302,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPTNeoXForCausalLM": _HfExamplesInfo(
         "EleutherAI/pythia-70m", {"1b": "EleutherAI/pythia-1.4b"}
     ),
-    "GptOssForCausalLM": _HfExamplesInfo("lmsys/gpt-oss-20b-bf16"),
+    "GptOssForCausalLM": _HfExamplesInfo(
+        "lmsys/gpt-oss-20b-bf16",
+        {"openai_20b": "openai/gpt-oss-20b", "openai_120b": "openai/gpt-oss-120b"},
+    ),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
     "GraniteMoeHybridForCausalLM": _HfExamplesInfo(
@@ -510,7 +513,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
         trust_remote_code=True,
     ),
-    "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
+    "SmolLM3ForCausalLM": _HfExamplesInfo(
+        "HuggingFaceTB/SmolLM3-3B",
+        extras={"fp8": "RedHatAI/SmolLM3-3B-FP8-dynamic"},
+    ),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),

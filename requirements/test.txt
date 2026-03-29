@@ -62,16 +62,6 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
-av==16.1.0
-    # via -r requirements/test.in
-azure-core==1.38.2
-    # via
-    #   azure-identity
-    #   azure-storage-blob
-azure-identity==1.25.2
-    # via runai-model-streamer-azure
-azure-storage-blob==12.28.0
-    # via runai-model-streamer-azure
 backoff==2.2.1
     # via
     #   -r requirements/test.in
@@ -111,10 +101,8 @@ certifi==2024.8.30
     #   rasterio
     #   requests
     #   sentry-sdk
-cffi==2.0.0
-    # via
-    #   cryptography
-    #   soundfile
+cffi==1.17.1
+    # via soundfile
 chardet==5.2.0
     # via mbstrdecoder
 charset-normalizer==3.4.0
@@ -127,6 +115,7 @@ click==8.1.7
     #   click-plugins
     #   cligj
     #   fiona
+    #   guidellm
     #   jiwer
     #   nltk
     #   rasterio
@@ -158,12 +147,6 @@ coverage==7.10.6
     # via pytest-cov
 cramjam==2.9.0
     # via fastparquet
-cryptography==46.0.5
-    # via
-    #   azure-identity
-    #   azure-storage-blob
-    #   msal
-    #   pyjwt
 cuda-bindings==12.9.4
     # via torch
 cuda-pathfinder==1.3.3
@@ -182,6 +165,7 @@ datasets==3.3.0
     # via
     #   -r requirements/test.in
     #   evaluate
+    #   guidellm
     #   lm-eval
     #   mteb
 decorator==5.1.1
@@ -220,8 +204,6 @@ email-validator==2.2.0
     # via pydantic
 encodec==0.1.1
     # via vocos
-et-xmlfile==2.0.0
-    # via openpyxl
 evaluate==0.4.3
     # via lm-eval
 fastapi==0.128.0
@@ -265,7 +247,9 @@ fsspec==2024.12.0
     #   tacoreader
     #   torch
 ftfy==6.3.1
-    # via open-clip-torch
+    # via
+    #   guidellm
+    #   open-clip-torch
 genai-perf==0.0.16
     # via -r requirements/test.in
 genson==1.3.0
@@ -309,9 +293,14 @@ grpcio==1.78.0
     # via
     #   -r requirements/test.in
     #   grpcio-reflection
+    #   grpcio-tools
     #   ray
     #   tensorboard
 grpcio-reflection==1.78.0
+    # via -r requirements/test.in
+grpcio-tools==1.78.0
+    # via -r requirements/test.in
+guidellm==0.3.1
     # via -r requirements/test.in
 h11==0.14.0
     # via
@@ -337,6 +326,7 @@ httpx==0.27.2
     # via
     #   -r requirements/test.in
     #   diffusers
+    #   guidellm
     #   perceptron
     #   schemathesis
 huggingface-hub==0.36.2
@@ -393,10 +383,6 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
-instanttensor==0.1.5
-    # via -r requirements/test.in
-isodate==0.7.2
-    # via azure-storage-blob
 isoduration==20.11.0
     # via jsonschema
 isort==5.13.2
@@ -475,6 +461,8 @@ llvmlite==0.44.0
     # via numba
 lm-eval==0.4.11
     # via -r requirements/test.in
+loguru==0.7.3
+    # via guidellm
 lxml==5.3.0
     # via
     #   blobfile
@@ -504,18 +492,12 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.10.0
+mistral-common==1.9.1
     # via -r requirements/test.in
 more-itertools==10.5.0
     # via lm-eval
 mpmath==1.3.0
     # via sympy
-msal==1.34.0
-    # via
-    #   azure-identity
-    #   msal-extensions
-msal-extensions==1.3.1
-    # via azure-identity
 msgpack==1.1.0
     # via
     #   librosa
@@ -544,7 +526,6 @@ numba==0.61.2
     # via
     #   -r requirements/test.in
     #   librosa
-    #   resampy
 numpy==2.2.6
     # via
     #   -r requirements/test.in
@@ -564,6 +545,7 @@ numpy==2.2.6
     #   fastparquet
     #   genai-perf
     #   geopandas
+    #   guidellm
     #   h5py
     #   imagehash
     #   imageio
@@ -585,7 +567,6 @@ numpy==2.2.6
     #   pyogrio
     #   pywavelets
     #   rasterio
-    #   resampy
     #   rioxarray
     #   rouge-score
     #   runai-model-streamer
@@ -666,8 +647,6 @@ opencv-python-headless==4.13.0.90
     #   albucore
     #   albumentations
     #   mistral-common
-openpyxl==3.1.5
-    # via -r requirements/test.in
 opentelemetry-api==1.35.0
     # via
     #   opentelemetry-exporter-prometheus
@@ -750,6 +729,7 @@ pillow==10.4.0
     # via
     #   diffusers
     #   genai-perf
+    #   guidellm
     #   imagehash
     #   imageio
     #   lightly-utils
@@ -768,9 +748,7 @@ platformdirs==4.3.6
     #   virtualenv
     #   wandb
 plotly==5.24.1
-    # via
-    #   -r requirements/test.in
-    #   genai-perf
+    # via genai-perf
 pluggy==1.5.0
     # via
     #   pytest
@@ -798,6 +776,8 @@ protobuf==6.33.2
     #   google-api-core
     #   googleapis-common-protos
     #   grpcio-reflection
+    #   grpcio-tools
+    #   guidellm
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -841,21 +821,23 @@ pydantic==2.12.0
     #   datamodel-code-generator
     #   fastapi
     #   gpt-oss
+    #   guidellm
     #   lightly
     #   mistral-common
     #   mteb
     #   openai-harmony
     #   pydantic-extra-types
+    #   pydantic-settings
     #   ray
     #   wandb
 pydantic-core==2.41.1
     # via pydantic
 pydantic-extra-types==2.10.5
     # via mistral-common
+pydantic-settings==2.13.1
+    # via guidellm
 pygments==2.18.0
     # via rich
-pyjwt==2.11.0
-    # via msal
 pyogrio==0.11.0
     # via geopandas
 pyparsing==3.2.0
@@ -913,6 +895,8 @@ python-dateutil==2.9.0.post0
     #   matplotlib
     #   pandas
     #   typepy
+python-dotenv==1.2.2
+    # via pydantic-settings
 python-rapidjson==1.20
     # via tritonclient
 pytorch-lightning==2.5.2
@@ -934,6 +918,7 @@ pyyaml==6.0.2
     #   datamodel-code-generator
     #   datasets
     #   genai-perf
+    #   guidellm
     #   huggingface-hub
     #   jsonargparse
     #   lightning
@@ -973,7 +958,6 @@ regex==2024.9.11
     #   transformers
 requests==2.32.3
     # via
-    #   azure-core
     #   buildkite-test-collector
     #   datasets
     #   diffusers
@@ -986,7 +970,6 @@ requests==2.32.3
     #   lightly
     #   lm-eval
     #   mistral-common
-    #   msal
     #   mteb
     #   pooch
     #   ray
@@ -997,8 +980,6 @@ requests==2.32.3
     #   tiktoken
     #   transformers
     #   wandb
-resampy==0.4.3
-    # via -r requirements/test.in
 responses==0.25.3
     # via genai-perf
 rfc3339-validator==0.1.4
@@ -1008,6 +989,7 @@ rfc3987==1.3.8
 rich==13.9.4
     # via
     #   genai-perf
+    #   guidellm
     #   lightning
     #   mteb
     #   perceptron
@@ -1025,13 +1007,11 @@ rsa==4.9.1
     # via google-auth
 rtree==1.4.0
     # via torchgeo
-runai-model-streamer==0.15.7
+runai-model-streamer==0.15.3
     # via -r requirements/test.in
-runai-model-streamer-azure==0.15.7
+runai-model-streamer-gcs==0.15.3
     # via runai-model-streamer
-runai-model-streamer-gcs==0.15.7
-    # via runai-model-streamer
-runai-model-streamer-s3==0.15.7
+runai-model-streamer-s3==0.15.3
     # via runai-model-streamer
 s3transfer==0.10.3
     # via boto3
@@ -1085,6 +1065,7 @@ sentry-sdk==2.52.0
     # via wandb
 setuptools==77.0.3
     # via
+    #   grpcio-tools
     #   lightning-utilities
     #   pytablewriter
     #   tensorboard
@@ -1207,7 +1188,6 @@ torch==2.10.0+cu129
     #   accelerate
     #   bitsandbytes
     #   encodec
-    #   instanttensor
     #   kornia
     #   lightly
     #   lightning
@@ -1273,6 +1253,7 @@ transformers==4.57.5
     # via
     #   -r requirements/test.in
     #   genai-perf
+    #   guidellm
     #   peft
     #   sentence-transformers
     #   transformers-stream-generator
@@ -1300,9 +1281,6 @@ typing-extensions==4.15.0
     #   aiosignal
     #   albumentations
     #   alembic
-    #   azure-core
-    #   azure-identity
-    #   azure-storage-blob
     #   chz
     #   fastapi
     #   grpcio
@@ -1331,7 +1309,9 @@ typing-extensions==4.15.0
     #   typing-inspection
     #   wandb
 typing-inspection==0.4.2
-    # via pydantic
+    # via
+    #   pydantic
+    #   pydantic-settings
 tzdata==2024.2
     # via pandas
 uri-template==1.3.0
