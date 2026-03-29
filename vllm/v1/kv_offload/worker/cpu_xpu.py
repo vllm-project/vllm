@@ -4,26 +4,22 @@ from contextlib import contextmanager
 
 import torch
 
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_offload.spec import CanonicalKVCaches
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 
 
 class CpuXpuOffloadingHandlers(CpuGpuOffloadingHandlers):
     def __init__(
         self,
-        gpu_block_size: int,
-        cpu_block_size: int,
+        kv_caches: CanonicalKVCaches,
+        block_size_factor: int,
         num_cpu_blocks: int,
-        gpu_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
     ):
         with _torch_cuda_wrapper():
             super().__init__(
-                gpu_block_size,
-                cpu_block_size,
+                kv_caches,
+                block_size_factor,
                 num_cpu_blocks,
-                gpu_caches,
-                attn_backends,
             )
 
 
