@@ -72,7 +72,7 @@ override this (e.g., for a doc change that also touches code), set
 |---|---|
 | PR labeled **`ready`** | Runs standard (non-optional) test suite |
 | PR labeled **`ready-run-all-tests`** | Runs all tests including optional ones (`RUN_ALL=1`, `NIGHTLY=1`) |
-| Merge to `main` | Full post-merge test suite |
+| Merge to `main` | Post-merge test suite, filtered by diff between the new commit and its parent (same `source_file_dependencies` logic applies) |
 
 !!! note
     CI does **not** run automatically when you open a PR. A maintainer must add
