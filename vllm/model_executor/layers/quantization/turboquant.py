@@ -334,7 +334,10 @@ class TurboQuantState:
                 gen = torch.Generator(device="cpu")
                 gen.manual_seed(config.seed + layer_idx + 10000)
                 self.S = torch.randn(
-                    self.normal_size, self.normal_size, generator=gen
+                    self.normal_size,
+                    self.normal_size,
+                    generator=gen,
+                    device="cpu",
                 ).to(device)
             else:
                 self.S = None
