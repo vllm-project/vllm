@@ -163,8 +163,11 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Process and copy when all weights are loaded
-        if info.load_numel >= info.load_numel_total and not isinstance(  # type: ignore[operator]
-            layer, (Attention, MLAAttention)
+        if (
+            info.load_numel >= info.load_numel_total
+            and not isinstance(  # type: ignore[operator]
+                layer, (Attention, MLAAttention)
+            )
         ):
             _layerwise_process(layer, info)
 
@@ -252,7 +255,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     # If no weights were loaded (e.g. dummy loading), initialize with
     # small random values to avoid NaN from zero/garbage data
-    if not info.loaded_weights:
+    if len(info.loaded_weights) <= 0:
         for tensor in get_layer_tensors(layer).values():
             initialize_single_dummy_weight(tensor)
 
