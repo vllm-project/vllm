@@ -45,6 +45,7 @@ configs = list(
 def benchmark(num_tokens, num_experts, topk, ep_size, provider):
     """Benchmark function for Triton."""
     block_size = 256
+    torch.manual_seed(0)
     current_platform.manual_seed_all(0)
     topk_ids = get_topk_ids(num_tokens, num_experts, topk)
 
