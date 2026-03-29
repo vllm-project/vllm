@@ -85,8 +85,8 @@ n_outliers = HEAD_SIZE - normal_size
 packed_bytes = math.ceil(normal_size * 4 / 8)
 slot_bytes = n_outliers * 2 + packed_bytes + 2
 
-# Create uint8 cache
-uint8_cache = torch.zeros(NUM_BLOCKS, BLOCK_SIZE, NUM_KV_HEADS,
+# Create uint8 cache with K/V separation (dim 1 = 2)
+uint8_cache = torch.zeros(NUM_BLOCKS, 2, BLOCK_SIZE, NUM_KV_HEADS,
                            slot_bytes, device=device, dtype=torch.uint8)
 
 # Encode K/V to uint8 cache
@@ -114,18 +114,20 @@ for kv_idx, (tensor, state) in enumerate([(key, k_state), (value, v_state)]):
     parts.append(norm_bytes)
     slot_data = torch.cat(parts, dim=-1)
 
-    # Write to cache
+    # Write to cache (kv_idx separates K and V)
+    cache_kv = uint8_cache[:, kv_idx]
     for i in range(NUM_TOKENS):
         bi = i // BLOCK_SIZE
         bo = i % BLOCK_SIZE
         for h in range(NUM_KV_HEADS):
-            uint8_cache[bi, bo, h] = slot_data[i * NUM_KV_HEADS + h]
+            cache_kv[bi, bo, h] = slot_data[i * NUM_KV_HEADS + h]
 
 # Decode from uint8 cache
 decoded_caches = []
-for state in [k_state, v_state]:
+for kv_idx, state in enumerate([k_state, v_state]):
+    cache_kv = uint8_cache[:, kv_idx]
     N = NUM_BLOCKS * BLOCK_SIZE * NUM_KV_HEADS
-    flat = uint8_cache.reshape(N, slot_bytes)
+    flat = cache_kv.reshape(N, slot_bytes)
 
     pos = 0
     outlier_vals = flat[:, :n_outliers*2].clone().view(
