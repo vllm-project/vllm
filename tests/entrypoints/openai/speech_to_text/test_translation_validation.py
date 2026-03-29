@@ -233,15 +233,18 @@ async def test_streaming_response(foscolo, client, model_name, server):
         ) as response,
     ):
         async for line in response.aiter_lines():
-            if not line or line.strip() == "[DONE]":
+            if not line:
                 continue
+
             if line.startswith("data: "):
-                line = line[len("data: ") :]
-            if line.strip() == "[DONE]":
+                data = line[len("data: ") :]
+                if data.strip() == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                content = chunk["choices"][0].get("delta", {}).get("content")
+                streamed_text += content or ""
+            elif line.strip() == "[DONE]":
                 break
-            chunk = json.loads(line)
-            content = chunk["choices"][0].get("delta", {}).get("content")
-            streamed_text += content or ""
     # NOTE Run is expected to be deterministic with temperature set to 0.0
     assert streamed_text == expected_text, (
         f"Streaming/non-streaming mismatch.\n"
@@ -280,21 +283,24 @@ async def test_stream_options(foscolo, model_name, server):
         ) as response,
     ):
         async for line in response.aiter_lines():
-            if not line or line.strip() == "[DONE]":
+            if not line:
                 continue
+
             if line.startswith("data: "):
-                line = line[len("data: ") :]
-            if line.strip() == "[DONE]":
+                data = line[len("data: ") :]
+                if data.strip() == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                choices = chunk.get("choices", [])
+                if not choices:
+                    assert "usage" in chunk
+                    got_final_usage = True
+                else:
+                    chunks_with_choices += 1
+                    if "usage" not in chunk:
+                        chunks_missing_usage += 1
+            elif line.strip() == "[DONE]":
                 break
-            chunk = json.loads(line)
-            choices = chunk.get("choices", [])
-            if not choices:
-                assert "usage" in chunk
-                got_final_usage = True
-            else:
-                chunks_with_choices += 1
-                if "usage" not in chunk:
-                    chunks_missing_usage += 1
 
     assert got_final_usage, "Never received final usage-only chunk"
     assert chunks_with_choices > 0, "No content chunks received"
@@ -325,8 +331,8 @@ async def test_long_audio_request(foscolo, client, model_name):
     out = json.loads(translation)["text"].strip()
     assert len(out) > 0, "Long audio translation returned empty text"
     out_lower = out.lower()
-    assert out_lower.count("greek sea") >= 2, (
-        f"Expected 'greek sea' at least twice in repeated audio translation, "
+    assert out_lower.count("greek sea") == 2, (
+        f"Expected 'greek sea' exactly twice in repeated audio translation, "
         f"found {out_lower.count('greek sea')}: {out!r}"
     )
 
