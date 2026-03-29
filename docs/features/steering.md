@@ -320,25 +320,31 @@ independently.
 ## Scheduler Admission Control
 
 When `--enable-steering` is set, the scheduler tracks distinct steering
-config hashes in the current batch (same pattern as `scheduled_loras`).
+config `(hash, phase)` pairs in the current batch — matching the worker's
+`SteeringManager` which allocates separate table rows per `(hash, phase)`
+key.  This ensures the scheduler's capacity counting is consistent with
+the actual row allocation.
 
 **Running request hash collection:** For each running request, the
-scheduler adds its currently-active hash: `prefill_steering_config_hash`
-for requests still in prefill (`num_computed_tokens < num_tokens`),
-`decode_steering_config_hash` for those in decode.
+scheduler adds its currently-active `(hash, phase)` pair:
+`(prefill_steering_config_hash, "prefill")` for requests still in
+prefill (`num_computed_tokens < num_tokens`),
+`(decode_steering_config_hash, "decode")` for those in decode.
 
 **New request admission:** A new request may need up to two distinct
-hashes over its lifetime (one for prefill, one for decode).  The
-scheduler counts how many genuinely new unique hashes the request would
-add to the scheduled set.  If the union would exceed
-`max_steering_configs`, the request is skipped.
+`(hash, phase)` pairs over its lifetime (one for prefill, one for
+decode).  Even when `prefill_hash == decode_hash`, the worker allocates
+two separate rows because they are keyed by `(hash, "prefill")` and
+`(hash, "decode")` respectively.  The scheduler counts how many
+genuinely new unique pairs the request would add to the scheduled set.
+If the union would exceed `max_steering_configs`, the request is skipped.
 
-1. Compute `new_hashes = {prefill_hash, decode_hash}` (excluding zeros)
+1. Compute `new_hashes = {(prefill_hash, "prefill"), (decode_hash, "decode")}` (excluding zeros)
 2. Compute `new_unique = new_hashes - scheduled_steering_configs`
 3. If `len(scheduled) + len(new_unique) > max_configs`, skip
-4. When admitted, add **both** hashes to the scheduled set
+4. When admitted, add **both** `(hash, phase)` pairs to the scheduled set
 5. Requests without steering (`both hashes == 0`) are never blocked
-6. Requests whose hashes are already in the batch pass through (dedup)
+6. Requests whose `(hash, phase)` pairs are already in the batch pass through (dedup)
 
 ## File Reference
 
