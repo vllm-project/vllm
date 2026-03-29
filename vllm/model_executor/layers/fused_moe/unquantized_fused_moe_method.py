@@ -61,7 +61,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().__init__(moe)
         self.unquantized_backend = select_unquantized_moe_backend(
             moe_config=self.moe,
-            use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
         )
 
