@@ -460,9 +460,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? last_chunk_indices) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
-  // Hadamard transforms
-  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
-
 #ifndef USE_ROCM
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
   ops.def(

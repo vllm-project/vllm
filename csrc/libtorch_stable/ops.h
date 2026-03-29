@@ -135,3 +135,6 @@ void silu_and_mul_nvfp4_quant(torch::stable::Tensor& out,
                               torch::stable::Tensor& input_global_scale);
 
 #endif
+
+torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
+                                         bool inplace);
