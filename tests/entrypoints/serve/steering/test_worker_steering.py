@@ -4,6 +4,9 @@
 
 All hook-point-aware tests use the default hook point
 (``post_mlp_pre_ln``) unless testing multi-hook-point behaviour.
+
+Tests cover three-tier steering (base, prefill, decode) and co-located
+scale format (bare list vs dict with scale).
 """
 
 import math
@@ -48,7 +51,10 @@ class FakeModel(nn.Module):
     """Model with a few steerable decoder layers."""
 
     def __init__(
-        self, num_layers: int = 4, hidden_size: int = 8, max_steering_configs: int = 0
+        self,
+        num_layers: int = 4,
+        hidden_size: int = 8,
+        max_steering_configs: int = 0,
     ):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -114,13 +120,15 @@ class TestSteerableLayers:
         assert layers == {}
 
 
-# --- set_steering_vectors ---
+# --- set_steering_vectors: base tier ---
 
 
-class TestSetSteeringVectors:
+class TestSetSteeringVectorsBase:
+    """Tests for base-tier vector setting."""
+
     def test_set_single_layer(self, worker, model):
         vec = [1.0] * 8
-        result = worker.set_steering_vectors({_HP: {2: vec}})
+        result = worker.set_steering_vectors(vectors={_HP: {2: vec}})
         assert result == [2]
         assert torch.allclose(
             model.layers[2].steering_vector_post_mlp_pre_ln,
@@ -130,94 +138,158 @@ class TestSetSteeringVectors:
     def test_set_multiple_layers(self, worker, model):
         vec_a = [1.0] * 8
         vec_b = [2.0] * 8
-        result = worker.set_steering_vectors({_HP: {0: vec_a, 3: vec_b}})
+        result = worker.set_steering_vectors(vectors={_HP: {0: vec_a, 3: vec_b}})
         assert result == [0, 3]
         assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 8.0
         assert model.layers[3].steering_vector_post_mlp_pre_ln.sum().item() == 16.0
 
     def test_unspecified_layers_unchanged(self, worker, model):
-        """Layers not in vectors_data should keep their current state."""
-        # Pre-set layer 1
         model.layers[1].steering_vector_post_mlp_pre_ln.fill_(5.0)
-        # Set only layer 0
-        worker.set_steering_vectors({_HP: {0: [1.0] * 8}})
-        # Layer 1 should be untouched
+        worker.set_steering_vectors(vectors={_HP: {0: [1.0] * 8}})
         assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 40.0
 
     def test_nonexistent_layer_ignored(self, worker):
-        """Requesting a layer that doesn't exist returns empty list."""
-        result = worker.set_steering_vectors({_HP: {999: [1.0] * 8}})
+        result = worker.set_steering_vectors(vectors={_HP: {999: [1.0] * 8}})
         assert result == []
 
     def test_mixed_valid_and_invalid_layers(self, worker, model):
-        """Valid layers are set; invalid layers are silently skipped."""
         vec = [3.0] * 8
-        result = worker.set_steering_vectors(
-            {_HP: {1: vec, 999: [1.0] * 8}}
-        )
+        result = worker.set_steering_vectors(vectors={_HP: {1: vec, 999: [1.0] * 8}})
         assert result == [1]
         assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 24.0
 
     def test_wrong_vector_size_raises(self, worker):
         with pytest.raises(SteeringVectorError, match="expected vector of size 8"):
-            worker.set_steering_vectors({_HP: {0: [1.0, 2.0]}})  # too short
+            worker.set_steering_vectors(vectors={_HP: {0: [1.0, 2.0]}})
 
     def test_nan_raises(self, worker):
         vec = [1.0] * 7 + [float("nan")]
         with pytest.raises(SteeringVectorError, match="non-finite"):
-            worker.set_steering_vectors({_HP: {0: vec}})
+            worker.set_steering_vectors(vectors={_HP: {0: vec}})
 
     def test_inf_raises(self, worker):
         vec = [float("inf")] + [1.0] * 7
         with pytest.raises(SteeringVectorError, match="non-finite"):
-            worker.set_steering_vectors({_HP: {0: vec}})
+            worker.set_steering_vectors(vectors={_HP: {0: vec}})
 
     def test_negative_inf_raises(self, worker):
         vec = [float("-inf")] + [1.0] * 7
         with pytest.raises(SteeringVectorError, match="non-finite"):
-            worker.set_steering_vectors({_HP: {0: vec}})
+            worker.set_steering_vectors(vectors={_HP: {0: vec}})
 
     def test_validate_only_does_not_mutate(self, worker, model):
         vec = [5.0] * 8
         result = worker.set_steering_vectors(
-            {_HP: {0: vec}}, validate_only=True
+            vectors={_HP: {0: vec}}, validate_only=True
         )
         assert result == [0]
-        # Buffer should still be zero
         assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
 
     def test_validate_only_still_checks_size(self, worker):
         with pytest.raises(SteeringVectorError, match="expected vector of size"):
-            worker.set_steering_vectors({_HP: {0: [1.0]}}, validate_only=True)
+            worker.set_steering_vectors(vectors={_HP: {0: [1.0]}}, validate_only=True)
 
     def test_validate_only_still_checks_finite(self, worker):
         vec = [float("nan")] * 8
         with pytest.raises(SteeringVectorError, match="non-finite"):
-            worker.set_steering_vectors({_HP: {0: vec}}, validate_only=True)
+            worker.set_steering_vectors(vectors={_HP: {0: vec}}, validate_only=True)
 
     def test_validation_error_prevents_mutation(self, worker, model):
-        """If layer 0 is valid but layer 1 has wrong size, no layer is
-        mutated — validation runs for all layers before any copy."""
-        # Layer 0 valid, layer 1 invalid size
         with pytest.raises(SteeringVectorError, match="expected vector of size"):
             worker.set_steering_vectors(
-                {_HP: {0: [1.0] * 8, 1: [1.0] * 3}},
+                vectors={_HP: {0: [1.0] * 8, 1: [1.0] * 3}},
             )
-        # Layer 0 should NOT have been updated
         assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
 
-    def test_empty_dict_is_noop(self, worker):
-        result = worker.set_steering_vectors({})
+    def test_empty_vectors_is_noop(self, worker):
+        result = worker.set_steering_vectors(vectors={})
+        assert result == []
+
+    def test_no_vectors_is_noop(self, worker):
+        result = worker.set_steering_vectors()
         assert result == []
 
     def test_invalid_hook_point_raises(self, worker):
         with pytest.raises(SteeringVectorError, match="Invalid hook point"):
-            worker.set_steering_vectors({"not_a_hook": {0: [1.0] * 8}})
+            worker.set_steering_vectors(vectors={"not_a_hook": {0: [1.0] * 8}})
 
     def test_inactive_hook_point_raises(self, worker):
-        """Hook point that exists in enum but has no buffer on the layer."""
         with pytest.raises(SteeringVectorError, match="not active"):
-            worker.set_steering_vectors({"pre_attn": {0: [1.0] * 8}})
+            worker.set_steering_vectors(vectors={"pre_attn": {0: [1.0] * 8}})
+
+
+# --- set_steering_vectors: three-tier ---
+
+
+class TestSetSteeringVectorsThreeTier:
+    """Tests for three-tier steering (base, prefill, decode)."""
+
+    def test_set_prefill_only(self, worker, model):
+        """Setting prefill vectors writes to buffers."""
+        vec = [2.0] * 8
+        result = worker.set_steering_vectors(prefill_vectors={_HP: {0: vec}})
+        assert result == [0]
+        # Prefill vectors are written to the buffer
+        assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 16.0
+
+    def test_set_decode_only(self, worker, model):
+        """Setting decode vectors writes to buffers."""
+        vec = [3.0] * 8
+        result = worker.set_steering_vectors(decode_vectors={_HP: {1: vec}})
+        assert result == [1]
+        assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 24.0
+
+    def test_set_all_three_tiers(self, worker, model):
+        """Setting all three tiers in one call."""
+        result = worker.set_steering_vectors(
+            vectors={_HP: {0: [1.0] * 8}},
+            prefill_vectors={_HP: {1: [2.0] * 8}},
+            decode_vectors={_HP: {2: [3.0] * 8}},
+        )
+        assert result == [0, 1, 2]
+
+    def test_validate_only_checks_all_tiers(self, worker, model):
+        """Validate mode checks all tiers without mutation."""
+        result = worker.set_steering_vectors(
+            vectors={_HP: {0: [1.0] * 8}},
+            prefill_vectors={_HP: {1: [2.0] * 8}},
+            validate_only=True,
+        )
+        assert result == [0, 1]
+        # Nothing mutated
+        assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
+        assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
+
+    def test_validation_error_in_prefill_tier(self, worker):
+        """Validation error in prefill tier prevents all mutation."""
+        with pytest.raises(SteeringVectorError, match="expected vector of size"):
+            worker.set_steering_vectors(
+                vectors={_HP: {0: [1.0] * 8}},
+                prefill_vectors={_HP: {1: [1.0] * 3}},  # wrong size
+            )
+
+    def test_validation_error_in_decode_tier(self, worker):
+        """Validation error in decode tier prevents all mutation."""
+        with pytest.raises(SteeringVectorError, match="non-finite"):
+            worker.set_steering_vectors(
+                vectors={_HP: {0: [1.0] * 8}},
+                decode_vectors={_HP: {1: [float("nan")] * 8}},
+            )
+
+    def test_replace_clears_all_before_applying(self, worker, model):
+        """replace=True zeros all buffers before setting new vectors."""
+        # Set some initial values
+        worker.set_steering_vectors(vectors={_HP: {0: [5.0] * 8, 1: [5.0] * 8}})
+        # Replace with only layer 2
+        worker.set_steering_vectors(
+            vectors={_HP: {2: [1.0] * 8}},
+            replace=True,
+        )
+        # Layers 0, 1 should be zeroed (from clear)
+        assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
+        assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
+        # Layer 2 should have the new values
+        assert model.layers[2].steering_vector_post_mlp_pre_ln.sum().item() == 8.0
 
 
 # --- clear_steering_vectors ---
@@ -225,14 +297,23 @@ class TestSetSteeringVectors:
 
 class TestClearSteeringVectors:
     def test_clears_all_layers(self, worker, model):
-        # Set some vectors first
-        worker.set_steering_vectors({_HP: {0: [1.0] * 8, 2: [2.0] * 8}})
+        worker.set_steering_vectors(vectors={_HP: {0: [1.0] * 8, 2: [2.0] * 8}})
         worker.clear_steering_vectors()
         for layer in model.layers:
             assert layer.steering_vector_post_mlp_pre_ln.sum().item() == 0.0
 
     def test_clear_on_already_zero(self, worker, model):
-        """Clearing when already zero is a no-op — no errors."""
+        worker.clear_steering_vectors()
+        for layer in model.layers:
+            assert layer.steering_vector_post_mlp_pre_ln.sum().item() == 0.0
+
+    def test_clear_after_three_tier_set(self, worker, model):
+        """Clearing after setting all three tiers zeros everything."""
+        worker.set_steering_vectors(
+            vectors={_HP: {0: [1.0] * 8}},
+            prefill_vectors={_HP: {1: [2.0] * 8}},
+            decode_vectors={_HP: {2: [3.0] * 8}},
+        )
         worker.clear_steering_vectors()
         for layer in model.layers:
             assert layer.steering_vector_post_mlp_pre_ln.sum().item() == 0.0
@@ -247,24 +328,23 @@ class TestGetSteeringStatus:
         assert status == {}
 
     def test_reports_active_layers(self, worker):
-        worker.set_steering_vectors({_HP: {1: [1.0] * 8, 3: [2.0] * 8}})
+        worker.set_steering_vectors(vectors={_HP: {1: [1.0] * 8, 3: [2.0] * 8}})
         status = worker.get_steering_status()
         assert 1 in status
         assert 3 in status
         assert 0 not in status
         assert 2 not in status
-        # Status is now per-hook-point
         assert _HP in status[1]
         assert _HP in status[3]
 
     def test_norm_values(self, worker):
-        worker.set_steering_vectors({_HP: {0: [3.0] * 8}})
+        worker.set_steering_vectors(vectors={_HP: {0: [3.0] * 8}})
         status = worker.get_steering_status()
         expected_norm = round(math.sqrt(8 * 9.0), 6)
         assert status[0][_HP]["norm"] == expected_norm
 
     def test_cleared_after_set(self, worker):
-        worker.set_steering_vectors({_HP: {0: [1.0] * 8}})
+        worker.set_steering_vectors(vectors={_HP: {0: [1.0] * 8}})
         worker.clear_steering_vectors()
         status = worker.get_steering_status()
         assert status == {}
@@ -277,7 +357,7 @@ class TestNoModelRunner:
     def test_set_with_no_runner(self):
         w = FakeWorker.__new__(FakeWorker)
         w.model_runner = None
-        assert w.set_steering_vectors({_HP: {0: [1.0]}}) == []
+        assert w.set_steering_vectors(vectors={_HP: {0: [1.0]}}) == []
 
     def test_clear_with_no_runner(self):
         w = FakeWorker.__new__(FakeWorker)

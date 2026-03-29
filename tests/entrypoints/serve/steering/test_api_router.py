@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the steering API router using a mock engine."""
+"""Unit tests for the steering API router using a mock engine.
+
+Tests cover three-tier steering (base, prefill, decode) with co-located
+scale format support.
+"""
 
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -45,14 +49,16 @@ def client(engine):
 
 
 def _vecs(layer_vecs: dict, hook: str = _HP) -> dict:
-    """Shorthand: wrap layer vectors in hook-point format."""
+    """Shorthand: wrap layer vectors in base-tier format."""
     return {"vectors": {hook: layer_vecs}}
 
 
-# --- POST /v1/steering/set ---
+# --- POST /v1/steering/set: base vectors ---
 
 
-class TestSetSteering:
+class TestSetSteeringBase:
+    """Tests for setting base-tier vectors."""
+
     def test_set_basic(self, client, engine):
         """Set vectors on one layer."""
         engine.collective_rpc.side_effect = [[[0]], [[0]]]
@@ -74,22 +80,33 @@ class TestSetSteering:
         assert resp.status_code == 200
         assert resp.json()["layers_updated"] == [0, 3]
 
-    def test_set_with_scales(self, client, engine):
-        """Scale factors are pre-multiplied before sending to workers."""
+    def test_set_with_co_located_scale(self, client, engine):
+        """Co-located scale factors are pre-multiplied before sending."""
         engine.collective_rpc.side_effect = [[[0]], [[0]]]
         resp = client.post(
             "/v1/steering/set",
-            json={**_vecs({"0": [1.0, 2.0]}), "scales": {"0": 3.0}},
+            json={"vectors": {_HP: {"0": {"vector": [1.0, 2.0], "scale": 3.0}}}},
         )
         assert resp.status_code == 200
         validate_call = engine.collective_rpc.call_args_list[0]
-        hook_vectors = validate_call.kwargs.get(
-            "args", validate_call[1].get("args", (None,))
-        )[0]
-        assert hook_vectors[_HP][0] == [3.0, 6.0]
+        kwargs = validate_call.kwargs.get("kwargs", validate_call[1].get("kwargs", {}))
+        vectors = kwargs.get("vectors", {})
+        assert vectors[_HP][0] == [3.0, 6.0]
+
+    def test_set_bare_list_scale_one(self, client, engine):
+        """Bare list vectors pass through with scale=1.0."""
+        engine.collective_rpc.side_effect = [[[0]], [[0]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json=_vecs({"0": [5.0, 10.0]}),
+        )
+        assert resp.status_code == 200
+        validate_call = engine.collective_rpc.call_args_list[0]
+        kwargs = validate_call.kwargs.get("kwargs", validate_call[1].get("kwargs", {}))
+        vectors = kwargs.get("vectors", {})
+        assert vectors[_HP][0] == [5.0, 10.0]
 
     def test_set_missing_layer_returns_400(self, client, engine):
-        """Layer not found on any worker -> 400."""
         engine.collective_rpc.side_effect = [[[]]]
         resp = client.post(
             "/v1/steering/set",
@@ -99,7 +116,6 @@ class TestSetSteering:
         assert "999" in resp.json()["error"]
 
     def test_set_partial_missing_layers(self, client, engine):
-        """Some layers valid, some missing -> 400 for the missing ones."""
         engine.collective_rpc.side_effect = [[[0]]]
         resp = client.post(
             "/v1/steering/set",
@@ -109,7 +125,6 @@ class TestSetSteering:
         assert "999" in resp.json()["error"]
 
     def test_set_no_steerable_layers(self, client, engine):
-        """Model has no steerable layers at all -> 400."""
         engine.collective_rpc.side_effect = [[[]]]
         resp = client.post(
             "/v1/steering/set",
@@ -170,22 +185,15 @@ class TestSetSteering:
         assert resp.status_code == 200
         assert engine.collective_rpc.call_count == 2
 
-    def test_set_scale_default_1(self, client, engine):
-        """Unscaled vectors are passed through as-is."""
-        engine.collective_rpc.side_effect = [[[0]], [[0]]]
-        resp = client.post(
-            "/v1/steering/set",
-            json=_vecs({"0": [5.0, 10.0]}),
-        )
-        assert resp.status_code == 200
-        validate_call = engine.collective_rpc.call_args_list[0]
-        hook_vectors = validate_call.kwargs.get(
-            "args", validate_call[1].get("args", (None,))
-        )[0]
-        assert hook_vectors[_HP][0] == [5.0, 10.0]
+    def test_set_empty_all_tiers(self, client, engine):
+        """No tiers provided -> immediate 400."""
+        resp = client.post("/v1/steering/set", json={})
+        assert resp.status_code == 400
+        assert "No vectors provided" in resp.json()["error"]
+        engine.collective_rpc.assert_not_called()
 
     def test_set_empty_vectors(self, client, engine):
-        """Empty vectors dict -> immediate 400."""
+        """Empty vectors dict -> immediate 400 (no data in any tier)."""
         resp = client.post(
             "/v1/steering/set",
             json={"vectors": {}},
@@ -195,13 +203,131 @@ class TestSetSteering:
         engine.collective_rpc.assert_not_called()
 
     def test_set_invalid_hook_point(self, client, engine):
-        """Invalid hook point name -> 400."""
         resp = client.post(
             "/v1/steering/set",
             json={"vectors": {"invalid_hook": {"0": [1.0]}}},
         )
         assert resp.status_code == 400
         assert "Invalid hook point" in resp.json()["error"]
+
+
+# --- POST /v1/steering/set: three-tier vectors ---
+
+
+class TestSetSteeringThreeTier:
+    """Tests for three-tier steering (base, prefill, decode)."""
+
+    def test_set_prefill_only(self, client, engine):
+        """Set prefill-specific vectors without base."""
+        engine.collective_rpc.side_effect = [[[0]], [[0]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json={"prefill_vectors": {_HP: {"0": [1.0, 2.0]}}},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["layers_updated"] == [0]
+
+    def test_set_decode_only(self, client, engine):
+        """Set decode-specific vectors without base."""
+        engine.collective_rpc.side_effect = [[[1]], [[1]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json={"decode_vectors": {_HP: {"1": [3.0, 4.0]}}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["layers_updated"] == [1]
+
+    def test_set_all_three_tiers(self, client, engine):
+        """Set all three tiers simultaneously."""
+        engine.collective_rpc.side_effect = [[[0, 1, 2]], [[0, 1, 2]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json={
+                "vectors": {_HP: {"0": [1.0]}},
+                "prefill_vectors": {_HP: {"1": [2.0]}},
+                "decode_vectors": {_HP: {"2": [3.0]}},
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert sorted(body["layers_updated"]) == [0, 1, 2]
+
+    def test_prefill_with_co_located_scale(self, client, engine):
+        """Prefill vectors support co-located scale format."""
+        engine.collective_rpc.side_effect = [[[0]], [[0]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json={
+                "prefill_vectors": {_HP: {"0": {"vector": [1.0, 2.0], "scale": 2.0}}}
+            },
+        )
+        assert resp.status_code == 200
+        validate_call = engine.collective_rpc.call_args_list[0]
+        kwargs = validate_call.kwargs.get("kwargs", validate_call[1].get("kwargs", {}))
+        prefill_vecs = kwargs.get("prefill_vectors", {})
+        assert prefill_vecs[_HP][0] == [2.0, 4.0]
+
+    def test_decode_with_co_located_scale(self, client, engine):
+        """Decode vectors support co-located scale format."""
+        engine.collective_rpc.side_effect = [[[0]], [[0]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json={"decode_vectors": {_HP: {"0": {"vector": [3.0, 6.0], "scale": 0.5}}}},
+        )
+        assert resp.status_code == 200
+        validate_call = engine.collective_rpc.call_args_list[0]
+        kwargs = validate_call.kwargs.get("kwargs", validate_call[1].get("kwargs", {}))
+        decode_vecs = kwargs.get("decode_vectors", {})
+        assert decode_vecs[_HP][0] == [1.5, 3.0]
+
+    def test_replace_clears_all_tiers(self, client, engine):
+        """replace=True clears all tiers before setting decode-only."""
+        engine.collective_rpc.side_effect = [[[0]], None, [[0]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json={
+                "decode_vectors": {_HP: {"0": [1.0]}},
+                "replace": True,
+            },
+        )
+        assert resp.status_code == 200
+        assert engine.collective_rpc.call_count == 3
+        clear_call = engine.collective_rpc.call_args_list[1]
+        assert clear_call[0][0] == "clear_steering_vectors"
+
+    def test_invalid_hook_in_prefill_tier(self, client, engine):
+        """Invalid hook in any tier returns 400."""
+        resp = client.post(
+            "/v1/steering/set",
+            json={"prefill_vectors": {"bad_hook": {"0": [1.0]}}},
+        )
+        assert resp.status_code == 400
+        assert "Invalid hook point" in resp.json()["error"]
+
+    def test_invalid_hook_in_decode_tier(self, client, engine):
+        resp = client.post(
+            "/v1/steering/set",
+            json={"decode_vectors": {"bad_hook": {"0": [1.0]}}},
+        )
+        assert resp.status_code == 400
+        assert "Invalid hook point" in resp.json()["error"]
+
+    def test_hook_points_response_includes_all_tiers(self, client, engine):
+        """Response includes hook points from all tiers."""
+        engine.collective_rpc.side_effect = [[[0]], [[0]]]
+        resp = client.post(
+            "/v1/steering/set",
+            json={
+                "vectors": {"pre_attn": {"0": [1.0]}},
+                "decode_vectors": {_HP: {"0": [1.0]}},
+            },
+        )
+        assert resp.status_code == 200
+        hooks = resp.json()["hook_points"]
+        assert "pre_attn" in hooks
+        assert _HP in hooks
 
 
 # --- POST /v1/steering/clear ---
