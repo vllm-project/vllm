@@ -383,6 +383,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        """Set RNG seed across all devices for the current platform."""
+        torch.manual_seed(seed)
+
+    @classmethod
     def pre_register_and_update(
         cls, parser: FlexibleArgumentParser | None = None
     ) -> None:

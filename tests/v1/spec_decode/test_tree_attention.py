@@ -322,7 +322,7 @@ def test_tree_attn_correctness(
     reference_backend: AttentionBackendEnum,
 ) -> None:
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    current_platform.manual_seed_all(42)
 
     device = "cuda"
     tree_attn_masks = {

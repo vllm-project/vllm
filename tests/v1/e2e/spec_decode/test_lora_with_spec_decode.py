@@ -66,7 +66,7 @@ def test_batch_inference_correctness(
         torch.manual_seed(SEED)
         np.random.seed(SEED)
         random.seed(SEED)
-        torch.cuda.manual_seed_all(SEED)
+        current_platform.manual_seed_all(SEED)
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
