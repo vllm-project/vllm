@@ -195,6 +195,91 @@ With `load_format="dummy"`, certain tokens become strong attractors regardless o
 
 ---
 
+## Phase 3: Multiple Hook Points
+
+Phase 3 extended steering from a single post-MLP position to four hook points on the residual stream (`pre_attn`, `post_attn`, `post_mlp_pre_ln`, `post_mlp_post_ln`). This section documents what we learned about torch.compile, graph partitions, and buffer allocation strategy.
+
+### Splitting Ops Are Not Required for Buffer Correctness
+
+The Phase 1/2 implementation registered `apply_steering` as a splitting op based on the belief that torch.compile would constant-fold zero-valued buffers, eliminating the steering addition. During Phase 3, we tested removing the splitting op registration and found that **the custom op alone is sufficient**.
+
+A custom op registered via `direct_register_custom_op` is opaque to the torch.compile tracer — Inductor cannot see through it to constant-fold the buffer values. The splitting op registration controls whether the op **partitions the compiled graph**, which is a separate concern from opacity.
+
+Without the splitting op:
+- The op is still opaque (Inductor generates a call to it, not inlined code)
+- The compiled graph is NOT partitioned at the op call
+- Buffer values updated in-place between forward passes are visible to CUDA graph replays
+- The op runs as part of the compiled graph, not between graph segments
+
+**Lesson**: `direct_register_custom_op` provides opacity. `splitting_ops` provides graph partitioning. You need opacity for correctness, but you don't necessarily need partitioning. We were conflating the two in Phase 1.
+
+**Lesson**: The "inline tensor math with module buffers" approach documented as broken in Phase 1 fails for a different reason than we thought — it's not that buffers are constant-folded, it's that inline math gets traced through by Inductor and the buffer values at trace time are baked into the generated code. A custom op prevents tracing through the operation entirely.
+
+### Inline Tensor Math Causes AOT Autograd Cache Pickle Failures
+
+We attempted to remove the custom op entirely and use inline tensor math:
+
+```python
+# Fails with AOT autograd cache pickle error
+residual = residual + self.steering_table_pre_attn[
+    self.steering_index[:residual.shape[0]]
+].to(residual.dtype)
+```
+
+This caused `AttributeError: Can't pickle local object 'WeakValueDictionary.__init__.<locals>.remove'` during PyTorch's AOT autograd cache save step. The error comes from Python's `Enum` class (which uses `WeakValueDictionary` internally for member tracking) being captured in the traced graph's metadata.
+
+The issue is NOT stale caches — clearing `/tmp/torchinductor_nymph/aotautograd/` does not help. The error is reproducible with a fresh cache.
+
+**Lesson**: Inline tensor math that references module buffers can trigger AOT autograd serialization issues when the module's class hierarchy includes Python Enums or other unpicklable objects. Custom ops sidestep this by creating an opaque boundary that AOT autograd doesn't try to trace through.
+
+### Always Allocate All Hook Point Buffers
+
+We initially designed Phase 3 with an opt-in `--steering-hook-points` CLI flag that controlled which hook points allocated buffers. This was motivated by the belief that each hook point added a graph partition (splitting op). After discovering that splitting ops are unnecessary, the performance argument evaporated.
+
+All four hook point buffers are now allocated unconditionally on every decoder layer:
+
+| Config | Per Layer (Gemma 3 4B, bf16) | 26 Layers |
+|--------|------------------------------|-----------|
+| `max_steering_configs=4` (default) | 4 × 6 rows × 3072 × 2B = ~144 KB | ~3.6 MB |
+| `max_steering_configs=16` | 4 × 18 rows × 3072 × 2B = ~432 KB | ~11.2 MB |
+
+Benefits:
+- No `hasattr` guards in the forward path — unconditional code is easier to reason about
+- No `--steering-hook-points` CLI flag to configure
+- No `SteeringConfig.steering_hook_points` field to manage
+- No trace-time branching concerns for torch.compile
+- Zero rows make unused hook points a no-op with negligible compute cost
+
+**Lesson**: When the memory cost of "always allocate" is trivial relative to model size, prefer unconditional allocation over opt-in configuration. The configuration surface area (CLI flags, config fields, validation, documentation) costs more in complexity than the memory saves.
+
+### Hook Points at the Same Residual State
+
+In Gemma 3's architecture, some hook points see identical residual state:
+- `pre_attn` and `post_attn` — attention only modifies `hidden_states`, not `residual`
+- `post_mlp_pre_ln` and `post_mlp_post_ln` — `post_feedforward_layernorm` only modifies `hidden_states`
+
+The steering effect is therefore identical whether applied at `pre_attn` or `post_attn` (and likewise for the post-MLP pair). Both hook points exist for semantic matching with SAE training positions, not because they produce different results.
+
+**Lesson**: Hook point naming should match the conventions of the tools that produce steering vectors (e.g., TransformerLens SAE positions), even when the underlying residual state is identical at adjacent positions.
+
+### Unified API: Hook Points Required
+
+Phase 3 initially maintained backward compatibility with Phase 2's flat `steering_vectors: dict[int, list[float]]` format (mapped to `post_mlp_pre_ln` by default) alongside a new `steering_hook_vectors` field. This created:
+- Two fields for the same concept
+- Merging logic when both were specified
+- Ambiguity about which format to use
+
+We removed backward compatibility and unified on a single format:
+
+```python
+steering_vectors: dict[str, dict[int, list[float]]]
+# {hook_point: {layer_idx: [floats]}}
+```
+
+**Lesson**: When adding a dimension to an API (hook points), don't maintain backward compatibility with the old format. The merging logic is a source of bugs and the old format will confuse users. Make the breaking change cleanly.
+
+---
+
 ## Testing
 
 ### What the tests cover
