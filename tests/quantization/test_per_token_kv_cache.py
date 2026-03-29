@@ -311,9 +311,7 @@ def test_per_token_round_trip_accuracy(
             actual_deq = actual_q.float() * actual_sc
 
             # Scales must match
-            torch.testing.assert_close(
-                actual_sc, ref_scale, atol=1e-5, rtol=1e-5
-            )
+            torch.testing.assert_close(actual_sc, ref_scale, atol=1e-5, rtol=1e-5)
 
             if qcfg.uses_trunc:
                 # INT8: allow +-1 for bf16->f32 differences
@@ -329,9 +327,7 @@ def test_per_token_round_trip_accuracy(
                 )
             else:
                 # FP8: wider tolerance
-                torch.testing.assert_close(
-                    actual_deq, ref_deq, atol=0.05, rtol=0.05
-                )
+                torch.testing.assert_close(actual_deq, ref_deq, atol=0.05, rtol=0.05)
 
 
 # ===========================================================================
@@ -392,9 +388,7 @@ def test_per_token_negative_slot_skipped(qcfg: QuantConfig):
 # ===========================================================================
 # 5. process_weights_after_loading -- per-token early return
 # ===========================================================================
-@pytest.mark.parametrize(
-    "kv_cache_dtype", ["int8_per_token", "fp8_per_token"]
-)
+@pytest.mark.parametrize("kv_cache_dtype", ["int8_per_token", "fp8_per_token"])
 def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     """Per-token should set _k_scale=1.0, _v_scale=1.0
     and delete checkpoint attrs."""
@@ -408,9 +402,7 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
-    layer.prob_scale = torch.nn.Parameter(
-        torch.tensor(-1.0), requires_grad=False
-    )
+    layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer._k_scale = torch.tensor(0.0)
     layer._v_scale = torch.tensor(0.0)
     layer._k_scale_float = 0.0
@@ -490,11 +482,11 @@ def test_triton_unified_attention_per_token_scale(
             scaled_v.round().clamp(qcfg.quant_min, qcfg.quant_max).to(qcfg.cache_dtype)
         )
     else:
-        key_cache_q = (
-            scaled_k.clamp(qcfg.quant_min, qcfg.quant_max).to(qcfg.cache_dtype)
+        key_cache_q = scaled_k.clamp(qcfg.quant_min, qcfg.quant_max).to(
+            qcfg.cache_dtype
         )
-        value_cache_q = (
-            scaled_v.clamp(qcfg.quant_min, qcfg.quant_max).to(qcfg.cache_dtype)
+        value_cache_q = scaled_v.clamp(qcfg.quant_min, qcfg.quant_max).to(
+            qcfg.cache_dtype
         )
 
     # Dequantized reference
