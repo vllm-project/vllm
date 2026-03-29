@@ -315,6 +315,7 @@ class RoutingSimulatorRouter(BaseRouter):
         global_num_experts: int,
         eplb_state: EplbLayerState,
         enable_eplb: bool = False,
+        eplb_static: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
@@ -322,6 +323,7 @@ class RoutingSimulatorRouter(BaseRouter):
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
+            eplb_static=eplb_static,
             indices_type_getter=indices_type_getter,
         )
 

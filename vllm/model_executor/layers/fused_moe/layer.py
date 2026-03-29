@@ -263,6 +263,7 @@ class FusedMoE(CustomOp):
         activation: str = "silu",
         is_act_and_mul: bool = True,
         enable_eplb: bool = False,
+        eplb_static: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
         is_sequence_parallel=False,
@@ -330,6 +331,7 @@ class FusedMoE(CustomOp):
         self.layer_name = prefix
 
         self.enable_eplb = enable_eplb
+        self.eplb_static = eplb_static
         # TODO(bnell): should this be owned by router?
         self.eplb_state = EplbLayerState()
         self.expert_placement_strategy: ExpertPlacementStrategy = (
@@ -459,6 +461,7 @@ class FusedMoE(CustomOp):
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,
+            eplb_static=self.eplb_static,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,

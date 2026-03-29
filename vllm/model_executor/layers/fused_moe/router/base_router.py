@@ -19,6 +19,7 @@ if current_platform.is_cuda_alike():
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        eplb_static: bool = False,
     ) -> torch.Tensor:
         """
         Map the logical expert ids to physical expert ids
@@ -60,29 +61,30 @@ if current_platform.is_cuda_alike():
 
         topk_ids = physical_ids
 
-        # 2. Record expert load metrics.
+        if not eplb_static:
+            # 2. Record expert load metrics.
 
-        # TODO(bowen): When using `FusedMoEModularKernel`, this
-        # can be done in a more unified way, since
-        # `FusedMoEPrepareAndFinalizeModular` will return the expert
-        # token count, in some cases directly from the kernel.
-        # However, now there are many code paths not using
-        # the modular kernel, e.g. calling `fused_experts`,
-        # so we decide to keep the logic here.
-        #
-        # If later refactor moved all the MoE kernel calls
-        # to the modular kernel, we can move this logic there
-        # to achieve better efficiency.
+            # TODO(bowen): When using `FusedMoEModularKernel`, this
+            # can be done in a more unified way, since
+            # `FusedMoEPrepareAndFinalize` will return the expert
+            # token count, in some cases directly from the kernel.
+            # However, now there are many code paths not using
+            # the modular kernel, e.g. calling `fused_experts`,
+            # so we decide to keep the logic here.
+            #
+            # If later refactor moved all the MoE kernel calls
+            # to the modular kernel, we can move this logic there
+            # to achieve better efficiency.
 
-        # `expert_load_view`: (num_physical_experts,)
+            # `expert_load_view`: (num_physical_experts,)
 
-        # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-        topk_ids_flatten = topk_ids.flatten()
-        expert_load_view.scatter_add_(
-            dim=0,
-            index=topk_ids_flatten.long(),
-            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
-        )
+            # `torch.bincount` is not compilable, so use `scatter_add_` instead.
+            topk_ids_flatten = topk_ids.flatten()
+            expert_load_view.scatter_add_(
+                dim=0,
+                index=topk_ids_flatten.long(),
+                src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+            )
         return topk_ids
 else:
 
@@ -111,6 +113,7 @@ class BaseRouter(FusedMoERouter):
         global_num_experts: int,
         eplb_state: EplbLayerState,
         enable_eplb: bool = False,
+        eplb_static: bool = False,
         # TODO(bnell): Once the MK is constructed at layer init time, we
         # can make this a plain value instead of a callback.
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
@@ -126,6 +129,7 @@ class BaseRouter(FusedMoERouter):
         self.global_num_experts = global_num_experts
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
+        self.eplb_static = eplb_static
         self.indices_type_getter = indices_type_getter
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
@@ -164,6 +168,7 @@ class BaseRouter(FusedMoERouter):
                 expert_load_view=self.eplb_state.expert_load_view,
                 logical_to_physical_map=self.eplb_state.logical_to_physical_map,
                 logical_replica_count=self.eplb_state.logical_replica_count,
+                eplb_static=self.eplb_static,
             )
         return topk_ids
 

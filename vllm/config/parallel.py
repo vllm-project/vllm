@@ -4,6 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import torch
@@ -82,6 +83,30 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+    load_initial_load_window: bool = False
+    """
+    Whether to load initial load window.
+    """
+    save_load_window: bool = False
+    """
+    Whether to save load window.
+    """
+    static: bool = False
+    """
+    Whether to do just one expert reshuffling at the start.
+    """
+    save_dir: Path | None = None
+    """Directory to save expert load balance metrics."""
+    load_path: Path | None = None
+    """Path to load expert load balance metrics."""
+
+    @model_validator(mode="after")
+    def _validate_eplb_config(self) -> Self:
+        if self.use_async and self.policy != "default":
+            raise ValueError("Async EPLB is only supported with the default policy.")
+        if self.log_balancedness and self.log_balancedness_interval <= 0:
+            raise ValueError("log_balancedness_interval must be greater than 0.")
+        return self
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -821,5 +846,20 @@ class ParallelConfig:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
             )
+        if (
+            self.eplb_config.load_initial_load_window
+            and self.eplb_config.load_path is None
+        ):
+            raise ValueError(
+                "load_initial_load_window is set to True,but load_path is not provided."
+            )
+        if self.eplb_config.save_load_window and self.eplb_config.save_dir is None:
+            raise ValueError(
+                "save_load_window is set to True, but save_dir is provided."
+            )
+        if self.eplb_config.save_load_window and self.eplb_config.static:
+            raise ValueError("save_load_window cannot be set to true with static eplb.")
+        if self.eplb_config.use_async and self.eplb_config.static:
+            raise ValueError("use_async cannot be set to true with static eplb.")
 
         return self

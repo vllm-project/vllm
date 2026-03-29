@@ -181,6 +181,7 @@ class FusedTopKBiasRouter(BaseRouter):
         renormalize: bool = True,
         routed_scaling_factor: float = 1.0,
         enable_eplb: bool = False,
+        eplb_static: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
@@ -188,6 +189,7 @@ class FusedTopKBiasRouter(BaseRouter):
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
+            eplb_static=eplb_static,
             indices_type_getter=indices_type_getter,
         )
         self.e_score_correction_bias = e_score_correction_bias
