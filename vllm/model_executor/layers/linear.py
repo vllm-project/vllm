@@ -7,6 +7,7 @@ from abc import abstractmethod
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -19,7 +20,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.batch_invariant import (
     linear_batch_invariant,
-    vllm_is_batch_invariant,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -223,7 +223,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if vllm_is_batch_invariant() and current_platform.is_cuda_alike():
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
@@ -768,6 +768,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Quantization.
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
+                # Add check to adjust the size/offset for FP8 block scales
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.packed_factor
                     shard_offset = shard_offset // param.packed_factor
@@ -1218,6 +1225,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # Special case for Quantized Weights.
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
+                # Add check to adjust the size/offset for FP8 block scales
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.packed_factor
                     shard_offset = shard_offset // param.packed_factor

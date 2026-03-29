@@ -195,7 +195,10 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        return True
+        # ROCM custom attention kernel does not support sinks.
+        # Callink this backend with sinks will cause it to fall back to the Triton
+        # kernel, which is less efficient than the proper triton backends.
+        return False
 
     forward_includes_kv_cache_update: bool = False
 
@@ -209,12 +212,17 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """RocmAttention supports all attention types."""
+        """ENCODER_DECODER is not supported because
+        chunked_prefill_paged_decode's prefill kernel (context_attention_fwd)
+        assumes self-attention semantics: it treats passed K/V as new tokens
+        to mix with cached K/V. For cross-attention layers the encoder K/V
+        are already fully cached, so mixing them again produces incorrect
+        results when max_query_len > 1 (e.g. beam search).
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER_DECODER,
         )
 
     @staticmethod
