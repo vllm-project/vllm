@@ -12,15 +12,15 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
 
-from .decoder_layer import MonolithicDecoderLayer, _fused_add_rms_norm
+from .decoder_layer import MonolithicDecoderLayer
+from .ops import fused_add_rms_norm
 
 
 @support_torch_compile
@@ -78,7 +78,7 @@ class MonolithicDeepseekV32Model(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
-        hidden_states, _ = _fused_add_rms_norm(
+        hidden_states, _ = fused_add_rms_norm(
             hidden_states, residual, self.norm_weight, self.rms_norm_eps
         )
         return hidden_states
@@ -112,7 +112,6 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.lm_head" if prefix else "lm_head",
         )
-        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.num_redundant_experts = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -128,7 +127,10 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
         return self.model(input_ids, positions)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
+        logits = self.lm_head.quant_method.apply(self.lm_head, hidden_states)
+        logits = tensor_model_parallel_all_gather(logits)
+        logits = logits[..., : self.config.vocab_size]
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Delegate to the original DeepSeek V2 weight loader.

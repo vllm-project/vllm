@@ -14,22 +14,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 
 from .attention import MonolithicMLAAttention
-
-
-def _fused_add_rms_norm(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    ops.fused_add_rms_norm(x, residual, weight, eps)
-    return x, residual
-
-
-def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    out = torch.empty_like(x)
-    ops.rms_norm(out, x, weight, eps)
-    return out
+from .ops import rms_norm, fused_add_rms_norm
 
 
 class MonolithicDecoderLayer(nn.Module):
@@ -131,17 +116,6 @@ class MonolithicDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
 
-    def _forward_fused_qkv_a_proj(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        out = self.self_attn.fused_qkv_a_proj(x)
-        if isinstance(out, tuple):
-            out = out[0]
-        return out.split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-            dim=-1,
-        )
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -150,12 +124,12 @@ class MonolithicDecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Input norm + residual
         if residual is None:
-            residual = hidden_states.clone()
-            hidden_states = _rms_norm(
+            residual = hidden_states
+            hidden_states = rms_norm(
                 hidden_states, self.input_layernorm_weight, self.rms_norm_eps
             )
         else:
-            hidden_states, residual = _fused_add_rms_norm(
+            hidden_states, residual = fused_add_rms_norm(
                 hidden_states,
                 residual,
                 self.input_layernorm_weight,
@@ -163,14 +137,44 @@ class MonolithicDecoderLayer(nn.Module):
             )
 
         # Fused QKV A-proj + Q norm
-        q_c, kv_lora = self._forward_fused_qkv_a_proj(hidden_states)
-        q_c = _rms_norm(q_c, self.attn.q_a_layernorm_weight, self.rms_norm_eps)
+        out: torch.Tensor | tuple = self.self_attn.fused_qkv_a_proj(hidden_states)
+        if isinstance(out, tuple):
+            out: torch.Tensor = out[0]
+        q_c, kv_lora = out.split([self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
+        q_c = rms_norm(q_c, self.attn.q_a_layernorm_weight, self.rms_norm_eps)
 
         # Attention
-        hidden_states = self.attn(positions, hidden_states, q_c, kv_lora)
+        # 1. Q B-projection
+        q = self.attn.q_b_proj(q_c)[0].view(-1, self.attn.num_local_heads, self.attn.qk_head_dim)
+
+        # 2. KV layernorm + RoPE
+        kv_c, k_pe = kv_lora.split([self.attn.kv_lora_rank, self.attn.qk_rope_head_dim], dim=-1)
+        kv_c_normed = rms_norm(kv_c, self.attn.kv_a_layernorm_weight, self.attn.rms_norm_eps)
+
+        k_pe = k_pe.unsqueeze(1)
+        q[..., self.attn.qk_nope_head_dim :], k_pe = self.attn.rotary_emb(
+            positions, q[..., self.attn.qk_nope_head_dim :], k_pe
+        )
+
+        # 3. Sparse indexer
+        self.attn._run_indexer(hidden_states, q_c, positions)
+
+        # 4-7. KV cache update + W_UK_T absorption + sparse attn + W_UV
+        attn_out = self.attn.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(
+                hidden_states.shape[0],
+                self.attn.num_local_heads * self.attn.v_head_dim,
+            ),
+        )
+
+        # 8. Output projection (TP all-reduce)
+        hidden_states, _ = self.attn.o_proj(attn_out)
 
         # Post-attn norm + residual
-        hidden_states, residual = _fused_add_rms_norm(
+        hidden_states, residual = fused_add_rms_norm(
             hidden_states,
             residual,
             self.post_attention_layernorm_weight,
