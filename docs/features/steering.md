@@ -82,35 +82,59 @@ act as a no-op, so unused hook points add no computational overhead.
 Requires `VLLM_SERVER_DEV_MODE=1`.
 
 ```bash
-# Set steering on layer 15 at the post_mlp_pre_ln hook point
+# Set base steering (applies to both prefill and decode)
+curl -X POST http://localhost:8000/v1/steering/set \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vectors": {
+      "post_mlp_pre_ln": {"15": [0.1, 0.2, ...]}
+    }
+  }'
+
+# Co-located scale factor (scale embedded in the vector entry)
+curl -X POST http://localhost:8000/v1/steering/set \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vectors": {
+      "post_mlp_pre_ln": {
+        "15": {"vector": [0.1, 0.2, ...], "scale": 1.5}
+      }
+    }
+  }'
+
+# Three-tier: base + prefill-specific + decode-specific
 curl -X POST http://localhost:8000/v1/steering/set \
   -H "Content-Type: application/json" \
   -d '{
     "vectors": {
       "post_mlp_pre_ln": {"15": [0.1, 0.2, ...]}
     },
-    "scales": {"15": 1.5}
+    "prefill_vectors": {
+      "pre_attn": {"15": [0.5, 0.6, ...]}
+    },
+    "decode_vectors": {
+      "pre_attn": {"15": [0.3, 0.4, ...]}
+    }
   }'
 
-# Set steering at multiple hook points
+# Replace all existing vectors atomically
 curl -X POST http://localhost:8000/v1/steering/set \
   -H "Content-Type: application/json" \
   -d '{
-    "vectors": {
-      "pre_attn": {"15": [0.1, 0.2, ...]},
-      "post_mlp_pre_ln": {"15": [0.3, 0.4, ...]}
-    },
-    "scales": {"15": 1.5}
+    "vectors": {"post_mlp_pre_ln": {"15": [0.1, 0.2, ...]}},
+    "replace": true
   }'
 
 # Check active steering
 curl http://localhost:8000/v1/steering
 
-# Clear all steering
+# Clear all steering (all tiers)
 curl -X POST http://localhost:8000/v1/steering/clear
 ```
 
-Global vectors affect **all** decode tokens in **all** requests until cleared.
+Global vectors affect **all** requests until cleared.  Base vectors
+affect both prefill and decode phases.  Phase-specific vectors
+(`prefill_vectors`, `decode_vectors`) are additive on top of base.
 
 ### Per-Request Steering (SamplingParams)
 
@@ -197,7 +221,8 @@ Request.decode_steering_config_hash   ◄── deterministic SHA-256 hash
     │
     ▼
 Scheduler ── checks capacity against max_steering_configs
-    │         (uses prefill hash for admission control)
+    │         (tracks union of active hashes: prefill for prefill,
+    │          decode for decode; new requests must fit BOTH hashes)
     │         excess requests queued in skipped_waiting
     ▼
 NewRequestData.prefill_steering_config_hash
@@ -296,12 +321,24 @@ independently.
 
 When `--enable-steering` is set, the scheduler tracks distinct steering
 config hashes in the current batch (same pattern as `scheduled_loras`).
-If `max_steering_configs` slots are occupied by distinct configs:
 
-1. New requests with a **new** config hash are moved to `skipped_waiting`
-2. They retry on the next scheduling step (FCFS priority)
-3. Requests with a hash already in the batch pass through (dedup)
-4. Requests without steering (`hash == 0`) are never blocked
+**Running request hash collection:** For each running request, the
+scheduler adds its currently-active hash: `prefill_steering_config_hash`
+for requests still in prefill (`num_computed_tokens < num_tokens`),
+`decode_steering_config_hash` for those in decode.
+
+**New request admission:** A new request may need up to two distinct
+hashes over its lifetime (one for prefill, one for decode).  The
+scheduler counts how many genuinely new unique hashes the request would
+add to the scheduled set.  If the union would exceed
+`max_steering_configs`, the request is skipped.
+
+1. Compute `new_hashes = {prefill_hash, decode_hash}` (excluding zeros)
+2. Compute `new_unique = new_hashes - scheduled_steering_configs`
+3. If `len(scheduled) + len(new_unique) > max_configs`, skip
+4. When admitted, add **both** hashes to the scheduled set
+5. Requests without steering (`both hashes == 0`) are never blocked
+6. Requests whose hashes are already in the batch pass through (dedup)
 
 ## File Reference
 
@@ -321,6 +358,27 @@ If `max_steering_configs` slots are occupied by distinct configs:
 | SamplingParams field | `vllm/sampling_params.py` |
 | Request hash | `vllm/v1/request.py` |
 | CLI args | `vllm/engine/arg_utils.py` |
+| Prefix cache key integration | `vllm/v1/core/kv_cache_utils.py` (`_gen_steering_extra_hash_keys`) |
+
+## Prefix Cache Key Integration
+
+Per-request prefill steering config hashes are included in block hash extra
+keys via `_gen_steering_extra_hash_keys()` in `kv_cache_utils.py`. This
+ensures that blocks computed under different prefill steering produce
+different cache entries.
+
+Key design decisions:
+- **Only prefill steering hash is included.** Decode steering does not affect
+  KV cache content during prefill, so it is excluded from block hashes.
+- **Zero impact when unused.** When `prefill_steering_config_hash` is 0 or
+  absent, the helper returns an empty list, adding nothing to the extra keys.
+- **Global prefill steering is NOT in per-request hashes.** Instead, global
+  steering changes trigger `reset_prefix_cache()` to clear all cached blocks.
+  This avoids encoding mutable global state into every block hash. The
+  invariant is: within a "global steering epoch" (between cache resets), all
+  cached blocks were computed with the same global state.
+- **Forward-compatible.** Uses `getattr(request, 'prefill_steering_config_hash', 0)`
+  so this code works even before the Request attribute is added.
 
 ## Invariants
 
@@ -335,3 +393,5 @@ If `max_steering_configs` slots are occupied by distinct configs:
 9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all three vector fields before any request processing begins.
 10. **Additive composition is pre-scaled.** `resolve_effective_vectors()` applies co-located scales before summing base and phase-specific vectors.
 11. **Phase detection is token-count based.** `num_computed_tokens < num_prompt_tokens` determines prefill vs decode, not the `n_tokens == 1` heuristic.
+12. **Reference counting is exact.** Every `register_config` is balanced by a `release_config` when the request finishes. Rows are only freed at refcount 0.
+13. **Prefix cache correctness.** Blocks computed under different per-request prefill steering configs produce different block hashes. Global steering changes invalidate the entire prefix cache rather than being encoded per-block.
