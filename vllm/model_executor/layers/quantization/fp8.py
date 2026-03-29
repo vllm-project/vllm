@@ -1012,8 +1012,12 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = torch.ones(layer.num_experts, dtype=torch.float32)
-        w2_scale = torch.ones(layer.num_experts, dtype=torch.float32)
+        w13_scale = torch.ones(
+            layer.num_experts, dtype=torch.float32, device=layer.w13_weight.device
+        )
+        w2_scale = torch.ones(
+            layer.num_experts, dtype=torch.float32, device=layer.w2_weight.device
+        )
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 

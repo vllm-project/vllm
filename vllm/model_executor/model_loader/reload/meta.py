@@ -38,15 +38,23 @@ def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return meta_tensor
 
 
-def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
+def materialize_meta_tensor(
+    meta_tensor: torch.Tensor,
+    device: torch.types.Device = None,
+) -> torch.Tensor:
     """
-    Materialize a meta tensor into an actual tensor on the current device.
-    Should be called within the torch device context for the given rank.
+    Materialize a meta tensor into an actual tensor.
+
+    :param meta_tensor: tensor on the meta device to materialize
+    :param device: target device for the materialized tensor. If ``None``,
+        uses the ambient ``torch.device`` context (the caller must ensure
+        one is active, e.g. via ``with torch.device(target):``).
     """
     tensor = torch.empty_strided(
         size=tuple(meta_tensor.size()),
         stride=tuple(meta_tensor.stride()),
         dtype=meta_tensor.dtype,
+        device=device,
         requires_grad=False,
     )
     tensor.__class__ = meta_tensor.__class__
@@ -94,14 +102,17 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
             layer.register_buffer(name, buffer)
 
 
-def materialize_layer(layer: torch.nn.Module) -> None:
+def materialize_layer(
+    layer: torch.nn.Module,
+    device: torch.types.Device = None,
+) -> None:
     """Materialize all meta tensors in a layer to actual tensors."""
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
     for name, tensor in get_layer_tensors(layer).items():
         if name not in SKIP_TENSORS:
-            setattr(layer, name, materialize_meta_tensor(tensor))
+            setattr(layer, name, materialize_meta_tensor(tensor, device=device))
 
 
 class CopyCounter(TorchDispatchMode):

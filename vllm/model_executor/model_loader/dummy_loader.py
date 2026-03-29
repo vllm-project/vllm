@@ -9,6 +9,7 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import initialize_dummy_weights
+from vllm.platforms import current_platform
 
 
 class DummyModelLoader(BaseModelLoader):
@@ -30,7 +31,13 @@ class DummyModelLoader(BaseModelLoader):
         for layer in model.modules():
             for name, param in get_layer_tensors(layer).items():
                 if param.device == torch.device("meta"):
-                    setattr(layer, name, materialize_meta_tensor(param))
+                    setattr(
+                        layer,
+                        name,
+                        materialize_meta_tensor(
+                            param, device=current_platform.device_type
+                        ),
+                    )
 
         # NOTE(woosuk): For accurate performance evaluation, we assign
         # random values to the weights.
