@@ -19,7 +19,10 @@ import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateContentFormatOption,
+    UsagePolicy,
+)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -167,6 +170,7 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
+        usage_policy: "UsagePolicy | None" = None,
     ):
         super().__init__()
 
@@ -176,6 +180,7 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+        self.usage_policy = usage_policy
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
@@ -880,6 +885,47 @@ class OpenAIServing:
         if not model_name:
             return True
         return self.models.is_base_model(model_name)
+
+    def should_include_usage(self, is_streaming: bool) -> tuple[bool, bool]:
+        """
+        Determine whether usage information should be included in the response.
+
+        Args:
+            is_streaming: Whether the request is streaming.
+
+        Returns:
+            tuple[bool, bool]: (include_in_final, include_in_chunks)
+                - include_in_final: Whether to include usage in the final
+                  response/chunk.
+                - include_in_chunks: Whether to include usage in each streaming
+                  chunk.
+
+        Default behavior:
+            - Non-streaming: Returns usage (True, False).
+            - Streaming: Returns usage in the final chunk (True, False).
+            - With usage_policy.include_usage="always": Returns usage in
+              final chunk, and in each chunk if
+              usage_policy.continuous_usage="always".
+
+        Subclass override note:
+            Subclasses may override this method to customize usage behavior.
+            When overridden, the method can either:
+            1. Consult self.usage_policy for configuration, or
+            2. Ignore self.usage_policy and implement fixed behavior
+               (e.g., always return (False, False) for APIs that never
+               return usage, or always return (True, True) for APIs that
+               always include usage in every chunk).
+
+        """
+        if not is_streaming:
+            return (True, False)
+
+        policy = self.usage_policy
+        if policy is not None and policy.include_usage == "always":
+            include_in_chunks = policy.continuous_usage == "always"
+            return (True, include_in_chunks)
+
+        return (True, False)
 
 
 def clamp_prompt_logprobs(
