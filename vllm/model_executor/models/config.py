@@ -163,12 +163,29 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             ).page_size_bytes
         else:
             kernel_block_alignment_size = 16
-            attn_page_size_1_token = FullAttentionSpec(
-                block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                head_size=model_config.get_head_size(),
-                dtype=kv_cache_dtype,
-            ).page_size_bytes
+            # For TQ cache dtypes, use effective_head_size from
+            # padded_slot_size so block_size is computed correctly
+            if cache_config.cache_dtype.startswith("tq"):
+                from vllm.turboquant.config import TurboQuantConfig
+                tq_cfg = TurboQuantConfig.from_cache_dtype(
+                    cache_config.cache_dtype,
+                    model_config.get_head_size())
+                effective_hs = tq_cfg.padded_slot_size // 2
+                attn_page_size_1_token = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=model_config.get_num_kv_heads(
+                        parallel_config),
+                    head_size=effective_hs,
+                    dtype=kv_cache_dtype,
+                ).page_size_bytes
+            else:
+                attn_page_size_1_token = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=model_config.get_num_kv_heads(
+                        parallel_config),
+                    head_size=model_config.get_head_size(),
+                    dtype=kv_cache_dtype,
+                ).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,
