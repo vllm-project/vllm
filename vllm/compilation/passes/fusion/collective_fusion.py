@@ -409,9 +409,9 @@ class AsyncTPPass(VllmPatternMatcherPass):
         # This pass is applied on top of the sequence parallelism pass.
         # It inherits the same applicability condition as `SequenceParallelismPass`.
         # See `SequenceParallelismPass.is_applicable` for more details.
-        return not (
-            not self.compilation_config.use_inductor_graph_partition
-            and self.compilation_config.splitting_ops
+        return (
+            self.compilation_config.use_inductor_graph_partition
+            or not self.compilation_config.splitting_ops
         )
 
     @VllmInductorPass.time_and_log
