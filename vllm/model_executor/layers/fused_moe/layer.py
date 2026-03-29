@@ -860,6 +860,9 @@ class FusedMoE(CustomOp):
     ):
         # for per channel weight quantization
         if shard_id == "w2":
+            expert_data = self._narrow_expert_data_for_padding(
+                expert_data, loaded_weight
+            )
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -869,6 +872,22 @@ class FusedMoE(CustomOp):
                 expert_data=expert_data,
                 tp_rank=tp_rank,
             )
+
+    @staticmethod
+    def _narrow_expert_data_for_padding(
+        expert_data: torch.Tensor, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        """Narrow expert_data dims to match loaded_weight for padded hidden_size.
+
+        When backends (e.g., DeepEP) round up hidden_size, weight parameters
+        are larger than checkpoint weights. Narrow the padded dimensions
+        before copying.
+        """
+        if loaded_weight.ndim > 0:
+            for d in range(min(expert_data.ndim, loaded_weight.ndim)):
+                if expert_data.shape[d] != loaded_weight.shape[d]:
+                    expert_data = expert_data.narrow(d, 0, loaded_weight.shape[d])
+        return expert_data
 
     def _load_w13(
         self,
@@ -907,13 +926,7 @@ class FusedMoE(CustomOp):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-
-        # Handle padding: if loaded_weight is smaller than expert_data (can happen
-        # on last TP shard with padding), copy to top-left corner
-        if expert_data.shape != loaded_weight.shape:
-            expert_data = expert_data[
-                : loaded_weight.shape[0], : loaded_weight.shape[1]
-            ]
+        expert_data = self._narrow_expert_data_for_padding(expert_data, loaded_weight)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(
@@ -943,12 +956,7 @@ class FusedMoE(CustomOp):
             narrow_size = min(shard_size, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # w2, down_proj: Load into only logical weight of w2.
-        # Handle padding: if loaded_weight is smaller than expert_data (can happen
-        # on last TP shard with padding), copy to top-left corner
-        if expert_data.shape != loaded_weight.shape:
-            expert_data = expert_data[
-                : loaded_weight.shape[0], : loaded_weight.shape[1]
-            ]
+        expert_data = self._narrow_expert_data_for_padding(expert_data, loaded_weight)
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
@@ -1095,6 +1103,9 @@ class FusedMoE(CustomOp):
 
             expert_data = param.data[expert_id]
             if shard_id == "w2":
+                # BnB params are flat packed-integer tensors; copy_() is
+                # intercepted by __torch_function__ for in-flight quantization.
+                # Do NOT narrow — shapes are intentionally different.
                 expert_data.copy_(loaded_weight)
             elif shard_id in ("w1", "w3"):
                 # BNB inflight quantization has already sharded the weights
