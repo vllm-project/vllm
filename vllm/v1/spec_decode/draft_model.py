@@ -6,10 +6,10 @@ import torch.nn as nn
 from typing_extensions import override
 
 from vllm.config import VllmConfig
+from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
 
 logger = init_logger(__name__)
 
@@ -53,15 +53,28 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             )
 
     @override
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        base = super()._create_draft_vllm_config()
+        spec = self.speculative_config
+
+        return replace(
+            base,
+            quant_config=None,
+            parallel_config=replace(
+                spec.draft_parallel_config,
+                rank=self.vllm_config.parallel_config.rank,
+            ),
+            model_config=spec.draft_model_config,
+        )
+
+    @override
     def _get_model(self) -> nn.Module:
-        # Draft models may be quantized or on different parallelism,
-        # so we load them with a modified vllm config
         from vllm.compilation.backends import set_model_tag
 
-        temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
+        draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("draft_model"):
             model = get_model(
-                vllm_config=temp_vllm_config,
+                vllm_config=draft_vllm_config,
                 prefix="draft_model",
             )
         return model
