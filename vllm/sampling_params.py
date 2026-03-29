@@ -15,6 +15,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+from vllm.config.steering_types import SteeringLayerEntry, SteeringVectorSpec
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -289,10 +290,19 @@ class SamplingParams(
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 
-    steering_vectors: dict[str, dict[int, list[float]]] | None = None
-    """Per-request activation steering vectors keyed by hook point name
-    (pre_attn, post_attn, post_mlp_pre_ln, post_mlp_post_ln), then
-    layer index. Values are vectors of length hidden_size."""
+    steering_vectors: SteeringVectorSpec | None = None
+    """Base steering vectors applied to both prefill and decode phases.
+    Keyed by hook point name (pre_attn, post_attn, post_mlp_pre_ln,
+    post_mlp_post_ln), then layer index. Values are either bare
+    ``list[float]`` (scale=1.0) or ``{"vector": [...], "scale": float}``."""
+
+    prefill_steering_vectors: SteeringVectorSpec | None = None
+    """Phase-specific steering vectors added to base during prefill only.
+    Same format as ``steering_vectors``."""
+
+    decode_steering_vectors: SteeringVectorSpec | None = None
+    """Phase-specific steering vectors added to base during decode only.
+    Same format as ``steering_vectors``."""
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -333,7 +343,9 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
-        steering_vectors: dict[str, dict[int, list[float]]] | None = None,
+        steering_vectors: SteeringVectorSpec | None = None,
+        prefill_steering_vectors: SteeringVectorSpec | None = None,
+        decode_steering_vectors: SteeringVectorSpec | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -376,6 +388,8 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             steering_vectors=steering_vectors,
+            prefill_steering_vectors=prefill_steering_vectors,
+            decode_steering_vectors=decode_steering_vectors,
         )
 
     def __post_init__(self) -> None:
@@ -529,55 +543,123 @@ class SamplingParams(
         self._validate_steering_vectors()
 
     def _validate_steering_vectors(self) -> None:
-        """Validate steering_vectors if provided.
+        """Validate all steering vector fields if provided.
 
-        Expected format: ``{hook_point: {layer_idx: [floats]}}``.
+        Expected format per field:
+        ``{hook_point: {layer_idx: SteeringLayerEntry}}``
+        where ``SteeringLayerEntry`` is either ``list[float]`` (scale=1.0)
+        or ``{"vector": list[float], "scale": float}``.
         """
-        if self.steering_vectors is None:
-            return
+        fields_to_check: list[tuple[str, SteeringVectorSpec | None]] = [
+            ("steering_vectors", self.steering_vectors),
+            ("prefill_steering_vectors", self.prefill_steering_vectors),
+            ("decode_steering_vectors", self.decode_steering_vectors),
+        ]
+        for field_name, spec in fields_to_check:
+            if spec is not None:
+                self._validate_single_steering_spec(field_name, spec)
+
+    def _validate_single_steering_spec(
+        self, field_name: str, spec: SteeringVectorSpec
+    ) -> None:
+        """Validate a single steering vector spec."""
         from vllm.model_executor.layers.steering import VALID_HOOK_POINT_NAMES
 
-        if not isinstance(self.steering_vectors, dict):
+        if not isinstance(spec, dict):
             raise ValueError(
-                "steering_vectors must be a dict mapping hook point "
+                f"{field_name} must be a dict mapping hook point "
                 "names to dicts of layer vectors."
             )
-        for hook_name, layer_vecs in self.steering_vectors.items():
+        for hook_name, layer_vecs in spec.items():
             if hook_name not in VALID_HOOK_POINT_NAMES:
                 raise ValueError(
-                    f"steering_vectors key {hook_name!r} is not a "
+                    f"{field_name} key {hook_name!r} is not a "
                     f"valid hook point. Valid values: "
                     f"{sorted(VALID_HOOK_POINT_NAMES)}."
                 )
             if not isinstance(layer_vecs, dict):
                 raise ValueError(
-                    f"steering_vectors[{hook_name!r}] must be a dict "
-                    f"mapping layer indices to lists of floats."
+                    f"{field_name}[{hook_name!r}] must be a dict "
+                    f"mapping layer indices to layer entries."
                 )
             for key, value in layer_vecs.items():
                 if not isinstance(key, int) or key < 0:
                     raise ValueError(
-                        f"steering_vectors[{hook_name!r}] keys must be "
+                        f"{field_name}[{hook_name!r}] keys must be "
                         f"non-negative integers, got {key!r}."
                     )
-                if not isinstance(value, list):
-                    raise ValueError(
-                        f"steering_vectors[{hook_name!r}][{key}] must "
-                        f"be a list of floats, got "
-                        f"{type(value).__name__}."
-                    )
-                for i, v in enumerate(value):
-                    if not isinstance(v, (int, float)):
-                        raise ValueError(
-                            f"steering_vectors[{hook_name!r}][{key}]"
-                            f"[{i}] must be a finite float, got "
-                            f"{type(v).__name__}."
-                        )
-                    if not math.isfinite(v):
-                        raise ValueError(
-                            f"steering_vectors[{hook_name!r}][{key}]"
-                            f"[{i}] must be finite, got {v}."
-                        )
+                self._validate_layer_entry(field_name, hook_name, key, value)
+
+    def _validate_layer_entry(
+        self,
+        field_name: str,
+        hook_name: str,
+        layer_idx: int,
+        entry: SteeringLayerEntry,
+    ) -> None:
+        """Validate a single layer entry (bare list or dict with scale)."""
+        prefix = f"{field_name}[{hook_name!r}][{layer_idx}]"
+        if isinstance(entry, dict):
+            if "vector" not in entry or "scale" not in entry:
+                raise ValueError(
+                    f"{prefix} dict entries must have 'vector' "
+                    f"and 'scale' keys, got {sorted(entry.keys())}."
+                )
+            if not isinstance(entry["scale"], (int, float)):
+                raise ValueError(
+                    f"{prefix}['scale'] must be a finite float, got "
+                    f"{type(entry['scale']).__name__}."
+                )
+            if not math.isfinite(entry["scale"]):
+                raise ValueError(
+                    f"{prefix}['scale'] must be finite, got {entry['scale']}."
+                )
+            self._validate_float_list(prefix + "['vector']", entry["vector"])
+        elif isinstance(entry, list):
+            self._validate_float_list(prefix, entry)
+        else:
+            raise ValueError(
+                f"{prefix} must be a list of floats or a dict with "
+                f"'vector' and 'scale' keys, got "
+                f"{type(entry).__name__}."
+            )
+
+    @staticmethod
+    def _validate_float_list(prefix: str, values: Any) -> None:
+        """Validate that *values* is a list of finite floats."""
+        if not isinstance(values, list):
+            raise ValueError(
+                f"{prefix} must be a list of floats, got {type(values).__name__}."
+            )
+        for i, v in enumerate(values):
+            if not isinstance(v, (int, float)):
+                raise ValueError(
+                    f"{prefix}[{i}] must be a finite float, got {type(v).__name__}."
+                )
+            if not math.isfinite(v):
+                raise ValueError(f"{prefix}[{i}] must be finite, got {v}.")
+
+    @cached_property
+    def effective_prefill_steering(
+        self,
+    ) -> dict[str, dict[int, list[float]]] | None:
+        """Resolved prefill steering: base + prefill-specific, pre-scaled."""
+        from vllm.config.steering_types import resolve_effective_vectors
+
+        return resolve_effective_vectors(
+            self.steering_vectors, self.prefill_steering_vectors
+        )
+
+    @cached_property
+    def effective_decode_steering(
+        self,
+    ) -> dict[str, dict[int, list[float]]] | None:
+        """Resolved decode steering: base + decode-specific, pre-scaled."""
+        from vllm.config.steering_types import resolve_effective_vectors
+
+        return resolve_effective_vectors(
+            self.steering_vectors, self.decode_steering_vectors
+        )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

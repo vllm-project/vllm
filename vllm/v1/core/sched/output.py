@@ -39,8 +39,9 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
 
-    # Per-request steering config hash (0 = no per-request steering)
-    steering_config_hash: int = 0
+    # Per-request steering config hashes (0 = no per-request steering)
+    prefill_steering_config_hash: int = 0
+    decode_steering_config_hash: int = 0
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
@@ -62,7 +63,8 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
-            steering_config_hash=request.steering_config_hash,
+            prefill_steering_config_hash=request.prefill_steering_config_hash,
+            decode_steering_config_hash=request.decode_steering_config_hash,
             prefill_token_ids=prefill_token_ids,
         )
 

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import hashlib
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -97,9 +96,16 @@ class Request:
         self.kv_transfer_params: dict[str, Any] | None = None
 
         # Per-request activation steering vectors keyed by hook point.
-        self.steering_vectors: dict[str, dict[int, list[float]]] | None = None
-        if sampling_params is not None and sampling_params.steering_vectors:
-            self.steering_vectors = sampling_params.steering_vectors
+        self.steering_vectors = None
+        self.prefill_steering_vectors = None
+        self.decode_steering_vectors = None
+        if sampling_params is not None:
+            if sampling_params.steering_vectors:
+                self.steering_vectors = sampling_params.steering_vectors
+            if sampling_params.prefill_steering_vectors:
+                self.prefill_steering_vectors = sampling_params.prefill_steering_vectors
+            if sampling_params.decode_steering_vectors:
+                self.decode_steering_vectors = sampling_params.decode_steering_vectors
 
         if pooling_params is not None:
             # Pooling models.
@@ -250,17 +256,22 @@ class Request:
         return self.num_encoder_inputs > 0
 
     @cached_property
-    def steering_config_hash(self) -> int:
-        """0 if no per-request steering, else deterministic hash of vectors."""
-        if not self.steering_vectors:
+    def prefill_steering_config_hash(self) -> int:
+        """0 if no prefill steering, else deterministic hash of vectors."""
+        from vllm.config.steering_types import hash_steering_config
+
+        if self.sampling_params is None:
             return 0
-        canonical = {
-            hp: sorted(vecs.items())
-            for hp, vecs in sorted(self.steering_vectors.items())
-        }
-        data = str(sorted(canonical.items())).encode()
-        # Mask to fit in np.int64 (used by InputBatch tracking arrays)
-        return int(hashlib.sha256(data).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
+        return hash_steering_config(self.sampling_params.effective_prefill_steering)
+
+    @cached_property
+    def decode_steering_config_hash(self) -> int:
+        """0 if no decode steering, else deterministic hash of vectors."""
+        from vllm.config.steering_types import hash_steering_config
+
+        if self.sampling_params is None:
+            return 0
+        return hash_steering_config(self.sampling_params.effective_decode_steering)
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (

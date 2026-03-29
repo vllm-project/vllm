@@ -554,13 +554,14 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
-        # Record steering configs in scheduled_running_reqs
+        # Record steering configs in scheduled_running_reqs.
+        # Use the prefill hash for admission control (WS4 will refine).
         scheduled_steering_configs: set[int] = set()
         if self.steering_config:
             scheduled_steering_configs = set(
-                req.steering_config_hash
+                req.prefill_steering_config_hash
                 for req in scheduled_running_reqs
-                if req.steering_config_hash != 0
+                if req.prefill_steering_config_hash != 0
             )
             assert len(scheduled_steering_configs) <= (
                 self.steering_config.max_steering_configs
@@ -608,14 +609,15 @@ class Scheduler(SchedulerInterface):
                     step_skipped_waiting.prepend_request(request)
                     continue
 
-                # Check steering config capacity
+                # Check steering config capacity (uses prefill hash;
+                # WS4 will refine to check both phases).
                 if (
                     self.steering_config
-                    and request.steering_config_hash != 0
+                    and request.prefill_steering_config_hash != 0
                     and (
                         len(scheduled_steering_configs)
                         == self.steering_config.max_steering_configs
-                        and request.steering_config_hash
+                        and request.prefill_steering_config_hash
                         not in scheduled_steering_configs
                     )
                 ):
@@ -840,8 +842,8 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                if self.steering_config and request.steering_config_hash != 0:
-                    scheduled_steering_configs.add(request.steering_config_hash)
+                if self.steering_config and request.prefill_steering_config_hash != 0:
+                    scheduled_steering_configs.add(request.prefill_steering_config_hash)
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
                     request_id
                 )
