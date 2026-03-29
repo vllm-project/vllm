@@ -198,8 +198,6 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
-        self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
-
         # Create profiler schedule if warmup or wait iterations are configured
         profiler_schedule = None
         if profiler_config.warmup_iterations > 0 or profiler_config.wait_iterations > 0:
@@ -265,12 +263,20 @@ class TorchProfilerWrapper(WorkerProfiler):
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
-        if self.dump_cpu_time_total and rank == 0:
-            logger.info(
-                self.profiler.key_averages().table(
-                    sort_by="self_cpu_time_total", row_limit=50
+        if profiler_config.torch_profiler_dump_cpu_time_total:
+            profiler_dir = profiler_config.torch_profiler_dir
+            sort_key = "self_cpu_time_total"
+            table = self.profiler.key_averages().table(sort_by=sort_key)
+
+            if not _is_uri_path(profiler_dir):
+                profiler_out_file = (
+                    f"{profiler_dir}/profiler_cpu_out_{rank}.txt"
                 )
-            )
+                with open(profiler_out_file, "w") as f:
+                    print(table, file=f)
+
+            if rank == 0:
+                print(table)
 
     @override
     def _profiler_step(self) -> bool:
