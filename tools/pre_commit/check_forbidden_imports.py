@@ -71,7 +71,10 @@ CHECK_IMPORTS = {
         pattern=r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)",
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
-        allowed_files={"setup.py"},
+        allowed_files={
+            "setup.py",
+            ".buildkite/scripts/hardware_ci/run-amd-test.py",
+        },
     ),
     "triton": ForbiddenImport(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",

@@ -86,6 +86,7 @@ import fcntl
 import grp
 import json
 import os
+import re  # noqa: UP027
 import shlex
 import shutil
 import signal
@@ -97,8 +98,6 @@ import xml.etree.ElementTree as ET
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
-
-import regex as re
 
 # ==========================================================================
 # Constants
