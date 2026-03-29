@@ -337,8 +337,6 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
         w13_scale = layer.w13_weight_scale
         w2_scale = layer.w2_weight_scale
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
 
         w13, w13_scale = self._quantize_mxfp8_moe_weight(layer.w13_weight)
         w2, w2_scale = self._quantize_mxfp8_moe_weight(layer.w2_weight)

@@ -104,7 +104,7 @@ def materialize_layer(layer: torch.nn.Module) -> None:
             setattr(layer, name, materialize_meta_tensor(tensor))
 
 
-class CopyCounter(TorchDispatchMode):
+class MetaCopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.
 
@@ -122,7 +122,7 @@ class CopyCounter(TorchDispatchMode):
         if kwargs is None:
             kwargs = {}
 
-        if func is torch.ops.aten.copy_.default:
+        if func is torch.ops.aten.copy_.default and args[0].device.type == "meta":
             assert args[0].numel() == args[1].numel()
             self.copied_numel += args[0].numel()
 
@@ -140,6 +140,7 @@ def get_numel_loaded(
     :return: number of elements loaded by the weight loader, the return value of the
         weight loader
     """
-    with CopyCounter() as counter:
+    assert args.arguments["param"].device.type == "meta"
+    with MetaCopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
     return counter.copied_numel, return_value
