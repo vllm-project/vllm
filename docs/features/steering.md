@@ -303,6 +303,27 @@ If `max_steering_configs` slots are occupied by distinct configs:
 | SamplingParams field | `vllm/sampling_params.py` |
 | Request hash | `vllm/v1/request.py` |
 | CLI args | `vllm/engine/arg_utils.py` |
+| Prefix cache key integration | `vllm/v1/core/kv_cache_utils.py` (`_gen_steering_extra_hash_keys`) |
+
+## Prefix Cache Key Integration
+
+Per-request prefill steering config hashes are included in block hash extra
+keys via `_gen_steering_extra_hash_keys()` in `kv_cache_utils.py`. This
+ensures that blocks computed under different prefill steering produce
+different cache entries.
+
+Key design decisions:
+- **Only prefill steering hash is included.** Decode steering does not affect
+  KV cache content during prefill, so it is excluded from block hashes.
+- **Zero impact when unused.** When `prefill_steering_config_hash` is 0 or
+  absent, the helper returns an empty list, adding nothing to the extra keys.
+- **Global prefill steering is NOT in per-request hashes.** Instead, global
+  steering changes trigger `reset_prefix_cache()` to clear all cached blocks.
+  This avoids encoding mutable global state into every block hash. The
+  invariant is: within a "global steering epoch" (between cache resets), all
+  cached blocks were computed with the same global state.
+- **Forward-compatible.** Uses `getattr(request, 'prefill_steering_config_hash', 0)`
+  so this code works even before the Request attribute is added.
 
 ## Invariants
 
@@ -313,6 +334,7 @@ If `max_steering_configs` slots are occupied by distinct configs:
 5. **The steering_index tensor is shared across all layers and all hook points.** One in-place update is visible to all decoder layers. Token-to-row mapping is independent of hook point.
 6. **All four hook point buffers are always allocated.** The memory cost is trivial. Zero rows make unused hook points a no-op.
 7. **The custom op is not a splitting op.** It prevents constant-folding but does not partition the compiled graph.
-8. **Reference counting is exact.** Every `register_config` is balanced by a `release_config` when the request finishes. Rows are only freed at refcount 0. Both prefill and decode hashes are released on finish.
-9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all three vector fields before any request processing begins.
-10. **Additive composition is pre-scaled.** `resolve_effective_vectors()` applies co-located scales before summing base and phase-specific vectors.
+8. **Reference counting is exact.** Every `register_config` is balanced by a `release_config` when the request finishes. Rows are only freed at refcount 0.
+9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all keys and values before any request processing begins.
+10. **Prefix cache correctness.** Blocks computed under different per-request prefill steering configs produce different block hashes. Global steering changes invalidate the entire prefix cache rather than being encoded per-block.
+11. **Additive composition is pre-scaled.** `resolve_effective_vectors()` applies co-located scales before summing base and phase-specific vectors.
