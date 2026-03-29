@@ -42,18 +42,18 @@ class SteeringManager:
 
     def __init__(self, max_steering_configs: int):
         self.max_steering_configs = max_steering_configs
-        # config_hash -> assigned table row index (3-based)
-        self.config_to_row: dict[int, int] = {}
-        # config_hash -> {hook_point_str: {layer_idx: tensor}}
+        # (config_hash, phase) -> assigned table row index (3-based)
+        self.config_to_row: dict[tuple[int, str], int] = {}
+        # (config_hash, phase) -> {hook_point_str: {layer_idx: tensor}}
         # (per-request vectors only, not combined)
-        self.config_vectors: dict[int, dict[str, dict[int, torch.Tensor]]] = {}
-        # config_hash -> number of active requests using this config
-        self.config_refcounts: dict[int, int] = defaultdict(int)
+        self.config_vectors: dict[
+            tuple[int, str], dict[str, dict[int, torch.Tensor]]
+        ] = {}
+        # (config_hash, phase) -> number of active requests using this config
+        self.config_refcounts: dict[tuple[int, str], int] = defaultdict(int)
         # Available row indices (rows 3 through max_steering_configs + 2)
         # Reversed so pop() gives lowest
         self.free_rows: list[int] = list(range(max_steering_configs + 2, 2, -1))
-        # config_hash -> phase ("prefill" or "decode")
-        self.config_phase: dict[int, str] = {}
 
         # Global vectors split into three tiers:
         #   base:    both-phases vectors (from global API steering_vector_* buffers)
@@ -76,14 +76,17 @@ class SteeringManager:
             vectors: ``{hook_point_str: {layer_idx: [floats]}}``
             phase: ``"prefill"`` or ``"decode"``
 
-        If the config_hash is already registered, increments refcount
-        and returns the existing row. Otherwise assigns a new row.
+        If the ``(config_hash, phase)`` pair is already registered,
+        increments refcount and returns the existing row. Otherwise
+        assigns a new row. The same ``config_hash`` with a different
+        phase gets its own independent row.
 
         Raises RuntimeError if no free rows are available.
         """
-        if config_hash in self.config_to_row:
-            self.config_refcounts[config_hash] += 1
-            return self.config_to_row[config_hash]
+        key = (config_hash, phase)
+        if key in self.config_to_row:
+            self.config_refcounts[key] += 1
+            return self.config_to_row[key]
 
         if not self.free_rows:
             raise RuntimeError(
@@ -93,9 +96,8 @@ class SteeringManager:
             )
 
         row = self.free_rows.pop()
-        self.config_to_row[config_hash] = row
-        self.config_refcounts[config_hash] = 1
-        self.config_phase[config_hash] = phase
+        self.config_to_row[key] = row
+        self.config_refcounts[key] = 1
         # Store per-request vectors as tensors, keyed by hook point
         stored: dict[str, dict[int, torch.Tensor]] = {}
         for hook_point, layer_vecs in vectors.items():
@@ -103,19 +105,22 @@ class SteeringManager:
                 layer_idx: torch.tensor(vec, dtype=torch.float32).unsqueeze(0)
                 for layer_idx, vec in layer_vecs.items()
             }
-        self.config_vectors[config_hash] = stored
+        self.config_vectors[key] = stored
         return row
 
-    def release_config(self, config_hash: int) -> None:
-        """Decrement refcount. Free the row when it reaches 0."""
-        if config_hash not in self.config_to_row:
+    def release_config(self, config_hash: int, phase: str) -> None:
+        """Decrement refcount for ``(config_hash, phase)``.
+
+        Free the row when it reaches 0.
+        """
+        key = (config_hash, phase)
+        if key not in self.config_to_row:
             return
-        self.config_refcounts[config_hash] -= 1
-        if self.config_refcounts[config_hash] <= 0:
-            row = self.config_to_row.pop(config_hash)
-            self.config_vectors.pop(config_hash, None)
-            self.config_phase.pop(config_hash, None)
-            del self.config_refcounts[config_hash]
+        self.config_refcounts[key] -= 1
+        if self.config_refcounts[key] <= 0:
+            row = self.config_to_row.pop(key)
+            self.config_vectors.pop(key, None)
+            del self.config_refcounts[key]
             self.free_rows.append(row)
 
     def get_row_for_config(self, config_hash: int, is_prefill: bool = False) -> int:
@@ -126,14 +131,16 @@ class SteeringManager:
             is_prefill=False -> row 2 (global decode effective)
 
         For registered per-request configs:
-            Returns the assigned row (3+).
+            Returns the assigned row (3+), looked up by
+            ``(config_hash, "prefill"/"decode")``.
 
         For unregistered nonzero hashes:
             Falls back to row 1 (prefill) or row 2 (decode).
         """
         if config_hash == 0:
             return 1 if is_prefill else 2
-        row = self.config_to_row.get(config_hash)
+        phase = "prefill" if is_prefill else "decode"
+        row = self.config_to_row.get((config_hash, phase))
         if row is not None:
             return row
         # Fallback for unregistered nonzero hash
@@ -249,15 +256,12 @@ class SteeringManager:
                     table[2].zero_()
 
                 # Rows 3+: phase-appropriate global + per_request
-                for config_hash, row in self.config_to_row.items():
+                for (config_hash, phase), row in self.config_to_row.items():
                     per_req = (
-                        self.config_vectors.get(config_hash, {})
+                        self.config_vectors.get((config_hash, phase), {})
                         .get(hp_str, {})
                         .get(layer_idx)
                     )
-
-                    # Determine the phase-appropriate global effective
-                    phase = self.config_phase.get(config_hash, "prefill")
                     if phase == "prefill":
                         phase_global = global_prefill
                     else:
