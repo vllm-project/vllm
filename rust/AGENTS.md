@@ -13,6 +13,10 @@ This project aims to implement an alternative frontend to the vLLM Engine in Rus
 - Rust error handling:
   - Never call `to_string()` directly on an error value.
   - Use `ToReportString` or `AsReport` by `thiserror-ext` instead.
+  - For `Error` variants that are primarily free-form text, prefer a struct variant with a `message: String` field. `thiserror_ext::Macro` will auto-derive `foo!(...)` and `bail_foo!(...)` helper macros from that shape.
+    - Use `foo!(...)` when you need to construct an error value inside an expression, such as `Err(foo!(...))`, `.ok_or_else(|| foo!(...))`, or `Err::<(), _>(foo!(...))?`.
+    - Use `bail_foo!(...)` only in statement positions where you want to exit the current `Result`-returning function immediately. Prefer it over `return Err(foo!(...))` in those cases.
+    - If a variant has extra structured fields, prefer the generated macro form `foo!(field = value, "message")` rather than manually writing `Error::Foo { ... }`.
 - Since the project is still in early stage, it's fine to break API and make non-backwards-compatible changes as needed.
 
 # Testing
@@ -20,4 +24,4 @@ This project aims to implement an alternative frontend to the vLLM Engine in Rus
 - Prefer snapshot testing with the `expect-test` crate over writing multiple `assert_eq!` statements on individual fields. Use `expect_test::expect![[...]].assert_debug_eq(...)` to snapshot the `Debug` output of the entire struct.
   - Write `expect![[""]]` as a placeholder first, then run `UPDATE_EXPECT=1 cargo test` to auto-fill the snapshot content.
   - For values containing non-deterministic data (e.g., UUIDs), set them to a fixed value like `"<placeholder>"` before snapshotting.
-- Always run test with `cargo nextest run` instead of  `cargo test`, if available, as it's much faster.
+- Always run test with `cargo nextest run` instead of `cargo test`, if available, as it's much faster.

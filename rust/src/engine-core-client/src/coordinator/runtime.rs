@@ -8,7 +8,7 @@ use zeromq::prelude::SocketSend;
 use zeromq::{XPubSocket, ZmqMessage};
 
 use crate::client::imp::ClientInner;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_control_closed, bail_unexpected_coordinator_output};
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, DpControlMessage, EngineCoreOutputs, EngineCoreRequestType,
     encode_msgpack,
@@ -91,9 +91,7 @@ impl CoordinatorHandle {
             wave: state.current_wave,
         };
         if self.command_tx.send(command).is_err() {
-            return Err(Error::ControlClosed(
-                "in-process coordinator command channel already shut down".to_string(),
-            ));
+            bail_control_closed!("in-process coordinator command channel already shut down");
         }
 
         state.engines_running = true;
@@ -197,9 +195,9 @@ impl CoordinatorRunner {
                 }
             },
             other => {
-                return Err(Error::UnexpectedCoordinatorOutput {
-                    message: format!("received non-control output on coordinator path: {other:?}"),
-                });
+                bail_unexpected_coordinator_output!(
+                    "received non-control output on coordinator path: {other:?}"
+                );
             }
         }
         Ok(())

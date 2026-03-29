@@ -304,7 +304,7 @@ fn rejects_non_none_cu_num_generated_tokens() {
 
     let error = decode_engine_core_outputs(&frames).unwrap_err();
     assert_eq!(error.to_string(), "messagepack ext value decode failed");
-    let crate::error::Error::ValueDecodeExt(message) = error else {
+    let crate::error::Error::ValueDecodeExt { message } = error else {
         panic!("expected ValueDecodeExt");
     };
     assert_eq!(

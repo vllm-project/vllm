@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, value_decode_ext};
 use crate::protocol::logprobs::wire::{WireArrayData, WireNdArray};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,5 +302,5 @@ where
 }
 
 pub(super) fn decode_error(field: &str, reason: &str) -> Error {
-    Error::ValueDecodeExt(format!("{field}: {reason}"))
+    value_decode_ext!("{field}: {reason}")
 }

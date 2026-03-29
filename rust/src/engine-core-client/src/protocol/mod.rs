@@ -9,7 +9,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use thiserror_ext::AsReport;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, value_encode_ext};
 use crate::protocol::stats::SchedulerStats;
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
@@ -33,8 +33,7 @@ pub mod handshake;
 mod logprobs;
 pub mod stats;
 pub use classfied_outputs::{
-    ClassifiedEngineCoreOutputs, DpControlMessage, OtherEngineCoreOutputs, RequestBatchOutputs,
-    UtilityCallOutput,
+    ClassifiedEngineCoreOutputs, DpControlMessage, RequestBatchOutputs, UtilityCallOutput,
 };
 pub use logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob, decode_engine_core_outputs,
@@ -301,10 +300,7 @@ impl EngineCoreUtilityRequest {
         T: Serialize,
     {
         let args = rmpv::ext::to_value(args).map_err(|error| {
-            Error::ValueEncodeExt(format!(
-                "failed to encode utility args: {}",
-                error.as_report()
-            ))
+            value_encode_ext!("failed to encode utility args: {}", error.as_report())
         })?;
         let args = match args {
             Value::Nil => Value::Array(Vec::new()),
@@ -424,7 +420,7 @@ impl UtilityOutput {
         rmpv::ext::from_value(result).map_err(|error| Error::UtilityResultDecode {
             method: method.to_string(),
             call_id: self.call_id,
-            reason: error.to_string(),
+            message: error.to_report_string(),
         })
     }
 }

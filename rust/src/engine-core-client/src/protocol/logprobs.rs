@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use self::wire::*;
 use super::{EngineCoreOutput, EngineCoreOutputs};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_value_decode_ext, value_decode_ext};
 
 /// One token candidate and its logprob metadata for a single sequence position.
 ///
@@ -40,16 +40,14 @@ impl PositionLogprobs {
     /// pair together with the sampled/selected token's actual vocab rank.
     fn from_decoded_row(token_ids: &[u32], logprobs: &[f32], sampled_rank: u32) -> Result<Self> {
         if token_ids.len() != logprobs.len() {
-            return Err(Error::ValueDecodeExt(format!(
+            bail_value_decode_ext!(
                 "logprobs row length mismatch: token_ids={}, logprobs={}",
                 token_ids.len(),
                 logprobs.len()
-            )));
+            );
         }
         if sampled_rank == 0 {
-            return Err(Error::ValueDecodeExt(
-                "token_ranks must be >= 1 for decoded engine-core logprobs".to_string(),
-            ));
+            bail_value_decode_ext!("token_ranks must be >= 1 for decoded engine-core logprobs");
         }
 
         let mut entries = Vec::with_capacity(token_ids.len());
@@ -258,10 +256,10 @@ impl WireLogprobs {
         Frame: AsRef<[u8]>,
     {
         if let Some(indices) = self.cu_num_generated_tokens {
-            return Err(Error::ValueDecodeExt(format!(
+            bail_value_decode_ext!(
                 "{field_prefix}.cu_num_generated_tokens: \
                  expected None for per-request engine-core logprobs payload, got {indices:?}"
-            )));
+            );
         }
 
         let token_ids = array::decode_array2_u32(
@@ -278,17 +276,20 @@ impl WireLogprobs {
         )?;
 
         if token_ids.rows != logprobs.rows || token_ids.cols != logprobs.cols {
-            return Err(Error::ValueDecodeExt(format!(
+            bail_value_decode_ext!(
                 "{field_prefix}: row shape mismatch between token ids ({}, {}) and logprobs ({}, {})",
-                token_ids.rows, token_ids.cols, logprobs.rows, logprobs.cols
-            )));
+                token_ids.rows,
+                token_ids.cols,
+                logprobs.rows,
+                logprobs.cols
+            );
         }
         if token_ids.rows != token_ranks.len() {
-            return Err(Error::ValueDecodeExt(format!(
+            bail_value_decode_ext!(
                 "{field_prefix}: token_ranks length {} does not match row count {}",
                 token_ranks.len(),
                 token_ids.rows
-            )));
+            );
         }
 
         let mut positions = Vec::with_capacity(token_ids.rows);
@@ -317,11 +318,11 @@ where
 {
     let first_frame = frames
         .first()
-        .ok_or_else(|| Error::ValueDecodeExt("missing output frame".to_string()))?;
+        .ok_or_else(|| value_decode_ext!("missing output frame"))?;
 
     let value = rmpv::decode::read_value(&mut Cursor::new(first_frame.as_ref()))?;
     let mut outputs: EngineCoreOutputs =
-        rmpv::ext::from_value(value).map_err(|error| Error::ValueDecodeExt(error.to_string()))?;
+        rmpv::ext::from_value(value).map_err(|error| value_decode_ext!("{}", error))?;
     outputs.resolve_in_place(frames)?;
     Ok(outputs)
 }

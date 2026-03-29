@@ -295,7 +295,7 @@ fn is_engine_core_dead(error: &Error) -> bool {
 
 fn is_decode_error(error: &Error) -> bool {
     match error {
-        Error::Decode(_) | Error::ValueDecodeExt(_) => true,
+        Error::Decode(_) | Error::ValueDecodeExt { .. } => true,
         Error::Shared(error) => is_decode_error(error),
         _ => false,
     }
@@ -744,6 +744,92 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
                 send_outputs(
                     push,
                     EngineCoreOutputs {
+                        outputs: vec![request_output("req-1", vec![999], None)],
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            engine_count: 1,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 7,
+            enable_inproc_coordinator: false,
+        },
+        &ipc,
+    )
+    .await;
+    assert_eq!(client.engine_identities()[0], b"engine-0");
+    assert_eq!(client.ready_messages()[0].status.as_deref(), Some("READY"));
+
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+
+    let error_2 = timeout(Duration::from_secs(1), stream_2.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(is_unexpected_dispatcher_output(&error_2));
+
+    let error_1 = timeout(Duration::from_secs(1), stream_1.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(is_unexpected_dispatcher_output(&error_1));
+
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(error) if is_unexpected_dispatcher_output(error)
+    ));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_fail_closes_when_main_output_path_receives_mixed_shape_output() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-0".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add_1 = recv_engine_message(dealer).await;
+                assert_eq!(add_1[0].as_ref(), &[0x00]);
+                let request_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
+                assert_eq!(request_1.client_index, 7);
+                assert_eq!(request_1.request_id, "req-1");
+
+                let add_2 = recv_engine_message(dealer).await;
+                assert_eq!(add_2[0].as_ref(), &[0x00]);
+                let request_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
+                assert_eq!(request_2.client_index, 7);
+                assert_eq!(request_2.request_id, "req-2");
+
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        utility_output: Some(UtilityOutput {
+                            call_id: 1,
+                            failure_message: None,
+                            result: None,
+                        }),
                         outputs: vec![request_output("req-1", vec![999], None)],
                         ..Default::default()
                     },

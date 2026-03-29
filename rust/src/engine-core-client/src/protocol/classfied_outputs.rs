@@ -28,13 +28,6 @@ pub struct UtilityCallOutput {
     pub output: UtilityOutput,
 }
 
-#[derive(Debug, Clone, PartialEq, EnumAsInner)]
-pub enum OtherEngineCoreOutputs {
-    /// Fallback for wire-shape combinations that do not map cleanly onto the
-    /// current semantic families.
-    Raw(EngineCoreOutputs),
-}
-
 /// Semantic classification of a raw `EngineCoreOutputs` message.
 ///
 /// Python currently uses one product-shaped wire struct for several distinct
@@ -49,7 +42,9 @@ pub enum ClassifiedEngineCoreOutputs {
         timestamp: f64,
         control: DpControlMessage,
     },
-    Other(OtherEngineCoreOutputs),
+    /// Fallback for wire-shape combinations that do not map cleanly onto the
+    /// current semantic families.
+    Other(EngineCoreOutputs),
 }
 
 impl EngineCoreOutputs {
@@ -91,7 +86,7 @@ impl EngineCoreOutputs {
                 timestamp: self.timestamp,
                 control: DpControlMessage::StartWave(self.start_wave.unwrap()),
             },
-            _ => ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::Raw(self)),
+            _ => ClassifiedEngineCoreOutputs::Other(self),
         }
     }
 }
@@ -216,43 +211,41 @@ mod tests {
 
         expect_test::expect![[r#"
             Other(
-                Raw(
-                    EngineCoreOutputs {
-                        engine_index: 0,
-                        outputs: [
-                            EngineCoreOutput {
-                                request_id: "req-1",
-                                new_token_ids: [
-                                    7,
-                                ],
-                                new_logprobs: None,
-                                new_prompt_logprobs_tensors: None,
-                                pooling_output: None,
-                                finish_reason: None,
-                                stop_reason: None,
-                                events: None,
-                                kv_transfer_params: None,
-                                trace_headers: None,
-                                num_cached_tokens: 0,
-                                num_external_computed_tokens: 0,
-                                routed_experts: None,
-                                num_nans_in_logits: 0,
-                            },
-                        ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: Some(
-                            UtilityOutput {
-                                call_id: 1,
-                                failure_message: None,
-                                result: None,
-                            },
-                        ),
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
-                ),
+                EngineCoreOutputs {
+                    engine_index: 0,
+                    outputs: [
+                        EngineCoreOutput {
+                            request_id: "req-1",
+                            new_token_ids: [
+                                7,
+                            ],
+                            new_logprobs: None,
+                            new_prompt_logprobs_tensors: None,
+                            pooling_output: None,
+                            finish_reason: None,
+                            stop_reason: None,
+                            events: None,
+                            kv_transfer_params: None,
+                            trace_headers: None,
+                            num_cached_tokens: 0,
+                            num_external_computed_tokens: 0,
+                            routed_experts: None,
+                            num_nans_in_logits: 0,
+                        },
+                    ],
+                    scheduler_stats: None,
+                    timestamp: 0.0,
+                    utility_output: Some(
+                        UtilityOutput {
+                            call_id: 1,
+                            failure_message: None,
+                            result: None,
+                        },
+                    ),
+                    finished_requests: None,
+                    wave_complete: None,
+                    start_wave: None,
+                },
             )
         "#]]
         .assert_debug_eq(&outputs.classify());
