@@ -16,90 +16,47 @@ signs = torch.where(torch.rand(D, device=device) > 0.5,
                      torch.ones(D, device=device),
                      -torch.ones(D, device=device))
 
-# Use 256 centroids (8-bit) for near-lossless quantization
-num_bits = 8
-num_centroids = 2**num_bits
-# Codebook scaled for D=128
-scale = 1.0 / math.sqrt(D)
 from vllm.model_executor.layers.quantization.turboquant import CODEBOOKS_NORMALIZED
-codebook = torch.tensor([c * scale for c in CODEBOOKS_NORMALIZED[num_bits]],
-                         device=device, dtype=torch.float32)
-boundaries = (codebook[:-1] + codebook[1:]) / 2.0
 
-# Encode
+# 4-bit with CORRECT scale (1/sqrt(128) matching Hadamard output)
+scale128 = 1.0 / math.sqrt(D)
+codebook128 = torch.tensor([c * scale128 for c in CODEBOOKS_NORMALIZED[4]],
+                            device=device, dtype=torch.float32)
+boundaries128 = (codebook128[:-1] + codebook128[1:]) / 2.0
+
 indices = torch.empty(N, 1, D, dtype=torch.uint8, device=device)
-norms = torch.empty(N, 1, dtype=torch.float16, device=device)
+norms_out = torch.empty(N, 1, dtype=torch.float16, device=device)
 scratch = torch.empty(N, D, dtype=torch.float32, device=device)
 
 _fused_hadamard_encode_kernel[(N, 1)](
-    x_ptr=x, signs_ptr=signs, boundaries_ptr=boundaries,
-    scratch_ptr=scratch, indices_ptr=indices, norms_ptr=norms,
+    x_ptr=x, signs_ptr=signs, boundaries_ptr=boundaries128,
+    scratch_ptr=scratch, indices_ptr=indices, norms_ptr=norms_out,
     head_size=D, num_kv_heads=1,
-    num_boundaries=boundaries.shape[0], LOG2_D=LOG2_D,
+    num_boundaries=boundaries128.shape[0], LOG2_D=LOG2_D,
     x_stride_token=x.stride(0), x_stride_head=x.stride(1),
     idx_stride_token=indices.stride(0), idx_stride_head=indices.stride(1),
-    norm_stride_token=norms.stride(0), BLOCK_D=D,
+    norm_stride_token=norms_out.stride(0), BLOCK_D=D,
     num_warps=1, num_stages=1,
 )
 
-# Decode
 decoded = torch.empty(N, 1, D, dtype=torch.float32, device=device)
 scratch2 = torch.empty(N, D, dtype=torch.float32, device=device)
 
 _fused_hadamard_decode_kernel[(N, 1)](
-    indices_ptr=indices, norms_ptr=norms, signs_ptr=signs,
-    codebook_ptr=codebook, scratch_ptr=scratch2, out_ptr=decoded,
+    indices_ptr=indices, norms_ptr=norms_out, signs_ptr=signs,
+    codebook_ptr=codebook128, scratch_ptr=scratch2, out_ptr=decoded,
     head_size=D, num_kv_heads=1, LOG2_D=LOG2_D,
     idx_stride_token=indices.stride(0), idx_stride_head=indices.stride(1),
-    norm_stride_token=norms.stride(0),
+    norm_stride_token=norms_out.stride(0),
     out_stride_token=decoded.stride(0), out_stride_head=decoded.stride(1),
     BLOCK_D=D, OUTPUT_BF16=False,
     num_warps=1, num_stages=1,
 )
 
-cos = torch.nn.functional.cosine_similarity(
+cos128 = torch.nn.functional.cosine_similarity(
     x.reshape(N, -1), decoded.reshape(N, -1), dim=1).mean().item()
-max_diff = (x - decoded).abs().max().item()
-print(f"8-bit round-trip (D={D}, no padding):")
-print(f"  Cosine: {cos:.6f}")
-print(f"  Max diff: {max_diff:.6f}")
-
-# Now test with 4-bit
-codebook4 = torch.tensor(
-    [c * scale for c in CODEBOOKS_NORMALIZED[4]],
-    device=device, dtype=torch.float32)
-boundaries4 = (codebook4[:-1] + codebook4[1:]) / 2.0
-
-indices4 = torch.empty(N, 1, D, dtype=torch.uint8, device=device)
-norms4 = torch.empty(N, 1, dtype=torch.float16, device=device)
-
-_fused_hadamard_encode_kernel[(N, 1)](
-    x_ptr=x, signs_ptr=signs, boundaries_ptr=boundaries4,
-    scratch_ptr=scratch, indices_ptr=indices4, norms_ptr=norms4,
-    head_size=D, num_kv_heads=1,
-    num_boundaries=boundaries4.shape[0], LOG2_D=LOG2_D,
-    x_stride_token=x.stride(0), x_stride_head=x.stride(1),
-    idx_stride_token=indices4.stride(0), idx_stride_head=indices4.stride(1),
-    norm_stride_token=norms4.stride(0), BLOCK_D=D,
-    num_warps=1, num_stages=1,
-)
-
-decoded4 = torch.empty(N, 1, D, dtype=torch.float32, device=device)
-_fused_hadamard_decode_kernel[(N, 1)](
-    indices_ptr=indices4, norms_ptr=norms4, signs_ptr=signs,
-    codebook_ptr=codebook4, scratch_ptr=scratch2, out_ptr=decoded4,
-    head_size=D, num_kv_heads=1, LOG2_D=LOG2_D,
-    idx_stride_token=indices4.stride(0), idx_stride_head=indices4.stride(1),
-    norm_stride_token=norms4.stride(0),
-    out_stride_token=decoded4.stride(0), out_stride_head=decoded4.stride(1),
-    BLOCK_D=D, OUTPUT_BF16=False,
-    num_warps=1, num_stages=1,
-)
-
-cos4 = torch.nn.functional.cosine_similarity(
-    x.reshape(N, -1), decoded4.reshape(N, -1), dim=1).mean().item()
-print(f"\n4-bit round-trip (D={D}, no padding):")
-print(f"  Cosine: {cos4:.6f}")
+print(f"4-bit D=128 (correct scale 1/sqrt(128)):")
+print(f"  Cosine: {cos128:.6f}")
 print(f"  Expected (Lloyd-Max): ~0.990")
 
 # Test with D=109 (padded to 128) - the actual use case
