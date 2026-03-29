@@ -91,12 +91,6 @@ regardless of which steps have `source_file_dependencies`:
 - `csrc/` (all CUDA/C++ sources, excluding `csrc/cpu/`, `csrc/rocm/`)
 - `cmake/` (all CMake files, excluding `cmake/hipify.py`, `cmake/cpu_extension.cmake`)
 
-### Controlling Fail-Fast Behavior
-
-By default, the pipeline uses **fail-fast** mode — if a required step fails, the
-pipeline halts to avoid wasting compute. To disable fail-fast and see all failures
-across a build, add the label **`ci-no-fail-fast`** to the PR.
-
 ## What Gets Tested
 
 ### Image Build (runs first)
@@ -221,7 +215,6 @@ steps:
 | `commands` | list[str] | `[]` | Shell commands to run |
 | `device` | str | 1× L4 GPU | Hardware target (see [Hardware](#hardware-infrastructure)) |
 | `num_devices` | int | — | Number of GPUs/devices required |
-| `num_nodes` | int | — | Number of nodes for multi-node tests |
 | `no_gpu` | bool | `False` | Run on CPU-only machine |
 | `timeout_in_minutes` | int | — | Job timeout |
 | `source_file_dependencies` | list[str] | `[]` (always runs) | File path prefixes that trigger this step |
@@ -423,7 +416,6 @@ This is useful to identify tests that are consistently flaky.
 
 See [CI Failures](failures.md) for a detailed guide on:
 
-- Checking whether your failure is a pre-existing issue
 - Filing a CI failure issue
 - Log wrangling and cleanup
 - Bisecting failures on `main`
@@ -431,9 +423,8 @@ See [CI Failures](failures.md) for a detailed guide on:
 
 ### Quick Checklist
 
-1. **Check if it's pre-existing**: Look at the [CI Failures Dashboard](https://github.com/orgs/vllm-project/projects/20).
-2. **Look at the `main` branch builds**: [Buildkite main](https://buildkite.com/vllm/ci/builds?branch=main) — does the failure also appear there?
-3. **Reproduce locally**: Pull the CI Docker image and run the failing test:
+1. **Look at the `main` branch builds**: [Buildkite main](https://buildkite.com/vllm/ci/builds?branch=main) — does the failure also appear there?
+2. **Reproduce locally**: Pull the CI Docker image and run the failing test:
     ```bash
     docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest
     docker run --gpus all --rm \
@@ -441,33 +432,11 @@ See [CI Failures](failures.md) for a detailed guide on:
       public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:latest \
       pytest tests/failing/test_foo.py::test_name -v
     ```
-4. **Check for flakiness** using `.buildkite/scripts/rerun-test.sh`:
+3. **Check for flakiness** using `.buildkite/scripts/rerun-test.sh`:
     ```bash
     bash .buildkite/scripts/rerun-test.sh tests/failing/test_foo.py::test_name
     ```
 
-## Multi-Node Tests
-
-Multi-node tests use `.buildkite/scripts/run-multi-node-test.sh` which:
-
-1. Creates an isolated Docker network (`192.168.10.0/24`)
-2. Starts a Ray head node at `192.168.10.10:6379`
-3. Connects worker nodes to the head
-4. Runs commands across all nodes, capturing logs from the head
-5. Cleans up all containers on exit
-
-Multi-node steps in YAML:
-
-```yaml
-- label: "2 Node Test (4 GPUs)"
-  num_devices: 2
-  num_nodes: 2
-  timeout_in_minutes: 30
-  optional: true
-  commands:
-    - bash .buildkite/scripts/run-multi-node-test.sh
-      "pytest tests/distributed/test_multi_node.py" 4
-```
 
 ## Common CI Patterns
 
@@ -503,7 +472,6 @@ mirror:
 1. Use `rerun-test.sh` to reproduce the flakiness.
 2. File an issue using the
    [CI Failure Report template](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml).
-3. Track it in the [CI Failures Dashboard](https://github.com/orgs/vllm-project/projects/20).
 
 ## Key Resources
 
@@ -511,7 +479,6 @@ mirror:
 |---|---|
 | vLLM CI on Buildkite | <https://buildkite.com/vllm> |
 | vLLM CI Dashboard | <https://vllm-ci-dashboard.vercel.app/> |
-| CI Failures Dashboard | <https://github.com/orgs/vllm-project/projects/20> |
 | Test Analytics (reliability) | <https://buildkite.com/organizations/vllm/analytics/suites/ci-1/tests?branch=main&order=ASC&sort_by=reliability> |
 | CI Infra Repo | <https://github.com/vllm-project/ci-infra> |
 | Pipeline Generator | <https://github.com/vllm-project/ci-infra/tree/main/buildkite/pipeline_generator> |
