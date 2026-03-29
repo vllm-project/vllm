@@ -297,7 +297,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
         Uses fused Triton kernel for 4-bit (single kernel: unpack → codebook
         → inv Hadamard → norm scale → write bf16 with outlier interleaving).
         """
-        bits = int(layer._tq_k_state.config.bit_width)
+        k_bits = int(layer._tq_k_state.config.bit_width)
+        v_bits = int(layer._tq_v_state.config.bit_width)
 
         flat_bt = block_table.reshape(-1)
         num_entries = flat_bt.shape[0]
@@ -315,7 +316,20 @@ class TurboQuantAttentionImpl(AttentionImpl):
             )
         new_block_table = self._bt_cache[1]
 
-        if bits == 4:
+        if layer._tq_k_state.config.lite_mode:
+            return self._decode_lite(
+                key_cache,
+                value_cache,
+                layer,
+                flat_bt,
+                num_entries,
+                new_block_table,
+            )
+
+        # When K and V use the same bit-width, use the fast fused path
+        # for 4-bit. With asymmetric bits, fall back to unfused which
+        # handles per-state bit_width correctly.
+        if k_bits == 4 and v_bits == 4:
             return self._decode_fused_4bit(
                 key_cache,
                 value_cache,
@@ -343,13 +357,9 @@ class TurboQuantAttentionImpl(AttentionImpl):
         num_entries: int,
         new_block_table: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Fused 4-bit decode with paged gather.
-
-        Gathers blocks by block_table and decodes in one step,
-        minimizing Python overhead.
-        """
+        """Fused 4-bit decode from paged cache."""
         from vllm.v1.attention.ops.triton_fused_turboquant import (
-            fused_hadamard_decode_from_slots,
+            fused_paged_decode,
         )
 
         k_state = layer._tq_k_state
@@ -361,14 +371,9 @@ class TurboQuantAttentionImpl(AttentionImpl):
 
         decoded_caches = []
         for cache, state in [(key_cache, k_state), (value_cache, v_state)]:
-            _, block_size, num_kv_heads, slot_bytes = cache.shape
-
-            # Gather + flatten in one op (avoids separate reshape)
-            used = cache[flat_bt]  # [entries, bs, heads, slot]
-            N = num_entries * block_size * num_kv_heads
-
-            decoded_flat = fused_hadamard_decode_from_slots(
-                flat_slots=used.reshape(N, slot_bytes),
+            decoded = fused_paged_decode(
+                cache=cache,
+                flat_bt=flat_bt,
                 sign_flips=state.sign_flips,
                 codebook=state.codebook,
                 normal_idx=state.normal_idx,
@@ -378,10 +383,7 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 n_outliers=n_outliers,
                 packed_bytes=packed_bytes,
             )
-
-            decoded_caches.append(
-                decoded_flat.reshape(num_entries, block_size, num_kv_heads, head_size)
-            )
+            decoded_caches.append(decoded)
 
         return decoded_caches[0], decoded_caches[1], new_block_table
 
@@ -402,14 +404,16 @@ class TurboQuantAttentionImpl(AttentionImpl):
         k_state = layer._tq_k_state
         v_state = layer._tq_v_state
         head_size = k_state.head_size
-        bits = int(k_state.config.bit_width)
         normal_size = k_state.normal_size
         n_outliers = head_size - normal_size
         outlier_byte_count = n_outliers * 2
-        packed_bytes = math.ceil(normal_size * bits / 8)
 
         decoded_caches = []
         for cache, state in [(key_cache, k_state), (value_cache, v_state)]:
+            # Each state may have a different bit_width (asymmetric K/V)
+            bits = int(state.config.bit_width)
+            packed_bytes = math.ceil(normal_size * bits / 8)
+
             _, block_size, num_kv_heads, slot_bytes = cache.shape
             used = cache[flat_bt]
             N = num_entries * block_size * num_kv_heads
@@ -521,12 +525,22 @@ class TurboQuantAttentionImpl(AttentionImpl):
         num_actual = slot_mapping.shape[0]
         clamped_slots = slot_mapping.clamp(min=0)
 
-        bits = int(layer._tq_k_state.config.bit_width)
+        k_bits = int(layer._tq_k_state.config.bit_width)
+        v_bits = int(layer._tq_v_state.config.bit_width)
         block_size = kv_cache.shape[2]
         block_indices = clamped_slots // block_size
         block_offsets = clamped_slots % block_size
 
-        if bits == 4:
+        if layer._tq_k_state.config.lite_mode:
+            self._encode_lite(
+                key[:num_actual],
+                value[:num_actual],
+                kv_cache,
+                block_indices,
+                block_offsets,
+                layer,
+            )
+        elif k_bits == 4 and v_bits == 4:
             self._encode_fused_4bit(
                 key[:num_actual],
                 value[:num_actual],
@@ -647,6 +661,100 @@ class TurboQuantAttentionImpl(AttentionImpl):
             packed = packed[:, :packed_bytes]
 
             parts = []
+            if outlier_x is not None:
+                ob = (
+                    outlier_x.reshape(N, n_outliers)
+                    .to(torch.bfloat16)
+                    .view(torch.uint8)
+                    .reshape(N, n_outliers * 2)
+                )
+                parts.append(ob)
+            parts.append(packed)
+            norm_bytes_data = (
+                norms.reshape(N).to(torch.float16).view(torch.uint8).reshape(N, 2)
+            )
+            parts.append(norm_bytes_data)
+            slot_data = torch.cat(parts, dim=-1)
+
+            num_kv_heads = tensor.shape[1]
+            slot_3d = slot_data.reshape(num_actual, num_kv_heads, slot_bytes)
+            cache = kv_cache[:, kv_idx]
+            cache[block_indices, block_offsets] = slot_3d
+
+    def _encode_lite(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_indices: torch.Tensor,
+        block_offsets: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> None:
+        """Lite encode path: no rotation, pure scalar quantization.
+
+        Layout per slot (same as standard): [outlier_bytes | packed | norm(2B)]
+        No Hadamard, no sign flips — just normalize, quantize, pack, write.
+        """
+        k_state = layer._tq_k_state
+        v_state = layer._tq_v_state
+        head_size = k_state.head_size
+        bits = int(k_state.config.bit_width)
+        normal_size = k_state.normal_size
+        n_outliers = head_size - normal_size
+        packed_bytes = math.ceil(normal_size * bits / 8)
+        slot_bytes = kv_cache.shape[-1]
+        num_actual = key.shape[0]
+
+        for kv_idx, (tensor, state) in enumerate(
+            [
+                (key, k_state),
+                (value, v_state),
+            ]
+        ):
+            # Split outlier / normal channels
+            if state.outlier_idx is not None:
+                normal_x = tensor[..., state.normal_idx].contiguous()
+                outlier_x = tensor[..., state.outlier_idx]
+            else:
+                normal_x = tensor
+                outlier_x = None
+
+            # Flatten to (N, normal_size)
+            flat = normal_x.reshape(-1, normal_size).float()
+            N = flat.shape[0]
+
+            # Compute norms and normalize
+            norms = torch.norm(flat, dim=-1, keepdim=True)
+            flat_normed = flat / (norms + 1e-16)
+
+            # Scalar quantize (no rotation)
+            indices = torch.bucketize(flat_normed.contiguous(), state.boundaries).to(
+                torch.uint8
+            )
+
+            # Pack indices
+            flat_indices = indices.reshape(N, normal_size)
+            align = {4: 2, 2: 4, 3: 10}.get(bits, 1)
+            if normal_size % align != 0:
+                pad = align - (normal_size % align)
+                flat_indices = torch.nn.functional.pad(flat_indices, (0, pad), value=0)
+            if bits == 4:
+                packed = flat_indices[:, 0::2] | (flat_indices[:, 1::2] << 4)
+            elif bits == 2:
+                packed = (
+                    flat_indices[:, 0::4]
+                    | (flat_indices[:, 1::4] << 2)
+                    | (flat_indices[:, 2::4] << 4)
+                    | (flat_indices[:, 3::4] << 6)
+                )
+            elif bits == 3:
+                packed = _pack_3bit_vectorized(flat_indices, normal_size, packed_bytes)
+            else:
+                packed = flat_indices[:, :packed_bytes]
+            packed = packed[:, :packed_bytes]
+
+            # Assemble slot data: [outlier_bytes | packed | norm_bytes]
+            parts: list[torch.Tensor] = []
             if outlier_x is not None:
                 ob = (
                     outlier_x.reshape(N, n_outliers)

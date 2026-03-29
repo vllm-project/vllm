@@ -421,3 +421,79 @@ def fused_hadamard_decode_from_slots(
     )
 
     return out
+
+
+def fused_paged_decode(
+    cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, slot_bytes]
+    flat_bt: torch.Tensor,  # [num_entries] int32/int64
+    sign_flips: torch.Tensor,
+    codebook: torch.Tensor,
+    normal_idx: torch.Tensor | None,
+    outlier_idx: torch.Tensor | None,
+    head_size: int,
+    normal_size: int,
+    n_outliers: int,
+    packed_bytes: int,
+) -> torch.Tensor:
+    """Decode from paged cache without Python gather.
+
+    Instead of cache[flat_bt] (copies blocks to contiguous buffer),
+    passes the paged cache + block_table to the kernel which reads
+    directly using computed addresses.
+
+    Returns: [num_entries, block_size, num_kv_heads, head_size] bf16
+    """
+    num_entries = flat_bt.shape[0]
+    _, block_size, num_kv_heads, slot_bytes = cache.shape
+    N = num_entries * block_size * num_kv_heads
+    BLOCK_D = sign_flips.shape[0]
+    LOG2_D = int(math.log2(BLOCK_D))
+    outlier_u8_count = n_outliers * 2
+    norm_offset = outlier_u8_count + packed_bytes
+
+    # Gather + extract norms in one step
+    # This is the only Python gather — just for the 2-byte norms
+    used = cache[flat_bt]  # [entries, bs, heads, slot]
+    flat = used.reshape(N, slot_bytes)
+    norms = (
+        flat[:, norm_offset : norm_offset + 2]
+        .contiguous()
+        .view(torch.float16)
+        .reshape(N)
+    )
+
+    has_outliers = normal_idx is not None and n_outliers > 0
+    out = torch.empty(N, head_size, dtype=torch.bfloat16, device=cache.device)
+    scratch = torch.empty(N, BLOCK_D, dtype=torch.float32, device=cache.device)
+
+    if normal_idx is None:
+        normal_idx = torch.empty(0, dtype=torch.int64, device=cache.device)
+    if outlier_idx is None:
+        outlier_idx = torch.empty(0, dtype=torch.int64, device=cache.device)
+
+    BLOCK_OUTLIER = max(_next_power_of_2(n_outliers), 1)
+
+    _fused_decode_from_slot_kernel[(N,)](
+        slot_ptr=flat,
+        signs_ptr=sign_flips,
+        codebook_ptr=codebook,
+        scratch_ptr=scratch,
+        norms_ptr=norms,
+        normal_idx_ptr=normal_idx,
+        outlier_idx_ptr=outlier_idx,
+        out_ptr=out,
+        normal_size=normal_size,
+        head_size=head_size,
+        n_outliers=n_outliers,
+        outlier_u8_count=outlier_u8_count,
+        packed_bytes=packed_bytes,
+        slot_bytes=slot_bytes,
+        LOG2_D=LOG2_D,
+        HAS_OUTLIERS=has_outliers,
+        BLOCK_D=BLOCK_D,
+        BLOCK_OUTLIER=BLOCK_OUTLIER,
+        num_warps=4,
+        num_stages=1,
+    )
+
+    return out.reshape(num_entries, block_size, num_kv_heads, head_size)
