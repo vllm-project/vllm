@@ -322,7 +322,12 @@ class TurboQuantState:
             mse_bits = bw - 1 if config.use_qjl else bw
             mse_bits = max(mse_bits, 1)
             self.mse_bits = mse_bits
-            self.codebook = _get_codebook(mse_bits, self.normal_size, device)
+            # Scale codebook by 1/sqrt(hadamard_d), not 1/sqrt(normal_size),
+            # because the Hadamard pads to hadamard_d and output has
+            # std ≈ 1/sqrt(hadamard_d).
+            self.codebook = _get_codebook(
+                mse_bits, self._hadamard_d, device
+            )
             self.boundaries = (self.codebook[:-1] + self.codebook[1:]) / 2.0
             self.hi_bits = None
 
@@ -392,7 +397,7 @@ class TurboQuantState:
             # Regenerate codebooks for new dimension
             if not self.config.is_fractional and self.mse_bits is not None:
                 self.codebook = _get_codebook(
-                    self.mse_bits, self.normal_size, self.device
+                    self.mse_bits, self._hadamard_d, self.device
                 )
                 self.boundaries = (self.codebook[:-1] + self.codebook[1:]) / 2.0
 
