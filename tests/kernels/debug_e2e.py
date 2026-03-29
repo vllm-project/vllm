@@ -13,7 +13,8 @@ _call_count = [0]
 
 def _debug_do_kv(self, layer, key, value, kv_cache, slot_mapping):
     _call_count[0] += 1
-    if _call_count[0] <= 2:  # Print for first 2 calls only
+    # Print for profiling AND first real request
+    if _call_count[0] <= 60:  # 28 layers × ~2 calls
         has_state = hasattr(layer, "_tq_k_state")
         needs_cal = getattr(layer, "_tq_needs_calibration", "N/A")
         print(f"\n[DEBUG do_kv_cache_update #{_call_count[0]}] "
