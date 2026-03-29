@@ -43,19 +43,16 @@ _fwd_count = [0]
 def _debug_forward(self, layer, query, key, value, kv_cache, attn_metadata,
                    output=None, output_scale=None, output_block_scale=None):
     _fwd_count[0] += 1
-    if _fwd_count[0] <= 2:
-        key_cache, value_cache = kv_cache.unbind(1)
+    if _fwd_count[0] <= 2 and attn_metadata is not None and kv_cache.dim() > 1:
         print(f"\n[DEBUG forward #{_fwd_count[0]}] "
               f"query.shape={query.shape}, kv_cache.shape={kv_cache.shape}")
-        print(f"  key_cache stats: min={key_cache.float().min():.4f}, "
-              f"max={key_cache.float().max():.4f}, "
-              f"nonzero={key_cache.count_nonzero().item()}/{key_cache.numel()}")
-        if attn_metadata is not None:
-            print(f"  block_table.shape={attn_metadata.block_table.shape}, "
-                  f"seq_lens={attn_metadata.seq_lens}")
+        key_cache = kv_cache[:, 0]
+        print(f"  key_cache nonzero: {key_cache.count_nonzero().item()}/{key_cache.numel()}")
+        print(f"  block_table.shape={attn_metadata.block_table.shape}, "
+              f"seq_lens={attn_metadata.seq_lens}")
     result = _orig_forward(self, layer, query, key, value, kv_cache,
                            attn_metadata, output, output_scale, output_block_scale)
-    if _fwd_count[0] <= 2:
+    if _fwd_count[0] <= 2 and attn_metadata is not None and kv_cache.dim() > 1:
         print(f"  output stats: min={result.float().min():.4f}, "
               f"max={result.float().max():.4f}")
     return result
