@@ -749,12 +749,7 @@ def triton_tq_decode_attention(
 
     # Path 2+3: Fused WPH or Triton (need q_rot, q_proj)
     _no_qjl = cfg['correction'] == 0.0
-    _tq_lite = os.environ.get("TQ_LITE", "0") == "1"
-    if _tq_lite:
-        # TQ-lite: no rotation, no QJL — ZERO decode GEMMs
-        q_rot = query.float().contiguous()
-        q_proj = torch.zeros_like(q_rot)
-    elif _no_qjl:
+    if _no_qjl:
         # No QJL: only need q_rot = q @ Pi.T (D×D instead of D×2D)
         q_float = query.float()
         q_rot = (q_float @ Pi.T.contiguous()).contiguous()

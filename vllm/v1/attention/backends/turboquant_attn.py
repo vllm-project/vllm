@@ -37,12 +37,9 @@ _USE_STREAM_OVERLAP = os.environ.get("TQ_STREAM_OVERLAP", "0") == "1"
 
 # Skip QJL: eliminates 1 of 2 store GEMMs and simplifies decode scoring.
 # Quality trade-off: removes 1-bit residual correction from attention scores.
+# Not default — full TQ3 (rotation + QJL) is recommended.
 _TQ_NO_QJL = os.environ.get("TQ_NO_QJL", "0") == "1"
 
-# TQ-lite: no rotation + no QJL = zero GEMMs. Maximum speed, ~2x compression.
-_TQ_LITE = os.environ.get("TQ_LITE", "0") == "1"
-if _TQ_LITE:
-    _TQ_NO_QJL = True  # Lite implies no QJL
 _store_stream: torch.cuda.Stream | None = None
 
 from vllm.config.cache import CacheDType
@@ -436,7 +433,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 value_quant_bits=self.tq_config.effective_value_quant_bits,
                 value_packed_size=self.tq_config.value_packed_size,
                 no_qjl=_TQ_NO_QJL,
-                no_rotation=_TQ_LITE,
             )
             return
         mse_bits = self.tq_config.mse_bits

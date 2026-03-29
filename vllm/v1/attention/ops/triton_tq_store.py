@@ -707,7 +707,7 @@ void tq_fused_store_launch(
     int N, int H, int block_size,
     int64_t stride_cache_block, int stride_cache_pos, int stride_cache_head,
     int key_packed_size, int value_packed_size,
-    bool no_rotation, bool no_qjl, int value_quant_bits);
+    bool no_qjl, int value_quant_bits);
 """
         from torch.utils.cpp_extension import load_inline
         _cuda_store_module = load_inline(
@@ -752,7 +752,6 @@ def triton_tq_store(
     value_quant_bits: int,
     value_packed_size: int,
     no_qjl: bool = False,
-    no_rotation: bool = False,
 ):
     """Launch TQ store kernel — selects CUDA fused > Triton semi-fused > fallback."""
     N, H, D = key.shape
@@ -799,7 +798,7 @@ def triton_tq_store(
                 N, H, block_size,
                 stride_block, stride_pos, stride_head,
                 key_packed_size, value_packed_size,
-                no_rotation, no_qjl, value_quant_bits,
+                False, no_qjl, value_quant_bits,
             )
             return
 
@@ -809,51 +808,12 @@ def triton_tq_store(
     can_semifuse = (D % 8 == 0 and BLOCK_D == D
                     and BLOCK_MSE == mse_bytes and BLOCK_QJL == qjl_bytes
                     and mse_bits == 2)
-    logger.info("triton_tq_store: can_semifuse=%s no_rotation=%s no_qjl=%s "
+    logger.info("triton_tq_store: can_semifuse=%s "
                 "D=%d BLOCK_D=%d MSE_BYTES=%d BLOCK_MSE=%d QJL_BYTES=%d BLOCK_QJL=%d",
-                can_semifuse, no_rotation, no_qjl, D, BLOCK_D,
+                can_semifuse, D, BLOCK_D,
                 mse_bytes, BLOCK_MSE, qjl_bytes, BLOCK_QJL)
 
-    if can_semifuse and no_rotation:
-        # Fully-fused: normalize + bucketize + pack + value quant in ONE kernel
-        grid = (NH,)
-        _tq_semifused_store[grid](
-            key, value,
-            kv_cache.view(-1), slot_mapping,
-            centroids, midpoints,
-            PiT, Pi_S_T,
-            # Cache strides
-            stride_cache_block=stride_block,
-            stride_cache_pos=stride_pos,
-            stride_cache_head=stride_head,
-            # KV strides
-            stride_kv_n=stride_kv_n,
-            stride_kv_h=stride_kv_h,
-            # Dimensions
-            D=D, H=H,
-            BLOCK_SIZE=block_size,
-            BLOCK_D=BLOCK_D,
-            # TQ layout
-            MSE_BITS=mse_bits,
-            MSE_BYTES=mse_bytes,
-            QJL_BYTES=qjl_bytes,
-            KPS=key_packed_size,
-            # Value
-            VQB=value_quant_bits,
-            VAL_DATA_BYTES=val_data_bytes,
-            BLOCK_MSE=BLOCK_MSE,
-            BLOCK_QJL=BLOCK_QJL,
-            BLOCK_VAL=BLOCK_VAL,
-            # Flags
-            NO_ROTATION=True,
-            NO_QJL=no_qjl,
-            TILE_K=min(64, D),
-            num_warps=4,
-            num_stages=1,
-        )
-        return
-
-    if can_semifuse and not no_rotation:
+    if can_semifuse:
         # Semi-fused with rotation: 1 GEMM + fused kernel
         # Do rotation GEMM externally (cuBLAS is faster for batched matmul)
         k_flat = key.float().reshape(NH, D)
@@ -896,10 +856,7 @@ def triton_tq_store(
     norms = k_flat.norm(dim=1, keepdim=True)
     x_hat = k_flat / (norms + 1e-8)
 
-    if no_rotation:
-        y = x_hat
-    else:
-        y = (x_hat @ PiT).contiguous()
+    y = (x_hat @ PiT).contiguous()
 
     idx = torch.bucketize(y, midpoints).to(torch.int32)
     y_hat = centroids[idx.long()]
