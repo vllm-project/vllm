@@ -7,7 +7,7 @@ decoder layers during generation.  This allows shifting model behaviour
 Steering supports a three-tier additive composition model with separate
 prefill and decode phases:
 
-```
+```text
 effective_prefill[hook][layer] = scale(steering_vectors) + scale(prefill_steering_vectors)
 effective_decode[hook][layer]  = scale(steering_vectors) + scale(decode_steering_vectors)
 ```
@@ -34,7 +34,6 @@ Where each entry is either a bare `list[float]` (scale=1.0) or
 
 - Named / pre-registered steering configs (LoRA-style)
 - Models other than Gemma 3 (requires wiring buffers into each model)
-- Speculative decoding interaction (decode detection heuristic assumes 1 token)
 
 ## Enabling Steering
 
@@ -46,10 +45,10 @@ vllm serve google/gemma-3-4b-it
 vllm serve google/gemma-3-4b-it --enable-steering --max-steering-configs 4
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--enable-steering` | `False` | Allocate per-request steering table rows |
-| `--max-steering-configs` | `4` | Max distinct per-request configs in one batch |
+| Flag                      | Default | Description                                  |
+|---------------------------|---------|----------------------------------------------|
+| `--enable-steering`       | `False` | Allocate per-request steering table rows     |
+| `--max-steering-configs`  | `4`     | Max distinct per-request configs in one batch|
 
 All four hook point buffers are always allocated on every decoder layer.
 The memory cost is trivial (~3.6 MB for 26 layers at `max_steering_configs=4`).
@@ -63,12 +62,12 @@ the scheduler since there is no `SteeringConfig` to enable admission control.
 Steering vectors can be applied at four positions within each decoder layer,
 all operating on the residual stream:
 
-| Hook Point | Position |
-|-----------|----------|
-| `pre_attn` | After `input_layernorm`, before `self_attn` |
-| `post_attn` | After `post_attention_layernorm`, before `pre_feedforward_layernorm` |
-| `post_mlp_pre_ln` | After `mlp`, before `post_feedforward_layernorm` |
-| `post_mlp_post_ln` | After `post_feedforward_layernorm` |
+| Hook Point         | Position                                                             |
+|--------------------|----------------------------------------------------------------------|
+| `pre_attn`         | After `input_layernorm`, before `self_attn`                          |
+| `post_attn`        | After `post_attention_layernorm`, before `pre_feedforward_layernorm` |
+| `post_mlp_pre_ln`  | After `mlp`, before `post_feedforward_layernorm`                     |
+| `post_mlp_post_ln` | After `post_feedforward_layernorm`                                   |
 
 All four are always active. The `apply_steering` custom op is **not** a
 graph-splitting op — it is opaque to the torch.compile tracer (preventing
@@ -205,7 +204,7 @@ response = client.chat.completions.create(
 
 ## Data Flow
 
-```
+```text
 SamplingParams
     ├── steering_vectors        (base, both phases)
     ├── prefill_steering_vectors  (prefill-specific)
@@ -279,7 +278,7 @@ of buffer values) but does not partition the compiled graph.  This means:
 Each decoder layer has a `steering_table_<hook>` buffer per hook point
 (e.g., `steering_table_post_mlp_pre_ln`):
 
-```
+```text
 Row 0:  [0, 0, 0, ..., 0]              ← no steering (zeros sentinel)
 Row 1:  [gB+gP₁, gB+gP₂, ..., gB+gPₕ] ← global prefill effective (base + prefill)
 Row 2:  [gB+gD₁, gB+gD₂, ..., gB+gDₕ] ← global decode effective (base + decode)
@@ -290,6 +289,7 @@ Row 4:  [(gB+gD)+b₁, ..., (gB+gD)+bₕ]  ← decode global + per-request confi
 
 Each hook point has its own table with independent global/per-request vectors.
 The global effective vectors are composed from three tiers:
+
 - **base**: applies to both phases (from `steering_vectors` global API)
 - **prefill**: prefill-specific globals
 - **decode**: decode-specific globals
@@ -299,7 +299,7 @@ with the per-request vector based on the config's registered phase.
 
 The shared `steering_index` buffer maps each token position to a row:
 
-```
+```text
 Token:  [decode₁, decode₂, prefill₁, prefill₂, prefill₃, decode₃]
 Index:  [   4,       2,        1,        1,        3,       4    ]
 ```
@@ -342,23 +342,23 @@ add to the scheduled set.  If the union would exceed
 
 ## File Reference
 
-| Component | File |
-|-----------|------|
-| Config | `vllm/config/steering.py` |
-| Type definitions + helpers | `vllm/config/steering_types.py` |
-| Custom op + hook point enum | `vllm/model_executor/layers/steering.py` |
-| Gemma 3 buffers | `vllm/model_executor/models/gemma3.py` |
-| SteeringManager | `vllm/v1/worker/steering_manager.py` |
-| InputBatch tracking | `vllm/v1/worker/gpu_input_batch.py` |
-| Scheduler admission | `vllm/v1/core/sched/scheduler.py` |
-| Model runner integration | `vllm/v1/worker/gpu_model_runner.py` |
-| Worker global API | `vllm/v1/worker/worker_base.py` |
-| HTTP endpoints | `vllm/entrypoints/serve/steering/api_router.py` |
-| Protocol types | `vllm/entrypoints/serve/steering/protocol.py` |
-| SamplingParams field | `vllm/sampling_params.py` |
-| Request hash | `vllm/v1/request.py` |
-| CLI args | `vllm/engine/arg_utils.py` |
-| Prefix cache key integration | `vllm/v1/core/kv_cache_utils.py` (`_gen_steering_extra_hash_keys`) |
+| Component                      | File                                                                |
+|--------------------------------|---------------------------------------------------------------------|
+| Config                         | `vllm/config/steering.py`                                           |
+| Type definitions + helpers     | `vllm/config/steering_types.py`                                     |
+| Custom op + hook point enum    | `vllm/model_executor/layers/steering.py`                            |
+| Gemma 3 buffers                | `vllm/model_executor/models/gemma3.py`                              |
+| SteeringManager                | `vllm/v1/worker/steering_manager.py`                                |
+| InputBatch tracking            | `vllm/v1/worker/gpu_input_batch.py`                                 |
+| Scheduler admission            | `vllm/v1/core/sched/scheduler.py`                                   |
+| Model runner integration       | `vllm/v1/worker/gpu_model_runner.py`                                |
+| Worker global API              | `vllm/v1/worker/worker_base.py`                                     |
+| HTTP endpoints                 | `vllm/entrypoints/serve/steering/api_router.py`                     |
+| Protocol types                 | `vllm/entrypoints/serve/steering/protocol.py`                       |
+| SamplingParams field           | `vllm/sampling_params.py`                                           |
+| Request hash                   | `vllm/v1/request.py`                                                |
+| CLI args                       | `vllm/engine/arg_utils.py`                                          |
+| Prefix cache key integration   | `vllm/v1/core/kv_cache_utils.py` (`_gen_steering_extra_hash_keys`)  |
 
 ## Prefix Cache Key Integration
 
@@ -368,6 +368,7 @@ ensures that blocks computed under different prefill steering produce
 different cache entries.
 
 Key design decisions:
+
 - **Only prefill steering hash is included.** Decode steering does not affect
   KV cache content during prefill, so it is excluded from block hashes.
 - **Zero impact when unused.** When `prefill_steering_config_hash` is 0 or
