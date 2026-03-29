@@ -229,11 +229,16 @@ class WorkerBase:
         """Notify SteeringManager of global vector changes for a given
         phase (``"base"``, ``"prefill"``, or ``"decode"``).
 
-        When the manager has not been lazily initialized yet, captures
-        the current buffer tensor values (which were just written by
-        ``_apply_vectors_to_buffers``) along with the phase and stores
-        them in ``self.model_runner._pending_steering_globals`` for
-        replay during lazy init in ``_update_steering_buffers``.
+        Converts the raw ``list[float]`` values from *vectors_data*
+        into tensors matching the layer buffer dtype/device, then passes
+        them to the manager.  This avoids reading from shared buffers,
+        which would silently use stale or overwritten data for
+        phase-specific tiers.
+
+        When the manager has not been lazily initialized yet, the
+        converted tensors are stored in
+        ``self.model_runner._pending_steering_globals`` for replay
+        during lazy init in ``_update_steering_buffers``.
         """
         if not hasattr(self, "model_runner") or self.model_runner is None:
             return
@@ -245,12 +250,15 @@ class WorkerBase:
             for hook_point_str, layer_vecs in vectors_data.items():
                 vec_attr = HOOK_POINT_VECTOR_ATTR[SteeringHookPoint(hook_point_str)]
                 captured_layers: dict[int, torch.Tensor] = {}
-                for idx in layer_vecs:
+                for idx, vec_values in layer_vecs.items():
                     if idx not in valid_indices or idx not in steerable:
                         continue
                     mod = steerable[idx]
                     if hasattr(mod, vec_attr):
-                        captured_layers[idx] = getattr(mod, vec_attr).clone()
+                        buf = getattr(mod, vec_attr)
+                        captured_layers[idx] = torch.tensor(
+                            vec_values, dtype=buf.dtype, device=buf.device
+                        )
                 if captured_layers:
                     captured[hook_point_str] = captured_layers
             if captured:
@@ -262,16 +270,17 @@ class WorkerBase:
             return
         for hook_point_str, layer_vecs in vectors_data.items():
             vec_attr = HOOK_POINT_VECTOR_ATTR[SteeringHookPoint(hook_point_str)]
-            for idx in layer_vecs:
+            for idx, vec_values in layer_vecs.items():
                 if idx not in valid_indices or idx not in steerable:
                     continue
                 mod = steerable[idx]
                 if hasattr(mod, vec_attr):
+                    buf = getattr(mod, vec_attr)
+                    t = torch.tensor(
+                        vec_values, dtype=buf.dtype, device=buf.device
+                    )
                     mgr.update_global_vectors(
-                        hook_point_str,
-                        idx,
-                        getattr(mod, vec_attr),
-                        phase=phase,
+                        hook_point_str, idx, t, phase=phase
                     )
 
     def set_steering_vectors(
@@ -345,22 +354,17 @@ class WorkerBase:
             self._apply_vectors_to_buffers(vectors, steerable, base_valid)
             self._notify_manager_vectors(vectors, steerable, base_valid, "base")
 
-        # Notify manager for prefill-specific vectors.
+        # Phase-specific vectors go only to the manager, not the shared
+        # buffers — writing them would overwrite base values and cause
+        # get_steering_status() to report the wrong tier.
         if prefill_vectors:
             prefill_valid = self._validate_vectors_spec(prefill_vectors, steerable)
-            # Prefill vectors: write to buffers (same as base) so the
-            # manager can read them, then notify with phase="prefill".
-            self._apply_vectors_to_buffers(prefill_vectors, steerable, prefill_valid)
             self._notify_manager_vectors(
                 prefill_vectors, steerable, prefill_valid, "prefill"
             )
 
-        # Notify manager for decode-specific vectors.
         if decode_vectors:
             decode_valid = self._validate_vectors_spec(decode_vectors, steerable)
-            # Decode vectors: write to buffers so the manager can read
-            # them, then notify with phase="decode".
-            self._apply_vectors_to_buffers(decode_vectors, steerable, decode_valid)
             self._notify_manager_vectors(
                 decode_vectors, steerable, decode_valid, "decode"
             )
