@@ -50,7 +50,10 @@ async def init_generate_state(
     supported_tasks: tuple["SupportedTask", ...],
 ):
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
-    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.entrypoints.chat_utils import (
+        UsagePolicy,
+        load_chat_template,
+    )
     from vllm.entrypoints.mcp.tool_server import (
         DemoToolServer,
         MCPToolServer,
@@ -63,6 +66,14 @@ async def init_generate_state(
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.entrypoints.serve.disagg.serving import ServingTokens
+
+    # Build UsagePolicy from CLI args
+    usage_policy: UsagePolicy | None = None
+    if args.include_usage_policy == "always":
+        usage_policy = UsagePolicy(
+            include_usage=args.include_usage_policy,
+            continuous_usage=args.continuous_usage_policy,
+        )
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -93,7 +104,7 @@ async def init_generate_state(
             tool_server=tool_server,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
             enable_log_outputs=args.enable_log_outputs,
         )
         if "generate" in supported_tasks
@@ -115,7 +126,7 @@ async def init_generate_state(
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-        enable_force_include_usage=args.enable_force_include_usage,
+        usage_policy=usage_policy,
         enable_log_outputs=args.enable_log_outputs,
         enable_log_deltas=args.enable_log_deltas,
     )
@@ -137,7 +148,7 @@ async def init_generate_state(
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
         )
         if "generate" in supported_tasks
         else None
@@ -156,7 +167,7 @@ async def init_generate_state(
             tool_parser=args.tool_call_parser,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
             default_chat_template_kwargs=args.default_chat_template_kwargs,
         )
         if "generate" in supported_tasks

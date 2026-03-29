@@ -7,7 +7,6 @@ from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.utils import (
     get_max_tokens,
     sanitize_message,
-    should_include_usage,
 )
 
 
@@ -33,10 +32,6 @@ def test_sanitize_message():
         ),
     ],
 )
-def test_should_include_usage_force_enables_continuous_usage(stream_options, expected):
-    assert should_include_usage(stream_options, True) == expected
-
-
 class TestGetMaxTokens:
     """Tests for get_max_tokens() to ensure generation_config's max_tokens
     acts as a default when from model author, and as a ceiling when

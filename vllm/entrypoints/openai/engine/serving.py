@@ -886,12 +886,22 @@ class OpenAIServing:
             return True
         return self.models.is_base_model(model_name)
 
-    def should_include_usage(self, is_streaming: bool) -> tuple[bool, bool]:
+    def should_include_usage(
+        self,
+        *,
+        is_streaming: bool,
+        include_usage: bool | None = None,
+        continuous_usage: bool | None = None,
+    ) -> tuple[bool, bool]:
         """
         Determine whether usage information should be included in the response.
 
         Args:
             is_streaming: Whether the request is streaming.
+            include_usage: Request-level preference to include usage in final
+                response. If None, uses usage_policy or default behavior.
+            continuous_usage: Request-level preference to include usage in each
+                streaming chunk. If None, uses usage_policy or default behavior.
 
         Returns:
             tuple[bool, bool]: (include_in_final, include_in_chunks)
@@ -900,18 +910,18 @@ class OpenAIServing:
                 - include_in_chunks: Whether to include usage in each streaming
                   chunk.
 
-        Default behavior:
-            - Non-streaming: Returns usage (True, False).
-            - Streaming: Returns usage in the final chunk (True, False).
-            - With usage_policy.include_usage="always": Returns usage in
-              final chunk, and in each chunk if
-              usage_policy.continuous_usage="always".
+        Priority:
+            1. usage_policy.include_usage="always" overrides request-level
+               preferences.
+            2. Request-level include_usage/continuous_usage if provided.
+            3. Default behavior: non-streaming returns usage, streaming returns
+               usage in final chunk.
 
         Subclass override note:
             Subclasses may override this method to customize usage behavior.
             When overridden, the method can either:
-            1. Consult self.usage_policy for configuration, or
-            2. Ignore self.usage_policy and implement fixed behavior
+            1. Consult self.usage_policy and request-level parameters, or
+            2. Ignore all parameters and implement fixed behavior
                (e.g., always return (False, False) for APIs that never
                return usage, or always return (True, True) for APIs that
                always include usage in every chunk).
@@ -922,8 +932,12 @@ class OpenAIServing:
 
         policy = self.usage_policy
         if policy is not None and policy.include_usage == "always":
-            include_in_chunks = policy.continuous_usage == "always"
-            return (True, include_in_chunks)
+            in_chunks = policy.continuous_usage == "always"
+            return (True, in_chunks)
+
+        if include_usage is not None:
+            in_chunks = continuous_usage if continuous_usage else False
+            return (include_usage, in_chunks)
 
         return (True, False)
 
