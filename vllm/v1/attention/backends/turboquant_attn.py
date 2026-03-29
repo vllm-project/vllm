@@ -475,13 +475,12 @@ class TurboQuantAttentionImpl(AttentionImpl):
             ctx = get_forward_context()
             is_profile = ctx.attn_metadata is None
             if not is_profile:
-                valid = slot_mapping >= 0
-                if valid.any():
-                    k_flat = key[valid].reshape(-1, key.shape[-1])
-                    v_flat = value[valid].reshape(-1, value.shape[-1])
-                    layer._tq_k_state.calibrate_outliers(k_flat)
-                    layer._tq_v_state.calibrate_outliers(v_flat)
-                    layer._tq_needs_calibration = False
+                num_actual = slot_mapping.shape[0]
+                k_flat = key[:num_actual].reshape(-1, key.shape[-1])
+                v_flat = value[:num_actual].reshape(-1, value.shape[-1])
+                layer._tq_k_state.calibrate_outliers(k_flat)
+                layer._tq_v_state.calibrate_outliers(v_flat)
+                layer._tq_needs_calibration = False
 
         self._encode_turboquant_cache(key, value, kv_cache, slot_mapping, layer)
 
@@ -495,25 +494,23 @@ class TurboQuantAttentionImpl(AttentionImpl):
         layer: torch.nn.Module,
     ) -> None:
         """Encode K/V with outlier-aware layout into paged uint8 cache."""
-        # Only encode valid tokens (slot_mapping >= 0).
-        # Padding tokens (slot_mapping == -1) from profiling/CUDA graph
-        # capture must be skipped to avoid writing garbage to cache slot 0.
-        valid = slot_mapping >= 0
-        if not valid.any():
-            return
-        valid_slots = slot_mapping[valid]
-        valid_key = key[valid]
-        valid_value = value[valid]
+        # Clamp slot_mapping: padding tokens (-1) go to slot 0.
+        # This is safe because calibration is skipped during profiling
+        # (checked in do_kv_cache_update), and real requests have no
+        # -1 entries. Using clamp avoids GPU→CPU sync that would break
+        # CUDA graph capture.
+        num_actual = slot_mapping.shape[0]
+        clamped_slots = slot_mapping.clamp(min=0)
 
         bits = int(layer._tq_k_state.config.bit_width)
         block_size = kv_cache.shape[2]
-        block_indices = valid_slots // block_size
-        block_offsets = valid_slots % block_size
+        block_indices = clamped_slots // block_size
+        block_offsets = clamped_slots % block_size
 
         if bits == 4:
             self._encode_fused_4bit(
-                valid_key,
-                valid_value,
+                key[:num_actual],
+                value[:num_actual],
                 kv_cache,
                 block_indices,
                 block_offsets,
@@ -521,8 +518,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
             )
         else:
             self._encode_unfused(
-                valid_key,
-                valid_value,
+                key[:num_actual],
+                value[:num_actual],
                 kv_cache,
                 block_indices,
                 block_offsets,
