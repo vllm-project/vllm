@@ -604,16 +604,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
 
-  # Hadacore kernels
-  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
-  if(HADACORE_ARCHS)
-    set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${HADACORE_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    message(STATUS "Building hadacore")
-  endif()
 
 # if CUDA endif
 endif()
@@ -987,6 +977,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Not building CUTLASS MLA as no compatible archs were found.")
     # clear MLA_ARCHS
     set(MLA_ARCHS)
+  endif()
+
+  # Hadacore kernels
+  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
+  if(HADACORE_ARCHS)
+    set(SRCS "csrc/libtorch_stable/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${HADACORE_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building hadacore")
   endif()
 
   message(STATUS "Enabling C_stable extension.")
