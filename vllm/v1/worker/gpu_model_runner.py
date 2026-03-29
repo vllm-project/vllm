@@ -1203,23 +1203,38 @@ class GPUModelRunner(
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
-            # Register only the initial-phase steering config.
-            # New requests start in prefill; the decode config will be
-            # registered on phase transition in _update_steering_buffers.
+            # Register the initial-phase steering config.
+            # Normally requests start in prefill, but a full
+            # prefix-cache hit (num_computed >= num_prompt) puts
+            # a request directly into decode.
             if (
                 getattr(self, "_steering_manager", None) is not None
                 and new_req_data.sampling_params is not None
             ):
                 sp = new_req_data.sampling_params
-                if (
-                    new_req_data.prefill_steering_config_hash != 0
-                    and sp.effective_prefill_steering
-                ):
-                    self._steering_manager.register_config(
-                        new_req_data.prefill_steering_config_hash,
-                        sp.effective_prefill_steering,
-                        phase="prefill",
-                    )
+                if new_req_data.num_computed_tokens >= req_state.num_prompt_tokens:
+                    # Already past prefill — register decode config.
+                    if (
+                        new_req_data.decode_steering_config_hash != 0
+                        and sp.effective_decode_steering
+                    ):
+                        self._steering_manager.register_config(
+                            new_req_data.decode_steering_config_hash,
+                            sp.effective_decode_steering,
+                            phase="decode",
+                        )
+                else:
+                    # Normal: start in prefill; decode registered
+                    # on transition in _update_steering_buffers.
+                    if (
+                        new_req_data.prefill_steering_config_hash != 0
+                        and sp.effective_prefill_steering
+                    ):
+                        self._steering_manager.register_config(
+                            new_req_data.prefill_steering_config_hash,
+                            sp.effective_prefill_steering,
+                            phase="prefill",
+                        )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (

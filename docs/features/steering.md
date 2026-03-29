@@ -231,9 +231,13 @@ NewRequestData.decode_steering_config_hash
 Model Runner._update_states()
     ├── CachedRequestState.{prefill,decode}_steering_config_hash
     ├── InputBatch.request_{prefill,decode}_steering_hash[req_idx]
-    └── SteeringManager.register_config(hash, vectors, phase="prefill")
-    │     Only prefill config registered initially; decode registered on
-    │     phase transition
+    └── SteeringManager.register_config(hash, vectors, phase=...)
+    │     Phase detected at registration time:
+    │       num_computed >= num_prompt → register decode config directly
+    │       otherwise → register prefill config; decode registered on
+    │       phase transition in _update_steering_buffers
+    │     This handles full prefix-cache hits where a request starts
+    │     directly in the decode phase.
     │
     ▼
 Model Runner._update_steering_buffers()  (called before each forward pass)
@@ -396,7 +400,7 @@ Key design decisions:
 5. **The steering_index tensor is shared across all layers and all hook points.** One in-place update is visible to all decoder layers. Token-to-row mapping is independent of hook point.
 6. **All four hook point buffers are always allocated.** The memory cost is trivial. Zero rows make unused hook points a no-op.
 7. **The custom op is not a splitting op.** It prevents constant-folding but does not partition the compiled graph.
-8. **One-active-at-a-time registration.** Only one phase's config is registered per request at any time. Prefill config is registered on request creation; on prefill->decode transition, the prefill config is released and the decode config is registered. On request completion, only the currently-active config is released.
+8. **One-active-at-a-time registration.** Only one phase's config is registered per request at any time. The initial phase is detected at registration time: if `num_computed_tokens >= num_prompt_tokens` (full prefix-cache hit), the decode config is registered directly; otherwise, the prefill config is registered and the decode config is registered on the prefill-to-decode transition. On request completion, only the currently-active config is released.
 9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all three vector fields before any request processing begins.
 10. **Additive composition is pre-scaled.** `resolve_effective_vectors()` applies co-located scales before summing base and phase-specific vectors.
 11. **Phase detection is token-count based.** `num_computed_tokens < num_prompt_tokens` determines prefill vs decode, not the `n_tokens == 1` heuristic.
