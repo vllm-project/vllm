@@ -57,7 +57,8 @@ def _attn_backend_params():
 ATTN_BACKENDS = _attn_backend_params()
 
 
-def _build_server_args(attn_backend):
+def _get_server_args(attn_backend):
+    """Get server args with attention backend if specified."""
     args = SERVER_ARGS.copy()
     if attn_backend:
         args.extend(["--attention-backend", attn_backend])
@@ -65,8 +66,7 @@ def _build_server_args(attn_backend):
 
 
 @pytest.fixture(
-    scope="module",
-    params=["openai/whisper-small", "google/gemma-3n-E2B-it"],
+    scope="module", params=["openai/whisper-small", "google/gemma-3n-E2B-it"]
 )
 def model_name(request):
     return request.param
@@ -79,8 +79,9 @@ def attn_backend(request):
 
 @pytest.fixture(scope="module")
 def server(model_name, attn_backend):
+    # Parametrize over model name
     with RemoteOpenAIServer(
-        model_name, _build_server_args(attn_backend)
+        model_name, _get_server_args(attn_backend)
     ) as remote_server:
         yield remote_server
 
@@ -108,6 +109,11 @@ async def test_non_asr_model(foscolo):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
 async def test_basic_audio_with_lora(mary_had_lamb, attn_backend):
+    # ROCm SPECIFIC CONFIGURATION:
+    # To ensure the test passes on ROCm, we modify the max model length to 512.
+    # We DO NOT apply this to other platforms to maintain strict upstream parity.
+    # NOTE - careful to call this test before the module scoped server
+    # fixture, otherwise it'll OOMkill the CI
     model_name = "ibm-granite/granite-speech-3.3-2b"
     lora_model_name = "speech"
     server_args = [
@@ -126,6 +132,7 @@ async def test_basic_audio_with_lora(mary_had_lamb, attn_backend):
     if attn_backend:
         server_args.extend(["--attention-backend", attn_backend])
 
+    # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
         translation = await client.audio.translations.create(
@@ -138,6 +145,11 @@ async def test_basic_audio_with_lora(mary_had_lamb, attn_backend):
 
     out = json.loads(translation)["text"].strip()
     assert len(out) > 0, "LoRA translation returned empty text"
+    out_lower = out.lower()
+    assert "pequeño" in out_lower, (
+        f"Expected 'pequeño' in Spanish translation, got: {out!r}"
+    )
+    assert "mary" in out_lower, f"Expected 'mary' in Spanish translation, got: {out!r}"
 
 
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
@@ -153,6 +165,11 @@ async def test_basic_audio(foscolo, client, model_name):
     )
     out = json.loads(translation)["text"].strip()
     assert len(out) > 0, "Translation returned empty text"
+    out_lower = out.lower()
+    assert "greek sea" in out_lower, (
+        f"Expected 'greek sea' in translation, got: {out!r}"
+    )
+    assert "exile" in out_lower, f"Expected 'exile' in translation, got: {out!r}"
 
 
 @pytest.mark.asyncio
@@ -169,6 +186,15 @@ async def test_audio_prompt(foscolo, client, model_name):
     )
     out = json.loads(translation)["text"].strip()
     assert len(out) > 0, "Prompted translation returned empty text"
+    if model_name == "openai/whisper-small":
+        assert "Nor will I ever touch the sacred" not in out, (
+            f"Prompt conditioning failed; unprompted text leaked: {out!r}"
+        )
+        assert prompt not in out, f"Prompt text echoed back in output: {out!r}"
+    out_lower = out.lower()
+    assert "greek sea" in out_lower, (
+        f"Expected 'greek sea' in prompted translation, got: {out!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -216,7 +242,7 @@ async def test_streaming_response(foscolo, client, model_name, server):
             chunk = json.loads(line)
             content = chunk["choices"][0].get("delta", {}).get("content")
             streamed_text += content or ""
-
+    # NOTE Run is expected to be deterministic with temperature set to 0.0
     assert streamed_text == expected_text, (
         f"Streaming/non-streaming mismatch.\n"
         f"  Non-stream: {expected_text!r}\n"
@@ -298,6 +324,11 @@ async def test_long_audio_request(foscolo, client, model_name):
     )
     out = json.loads(translation)["text"].strip()
     assert len(out) > 0, "Long audio translation returned empty text"
+    out_lower = out.lower()
+    assert out_lower.count("greek sea") >= 2, (
+        f"Expected 'greek sea' at least twice in repeated audio translation, "
+        f"found {out_lower.count('greek sea')}: {out!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -305,7 +336,6 @@ async def test_audio_with_max_tokens(mary_had_lamb, client, model_name):
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_name)
-    # max_completion_tokens=1 must produce exactly 1 token
     transcription = await client.audio.translations.create(
         model=model_name,
         file=mary_had_lamb,
