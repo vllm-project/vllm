@@ -6,6 +6,7 @@ import torch.nn as nn
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import initialize_dummy_weights
@@ -28,6 +29,9 @@ class DummyModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         # materialize meta tensors as part of online quantization lifecycle
         for layer in model.modules():
+            info = get_layerwise_info(layer)
+            if info.can_load():
+                continue
             for name, param in get_layer_tensors(layer).items():
                 if param.device == torch.device("meta"):
                     setattr(layer, name, materialize_meta_tensor(param))

@@ -211,7 +211,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         elif info.load_numel <= 0:
             # first load but received no weights. This happens on dummy load
             if info.kernel_tensors is None:
-                materialize_layer(layer)
+                _layerwise_process(layer, info)
+                continue
 
             # reloading: place kernel tensors back as a fallback
             else:
