@@ -40,6 +40,13 @@ from .vlm_utils.types import (
     VLMTestType,
 )
 
+try:
+    from transformers.cache_utils import SlidingWindowCache  # noqa: F401
+
+    _sliding_window_cache_available = True
+except ImportError:
+    _sliding_window_cache_available = False
+
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
     "dtype": "half",
@@ -575,6 +582,14 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"device_map": "auto"},
         patch_hf_runner=model_utils.isaac_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[
+            pytest.mark.skipif(
+                not _sliding_window_cache_available,
+                reason="Isaac HF model requires SlidingWindowCache from "
+                "transformers.cache_utils, which is not available in this "
+                "version of transformers",
+            )
+        ],
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],

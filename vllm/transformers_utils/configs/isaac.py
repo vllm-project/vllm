@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
 
 from transformers import Qwen3Config
 from transformers.models.siglip2.configuration_siglip2 import Siglip2VisionConfig
