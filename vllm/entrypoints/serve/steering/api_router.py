@@ -12,6 +12,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.steering.protocol import SetSteeringRequest
 from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
+from vllm.model_executor.layers.steering import VALID_HOOK_POINT_NAMES
 
 logger = init_logger(__name__)
 
@@ -27,6 +28,23 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+def _scale_layer_vectors(
+    layer_vecs: dict[int, list[float]],
+    scales: dict[int, float] | None,
+) -> dict[int, list[float]]:
+    """Pre-multiply per-layer scale factors into vectors."""
+    scaled: dict[int, list[float]] = {}
+    for layer_idx, vec in layer_vecs.items():
+        scale = 1.0
+        if scales and layer_idx in scales:
+            scale = scales[layer_idx]
+        if scale != 1.0:
+            scaled[layer_idx] = [v * scale for v in vec]
+        else:
+            scaled[layer_idx] = vec
+    return scaled
+
+
 @router.post("/v1/steering/set")
 async def set_steering(
     request: SetSteeringRequest,
@@ -34,58 +52,61 @@ async def set_steering(
 ) -> JSONResponse:
     """Set activation steering vectors on decoder layers.
 
-    Vectors are applied to the residual stream after the MLP in each
-    specified layer.  Only the listed layers are modified; other layers
-    keep their current state.  Call ``POST /v1/steering/clear`` first
-    to zero everything if a full replacement is intended.
+    The ``vectors`` field maps hook point names to per-layer vector dicts.
 
     When ``replace`` is ``True``, all existing vectors are cleared
-    atomically before the new ones are applied — no generation can
-    observe empty steering in between.
+    atomically before the new ones are applied.
     """
     engine = engine_client(raw_request)
 
-    if not request.vectors:
+    # Validate hook point names.
+    invalid_hooks = set(request.vectors.keys()) - VALID_HOOK_POINT_NAMES
+    if invalid_hooks:
         return JSONResponse(
             content={
                 "error": (
-                    "No vectors provided. Include at least one layer index and vector."
+                    f"Invalid hook point name(s): "
+                    f"{sorted(invalid_hooks)}. "
+                    f"Valid values: "
+                    f"{sorted(VALID_HOOK_POINT_NAMES)}"
                 ),
             },
             status_code=HTTPStatus.BAD_REQUEST.value,
         )
 
-    # Pre-multiply scales into vectors so the worker only needs to copy.
-    scaled: dict[int, list[float]] = {}
-    for layer_idx, vec in request.vectors.items():
-        scale = 1.0
-        if request.scales and layer_idx in request.scales:
-            scale = request.scales[layer_idx]
-        if scale != 1.0:
-            scaled[layer_idx] = [v * scale for v in vec]
-        else:
-            scaled[layer_idx] = vec
+    # Scale vectors.
+    all_hook_vectors: dict[str, dict[int, list[float]]] = {}
+    for hook_name, layer_vecs in request.vectors.items():
+        all_hook_vectors[hook_name] = _scale_layer_vectors(layer_vecs, request.scales)
+
+    if not all_hook_vectors:
+        return JSONResponse(
+            content={
+                "error": (
+                    "No vectors provided. Include at least one hook "
+                    "point with layer vectors."
+                ),
+            },
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
 
     try:
         async with _steering_lock:
-            # Phase 1 — validate on every worker without mutating
-            # buffers.  This prevents pipeline-parallel workers from
-            # partially applying an update when a later stage would
-            # reject it.
+            # Phase 1 -- validate on every worker without mutating
+            # buffers.
             results = await engine.collective_rpc(
-                "set_steering_vectors", args=(scaled, True)
+                "set_steering_vectors",
+                args=(all_hook_vectors, True),
             )
-            # Each worker returns the layer indices it *would* update.
-            # Union across workers (TP replicas report the same layers,
-            # PP stages report disjoint layers).
             validated_layers: set[int] = set()
             for per_worker in results:
                 validated_layers.update(per_worker)
 
-            # Reject requests that reference layers not owned by any
-            # worker — a typo like layer 999 must not be silently
-            # ignored while the valid layers succeed.
-            requested_layers = set(scaled.keys())
+            # Collect all requested layers across all hook points.
+            requested_layers: set[int] = set()
+            for layer_vecs in all_hook_vectors.values():
+                requested_layers.update(layer_vecs.keys())
+
             missing = requested_layers - validated_layers
             if missing:
                 return JSONResponse(
@@ -111,28 +132,28 @@ async def set_steering(
                     status_code=HTTPStatus.BAD_REQUEST.value,
                 )
 
-            # Atomic replacement: clear all vectors before applying
-            # new ones, within the same lock acquisition.
             if request.replace:
                 await engine.collective_rpc("clear_steering_vectors")
 
-            # Phase 2 — all workers validated; now apply.
-            await engine.collective_rpc("set_steering_vectors", args=(scaled, False))
+            # Phase 2 -- apply.
+            await engine.collective_rpc(
+                "set_steering_vectors",
+                args=(all_hook_vectors, False),
+            )
 
         return JSONResponse(
             content={
                 "status": "ok",
+                "hook_points": sorted(all_hook_vectors.keys()),
                 "layers_updated": sorted(validated_layers),
             },
         )
     except SteeringVectorError as err:
-        # Single-process: typed exception comes through directly.
         return JSONResponse(
             content={"error": str(err)},
             status_code=HTTPStatus.BAD_REQUEST.value,
         )
     except Exception as err:
-        # Multi-process: exception type is lost; match by message content.
         err_str = str(err)
         if "expected vector of size" in err_str or "non-finite" in err_str:
             return JSONResponse(
@@ -170,8 +191,6 @@ async def get_steering(raw_request: Request) -> JSONResponse:
 
     try:
         results = await engine.collective_rpc("get_steering_status")
-        # Union across all workers so pipeline-parallel ranks
-        # (which own disjoint layer ranges) are all represented.
         active: dict = {}
         for worker_result in results:
             active.update(worker_result)

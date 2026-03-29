@@ -5,9 +5,11 @@ from pydantic import BaseModel, Field
 
 
 class SetSteeringRequest(BaseModel):
-    vectors: dict[int, list[float]] = Field(
-        description="Mapping from layer index to steering vector. "
-        "Each vector must have length equal to the model's hidden_size.",
+    vectors: dict[str, dict[int, list[float]]] = Field(
+        description="Steering vectors keyed by hook point name "
+        "(pre_attn, post_attn, post_mlp_pre_ln, post_mlp_post_ln), "
+        "then layer index. Each vector must have length equal to "
+        "the model's hidden_size.",
     )
     scales: dict[int, float] | None = Field(
         default=None,

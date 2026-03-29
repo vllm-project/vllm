@@ -96,8 +96,8 @@ class Request:
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
 
-        # Per-request activation steering vectors.
-        self.steering_vectors: dict[int, list[float]] | None = None
+        # Per-request activation steering vectors keyed by hook point.
+        self.steering_vectors: dict[str, dict[int, list[float]]] | None = None
         if sampling_params is not None and sampling_params.steering_vectors:
             self.steering_vectors = sampling_params.steering_vectors
 
@@ -254,7 +254,11 @@ class Request:
         """0 if no per-request steering, else deterministic hash of vectors."""
         if not self.steering_vectors:
             return 0
-        data = str(sorted(self.steering_vectors.items())).encode()
+        canonical = {
+            hp: sorted(vecs.items())
+            for hp, vecs in sorted(self.steering_vectors.items())
+        }
+        data = str(sorted(canonical.items())).encode()
         # Mask to fit in np.int64 (used by InputBatch tracking arrays)
         return int(hashlib.sha256(data).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
 

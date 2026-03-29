@@ -177,10 +177,12 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    steering_vectors: dict[int, list[float]] | None = Field(
+    steering_vectors: dict[str, dict[int, list[float]]] | None = Field(
         default=None,
-        description="Per-request activation steering vectors. Keys are layer "
-        "indices, values are vectors of length hidden_size.",
+        description="Per-request activation steering vectors keyed by hook "
+        "point name (pre_attn, post_attn, post_mlp_pre_ln, "
+        "post_mlp_post_ln), then layer index. Values are vectors of "
+        "length hidden_size.",
     )
 
     # --8<-- [end:completion-extra-params]

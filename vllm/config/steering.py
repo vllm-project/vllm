@@ -29,7 +29,5 @@ class SteeringConfig:
         factors: list = []
         factors.append(self.max_steering_configs)
 
-        hash_str = safe_hash(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

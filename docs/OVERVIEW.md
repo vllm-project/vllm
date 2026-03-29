@@ -30,7 +30,8 @@ Features Index:
         description: >
             Activation steering — inject additive vectors into the residual
             stream during decode to steer model behaviour.  Supports both
-            global (server-wide) and per-request steering vectors.
+            global (server-wide) and per-request steering vectors at four
+            hook points (pre_attn, post_attn, post_mlp_pre_ln, post_mlp_post_ln).
         entry_points:
             - POST /v1/steering/set (global)
             - POST /v1/steering/clear (global)

@@ -41,6 +41,11 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.steering import (
+    HOOK_POINT_TABLE_ATTR,
+    HOOK_POINT_VECTOR_ATTR,
+    SteeringHookPoint,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -246,20 +251,23 @@ class Gemma3DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.layer_idx = extract_layer_index(prefix)
 
-        # Activation steering: vector buffer updated via .copy_() between
-        # forward passes, compatible with torch.compile and CUDA graphs.
-        self.register_buffer(
-            "steering_vector",
-            torch.zeros(1, config.hidden_size),
-            persistent=False,
-        )
-        # Per-layer steering table: row 0=zeros sentinel, row 1=global,
-        # rows 2+=global+per_request combined vectors.
-        self.register_buffer(
-            "steering_table",
-            torch.zeros(max_steering_configs + 2, config.hidden_size),
-            persistent=False,
-        )
+        # Activation steering buffers — one vector + table pair per hook
+        # point.  All four are always allocated (the memory cost is
+        # trivial) so the forward path is unconditional.  Buffers are
+        # updated in-place by the model runner before each step; zero
+        # rows act as a no-op.  torch.compile lifts them as graph inputs,
+        # so no splitting op is needed.
+        for hp in SteeringHookPoint:
+            self.register_buffer(
+                HOOK_POINT_VECTOR_ATTR[hp],
+                torch.zeros(1, config.hidden_size),
+                persistent=False,
+            )
+            self.register_buffer(
+                HOOK_POINT_TABLE_ATTR[hp],
+                torch.zeros(max_steering_configs + 2, config.hidden_size),
+                persistent=False,
+            )
         # Shared steering index mapping token positions to table rows.
         # Placeholder — replaced by a shared tensor during model init.
         self.register_buffer(
@@ -311,6 +319,16 @@ class Gemma3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        # Steering: indexed gather from each hook point's table.
+        # Zero rows are no-ops.  The custom op is registered but NOT
+        # as a splitting op — it's opaque to the tracer (preventing
+        # constant-folding and AOT cache pickle issues) but does not
+        # partition the compiled graph.
+        residual = torch.ops.vllm.apply_steering(
+            residual, self.steering_table_pre_attn, self.steering_index
+        )
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -318,19 +336,25 @@ class Gemma3DecoderLayer(nn.Module):
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
 
+        residual = torch.ops.vllm.apply_steering(
+            residual, self.steering_table_post_attn, self.steering_index
+        )
+
         hidden_states, residual = self.pre_feedforward_layernorm(
             hidden_states, residual
         )
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-        # Decode-only activation steering applied directly to the residual
-        # stream (post-MLP, pre-layernorm) to match the training-time
-        # injection point.  The custom op is a splitting point for
-        # torch.compile so the real Python runs at runtime, reading
-        # the live mask buffer (not a baked constant).
+
         residual = torch.ops.vllm.apply_steering(
-            residual, self.steering_table, self.steering_index
+            residual, self.steering_table_post_mlp_pre_ln, self.steering_index
         )
+
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+
+        residual = torch.ops.vllm.apply_steering(
+            residual, self.steering_table_post_mlp_post_ln, self.steering_index
+        )
+
         return hidden_states, residual
 
 

@@ -1066,10 +1066,7 @@ class GPUModelRunner(
         if getattr(self, "_steering_manager", None) is not None:
             for req_id in scheduler_output.finished_req_ids:
                 req_state = self.requests.get(req_id)
-                if (
-                    req_state is not None
-                    and req_state.steering_config_hash != 0
-                ):
+                if req_state is not None and req_state.steering_config_hash != 0:
                     self._steering_manager.release_config(
                         req_state.steering_config_hash
                     )
@@ -1178,17 +1175,18 @@ class GPUModelRunner(
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
-            # Register per-request steering config if present
+            # Register per-request steering config if present.
             if (
                 getattr(self, "_steering_manager", None) is not None
                 and new_req_data.steering_config_hash != 0
                 and new_req_data.sampling_params is not None
-                and new_req_data.sampling_params.steering_vectors
             ):
-                self._steering_manager.register_config(
-                    new_req_data.steering_config_hash,
-                    new_req_data.sampling_params.steering_vectors,
-                )
+                sp = new_req_data.sampling_params
+                if sp.steering_vectors:
+                    self._steering_manager.register_config(
+                        new_req_data.steering_config_hash,
+                        sp.steering_vectors,
+                    )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -3026,48 +3024,52 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
-    def _update_steering_buffers(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> None:
+    def _update_steering_buffers(self, scheduler_output: "SchedulerOutput") -> None:
         """Update per-layer steering tables and the shared steering index.
 
         Lazily initializes the SteeringManager on first call.  Each step:
-        1. Populate each layer's steering_table from the manager
+        1. Populate each layer's per-hook steering_table from the manager
         2. Build the steering_index mapping tokens to table rows
         """
+        from vllm.model_executor.layers.steering import (
+            HOOK_POINT_TABLE_ATTR,
+            HOOK_POINT_VECTOR_ATTR,
+        )
+
         # Lazy init
         if not hasattr(self, "_steering_manager"):
             steerable: dict = {}
             model = self.get_model()
             for mod in model.modules():
-                if hasattr(mod, "steering_table") and hasattr(
-                    mod, "layer_idx"
-                ):
+                if not hasattr(mod, "layer_idx"):
+                    continue
+                has_any_table = any(
+                    hasattr(mod, attr) for attr in HOOK_POINT_TABLE_ATTR.values()
+                )
+                if has_any_table:
                     steerable[mod.layer_idx] = mod
             self._steerable_layers = steerable
 
             if steerable:
-                steering_config = getattr(
-                    self.vllm_config, "steering_config", None
-                )
+                steering_config = getattr(self.vllm_config, "steering_config", None)
                 max_configs = (
-                    steering_config.max_steering_configs
-                    if steering_config
-                    else 0
+                    steering_config.max_steering_configs if steering_config else 0
                 )
                 from vllm.v1.worker.steering_manager import SteeringManager
 
                 self._steering_manager = SteeringManager(max_configs)
 
                 # Pick up any existing global vectors from the
-                # steering_vector buffers (set via the global API before
-                # this method was called).
-                for layer_idx, mod in steerable.items():
-                    if hasattr(mod, "steering_vector"):
-                        norm = mod.steering_vector.norm().item()
-                        if norm > 0.0:
+                # steering_vector_* buffers (set via the global API
+                # before this method was called).
+                for hp, vec_attr in HOOK_POINT_VECTOR_ATTR.items():
+                    for layer_idx, mod in steerable.items():
+                        if not hasattr(mod, vec_attr):
+                            continue
+                        vec = getattr(mod, vec_attr)
+                        if vec.any():
                             self._steering_manager.update_global_vectors(
-                                layer_idx, mod.steering_vector
+                                hp.value, layer_idx, vec
                             )
             else:
                 self._steering_manager = None
@@ -3077,9 +3079,7 @@ class GPUModelRunner(
             return
 
         # 1. Populate steering tables
-        self._steering_manager.populate_steering_tables(
-            self._steerable_layers
-        )
+        self._steering_manager.populate_steering_tables(self._steerable_layers)
 
         # 2. Build steering index
         # Get the shared steering_index buffer (all layers share one tensor)
@@ -3114,17 +3114,13 @@ class GPUModelRunner(
 
             if is_decode:
                 if steering_hash != 0:
-                    row = self._steering_manager.get_row_for_config(
-                        steering_hash
-                    )
+                    row = self._steering_manager.get_row_for_config(steering_hash)
                 else:
                     row = 1  # global-only
                 steering_index[token_offset] = row
             else:
                 # Prefill tokens: no steering
-                steering_index[
-                    token_offset : token_offset + n_tokens
-                ] = 0
+                steering_index[token_offset : token_offset + n_tokens] = 0
 
             token_offset += n_tokens
 
