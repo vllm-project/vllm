@@ -94,10 +94,11 @@ def _fused_encode_and_store_kernel(
         val_partner = tl.load(scratch_ptr + scratch_base + partner)
         is_lower = (dim_offs & h) == 0
         result = tl.where(is_lower, val_self + val_partner, val_partner - val_self)
+        tl.debug_barrier()
         tl.store(scratch_ptr + scratch_base + dim_offs, result)
+        tl.debug_barrier()
         h = h * 2
 
-    tl.debug_barrier()
     x = tl.load(scratch_ptr + scratch_base + dim_offs)
     had_scale = 1.0 / tl.sqrt(float(BLOCK_D))
     x = x * had_scale
@@ -300,6 +301,7 @@ def _fused_decode_kernel(
 
     # ---- Inverse Hadamard butterfly ----
     tl.store(scratch_ptr + scratch_base + dim_offs, reconstructed)
+    tl.debug_barrier()
 
     h = 1
     for _level in range(LOG2_D):
@@ -308,10 +310,11 @@ def _fused_decode_kernel(
         val_partner = tl.load(scratch_ptr + scratch_base + partner)
         is_lower = (dim_offs & h) == 0
         result = tl.where(is_lower, val_self + val_partner, val_partner - val_self)
+        tl.debug_barrier()
         tl.store(scratch_ptr + scratch_base + dim_offs, result)
+        tl.debug_barrier()
         h = h * 2
 
-    tl.debug_barrier()
     x = tl.load(scratch_ptr + scratch_base + dim_offs)
     had_scale = 1.0 / tl.sqrt(float(BLOCK_D))
     x = x * had_scale

@@ -67,8 +67,9 @@ def _fused_hadamard_encode_kernel(
     scratch_base = scratch_row * BLOCK_D
     tl.store(scratch_ptr + scratch_base + dim_offs, x)
 
-    # Hadamard butterfly: log2(BLOCK_D) passes
-    # Use integer h (not constexpr) to avoid type change in loop
+    # Hadamard butterfly: log2(BLOCK_D) passes.
+    # Barrier after each store to prevent inter-warp races
+    # (element i in warp 0 may partner with element j in warp 1).
     h = 1
     for _level in range(LOG2_D):
         partner = dim_offs ^ h
@@ -76,11 +77,12 @@ def _fused_hadamard_encode_kernel(
         val_partner = tl.load(scratch_ptr + scratch_base + partner)
         is_lower = (dim_offs & h) == 0
         result = tl.where(is_lower, val_self + val_partner, val_partner - val_self)
+        tl.debug_barrier()
         tl.store(scratch_ptr + scratch_base + dim_offs, result)
+        tl.debug_barrier()
         h = h * 2
 
     # Load result, scale
-    tl.debug_barrier()
     x = tl.load(scratch_ptr + scratch_base + dim_offs)
     scale = 1.0 / tl.sqrt(float(BLOCK_D))
     x = x * scale
