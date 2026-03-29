@@ -6,6 +6,7 @@ from vllm import LLM, SamplingParams
 MODEL = "Qwen/Qwen2.5-7B-Instruct"
 PROMPT = "Explain the theory of general relativity in detail."
 
+
 def benchmark(kv_cache_dtype="auto", label="baseline"):
     print(f"\n{'='*50}")
     print(f"  {label}")
@@ -23,9 +24,12 @@ def benchmark(kv_cache_dtype="auto", label="baseline"):
     tp = toks / (t1 - t0)
     print(f"  {toks} tokens in {t1-t0:.2f}s = {tp:.1f} tok/s")
     print(f"  Sample: {out[0].outputs[0].text[:80]}...")
-    del llm; torch.cuda.empty_cache()
+    del llm
+    torch.cuda.empty_cache()
     return tp
 
-t1 = benchmark("auto", "BASELINE (bf16)")
-t2 = benchmark("turboquant", "TURBOQUANT (4-bit)")
-print(f"\nRatio: {t2/t1:.2f}x")
+
+if __name__ == "__main__":
+    t1 = benchmark("auto", "BASELINE (bf16)")
+    t2 = benchmark("turboquant", "TURBOQUANT (4-bit)")
+    print(f"\nRatio: {t2/t1:.2f}x")
