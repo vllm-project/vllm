@@ -227,11 +227,17 @@ class TurboQuantAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(1)
 
-        # Decode compressed uint8 blocks → bf16
+        # Decode compressed uint8 blocks → bf16.
+        # Trim block_table to only needed blocks (avoids decoding padding).
         block_table = attn_metadata.block_table
         if hasattr(layer, "_tq_k_state"):
+            block_size = key_cache.shape[1]
+            max_blocks_needed = (
+                attn_metadata.max_seq_len + block_size - 1
+            ) // block_size
+            trimmed_bt = block_table[:, :max_blocks_needed]
             key_cache, value_cache, block_table = self._decode_turboquant_cache(
-                key_cache, value_cache, layer, block_table
+                key_cache, value_cache, layer, trimmed_bt
             )
 
         cu_seqlens_q = attn_metadata.query_start_loc
@@ -328,7 +334,11 @@ class TurboQuantAttentionImpl(AttentionImpl):
         num_entries: int,
         new_block_table: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Fused 4-bit decode: single Triton kernel per K/V."""
+        """Fused 4-bit decode with paged gather.
+
+        Gathers blocks by block_table and decodes in one step,
+        minimizing Python overhead.
+        """
         from vllm.v1.attention.ops.triton_fused_turboquant import (
             fused_hadamard_decode_from_slots,
         )
@@ -343,12 +353,13 @@ class TurboQuantAttentionImpl(AttentionImpl):
         decoded_caches = []
         for cache, state in [(key_cache, k_state), (value_cache, v_state)]:
             _, block_size, num_kv_heads, slot_bytes = cache.shape
-            used = cache[flat_bt]
+
+            # Gather + flatten in one op (avoids separate reshape)
+            used = cache[flat_bt]  # [entries, bs, heads, slot]
             N = num_entries * block_size * num_kv_heads
-            flat = used.reshape(N, slot_bytes)
 
             decoded_flat = fused_hadamard_decode_from_slots(
-                flat_slots=flat,
+                flat_slots=used.reshape(N, slot_bytes),
                 sign_flips=state.sign_flips,
                 codebook=state.codebook,
                 normal_idx=state.normal_idx,
@@ -359,10 +370,9 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 packed_bytes=packed_bytes,
             )
 
-            decoded = decoded_flat.reshape(
-                num_entries, block_size, num_kv_heads, head_size
+            decoded_caches.append(
+                decoded_flat.reshape(num_entries, block_size, num_kv_heads, head_size)
             )
-            decoded_caches.append(decoded)
 
         return decoded_caches[0], decoded_caches[1], new_block_table
 
