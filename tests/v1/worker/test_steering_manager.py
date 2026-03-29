@@ -5,11 +5,13 @@
 The SteeringManager maintains per-hook-point steering tables with the
 following row layout:
     row 0  — always zeros (no-steering sentinel)
-    row 1  — global-only steering vector
-    rows 2+ — global + per-request combined vectors
+    row 1  — global prefill effective (global_base + global_prefill)
+    row 2  — global decode effective (global_base + global_decode)
+    rows 3+ — phase-appropriate global + per-request combined vectors
 
-Tests are grouped into three classes covering the registration/release
-lifecycle, the row-lookup semantics, and the table-population logic.
+Tests are grouped into classes covering the registration/release
+lifecycle, the row-lookup semantics, the table-population logic,
+and the phase-aware config tracking.
 """
 
 import torch
@@ -52,11 +54,9 @@ def _make_layers(
     """Build a dict of FakeSteerableLayer keyed by layer index."""
     if layer_indices is None:
         layer_indices = [0, 1]
-    num_rows = manager.max_steering_configs + 2
-    return {
-        idx: FakeSteerableLayer(num_rows, hidden_size)
-        for idx in layer_indices
-    }
+    # +3 for rows 0 (zeros), 1 (global prefill), 2 (global decode)
+    num_rows = manager.max_steering_configs + 3
+    return {idx: FakeSteerableLayer(num_rows, hidden_size) for idx in layer_indices}
 
 
 # ---------------------------------------------------------------------------
@@ -67,19 +67,20 @@ def _make_layers(
 class TestRegisterRelease:
     """Registration and release lifecycle for per-request configs."""
 
-    def test_register_returns_row_gte_2(self):
-        """Registered configs must occupy rows >= 2 (0=zeros, 1=global)."""
+    def test_register_returns_row_gte_3(self):
+        """Registered configs must occupy rows >= 3
+        (0=zeros, 1=global prefill, 2=global decode)."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
-        row = mgr.register_config(config_hash=42, vectors=vectors)
-        assert row >= 2
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        assert row >= 3
 
     def test_duplicate_hash_returns_same_row(self):
         """Re-registering the same hash bumps the refcount, same row."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
-        row1 = mgr.register_config(config_hash=42, vectors=vectors)
-        row2 = mgr.register_config(config_hash=42, vectors=vectors)
+        row1 = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        row2 = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         assert row1 == row2
 
     def test_different_hashes_get_different_rows(self):
@@ -87,26 +88,28 @@ class TestRegisterRelease:
         mgr = _make_manager()
         vectors_a = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         vectors_b = {_HP: {0: [2.0] * HIDDEN_SIZE}}
-        row_a = mgr.register_config(config_hash=100, vectors=vectors_a)
-        row_b = mgr.register_config(config_hash=200, vectors=vectors_b)
+        row_a = mgr.register_config(config_hash=100, vectors=vectors_a, phase="prefill")
+        row_b = mgr.register_config(config_hash=200, vectors=vectors_b, phase="decode")
         assert row_a != row_b
 
     def test_release_decrements_refcount_still_active(self):
         """Releasing once with refcount > 1 keeps the config active."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
-        mgr.register_config(config_hash=42, vectors=vectors)
-        mgr.register_config(config_hash=42, vectors=vectors)  # refcount = 2
+        mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        mgr.register_config(
+            config_hash=42, vectors=vectors, phase="prefill"
+        )  # refcount = 2
         mgr.release_config(config_hash=42)  # refcount -> 1
         # Config should still be active and resolvable.
         row = mgr.get_row_for_config(config_hash=42)
-        assert row >= 2
+        assert row >= 3
 
     def test_release_frees_row_at_refcount_zero(self):
         """Fully releasing a config makes its row reclaimable."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
-        mgr.register_config(config_hash=42, vectors=vectors)
+        mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         assert mgr.num_active_configs == 1
         mgr.release_config(config_hash=42)
         assert mgr.num_active_configs == 0
@@ -115,28 +118,36 @@ class TestRegisterRelease:
         """After full release, the row can be assigned to a new config."""
         mgr = _make_manager(max_configs=1)
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
-        row_old = mgr.register_config(config_hash=42, vectors=vectors)
+        row_old = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         mgr.release_config(config_hash=42)
 
         # A completely new config should be able to use the freed slot.
         vectors_new = {_HP: {0: [9.0] * HIDDEN_SIZE}}
-        row_new = mgr.register_config(config_hash=99, vectors=vectors_new)
+        row_new = mgr.register_config(
+            config_hash=99, vectors=vectors_new, phase="decode"
+        )
         assert row_new == row_old  # same slot recycled
 
     def test_capacity_exhaustion_raises(self):
         """Exceeding max_steering_configs raises RuntimeError."""
         mgr = _make_manager(max_configs=2)
         mgr.register_config(
-            config_hash=1, vectors={_HP: {0: [1.0] * HIDDEN_SIZE}}
+            config_hash=1,
+            vectors={_HP: {0: [1.0] * HIDDEN_SIZE}},
+            phase="prefill",
         )
         mgr.register_config(
-            config_hash=2, vectors={_HP: {0: [2.0] * HIDDEN_SIZE}}
+            config_hash=2,
+            vectors={_HP: {0: [2.0] * HIDDEN_SIZE}},
+            phase="decode",
         )
         try:
             mgr.register_config(
-                config_hash=3, vectors={_HP: {0: [3.0] * HIDDEN_SIZE}}
+                config_hash=3,
+                vectors={_HP: {0: [3.0] * HIDDEN_SIZE}},
+                phase="prefill",
             )
-            assert False, "Expected RuntimeError for capacity exhaustion"
+            raise AssertionError("Expected RuntimeError for capacity exhaustion")
         except RuntimeError:
             pass
 
@@ -144,6 +155,17 @@ class TestRegisterRelease:
         """Releasing a hash that was never registered must not raise."""
         mgr = _make_manager()
         mgr.release_config(config_hash=999)  # should not raise
+
+    def test_free_rows_start_from_row_3(self):
+        """Free rows should start from row 3, not row 2."""
+        mgr = _make_manager(max_configs=2)
+        # With max_configs=2, rows 3 and 4 should be available
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        row1 = mgr.register_config(config_hash=10, vectors=vectors, phase="prefill")
+        row2 = mgr.register_config(config_hash=20, vectors=vectors, phase="decode")
+        assert row1 >= 3
+        assert row2 >= 3
+        assert {row1, row2} == {3, 4}
 
 
 # ---------------------------------------------------------------------------
@@ -154,22 +176,40 @@ class TestRegisterRelease:
 class TestGetRow:
     """Row-lookup semantics for get_row_for_config."""
 
-    def test_hash_zero_returns_global_row(self):
-        """Hash 0 is the sentinel for 'use global only' -> row 1."""
+    def test_hash_zero_prefill_returns_row_1(self):
+        """Hash 0 with is_prefill=True -> row 1 (global prefill)."""
         mgr = _make_manager()
-        assert mgr.get_row_for_config(config_hash=0) == 1
+        assert mgr.get_row_for_config(config_hash=0, is_prefill=True) == 1
+
+    def test_hash_zero_decode_returns_row_2(self):
+        """Hash 0 with is_prefill=False -> row 2 (global decode)."""
+        mgr = _make_manager()
+        assert mgr.get_row_for_config(config_hash=0, is_prefill=False) == 2
 
     def test_registered_hash_returns_assigned_row(self):
         """A registered config returns the row assigned at registration."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
-        row = mgr.register_config(config_hash=42, vectors=vectors)
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         assert mgr.get_row_for_config(config_hash=42) == row
 
-    def test_unregistered_nonzero_hash_returns_global_row(self):
-        """An unknown nonzero hash falls back to global row 1."""
+    def test_unregistered_nonzero_prefill_returns_row_1(self):
+        """An unknown nonzero hash with is_prefill=True falls back to row 1."""
         mgr = _make_manager()
-        assert mgr.get_row_for_config(config_hash=12345) == 1
+        assert mgr.get_row_for_config(config_hash=12345, is_prefill=True) == 1
+
+    def test_unregistered_nonzero_decode_returns_row_2(self):
+        """An unknown nonzero hash with is_prefill=False falls back to row 2."""
+        mgr = _make_manager()
+        assert mgr.get_row_for_config(config_hash=12345, is_prefill=False) == 2
+
+    def test_registered_hash_ignores_is_prefill(self):
+        """For a registered hash, is_prefill doesn't affect the row."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        assert mgr.get_row_for_config(config_hash=42, is_prefill=True) == row
+        assert mgr.get_row_for_config(config_hash=42, is_prefill=False) == row
 
 
 # ---------------------------------------------------------------------------
@@ -193,44 +233,116 @@ class TestPopulateTables:
             torch.zeros(HIDDEN_SIZE),
         )
 
-    def test_row_one_gets_global_vector(self):
-        """Row 1 should contain the global steering vector for each layer."""
+    def test_row_one_gets_global_prefill_effective(self):
+        """Row 1 should contain global_base + global_prefill."""
         mgr = _make_manager()
-        global_vec = torch.ones(HIDDEN_SIZE) * 3.0
+        base_vec = torch.ones(HIDDEN_SIZE) * 2.0
+        prefill_vec = torch.ones(HIDDEN_SIZE) * 3.0
         mgr.update_global_vectors(
-            hook_point=_HP, layer_idx=0, vector=global_vec
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=prefill_vec, phase="prefill"
         )
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
         table = getattr(layers[0], _TABLE_ATTR)
-        assert torch.allclose(table[1], global_vec)
+        expected = base_vec + prefill_vec  # 5.0
+        assert torch.allclose(table[1], expected)
 
-    def test_row_one_zero_without_global(self):
-        """Without a global vector set, row 1 must remain zeros."""
+    def test_row_two_gets_global_decode_effective(self):
+        """Row 2 should contain global_base + global_decode."""
+        mgr = _make_manager()
+        base_vec = torch.ones(HIDDEN_SIZE) * 2.0
+        decode_vec = torch.ones(HIDDEN_SIZE) * 4.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=decode_vec, phase="decode"
+        )
+        layers = _make_layers(mgr, layer_indices=[0])
+        mgr.populate_steering_tables(layers)
+        table = getattr(layers[0], _TABLE_ATTR)
+        expected = base_vec + decode_vec  # 6.0
+        assert torch.allclose(table[2], expected)
+
+    def test_row_one_base_only_no_prefill_global(self):
+        """Row 1 with only base vectors (no prefill-specific) = base."""
+        mgr = _make_manager()
+        base_vec = torch.ones(HIDDEN_SIZE) * 3.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        layers = _make_layers(mgr, layer_indices=[0])
+        mgr.populate_steering_tables(layers)
+        table = getattr(layers[0], _TABLE_ATTR)
+        assert torch.allclose(table[1], base_vec)
+
+    def test_row_one_zero_without_any_global(self):
+        """Without any global vector set, row 1 must remain zeros."""
         mgr = _make_manager()
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
         table = getattr(layers[0], _TABLE_ATTR)
         assert torch.allclose(table[1], torch.zeros(HIDDEN_SIZE))
 
-    def test_per_request_row_is_additive(self):
-        """Per-request rows should contain global + per_request vectors."""
+    def test_row_two_zero_without_any_global(self):
+        """Without any global vector set, row 2 must remain zeros."""
         mgr = _make_manager()
-        global_vec = torch.ones(HIDDEN_SIZE) * 2.0
+        layers = _make_layers(mgr, layer_indices=[0])
+        mgr.populate_steering_tables(layers)
+        table = getattr(layers[0], _TABLE_ATTR)
+        assert torch.allclose(table[2], torch.zeros(HIDDEN_SIZE))
+
+    def test_prefill_per_request_row_uses_prefill_global(self):
+        """Per-request prefill row = (base+prefill) + per_request."""
+        mgr = _make_manager()
+        base_vec = torch.ones(HIDDEN_SIZE) * 1.0
+        prefill_vec = torch.ones(HIDDEN_SIZE) * 2.0
         per_req_vec = torch.ones(HIDDEN_SIZE) * 5.0
         mgr.update_global_vectors(
-            hook_point=_HP, layer_idx=0, vector=global_vec
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=prefill_vec, phase="prefill"
         )
         vectors = {_HP: {0: per_req_vec.tolist()}}
-        row = mgr.register_config(config_hash=42, vectors=vectors)
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
 
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
 
         table = getattr(layers[0], _TABLE_ATTR)
-        expected = global_vec + per_req_vec
+        expected = base_vec + prefill_vec + per_req_vec  # 1+2+5 = 8.0
         assert torch.allclose(table[row], expected), (
-            f"Row {row} should be global+per_request.\n"
+            f"Row {row} should be (base+prefill)+per_request.\n"
+            f"Expected: {expected}\n"
+            f"Got: {table[row]}"
+        )
+
+    def test_decode_per_request_row_uses_decode_global(self):
+        """Per-request decode row = (base+decode) + per_request."""
+        mgr = _make_manager()
+        base_vec = torch.ones(HIDDEN_SIZE) * 1.0
+        decode_vec = torch.ones(HIDDEN_SIZE) * 3.0
+        per_req_vec = torch.ones(HIDDEN_SIZE) * 7.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=decode_vec, phase="decode"
+        )
+        vectors = {_HP: {0: per_req_vec.tolist()}}
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="decode")
+
+        layers = _make_layers(mgr, layer_indices=[0])
+        mgr.populate_steering_tables(layers)
+
+        table = getattr(layers[0], _TABLE_ATTR)
+        expected = base_vec + decode_vec + per_req_vec  # 1+3+7 = 11.0
+        assert torch.allclose(table[row], expected), (
+            f"Row {row} should be (base+decode)+per_request.\n"
             f"Expected: {expected}\n"
             f"Got: {table[row]}"
         )
@@ -240,7 +352,7 @@ class TestPopulateTables:
         mgr = _make_manager()
         per_req_vec = torch.ones(HIDDEN_SIZE) * 7.0
         vectors = {_HP: {0: per_req_vec.tolist()}}
-        row = mgr.register_config(config_hash=42, vectors=vectors)
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
 
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
@@ -248,40 +360,48 @@ class TestPopulateTables:
         table = getattr(layers[0], _TABLE_ATTR)
         assert torch.allclose(table[row], per_req_vec)
 
-    def test_layer_without_per_request_gets_global_only(self):
-        """A layer not covered by per-request vectors gets global in row."""
+    def test_layer_without_per_request_gets_phase_global_only(self):
+        """A layer not covered by per-request vectors gets phase global in row."""
         mgr = _make_manager()
-        global_vec_0 = torch.ones(HIDDEN_SIZE) * 2.0
-        global_vec_1 = torch.ones(HIDDEN_SIZE) * 3.0
+        base_0 = torch.ones(HIDDEN_SIZE) * 2.0
+        base_1 = torch.ones(HIDDEN_SIZE) * 3.0
         mgr.update_global_vectors(
-            hook_point=_HP, layer_idx=0, vector=global_vec_0
+            hook_point=_HP, layer_idx=0, vector=base_0, phase="base"
         )
         mgr.update_global_vectors(
-            hook_point=_HP, layer_idx=1, vector=global_vec_1
+            hook_point=_HP, layer_idx=1, vector=base_1, phase="base"
         )
 
         # Per-request config only targets layer 0, not layer 1.
         vectors = {_HP: {0: [5.0] * HIDDEN_SIZE}}
-        row = mgr.register_config(config_hash=42, vectors=vectors)
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
 
         layers = _make_layers(mgr, layer_indices=[0, 1])
         mgr.populate_steering_tables(layers)
 
-        # Layer 0: global + per_request
-        expected_layer0 = global_vec_0 + torch.tensor([5.0] * HIDDEN_SIZE)
+        # Layer 0: base + per_request (no prefill global, so just base+per_req)
+        expected_layer0 = base_0 + torch.tensor([5.0] * HIDDEN_SIZE)
         table_0 = getattr(layers[0], _TABLE_ATTR)
         assert torch.allclose(table_0[row], expected_layer0)
 
-        # Layer 1: only global (per-request didn't target it)
+        # Layer 1: only base (per-request didn't target it)
         table_1 = getattr(layers[1], _TABLE_ATTR)
-        assert torch.allclose(table_1[row], global_vec_1)
+        assert torch.allclose(table_1[row], base_1)
 
-    def test_clear_global_vectors_zeros_row_one(self):
-        """After clear_global_vectors, row 1 must return to zeros."""
+    def test_clear_global_vectors_zeros_rows_one_and_two(self):
+        """After clear_global_vectors, rows 1 and 2 must return to zeros."""
         mgr = _make_manager()
-        global_vec = torch.ones(HIDDEN_SIZE) * 4.0
+        base_vec = torch.ones(HIDDEN_SIZE) * 4.0
+        prefill_vec = torch.ones(HIDDEN_SIZE) * 2.0
+        decode_vec = torch.ones(HIDDEN_SIZE) * 3.0
         mgr.update_global_vectors(
-            hook_point=_HP, layer_idx=0, vector=global_vec
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=prefill_vec, phase="prefill"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=decode_vec, phase="decode"
         )
         mgr.clear_global_vectors()
 
@@ -290,3 +410,178 @@ class TestPopulateTables:
 
         table = getattr(layers[0], _TABLE_ATTR)
         assert torch.allclose(table[1], torch.zeros(HIDDEN_SIZE))
+        assert torch.allclose(table[2], torch.zeros(HIDDEN_SIZE))
+
+    def test_mixed_prefill_decode_configs_in_same_batch(self):
+        """Prefill and decode configs in the same batch use correct globals."""
+        mgr = _make_manager()
+        base_vec = torch.ones(HIDDEN_SIZE) * 1.0
+        prefill_global = torch.ones(HIDDEN_SIZE) * 2.0
+        decode_global = torch.ones(HIDDEN_SIZE) * 3.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=prefill_global, phase="prefill"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=decode_global, phase="decode"
+        )
+
+        prefill_per_req = torch.ones(HIDDEN_SIZE) * 10.0
+        decode_per_req = torch.ones(HIDDEN_SIZE) * 20.0
+
+        row_p = mgr.register_config(
+            config_hash=100,
+            vectors={_HP: {0: prefill_per_req.tolist()}},
+            phase="prefill",
+        )
+        row_d = mgr.register_config(
+            config_hash=200,
+            vectors={_HP: {0: decode_per_req.tolist()}},
+            phase="decode",
+        )
+
+        layers = _make_layers(mgr, layer_indices=[0])
+        mgr.populate_steering_tables(layers)
+        table = getattr(layers[0], _TABLE_ATTR)
+
+        # Prefill row: (base + prefill_global) + prefill_per_req = 1+2+10 = 13
+        expected_p = base_vec + prefill_global + prefill_per_req
+        assert torch.allclose(table[row_p], expected_p)
+
+        # Decode row: (base + decode_global) + decode_per_req = 1+3+20 = 24
+        expected_d = base_vec + decode_global + decode_per_req
+        assert torch.allclose(table[row_d], expected_d)
+
+
+# ---------------------------------------------------------------------------
+# TestPhaseTracking
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseTracking:
+    """Phase tracking via config_phase."""
+
+    def test_config_phase_stored_on_register(self):
+        """Register with phase='prefill' stores the phase."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        assert mgr.config_phase[42] == "prefill"
+
+    def test_config_phase_decode_stored(self):
+        """Register with phase='decode' stores the phase."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        mgr.register_config(config_hash=42, vectors=vectors, phase="decode")
+        assert mgr.config_phase[42] == "decode"
+
+    def test_config_phase_cleaned_on_release(self):
+        """Releasing a config removes its phase entry."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        mgr.release_config(42)
+        assert 42 not in mgr.config_phase
+
+    def test_config_phase_not_cleaned_with_remaining_refcount(self):
+        """Phase entry persists while refcount > 0."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        mgr.release_config(42)  # refcount -> 1
+        assert 42 in mgr.config_phase
+        assert mgr.config_phase[42] == "prefill"
+
+
+# ---------------------------------------------------------------------------
+# TestPhaseTransitionLifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseTransitionLifecycle:
+    """Simulate the register-prefill, release, register-decode lifecycle."""
+
+    def test_prefill_then_decode_transition(self):
+        """Register prefill, release, register decode — different rows OK."""
+        mgr = _make_manager()
+        vectors_p = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        vectors_d = {_HP: {0: [2.0] * HIDDEN_SIZE}}
+
+        row_p = mgr.register_config(config_hash=100, vectors=vectors_p, phase="prefill")
+        assert row_p >= 3
+        assert mgr.config_phase[100] == "prefill"
+
+        mgr.release_config(100)
+        assert mgr.num_active_configs == 0
+        assert 100 not in mgr.config_phase
+
+        row_d = mgr.register_config(config_hash=200, vectors=vectors_d, phase="decode")
+        assert row_d >= 3
+        assert mgr.config_phase[200] == "decode"
+
+        mgr.release_config(200)
+        assert mgr.num_active_configs == 0
+
+    def test_transition_reuses_freed_row(self):
+        """After prefill config is released, decode config can reuse the row."""
+        mgr = _make_manager(max_configs=1)
+        vectors_p = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        vectors_d = {_HP: {0: [2.0] * HIDDEN_SIZE}}
+
+        row_p = mgr.register_config(config_hash=100, vectors=vectors_p, phase="prefill")
+        mgr.release_config(100)
+
+        row_d = mgr.register_config(config_hash=200, vectors=vectors_d, phase="decode")
+        assert row_d == row_p  # reused slot
+
+
+# ---------------------------------------------------------------------------
+# TestUpdateGlobalVectors
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateGlobalVectors:
+    """Test phase-routed update_global_vectors."""
+
+    def test_base_phase_stores_in_base(self):
+        """phase='base' routes to global_base_vectors."""
+        mgr = _make_manager()
+        vec = torch.ones(HIDDEN_SIZE) * 5.0
+        mgr.update_global_vectors(hook_point=_HP, layer_idx=0, vector=vec, phase="base")
+        stored = mgr.global_base_vectors[_HP][0]
+        assert torch.allclose(stored, vec)
+
+    def test_prefill_phase_stores_in_prefill(self):
+        """phase='prefill' routes to global_prefill_vectors."""
+        mgr = _make_manager()
+        vec = torch.ones(HIDDEN_SIZE) * 6.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=vec, phase="prefill"
+        )
+        stored = mgr.global_prefill_vectors[_HP][0]
+        assert torch.allclose(stored, vec)
+
+    def test_decode_phase_stores_in_decode(self):
+        """phase='decode' routes to global_decode_vectors."""
+        mgr = _make_manager()
+        vec = torch.ones(HIDDEN_SIZE) * 7.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=vec, phase="decode"
+        )
+        stored = mgr.global_decode_vectors[_HP][0]
+        assert torch.allclose(stored, vec)
+
+    def test_invalid_phase_raises(self):
+        """Invalid phase string raises ValueError."""
+        mgr = _make_manager()
+        vec = torch.ones(HIDDEN_SIZE) * 1.0
+        try:
+            mgr.update_global_vectors(
+                hook_point=_HP, layer_idx=0, vector=vec, phase="invalid"
+            )
+            raise AssertionError("Expected ValueError for invalid phase")
+        except ValueError:
+            pass

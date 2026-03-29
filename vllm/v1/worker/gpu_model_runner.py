@@ -1061,18 +1061,34 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
-        # Release steering configs for finished requests (before popping
-        # state so we still have access to the steering config hashes).
+        # Release the currently-active steering config for finished requests
+        # (before popping state so we still have access to the hashes).
+        # Only one phase config is registered at a time: prefill during
+        # prefill, decode after the transition.
         if getattr(self, "_steering_manager", None) is not None:
             for req_id in scheduler_output.finished_req_ids:
                 req_state = self.requests.get(req_id)
                 if req_state is not None:
-                    for h in (
-                        req_state.prefill_steering_config_hash,
-                        req_state.decode_steering_config_hash,
-                    ):
+                    req_index = self.input_batch.req_id_to_index.get(req_id)
+                    if req_index is not None:
+                        num_computed = int(
+                            self.input_batch.num_computed_tokens_cpu[req_index]
+                        )
+                        num_prompt = req_state.num_prompt_tokens
+                        if num_computed < num_prompt:
+                            h = req_state.prefill_steering_config_hash
+                        else:
+                            h = req_state.decode_steering_config_hash
                         if h != 0:
                             self._steering_manager.release_config(h)
+                    else:
+                        # Request not in batch — release whichever is nonzero
+                        for h in (
+                            req_state.prefill_steering_config_hash,
+                            req_state.decode_steering_config_hash,
+                        ):
+                            if h != 0:
+                                self._steering_manager.release_config(h)
 
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
@@ -1181,9 +1197,9 @@ class GPUModelRunner(
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
-            # Register per-request steering configs if present.
-            # Use the prefill hash for initial registration since new
-            # requests start in prefill.
+            # Register only the initial-phase steering config.
+            # New requests start in prefill; the decode config will be
+            # registered on phase transition in _update_steering_buffers.
             if (
                 getattr(self, "_steering_manager", None) is not None
                 and new_req_data.sampling_params is not None
@@ -1196,14 +1212,7 @@ class GPUModelRunner(
                     self._steering_manager.register_config(
                         new_req_data.prefill_steering_config_hash,
                         sp.effective_prefill_steering,
-                    )
-                if (
-                    new_req_data.decode_steering_config_hash != 0
-                    and sp.effective_decode_steering
-                ):
-                    self._steering_manager.register_config(
-                        new_req_data.decode_steering_config_hash,
-                        sp.effective_decode_steering,
+                        phase="prefill",
                     )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
@@ -3048,6 +3057,7 @@ class GPUModelRunner(
         Lazily initializes the SteeringManager on first call.  Each step:
         1. Populate each layer's per-hook steering_table from the manager
         2. Build the steering_index mapping tokens to table rows
+        3. Detect prefill->decode phase transitions and swap configs
         """
         from vllm.model_executor.layers.steering import (
             HOOK_POINT_TABLE_ATTR,
@@ -3079,7 +3089,8 @@ class GPUModelRunner(
 
                 # Pick up any existing global vectors from the
                 # steering_vector_* buffers (set via the global API
-                # before this method was called).
+                # before this method was called).  These are base-phase
+                # globals.
                 for hp, vec_attr in HOOK_POINT_VECTOR_ATTR.items():
                     for layer_idx, mod in steerable.items():
                         if not hasattr(mod, vec_attr):
@@ -3087,7 +3098,7 @@ class GPUModelRunner(
                         vec = getattr(mod, vec_attr)
                         if vec.any():
                             self._steering_manager.update_global_vectors(
-                                hp.value, layer_idx, vec
+                                hp.value, layer_idx, vec, phase="base"
                             )
             else:
                 self._steering_manager = None
@@ -3122,35 +3133,68 @@ class GPUModelRunner(
                 token_offset += n_tokens
                 continue
 
-            # Decode heuristic: decode requests schedule exactly 1 token.
-            # TODO: spec decode may schedule >1 tokens for decode requests.
-            is_decode = n_tokens == 1
+            # Determine phase from num_computed vs num_prompt
+            num_computed = int(self.input_batch.num_computed_tokens_cpu[req_index])
+            num_prompt = int(self.input_batch.num_prompt_tokens[req_index])
+            is_prefilling = num_computed < num_prompt
 
-            if is_decode:
-                decode_hash = int(
-                    self.input_batch.request_decode_steering_hash[req_index]
-                )
-                if decode_hash != 0:
-                    row = self._steering_manager.get_row_for_config(decode_hash)
-                else:
-                    row = 1  # global-only
-                steering_index[token_offset] = row
-            else:
+            if is_prefilling:
                 # Prefill: use prefill steering hash
                 prefill_hash = int(
                     self.input_batch.request_prefill_steering_hash[req_index]
                 )
-                if prefill_hash != 0:
-                    row = self._steering_manager.get_row_for_config(prefill_hash)
-                    steering_index[token_offset : token_offset + n_tokens] = row
-                else:
-                    steering_index[token_offset : token_offset + n_tokens] = 0
+                row = self._steering_manager.get_row_for_config(
+                    prefill_hash, is_prefill=True
+                )
+                steering_index[token_offset : token_offset + n_tokens] = row
+
+                # Check if this request will transition to decode after
+                # this step's tokens are processed.
+                num_computed_after = num_computed + n_tokens
+                if num_computed_after >= num_prompt:
+                    self._handle_steering_transition(req_id, req_index, prefill_hash)
+            else:
+                # Decode: use decode steering hash
+                decode_hash = int(
+                    self.input_batch.request_decode_steering_hash[req_index]
+                )
+                row = self._steering_manager.get_row_for_config(
+                    decode_hash, is_prefill=False
+                )
+                steering_index[token_offset : token_offset + n_tokens] = row
 
             token_offset += n_tokens
 
         # Zero out remaining positions
         if token_offset < steering_index.shape[0]:
             steering_index[token_offset:].zero_()
+
+    def _handle_steering_transition(
+        self,
+        req_id: str,
+        req_index: int,
+        prefill_hash: int,
+    ) -> None:
+        """Handle prefill->decode steering config transition.
+
+        Called when a request will complete prefill after this step.
+        Releases the prefill config and registers the decode config
+        so it is ready for the next step's table population.
+        """
+        if prefill_hash != 0:
+            self._steering_manager.release_config(prefill_hash)
+
+        decode_hash = int(self.input_batch.request_decode_steering_hash[req_index])
+        if decode_hash != 0:
+            req_state = self.requests.get(req_id)
+            if req_state is not None and req_state.sampling_params is not None:
+                sp = req_state.sampling_params
+                if sp.effective_decode_steering:
+                    self._steering_manager.register_config(
+                        decode_hash,
+                        sp.effective_decode_steering,
+                        phase="decode",
+                    )
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()

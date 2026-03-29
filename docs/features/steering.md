@@ -54,7 +54,7 @@ vllm serve google/gemma-3-4b-it --enable-steering --max-steering-configs 4
 All four hook point buffers are always allocated on every decoder layer.
 The memory cost is trivial (~3.6 MB for 26 layers at `max_steering_configs=4`).
 
-Without `--enable-steering`, each layer gets a 2-row table (zeros + global).
+Without `--enable-steering`, each layer gets a 3-row table (zeros + global prefill + global decode).
 Per-request `steering_vectors` in `SamplingParams` are silently ignored by
 the scheduler since there is no `SteeringConfig` to enable admission control.
 
@@ -207,19 +207,25 @@ NewRequestData.decode_steering_config_hash
 Model Runner._update_states()
     ├── CachedRequestState.{prefill,decode}_steering_config_hash
     ├── InputBatch.request_{prefill,decode}_steering_hash[req_idx]
-    └── SteeringManager.register_config(hash, vectors) → row assignment
+    └── SteeringManager.register_config(hash, vectors, phase="prefill")
+    │     Only prefill config registered initially; decode registered on
+    │     phase transition
     │
     ▼
 Model Runner._update_steering_buffers()  (called before each forward pass)
     ├── SteeringManager.populate_steering_tables(layers)
     │     For EACH hook point's table:
     │       Row 0 = zeros (no-steering sentinel)
-    │       Row 1 = global vector for that hook point
-    │       Rows 2+ = global + per_request (additive)
-    └── Build steering_index: token → table row (shared across hook points)
-          prefill tokens → prefill hash row (or 0 if no prefill steering)
-          decode, no per-request → 1
-          decode, per-request → decode hash row
+    │       Row 1 = global_base + global_prefill (prefill effective)
+    │       Row 2 = global_base + global_decode (decode effective)
+    │       Rows 3+ = phase-appropriate global + per_request (additive)
+    ├── Build steering_index: token → table row (shared across hook points)
+    │     prefill tokens, no per-request → 1 (global prefill)
+    │     prefill tokens, per-request → prefill hash row (3+)
+    │     decode tokens, no per-request → 2 (global decode)
+    │     decode tokens, per-request → decode hash row (3+)
+    └── Detect prefill→decode transitions and swap configs
+          _handle_steering_transition() releases prefill, registers decode
     │
     ▼
 Gemma3DecoderLayer.forward()
@@ -249,21 +255,33 @@ Each decoder layer has a `steering_table_<hook>` buffer per hook point
 (e.g., `steering_table_post_mlp_pre_ln`):
 
 ```
-Row 0:  [0, 0, 0, ..., 0]          ← prefill / no steering
-Row 1:  [g₁, g₂, g₃, ..., gₕ]     ← global vector for this hook point
-Row 2:  [g₁+a₁, g₂+a₂, ..., gₕ+aₕ] ← global + per-request config A
-Row 3:  [g₁+b₁, g₂+b₂, ..., gₕ+bₕ] ← global + per-request config B
+Row 0:  [0, 0, 0, ..., 0]              ← no steering (zeros sentinel)
+Row 1:  [gB+gP₁, gB+gP₂, ..., gB+gPₕ] ← global prefill effective (base + prefill)
+Row 2:  [gB+gD₁, gB+gD₂, ..., gB+gDₕ] ← global decode effective (base + decode)
+Row 3:  [(gB+gP)+a₁, ..., (gB+gP)+aₕ]  ← prefill global + per-request config A
+Row 4:  [(gB+gD)+b₁, ..., (gB+gD)+bₕ]  ← decode global + per-request config B
 ...
 ```
 
 Each hook point has its own table with independent global/per-request vectors.
+The global effective vectors are composed from three tiers:
+- **base**: applies to both phases (from `steering_vectors` global API)
+- **prefill**: prefill-specific globals
+- **decode**: decode-specific globals
+
+Per-request rows (3+) combine the phase-appropriate global effective vector
+with the per-request vector based on the config's registered phase.
 
 The shared `steering_index` buffer maps each token position to a row:
 
 ```
 Token:  [decode₁, decode₂, prefill₁, prefill₂, prefill₃, decode₃]
-Index:  [   2,       1,        0,        0,        0,       3    ]
+Index:  [   4,       2,        1,        1,        3,       4    ]
 ```
+
+Phase detection uses `num_computed_tokens < num_prompt_tokens` (not the
+`n_tokens == 1` heuristic), making it correct for chunked prefill and
+speculative decoding.
 
 ## Deduplication
 
@@ -306,13 +324,14 @@ If `max_steering_configs` slots are occupied by distinct configs:
 
 ## Invariants
 
-1. **Row 0 is always zeros.** No token should ever receive steering from row 0 (unless no steering is configured).
+1. **Row 0 is always zeros.** No token should ever receive steering from row 0 (unless no steering is configured at all).
 2. **Prefill and decode phases use independent config hashes.** Each phase resolves its own effective vectors and hashes them separately.
 3. **Combined rows are recomputed every step.** `populate_steering_tables()` runs before each forward pass, so changes to global vectors are immediately reflected.
-4. **Buffer shapes are fixed at init.** The table has `max_steering_configs + 2` rows regardless of how many are active. This is required for CUDA graph compatibility.
+4. **Buffer shapes are fixed at init.** The table has `max_steering_configs + 3` rows (0=zeros, 1=global prefill, 2=global decode, 3+=per-request). This is required for CUDA graph compatibility.
 5. **The steering_index tensor is shared across all layers and all hook points.** One in-place update is visible to all decoder layers. Token-to-row mapping is independent of hook point.
 6. **All four hook point buffers are always allocated.** The memory cost is trivial. Zero rows make unused hook points a no-op.
 7. **The custom op is not a splitting op.** It prevents constant-folding but does not partition the compiled graph.
-8. **Reference counting is exact.** Every `register_config` is balanced by a `release_config` when the request finishes. Rows are only freed at refcount 0. Both prefill and decode hashes are released on finish.
+8. **One-active-at-a-time registration.** Only one phase's config is registered per request at any time. Prefill config is registered on request creation; on prefill->decode transition, the prefill config is released and the decode config is registered. On request completion, only the currently-active config is released.
 9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all three vector fields before any request processing begins.
 10. **Additive composition is pre-scaled.** `resolve_effective_vectors()` applies co-located scales before summing base and phase-specific vectors.
+11. **Phase detection is token-count based.** `num_computed_tokens < num_prompt_tokens` determines prefill vs decode, not the `n_tokens == 1` heuristic.
