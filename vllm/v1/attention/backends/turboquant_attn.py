@@ -357,7 +357,28 @@ class TurboQuantAttentionImpl(AttentionImpl):
         num_entries: int,
         new_block_table: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Fused 4-bit decode from paged cache."""
+        """Fused 4-bit decode. Uses CUDA WPH kernel if available."""
+        import os
+
+        use_cuda_wph = os.environ.get("TQ_CUDA_WPH", "0") in ("1", "true")
+        if use_cuda_wph:
+            try:
+                from vllm.v1.attention.ops.cuda_turboquant_decode import (
+                    cuda_wph_decode_from_slots,
+                )
+
+                return self._decode_cuda_wph(
+                    key_cache,
+                    value_cache,
+                    layer,
+                    flat_bt,
+                    num_entries,
+                    new_block_table,
+                    cuda_wph_decode_from_slots,
+                )
+            except Exception:
+                pass  # Fall through to Triton
+
         from vllm.v1.attention.ops.triton_fused_turboquant import (
             fused_paged_decode,
         )
@@ -384,6 +405,48 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 packed_bytes=packed_bytes,
             )
             decoded_caches.append(decoded)
+
+        return decoded_caches[0], decoded_caches[1], new_block_table
+
+    def _decode_cuda_wph(
+        self,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        layer: torch.nn.Module,
+        flat_bt: torch.Tensor,
+        num_entries: int,
+        new_block_table: torch.Tensor,
+        decode_fn,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """CUDA warp-per-head decode (no shared memory races)."""
+        k_state = layer._tq_k_state
+        v_state = layer._tq_v_state
+        head_size = k_state.head_size
+        normal_size = k_state.normal_size
+        n_outliers = head_size - normal_size
+        packed_bytes = math.ceil(normal_size * 4 / 8)
+
+        decoded_caches = []
+        for cache, state in [(key_cache, k_state), (value_cache, v_state)]:
+            _, block_size, num_kv_heads, slot_bytes = cache.shape
+            used = cache[flat_bt]
+            N = num_entries * block_size * num_kv_heads
+            flat = used.reshape(N, slot_bytes)
+
+            decoded_flat = decode_fn(
+                flat_slots=flat,
+                sign_flips=state.sign_flips,
+                codebook=state.codebook,
+                normal_idx=state.normal_idx,
+                outlier_idx=state.outlier_idx,
+                head_size=head_size,
+                normal_size=normal_size,
+                n_outliers=n_outliers,
+                packed_bytes=packed_bytes,
+            )
+            decoded_caches.append(
+                decoded_flat.reshape(num_entries, block_size, num_kv_heads, head_size)
+            )
 
         return decoded_caches[0], decoded_caches[1], new_block_table
 
