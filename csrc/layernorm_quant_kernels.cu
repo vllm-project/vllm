@@ -65,9 +65,23 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      float const out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
-      out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
-          scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+#if defined(__gfx90a__)
+      // gfx90a + hipcc -ffast-math elides the float-to-half-to-float
+      // round-trip in c10::Half arithmetic when the result feeds
+      // straight into a float.  Compute in float explicitly so
+      // behaviour is deterministic.  Only c10::Half is affected;
+      // bf16 round-trips are preserved by the compiler.
+      if constexpr (std::is_same_v<scalar_t, c10::Half>) {
+        float const out_norm = x * s_variance * static_cast<float>(src2.val[j]);
+        out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
+            scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+      } else
+#endif
+      {
+        float const out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
+        out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
+            scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+      }
     }
   }
 }
