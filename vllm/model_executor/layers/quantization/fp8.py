@@ -569,11 +569,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
 
 class Fp8MoEKernelMixin:
-    """Fp8-specific kernel setup, quant config, and apply methods.
-
-    Mixed into both Fp8MoEMethod (checkpoint) and Fp8OnlineMoEMethod (online)
-    to share fp8 backend selection, kernel format conversion, and dispatch.
-    """
+    """FP8 backend selection, kernel format conversion, and dispatch for MoE."""
 
     moe: FusedMoEConfig
     moe_quant_config: FusedMoEQuantConfig | None
@@ -737,13 +733,8 @@ class Fp8MoEKernelMixin:
 
 
 class Fp8MoEMethod(Fp8MoEKernelMixin, FusedMoEMethodBase):
-    """MoE method for FP8.
-    Supports loading FP8 checkpoints with static weight scale and
-    dynamic/static activation scale.
-
-    Args:
-        quant_config: The quantization config.
-    """
+    """MoE method for loading pre-quantized FP8 checkpoints with static
+    weight scales and dynamic/static activation scales."""
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         FusedMoEMethodBase.__init__(self, layer.moe_config)
@@ -936,14 +927,8 @@ class Fp8MoEMethod(Fp8MoEKernelMixin, FusedMoEMethodBase):
 
 
 class Fp8OnlineMoEMethod(Fp8MoEKernelMixin, OnlineMoEMethodBase):
-    """MoE method for online FP8 quantization.
-    Supports loading quantized FP16/BF16 model checkpoints with dynamic
-    activation scaling. The weight scaling factor will be initialized after
-    the model weights are loaded.
-
-    Args:
-        quant_config: The quantization config.
-    """
+    """Online FP8 MoE quantization. Loads full-precision weights and
+    quantizes to FP8 with per-tensor scales during model loading."""
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         OnlineMoEMethodBase.__init__(self, layer.moe_config)

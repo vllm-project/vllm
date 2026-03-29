@@ -26,11 +26,8 @@ from vllm.model_executor.layers.quantization.online_moe import (
 
 
 class ExpertsInt8Config(QuantizationConfig):
-    """Config for online int8 MoE expert quantization.
-
-    MoE expert weights are loaded in full precision and quantized to int8 with
-    per-row scales during model loading.  Linear layers are left unquantized.
-    """
+    """Online int8 quantization for MoE expert weights.
+    Linear layers are left unquantized."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -66,12 +63,8 @@ class ExpertsInt8Config(QuantizationConfig):
 
 
 class ExpertsInt8MoEMethod(OnlineMoEMethodBase):
-    """Online int8 MoE quantization method.
-
-    Inherits meta-device weight creation and the
-    ``process_weights_after_loading`` guard from :class:`OnlineMoEMethodBase`.
-    Implements ``_quantize_weights`` for per-row int8 quantization.
-    """
+    """Online int8 MoE quantization. Loads full-precision weights and
+    quantizes to int8 with per-row scales during model loading."""
 
     def __init__(
         self,
@@ -89,11 +82,13 @@ class ExpertsInt8MoEMethod(OnlineMoEMethodBase):
         w13_scale = torch.zeros(
             layer.num_experts,
             layer.w13_weight.shape[1],
+            device=w13.device,
             dtype=torch.float32,
         )
         w2_scale = torch.zeros(
             layer.num_experts,
             layer.w2_weight.shape[1],
+            device=w2.device,
             dtype=torch.float32,
         )
 

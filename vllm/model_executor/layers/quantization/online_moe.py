@@ -13,22 +13,8 @@ from vllm.model_executor.utils import set_weight_attrs
 
 
 class OnlineMoEMethodBase(FusedMoEMethodBase):
-    """Base class for online MoE quantization methods.
-
-    Allocates full-precision weights on the meta device, defers
-    materialization until all expert weights are loaded via the QeRL
-    layerwise processing infrastructure, then delegates to
-    ``_quantize_weights`` for method-specific quantization.
-
-    Subclasses must implement:
-        ``_quantize_weights(layer)`` — quantize the loaded full-precision
-        weights and store the results on the layer.
-
-    Subclasses may override:
-        ``_create_extra_weights(...)`` — create additional parameters
-        (biases, etc.) before ``initialize_online_processing`` counts
-        total elements.
-    """
+    """Base for MoE methods that load full-precision weights and quantize
+    them during model loading via the QeRL layerwise processing system."""
 
     uses_meta_device: bool = True
 
