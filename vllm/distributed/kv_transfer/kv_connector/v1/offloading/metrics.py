@@ -39,6 +39,9 @@ class OffloadingConnectorStats(KVConnectorStats):
         if not self.data:
             # Empty container init, no data is passed in.
             self.reset()
+        else:
+            self.data.setdefault(TRANSFERS_KEY, {})
+            self.data.setdefault(GAUGES_KEY, {})
 
     def reset(self):
         self.data: dict[str, Any] = {TRANSFERS_KEY: {}, GAUGES_KEY: {}}
