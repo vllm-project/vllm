@@ -976,3 +976,84 @@ fahrenheit
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
     assert args["unit"] == "fahrenheit"
+
+
+def test_streaming_whitespace_only_content_before_tool_call(
+    qwen3_xml_tool_parser, qwen3_tokenizer, sample_tools
+):
+    """Test that whitespace-only content between reasoning and tool_call is filtered.
+
+    This is a regression test for issue #29562:
+    https://github.com/vllm-project/vllm/issues/29562
+
+    When using stream mode with reasoning (e.g., <think>...</think>) and tool_call,
+    the whitespace (e.g., "\\n\\n") between </think> and <tool_call> should not be
+    emitted as content to the client.
+    """
+    # Simulate the output after reasoning ends: "\n\n" followed by tool_call
+    # This is what the tool parser receives after the reasoning parser
+    # extracts the content after </think>
+    model_output = """\n\n<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    collected_content = ""
+    tool_states = {}
+
+    for delta_message in stream_delta_message_generator(
+        qwen3_xml_tool_parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.content:
+            collected_content += delta_message.content
+
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    # The key assertion: whitespace-only content should be filtered out
+    # Before the fix, collected_content would be "\n\n"
+    # After the fix, collected_content should be empty or contain no
+    # whitespace-only segments
+    assert collected_content.strip() == "", (
+        f"Whitespace-only content should be filtered, "
+        f"but got: {repr(collected_content)}"
+    )
+
+    # Verify tool call was still parsed correctly
+    assert len(tool_states) == 1
+    state = tool_states[0]
+    assert state["name"] == "get_current_weather"
+    assert state["arguments"] is not None
+    args = json.loads(state["arguments"])
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
