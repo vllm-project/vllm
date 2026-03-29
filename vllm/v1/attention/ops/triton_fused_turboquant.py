@@ -6,12 +6,9 @@ Encode kernel fuses: normalize → sign_flip → Hadamard → quantize →
 4-bit pack → scatter packed bytes to paged KV cache.
 Norms and outlier bytes are handled in Python (simple, small).
 
-Decode kernel fuses: load packed bytes → 4-bit unpack → codebook →
+Decode kernel fuses: load slot → 4-bit unpack → codebook →
 inverse Hadamard → sign_flip → scale by norm → write output.
-Norms and outlier channels extracted in Python before kernel call.
-
-Both eliminate the expensive intermediate indices tensor and Python
-bit-packing overhead.
+Single kernel produces the full decoded head vector.
 """
 
 import math
@@ -60,11 +57,7 @@ def _fused_encode_and_store_kernel(
     norm_stride_token: tl.int64,
     BLOCK_D: tl.constexpr,
 ):
-    """Fused encode + 4-bit pack + scatter packed bytes to cache.
-
-    Norms are output separately (no Triton bitcast needed).
-    Outlier bytes are written to cache by the Python wrapper.
-    """
+    """Fused encode + 4-bit pack + scatter packed bytes to cache."""
     token_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
     scratch_row = token_idx * num_kv_heads + head_idx
@@ -110,9 +103,6 @@ def _fused_encode_and_store_kernel(
         idx = idx + (x > bnd).to(tl.int32)
 
     # ---- 4-bit pack via scratch ----
-    # IMPORTANT: reuse dim_offs (BLOCK_D) for pair indexing too, so all
-    # tl.arange vectors have the same width. Mixing widths causes
-    # thread-mapping issues where stores aren't visible to loads.
     tl.store(scratch_ptr + scratch_base + dim_offs, idx.to(tl.float32))
     tl.debug_barrier()
 
@@ -171,11 +161,7 @@ def fused_hadamard_encode_and_store(
     block_offsets: torch.Tensor,  # [num_tokens]
     bit_width: int = 4,
 ) -> None:
-    """Fused encode + 4-bit pack + scatter to paged KV cache.
-
-    The kernel handles quantization + packing + scatter of packed bytes.
-    Outlier bytes and norm bytes are written to cache by Python (simple ops).
-    """
+    """Fused encode + 4-bit pack + scatter to paged KV cache."""
     assert bit_width == 4, "Fused kernel only supports 4-bit packing"
 
     num_tokens, num_kv_heads, normal_size = normal_x.shape
@@ -200,7 +186,6 @@ def fused_hadamard_encode_and_store(
 
     grid = (num_tokens, num_kv_heads)
 
-    # Kernel writes packed indices to cache and norms to separate tensor
     _fused_encode_and_store_kernel[grid](
         x_ptr=normal_x,
         signs_ptr=sign_flips,
@@ -248,46 +233,57 @@ def fused_hadamard_encode_and_store(
 
 
 # ===========================================================================
-# Fused decode: unpack → codebook → inverse Hadamard → scale → write
+# Fused decode: slot bytes → full decoded head in one kernel
 # ===========================================================================
 
 
 @triton.jit
-def _fused_decode_kernel(
-    # Packed index bytes: [N, packed_bytes] uint8
-    packed_ptr,
+def _fused_decode_from_slot_kernel(
+    # Full slot data: [N, slot_bytes] uint8
+    slot_ptr,
     # Sign flips: [BLOCK_D] float32
     signs_ptr,
     # Codebook: [num_centroids] float32
     codebook_ptr,
     # Scratch: [N, BLOCK_D] float32
     scratch_ptr,
-    # Norms: [N] float16
+    # Norms: [N] float16 (pre-extracted by Python)
     norms_ptr,
-    # Output: [N, normal_size] bfloat16
+    # Normal channel indices: [normal_size] int64
+    normal_idx_ptr,
+    # Outlier channel indices: [n_outliers] int64
+    outlier_idx_ptr,
+    # Output: [N, head_size] bfloat16
     out_ptr,
     # Shapes
     normal_size: tl.constexpr,
+    head_size: tl.constexpr,
+    n_outliers: tl.constexpr,
+    outlier_u8_count: tl.constexpr,
     packed_bytes: tl.constexpr,
+    slot_bytes: tl.constexpr,
     LOG2_D: tl.constexpr,
+    HAS_OUTLIERS: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    BLOCK_OUTLIER: tl.constexpr,
 ):
-    """Fused decode: unpack 4-bit → codebook → inv Hadamard → scale → write.
+    """Fully fused decode from slot bytes to decoded head vector.
 
-    Norms are passed as a separate float16 tensor (no bitcast needed).
-    Outlier channels are handled by the Python caller.
+    Single kernel: unpack indices, codebook lookup, inverse Hadamard,
+    sign flip, norm scale, outlier copy, output write.
     """
     row_idx = tl.program_id(0)
+    slot_base = row_idx * slot_bytes
+    out_base = row_idx * head_size
 
     dim_offs = tl.arange(0, BLOCK_D)
     mask = dim_offs < normal_size
 
-    # ---- Unpack 4-bit indices directly (no scratch needed) ----
-    # For position i: byte = packed[i // 2], index = (byte >> ((i%2)*4)) & 0xF
+    # ---- Unpack 4-bit indices from slot ----
     byte_idx = dim_offs // 2
     is_high = dim_offs % 2
     packed_data = tl.load(
-        packed_ptr + row_idx * packed_bytes + byte_idx,
+        slot_ptr + slot_base + outlier_u8_count + byte_idx,
         mask=mask & (byte_idx < packed_bytes),
         other=0,
     ).to(tl.int32)
@@ -319,21 +315,42 @@ def _fused_decode_kernel(
     had_scale = 1.0 / tl.sqrt(float(BLOCK_D))
     x = x * had_scale
 
-    # ---- Sign flips ----
+    # ---- Sign flips + norm scale ----
     signs = tl.load(signs_ptr + dim_offs)
-    x = x * signs
-
-    # ---- Scale by norm (loaded from float16 tensor, no bitcast) ----
     norm_val = tl.load(norms_ptr + row_idx).to(tl.float32)
-    x = x * norm_val
+    x = x * signs * norm_val
 
     # ---- Write output ----
-    out_base = row_idx * normal_size
-    tl.store(
-        out_ptr + out_base + dim_offs,
-        x.to(tl.bfloat16),
-        mask=mask,
-    )
+    if HAS_OUTLIERS:
+        # Write normal channels to scattered positions
+        normal_positions = tl.load(normal_idx_ptr + dim_offs, mask=mask, other=0)
+        tl.store(
+            out_ptr + out_base + normal_positions,
+            x.to(tl.bfloat16),
+            mask=mask,
+        )
+        # Copy outlier values: read bf16 bytes from slot, write to output
+        outlier_dim = tl.arange(0, BLOCK_OUTLIER)
+        outlier_mask = outlier_dim < n_outliers
+        outlier_positions = tl.load(
+            outlier_idx_ptr + outlier_dim, mask=outlier_mask, other=0
+        )
+        # Read 2 bytes per outlier, write to scratch, reload as bf16
+        byte_offs = outlier_dim * 2
+        lo = tl.load(slot_ptr + slot_base + byte_offs, mask=outlier_mask, other=0)
+        hi = tl.load(slot_ptr + slot_base + byte_offs + 1, mask=outlier_mask, other=0)
+        scratch_u8 = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.uint8))
+        tl.store(scratch_u8 + byte_offs, lo, mask=outlier_mask)
+        tl.store(scratch_u8 + byte_offs + 1, hi, mask=outlier_mask)
+        scratch_bf16 = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.bfloat16))
+        outlier_bf16 = tl.load(scratch_bf16 + outlier_dim, mask=outlier_mask, other=0.0)
+        tl.store(
+            out_ptr + out_base + outlier_positions,
+            outlier_bf16,
+            mask=outlier_mask,
+        )
+    else:
+        tl.store(out_ptr + out_base + dim_offs, x.to(tl.bfloat16), mask=mask)
 
 
 def fused_hadamard_decode_from_slots(
@@ -347,20 +364,21 @@ def fused_hadamard_decode_from_slots(
     n_outliers: int,
     packed_bytes: int,
 ) -> torch.Tensor:
-    """Fused decode from flat slot data to bf16 output.
+    """Fully fused decode: single kernel from slot bytes to decoded bf16.
 
-    The kernel handles: unpack → codebook → inv Hadamard → scale → write.
-    Python handles: norm extraction and outlier channel interleaving.
+    Only Python overhead: norm extraction (slice + view, ~2 bytes/row).
+    Everything else done in one Triton kernel launch.
 
     Returns: [N, head_size] bfloat16
     """
     N = flat_slots.shape[0]
+    slot_bytes = flat_slots.shape[1]
     BLOCK_D = sign_flips.shape[0]
     LOG2_D = int(math.log2(BLOCK_D))
     outlier_u8_count = n_outliers * 2
     norm_offset = outlier_u8_count + packed_bytes
 
-    # Extract norms from slots (Python — simple slice + view)
+    # Extract norms (only Python step — fast slice + view)
     norms = (
         flat_slots[:, norm_offset : norm_offset + 2]
         .contiguous()
@@ -368,47 +386,38 @@ def fused_hadamard_decode_from_slots(
         .reshape(N)
     )
 
-    # Extract packed index bytes
-    packed_data = flat_slots[
-        :, outlier_u8_count : outlier_u8_count + packed_bytes
-    ].contiguous()
-
-    # Kernel decodes normal channels
-    normal_out = torch.empty(
-        N, normal_size, dtype=torch.bfloat16, device=flat_slots.device
-    )
+    has_outliers = normal_idx is not None and n_outliers > 0
+    out = torch.empty(N, head_size, dtype=torch.bfloat16, device=flat_slots.device)
     scratch = torch.empty(N, BLOCK_D, dtype=torch.float32, device=flat_slots.device)
 
-    grid = (N,)
+    if normal_idx is None:
+        normal_idx = torch.empty(0, dtype=torch.int64, device=flat_slots.device)
+    if outlier_idx is None:
+        outlier_idx = torch.empty(0, dtype=torch.int64, device=flat_slots.device)
 
-    _fused_decode_kernel[grid](
-        packed_ptr=packed_data,
+    BLOCK_OUTLIER = max(_next_power_of_2(n_outliers), 1)
+
+    _fused_decode_from_slot_kernel[(N,)](
+        slot_ptr=flat_slots,
         signs_ptr=sign_flips,
         codebook_ptr=codebook,
         scratch_ptr=scratch,
         norms_ptr=norms,
-        out_ptr=normal_out,
+        normal_idx_ptr=normal_idx,
+        outlier_idx_ptr=outlier_idx,
+        out_ptr=out,
         normal_size=normal_size,
+        head_size=head_size,
+        n_outliers=n_outliers,
+        outlier_u8_count=outlier_u8_count,
         packed_bytes=packed_bytes,
+        slot_bytes=slot_bytes,
         LOG2_D=LOG2_D,
+        HAS_OUTLIERS=has_outliers,
         BLOCK_D=BLOCK_D,
+        BLOCK_OUTLIER=BLOCK_OUTLIER,
         num_warps=4,
         num_stages=1,
     )
 
-    # Assemble full output with outlier channels
-    has_outliers = normal_idx is not None and n_outliers > 0
-    if has_outliers:
-        out = torch.empty(N, head_size, dtype=torch.bfloat16, device=flat_slots.device)
-        out[:, normal_idx] = normal_out
-        # Extract outlier bf16 values from slots
-        outlier_vals = (
-            flat_slots[:, :outlier_u8_count]
-            .contiguous()
-            .view(torch.bfloat16)
-            .reshape(N, n_outliers)
-        )
-        out[:, outlier_idx] = outlier_vals
-        return out
-    else:
-        return normal_out
+    return out
