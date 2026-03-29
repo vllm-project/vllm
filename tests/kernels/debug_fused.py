@@ -195,6 +195,21 @@ def test_decode_simple():
         num_warps=4, num_stages=1,
     )
 
+    # Also verify unpacked indices match
+    unpacked_ref = torch.zeros(N, normal_size, dtype=torch.uint8, device=device)
+    for i in range(normal_size):
+        byte_i = i // 2
+        is_hi = i % 2
+        if is_hi:
+            unpacked_ref[:, i] = (packed[:, byte_i] >> 4) & 0xF
+        else:
+            unpacked_ref[:, i] = packed[:, byte_i] & 0xF
+    idx_match = torch.equal(unpacked_ref, indices)
+    print(f"Unpacked indices match original: {idx_match}")
+    if not idx_match:
+        diff_pos = (unpacked_ref != indices).nonzero()[:5]
+        print(f"  First diffs at: {diff_pos.tolist()}")
+
     diff = (ref - fused_out).abs()
     print(f"Decode max diff: {diff.max().item():.6f}")
     print(f"Decode mean diff: {diff.mean().item():.6f}")

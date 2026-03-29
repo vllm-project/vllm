@@ -281,41 +281,18 @@ def _fused_decode_kernel(
     dim_offs = tl.arange(0, BLOCK_D)
     mask = dim_offs < normal_size
 
-    # ---- Unpack 4-bit indices ----
-    # Use dim_offs (BLOCK_D) for pair indexing too, so all tl.arange
-    # vectors share the same width (avoids thread-mapping issues).
-    pair_mask = dim_offs < packed_bytes
+    # ---- Unpack 4-bit indices directly (no scratch needed) ----
+    # For position i: byte = packed[i // 2], index = (byte >> ((i%2)*4)) & 0xF
+    byte_idx = dim_offs // 2
+    is_high = dim_offs % 2
     packed_data = tl.load(
-        packed_ptr + row_idx * packed_bytes + dim_offs,
-        mask=pair_mask,
+        packed_ptr + row_idx * packed_bytes + byte_idx,
+        mask=mask & (byte_idx < packed_bytes),
         other=0,
     ).to(tl.int32)
+    indices = (packed_data >> (is_high * 4)) & 0xF
 
-    low_idx = packed_data & 0xF
-    high_idx = (packed_data >> 4) & 0xF
-
-    # Store unpacked values to scratch at interleaved positions
     scratch_base = row_idx * BLOCK_D
-    even_pos = dim_offs * 2
-    odd_pos = dim_offs * 2 + 1
-    tl.store(
-        scratch_ptr + scratch_base + even_pos,
-        low_idx.to(tl.float32),
-        mask=pair_mask & (even_pos < normal_size),
-    )
-    tl.store(
-        scratch_ptr + scratch_base + odd_pos,
-        high_idx.to(tl.float32),
-        mask=pair_mask & (odd_pos < normal_size),
-    )
-    tl.debug_barrier()
-
-    # Reload as contiguous indices
-    indices = tl.load(
-        scratch_ptr + scratch_base + dim_offs,
-        mask=mask,
-        other=0,
-    ).to(tl.int32)
 
     # ---- Codebook lookup ----
     reconstructed = tl.load(codebook_ptr + indices)
