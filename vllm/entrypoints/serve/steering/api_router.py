@@ -205,21 +205,29 @@ async def set_steering(
             # Invalidate prefix cache if prefill-affecting vectors
             # were changed.  Base vectors affect prefill (they are
             # added to prefill-specific vectors), and explicit
-            # prefill_vectors do as well.
+            # prefill_vectors do as well.  This preempts all running
+            # requests and clears the prefix cache so that subsequent
+            # prefills use the new steering state.
             affects_prefill = (
-                normalized_base is not None or normalized_prefill is not None
+                normalized_base is not None
+                or normalized_prefill is not None
+                or request.replace  # replace clears all tiers including prefill
             )
             if affects_prefill:
-                # TODO(WS4): The api_router does not currently have a
-                # direct path to reset_prefix_cache.  The engine
-                # exposes reset_prefix_cache() but it requires going
-                # through the engine core, not collective_rpc.  This
-                # needs an engine-level method or a new RPC endpoint.
-                # For now we log the need for cache invalidation.
-                logger.info(
-                    "Prefill-affecting steering vectors changed; "
-                    "prefix cache should be invalidated."
+                success = await engine.reset_prefix_cache(
+                    reset_running_requests=True
                 )
+                if success:
+                    logger.info(
+                        "Prefix cache invalidated after "
+                        "prefill-affecting steering change."
+                    )
+                else:
+                    logger.warning(
+                        "Prefix cache reset requested after "
+                        "prefill-affecting steering change but "
+                        "some blocks were still in use."
+                    )
 
         # Build response with all hook points across tiers.
         all_hooks: set[str] = set()
@@ -261,6 +269,9 @@ async def clear_steering(raw_request: Request) -> JSONResponse:
     try:
         async with _steering_lock:
             await engine.collective_rpc("clear_steering_vectors")
+            # Clearing may remove prefill-affecting vectors, so
+            # invalidate prefix cache to stay consistent.
+            await engine.reset_prefix_cache(reset_running_requests=True)
         return JSONResponse(content={"status": "ok"})
     except Exception as err:
         logger.exception("Failed to clear steering vectors")
