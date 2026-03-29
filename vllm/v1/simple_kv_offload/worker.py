@@ -264,17 +264,6 @@ class SimpleCPUOffloadWorker:
             return
         self._flush_and_sync_all()
 
-    def drain_pending_transfers(self) -> set[str]:
-        """Synchronize in-flight events and return completions.
-
-        Returns ``finished_sending`` with ``__store_done_<idx>`` sentinels for
-        every pending store event so the scheduler can process the completions.
-        """
-        pending = set(self._pending_store_event_indices)
-        self._flush_and_sync_all()
-        self._pending_store_event_indices -= pending
-        return {f"__store_done_{idx}" for idx in pending}
-
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
         for event_idx, event in self._load_events:

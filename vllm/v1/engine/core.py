@@ -70,7 +70,7 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
@@ -578,26 +578,9 @@ class EngineCore:
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        # Drain any in-flight connector transfers
-        self._drain_connector_transfers()
         return self.scheduler.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
-
-    def _drain_connector_transfers(self) -> None:
-        """Flush worker-side connector transfers and process completions."""
-        connector = self.scheduler.get_kv_connector()
-        if (
-            connector is None
-            or not hasattr(connector, "has_pending_transfers")
-            or not connector.has_pending_transfers()
-        ):
-            return
-        results: list = self.collective_rpc("drain_kv_connector_transfers")
-        for finished_sending in results:
-            if finished_sending:
-                output = KVConnectorOutput(finished_sending=finished_sending)
-                connector.update_connector_output(output)
 
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.

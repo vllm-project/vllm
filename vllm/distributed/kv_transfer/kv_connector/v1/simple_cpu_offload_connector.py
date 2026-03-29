@@ -228,14 +228,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.scheduler_manager.has_pending_stores()
         return False
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
-    def drain_pending_transfers(self) -> set[str] | None:
-        """Worker-side: flush deferred stores, synchronize events, return
-        `finished_sending` for update_connector_output() to process."""
-        if self.worker_handler is not None:
-            return self.worker_handler.drain_pending_transfers()
-        return None
-
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.take_events()
