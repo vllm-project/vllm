@@ -70,14 +70,9 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        try:
-            vllm_config = get_current_vllm_config()
-            model_config = vllm_config.model_config
-            cache_config = vllm_config.cache_config
-        except Exception:
-            # This branch works for the AttentionConfig to get supported
-            # kernel block sizes
-            model_config = None
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
         if (
             model_config
             and model_config.is_hybrid
