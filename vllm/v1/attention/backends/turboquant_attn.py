@@ -302,9 +302,18 @@ class TurboQuantAttentionImpl(AttentionImpl):
         flat_bt = block_table.reshape(-1)
         num_entries = flat_bt.shape[0]
 
-        new_block_table = torch.arange(
-            num_entries, device=block_table.device, dtype=block_table.dtype
-        ).reshape(block_table.shape)
+        # Cache the remapped block_table (same size every call in CUDA graph)
+        cache_key = (num_entries, block_table.shape[0], block_table.shape[1])
+        if not hasattr(self, "_bt_cache") or self._bt_cache[0] != cache_key:
+            self._bt_cache = (
+                cache_key,
+                torch.arange(
+                    num_entries,
+                    device=block_table.device,
+                    dtype=block_table.dtype,
+                ).reshape(block_table.shape),
+            )
+        new_block_table = self._bt_cache[1]
 
         if bits == 4:
             return self._decode_fused_4bit(
