@@ -211,6 +211,7 @@ class LoggingStatLogger(StatLoggerBase):
         return
 
     def log(self):
+        num_preemptions = self.num_preemptions
         self._update_stats()
         self.aggregate_scheduler_stats()
         # Avoid log noise on an idle production system
@@ -229,9 +230,9 @@ class LoggingStatLogger(StatLoggerBase):
             self.last_scheduler_stats.num_waiting_reqs,
         ]
 
-        if self.num_preemptions > 0:
+        if num_preemptions > 0:
             log_parts.append("Preemptions: %d")
-            log_args.append(self.num_preemptions)
+            log_args.append(num_preemptions)
 
         log_parts.extend(
             [
