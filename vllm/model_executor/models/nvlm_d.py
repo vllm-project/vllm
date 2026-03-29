@@ -14,12 +14,10 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    BatchedTensorInputs,
-    MultiModalDataDict,
-)
+from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,

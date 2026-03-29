@@ -32,9 +32,9 @@ from vllm.platforms import current_platform
 
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
-    # Note: VllmBackend.__init__ already calls configure_post_pass()
     config = VllmConfig()
-    _ = VllmBackend(config)
+    backend = VllmBackend(config)
+    backend.configure_post_pass()
 
     # test that repr(config) succeeds
     val = repr(config)
@@ -1129,6 +1129,28 @@ def test_needs_dp_coordination(
     vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
 
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
+
+
+def test_renderer_num_workers_with_mm_cache():
+    """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
+    since neither cache type is thread-safe."""
+    mm_model = "Qwen/Qwen2-VL-2B-Instruct"
+
+    # Should raise: multi-worker + cache enabled (default cache_gb=4)
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=4)
+
+    # Should raise: multi-worker + explicit cache size
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=2, mm_processor_cache_gb=1.0)
+
+    # Should pass: multi-worker + cache disabled
+    config = ModelConfig(mm_model, renderer_num_workers=4, mm_processor_cache_gb=0)
+    assert config.renderer_num_workers == 4
+
+    # Should pass: single worker + cache enabled (default)
+    config = ModelConfig(mm_model, renderer_num_workers=1)
+    assert config.renderer_num_workers == 1
 
 
 def test_eagle_draft_model_config():
