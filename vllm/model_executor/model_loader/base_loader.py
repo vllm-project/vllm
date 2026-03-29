@@ -9,7 +9,6 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -61,6 +60,7 @@ class BaseModelLoader(ABC):
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
+            # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
 
             # Log peak GPU memory after loading weights. This is needed
@@ -72,11 +72,6 @@ class BaseModelLoader(ABC):
                     format_gib(peak_memory),
                     scope="local",
                 )
-
-            # Process weights into kernel format. Note that when using online
-            # quantization, weights are (typically) quantized as they are loaded.
-            if _has_online_quant(model):
-                finalize_layerwise_processing(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
 
@@ -91,12 +86,3 @@ def log_model_inspection(model: nn.Module) -> None:
     from vllm.model_inspection import format_model_inspection
 
     logger.info("vLLM model structure:\n%s", format_model_inspection(model))
-
-
-def _has_online_quant(model: nn.Module):
-    for module in model.modules():
-        quant_method = getattr(module, "quant_method", None)
-        if getattr(quant_method, "uses_meta_device", False):
-            return True
-
-    return False
