@@ -35,7 +35,7 @@ elif [[ "${CUDA_VERSION}" == 12.[8-9]* ]]; then
     FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 10.3a 12.0"
 else
     # CUDA 13.0+
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0f 12.0"
+    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0f 12.0 12.1"
 fi
 
 echo "🏗️ Building FlashInfer AOT for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
