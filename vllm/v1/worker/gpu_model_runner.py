@@ -1077,18 +1077,24 @@ class GPUModelRunner(
                         num_prompt = req_state.num_prompt_tokens
                         if num_computed < num_prompt:
                             h = req_state.prefill_steering_config_hash
+                            phase = "prefill"
                         else:
                             h = req_state.decode_steering_config_hash
+                            phase = "decode"
                         if h != 0:
-                            self._steering_manager.release_config(h)
+                            self._steering_manager.release_config(h, phase)
                     else:
                         # Request not in batch — release whichever is nonzero
-                        for h in (
-                            req_state.prefill_steering_config_hash,
-                            req_state.decode_steering_config_hash,
-                        ):
-                            if h != 0:
-                                self._steering_manager.release_config(h)
+                        h_p = req_state.prefill_steering_config_hash
+                        h_d = req_state.decode_steering_config_hash
+                        if h_p != 0:
+                            self._steering_manager.release_config(
+                                h_p, "prefill"
+                            )
+                        if h_d != 0:
+                            self._steering_manager.release_config(
+                                h_d, "decode"
+                            )
 
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
@@ -3115,7 +3121,8 @@ class GPUModelRunner(
                     )
                     if (
                         ph != 0
-                        and ph not in self._steering_manager.config_to_row
+                        and (ph, "prefill")
+                        not in self._steering_manager.config_to_row
                     ):
                         eff = rs.sampling_params.effective_prefill_steering
                         if eff:
@@ -3204,7 +3211,7 @@ class GPUModelRunner(
         so it is ready for the next step's table population.
         """
         if prefill_hash != 0:
-            self._steering_manager.release_config(prefill_hash)
+            self._steering_manager.release_config(prefill_hash, "prefill")
 
         decode_hash = int(self.input_batch.request_decode_steering_hash[req_index])
         if decode_hash != 0:

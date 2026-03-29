@@ -100,9 +100,9 @@ class TestRegisterRelease:
         mgr.register_config(
             config_hash=42, vectors=vectors, phase="prefill"
         )  # refcount = 2
-        mgr.release_config(config_hash=42)  # refcount -> 1
+        mgr.release_config(config_hash=42, phase="prefill")  # refcount -> 1
         # Config should still be active and resolvable.
-        row = mgr.get_row_for_config(config_hash=42)
+        row = mgr.get_row_for_config(config_hash=42, is_prefill=True)
         assert row >= 3
 
     def test_release_frees_row_at_refcount_zero(self):
@@ -111,7 +111,7 @@ class TestRegisterRelease:
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         assert mgr.num_active_configs == 1
-        mgr.release_config(config_hash=42)
+        mgr.release_config(config_hash=42, phase="prefill")
         assert mgr.num_active_configs == 0
 
     def test_freed_row_is_reusable(self):
@@ -119,7 +119,7 @@ class TestRegisterRelease:
         mgr = _make_manager(max_configs=1)
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         row_old = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
-        mgr.release_config(config_hash=42)
+        mgr.release_config(config_hash=42, phase="prefill")
 
         # A completely new config should be able to use the freed slot.
         vectors_new = {_HP: {0: [9.0] * HIDDEN_SIZE}}
@@ -154,7 +154,7 @@ class TestRegisterRelease:
     def test_release_nonexistent_hash_is_noop(self):
         """Releasing a hash that was never registered must not raise."""
         mgr = _make_manager()
-        mgr.release_config(config_hash=999)  # should not raise
+        mgr.release_config(config_hash=999, phase="prefill")  # should not raise
 
     def test_free_rows_start_from_row_3(self):
         """Free rows should start from row 3, not row 2."""
@@ -166,6 +166,24 @@ class TestRegisterRelease:
         assert row1 >= 3
         assert row2 >= 3
         assert {row1, row2} == {3, 4}
+
+    def test_same_hash_different_phase_gets_separate_rows(self):
+        """Same config_hash with different phases must get separate rows."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        row_p = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        row_d = mgr.register_config(config_hash=42, vectors=vectors, phase="decode")
+        assert row_p != row_d
+        assert row_p >= 3
+        assert row_d >= 3
+
+    def test_same_hash_same_phase_deduplicates(self):
+        """Same hash + same phase should deduplicate (bump refcount)."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        row1 = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        row2 = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        assert row1 == row2
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +209,7 @@ class TestGetRow:
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
-        assert mgr.get_row_for_config(config_hash=42) == row
+        assert mgr.get_row_for_config(config_hash=42, is_prefill=True) == row
 
     def test_unregistered_nonzero_prefill_returns_row_1(self):
         """An unknown nonzero hash with is_prefill=True falls back to row 1."""
@@ -203,13 +221,14 @@ class TestGetRow:
         mgr = _make_manager()
         assert mgr.get_row_for_config(config_hash=12345, is_prefill=False) == 2
 
-    def test_registered_hash_ignores_is_prefill(self):
-        """For a registered hash, is_prefill doesn't affect the row."""
+    def test_registered_hash_uses_phase_for_lookup(self):
+        """A prefill-registered hash is only found with is_prefill=True."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         assert mgr.get_row_for_config(config_hash=42, is_prefill=True) == row
-        assert mgr.get_row_for_config(config_hash=42, is_prefill=False) == row
+        # With is_prefill=False the (42, "decode") key is absent, falls back
+        assert mgr.get_row_for_config(config_hash=42, is_prefill=False) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +473,37 @@ class TestPopulateTables:
         expected_d = base_vec + decode_global + decode_per_req
         assert torch.allclose(table[row_d], expected_d)
 
+    def test_same_hash_different_phase_uses_correct_globals(self):
+        """Same hash registered as both prefill and decode should combine
+        with the correct global for each phase."""
+        mgr = _make_manager()
+        base_vec = torch.ones(HIDDEN_SIZE) * 1.0
+        prefill_global = torch.ones(HIDDEN_SIZE) * 2.0
+        decode_global = torch.ones(HIDDEN_SIZE) * 3.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=prefill_global, phase="prefill"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=decode_global, phase="decode"
+        )
+
+        per_req = torch.ones(HIDDEN_SIZE) * 5.0
+        vectors = {_HP: {0: per_req.tolist()}}
+        row_p = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        row_d = mgr.register_config(config_hash=42, vectors=vectors, phase="decode")
+
+        layers = _make_layers(mgr, layer_indices=[0])
+        mgr.populate_steering_tables(layers)
+        table = getattr(layers[0], _TABLE_ATTR)
+
+        # Prefill row: (base + prefill_global) + per_req = 1+2+5 = 8
+        assert torch.allclose(table[row_p], base_vec + prefill_global + per_req)
+        # Decode row: (base + decode_global) + per_req = 1+3+5 = 9
+        assert torch.allclose(table[row_d], base_vec + decode_global + per_req)
+
 
 # ---------------------------------------------------------------------------
 # TestPhaseTracking
@@ -461,39 +511,38 @@ class TestPopulateTables:
 
 
 class TestPhaseTracking:
-    """Phase tracking via config_phase."""
+    """Phase tracking via (config_hash, phase) composite keys."""
 
     def test_config_phase_stored_on_register(self):
-        """Register with phase='prefill' stores the phase."""
+        """Register with phase='prefill' is keyed by (hash, 'prefill')."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
-        assert mgr.config_phase[42] == "prefill"
+        assert (42, "prefill") in mgr.config_to_row
 
     def test_config_phase_decode_stored(self):
-        """Register with phase='decode' stores the phase."""
+        """Register with phase='decode' is keyed by (hash, 'decode')."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         mgr.register_config(config_hash=42, vectors=vectors, phase="decode")
-        assert mgr.config_phase[42] == "decode"
+        assert (42, "decode") in mgr.config_to_row
 
     def test_config_phase_cleaned_on_release(self):
-        """Releasing a config removes its phase entry."""
+        """Releasing a config removes its (hash, phase) entry."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
-        mgr.release_config(42)
-        assert 42 not in mgr.config_phase
+        mgr.release_config(42, phase="prefill")
+        assert (42, "prefill") not in mgr.config_to_row
 
     def test_config_phase_not_cleaned_with_remaining_refcount(self):
-        """Phase entry persists while refcount > 0."""
+        """(hash, phase) entry persists while refcount > 0."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
-        mgr.release_config(42)  # refcount -> 1
-        assert 42 in mgr.config_phase
-        assert mgr.config_phase[42] == "prefill"
+        mgr.release_config(42, phase="prefill")  # refcount -> 1
+        assert (42, "prefill") in mgr.config_to_row
 
 
 # ---------------------------------------------------------------------------
@@ -512,17 +561,17 @@ class TestPhaseTransitionLifecycle:
 
         row_p = mgr.register_config(config_hash=100, vectors=vectors_p, phase="prefill")
         assert row_p >= 3
-        assert mgr.config_phase[100] == "prefill"
+        assert (100, "prefill") in mgr.config_to_row
 
-        mgr.release_config(100)
+        mgr.release_config(100, phase="prefill")
         assert mgr.num_active_configs == 0
-        assert 100 not in mgr.config_phase
+        assert (100, "prefill") not in mgr.config_to_row
 
         row_d = mgr.register_config(config_hash=200, vectors=vectors_d, phase="decode")
         assert row_d >= 3
-        assert mgr.config_phase[200] == "decode"
+        assert (200, "decode") in mgr.config_to_row
 
-        mgr.release_config(200)
+        mgr.release_config(200, phase="decode")
         assert mgr.num_active_configs == 0
 
     def test_transition_reuses_freed_row(self):
@@ -532,7 +581,7 @@ class TestPhaseTransitionLifecycle:
         vectors_d = {_HP: {0: [2.0] * HIDDEN_SIZE}}
 
         row_p = mgr.register_config(config_hash=100, vectors=vectors_p, phase="prefill")
-        mgr.release_config(100)
+        mgr.release_config(100, phase="prefill")
 
         row_d = mgr.register_config(config_hash=200, vectors=vectors_d, phase="decode")
         assert row_d == row_p  # reused slot
