@@ -318,6 +318,28 @@ class TestClearSteeringVectors:
         for layer in model.layers:
             assert layer.steering_vector_post_mlp_pre_ln.sum().item() == 0.0
 
+    def test_clear_removes_pending_steering_globals(self, worker):
+        """Clearing should also discard any pending globals queued
+        before the SteeringManager was lazily initialized."""
+        # Simulate pending globals queued before manager init
+        worker.model_runner._pending_steering_globals = [
+            ({"post_mlp_pre_ln": {0: torch.ones(1, 8)}}, "base"),
+        ]
+        worker.clear_steering_vectors()
+        assert worker.model_runner._pending_steering_globals is None
+
+    def test_clear_removes_pending_globals_when_no_manager(self, worker):
+        """Even without a live SteeringManager, clear should remove
+        pending globals so they are not replayed on lazy init."""
+        # Ensure no manager exists
+        assert not hasattr(worker.model_runner, "_steering_manager")
+        worker.model_runner._pending_steering_globals = [
+            ({"post_mlp_pre_ln": {1: torch.ones(1, 8)}}, "prefill"),
+            ({"post_mlp_pre_ln": {2: torch.ones(1, 8)}}, "decode"),
+        ]
+        worker.clear_steering_vectors()
+        assert worker.model_runner._pending_steering_globals is None
+
 
 # --- get_steering_status ---
 

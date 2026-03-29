@@ -380,6 +380,10 @@ class WorkerBase:
             mgr = getattr(self.model_runner, "_steering_manager", None)
             if mgr is not None:
                 mgr.clear_global_vectors()
+            # Also clear any pending globals queued before manager init,
+            # so they are not replayed on lazy initialization.
+            if hasattr(self.model_runner, "_pending_steering_globals"):
+                self.model_runner._pending_steering_globals = None
 
     def get_steering_status(self) -> dict:
         """Return per-hook-point status for active layers.
