@@ -9,10 +9,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
-from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,

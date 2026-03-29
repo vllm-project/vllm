@@ -97,10 +97,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._handlers = CpuGpuOffloadingHandlers(
                 kv_caches=kv_caches,
-                block_size_factor=self.block_size_factor,
-                attn_backends=attn_backends,
-                gpu_block_size=gpu_block_size,
-                cpu_block_size=gpu_block_size * self.block_size_factors[0],
+                block_size_factor=self.block_size_factors[0],
                 num_cpu_blocks=self.num_blocks,
             )
 

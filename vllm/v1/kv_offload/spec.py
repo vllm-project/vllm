@@ -10,7 +10,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.planner import HybridOffloadPlanner
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
