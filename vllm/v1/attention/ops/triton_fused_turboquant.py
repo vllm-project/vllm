@@ -59,7 +59,6 @@ def _fused_encode_and_store_kernel(
     # Norm strides
     norm_stride_token: tl.int64,
     BLOCK_D: tl.constexpr,
-    BLOCK_PACKED: tl.constexpr,
 ):
     """Fused encode + 4-bit pack + scatter packed bytes to cache.
 
@@ -110,13 +109,15 @@ def _fused_encode_and_store_kernel(
         idx = idx + (x > bnd).to(tl.int32)
 
     # ---- 4-bit pack via scratch ----
+    # IMPORTANT: reuse dim_offs (BLOCK_D) for pair indexing too, so all
+    # tl.arange vectors have the same width. Mixing widths causes
+    # thread-mapping issues where stores aren't visible to loads.
     tl.store(scratch_ptr + scratch_base + dim_offs, idx.to(tl.float32))
     tl.debug_barrier()
 
-    pair_offs = tl.arange(0, BLOCK_PACKED)
-    pair_mask = pair_offs < packed_bytes
-    even_pos = pair_offs * 2
-    odd_pos = pair_offs * 2 + 1
+    pair_mask = dim_offs < packed_bytes
+    even_pos = dim_offs * 2
+    odd_pos = dim_offs * 2 + 1
 
     even_val = tl.load(
         scratch_ptr + scratch_base + even_pos,
@@ -141,7 +142,7 @@ def _fused_encode_and_store_kernel(
     )
 
     tl.store(
-        cache_ptr + cache_base + packed_start + pair_offs,
+        cache_ptr + cache_base + packed_start + dim_offs,
         packed_byte,
         mask=pair_mask,
     )
@@ -196,7 +197,6 @@ def fused_hadamard_encode_and_store(
         device=normal_x.device,
     )
 
-    BLOCK_PACKED = _next_power_of_2(packed_bytes)
     grid = (num_tokens, num_kv_heads)
 
     # Kernel writes packed indices to cache and norms to separate tensor
@@ -222,7 +222,6 @@ def fused_hadamard_encode_and_store(
         cache_stride_head=cache.stride(2),
         norm_stride_token=norms.stride(0),
         BLOCK_D=BLOCK_D,
-        BLOCK_PACKED=BLOCK_PACKED,
         num_warps=4,
         num_stages=1,
     )
@@ -271,7 +270,6 @@ def _fused_decode_kernel(
     packed_bytes: tl.constexpr,
     LOG2_D: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    BLOCK_PACKED: tl.constexpr,
 ):
     """Fused decode: unpack 4-bit → codebook → inv Hadamard → scale → write.
 
@@ -284,10 +282,11 @@ def _fused_decode_kernel(
     mask = dim_offs < normal_size
 
     # ---- Unpack 4-bit indices ----
-    pair_offs = tl.arange(0, BLOCK_PACKED)
-    pair_mask = pair_offs < packed_bytes
+    # Use dim_offs (BLOCK_D) for pair indexing too, so all tl.arange
+    # vectors share the same width (avoids thread-mapping issues).
+    pair_mask = dim_offs < packed_bytes
     packed_data = tl.load(
-        packed_ptr + row_idx * packed_bytes + pair_offs,
+        packed_ptr + row_idx * packed_bytes + dim_offs,
         mask=pair_mask,
         other=0,
     ).to(tl.int32)
@@ -297,8 +296,8 @@ def _fused_decode_kernel(
 
     # Store unpacked values to scratch at interleaved positions
     scratch_base = row_idx * BLOCK_D
-    even_pos = pair_offs * 2
-    odd_pos = pair_offs * 2 + 1
+    even_pos = dim_offs * 2
+    odd_pos = dim_offs * 2 + 1
     tl.store(
         scratch_ptr + scratch_base + even_pos,
         low_idx.to(tl.float32),
@@ -400,7 +399,6 @@ def fused_hadamard_decode_from_slots(
     )
     scratch = torch.empty(N, BLOCK_D, dtype=torch.float32, device=flat_slots.device)
 
-    BLOCK_PACKED = _next_power_of_2(packed_bytes)
     grid = (N,)
 
     _fused_decode_kernel[grid](
@@ -414,7 +412,6 @@ def fused_hadamard_decode_from_slots(
         packed_bytes=packed_bytes,
         LOG2_D=LOG2_D,
         BLOCK_D=BLOCK_D,
-        BLOCK_PACKED=BLOCK_PACKED,
         num_warps=4,
         num_stages=1,
     )

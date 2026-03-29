@@ -179,10 +179,9 @@ def test_decode_simple():
     packed = packed[:, :packed_bytes].to(torch.uint8)
 
     # Fused decode with packed + norms directly
-    from vllm.v1.attention.ops.triton_fused_turboquant import _fused_decode_kernel, _next_power_of_2
+    from vllm.v1.attention.ops.triton_fused_turboquant import _fused_decode_kernel
     BLOCK_D = state["sign_flips"].shape[0]
     LOG2_D = int(math.log2(BLOCK_D))
-    BLOCK_PACKED = _next_power_of_2(packed_bytes)
 
     fused_out = torch.empty(N, normal_size, dtype=torch.bfloat16, device=device)
     scratch = torch.empty(N, BLOCK_D, dtype=torch.float32, device=device)
@@ -192,7 +191,7 @@ def test_decode_simple():
         codebook_ptr=state["codebook"], scratch_ptr=scratch,
         norms_ptr=norms, out_ptr=fused_out,
         normal_size=normal_size, packed_bytes=packed_bytes,
-        LOG2_D=LOG2_D, BLOCK_D=BLOCK_D, BLOCK_PACKED=BLOCK_PACKED,
+        LOG2_D=LOG2_D, BLOCK_D=BLOCK_D,
         num_warps=4, num_stages=1,
     )
 
