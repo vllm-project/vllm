@@ -213,9 +213,9 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
                 torch.from_numpy(rows_arr).to(self.device, non_blocking=True),
                 torch.from_numpy(toks_arr).to(self.device, non_blocking=True),
             )
-            bias_tensor = torch.from_numpy(
-                bias_arr.astype(np.float32)
-            ).to(self.device, non_blocking=True)
+            bias_tensor = torch.from_numpy(bias_arr.astype(np.float32)).to(
+                self.device, non_blocking=True
+            )
             logits[logits_slice] += bias_tensor
 
         return logits
