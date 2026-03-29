@@ -8,7 +8,7 @@ tests, and how to investigate failures.
 vLLM CI runs on two platforms:
 
 | Platform | Purpose |
-|---|---|
+| --- | --- |
 | **GitHub Actions** | Fast pre-commit checks: linting (`ruff`, `clang-format`), type checking (`mypy`), shell/markdown linting, typo detection |
 | **Buildkite** | All unit tests and integration/e2e tests that require GPU hardware |
 
@@ -68,7 +68,7 @@ override this (e.g., for a doc change that also touches code), set
 ### Automatic Triggers
 
 | Event | Behavior |
-|---|---|
+| --- | --- |
 | PR labeled **`ready`** | Runs standard (non-optional) test suite |
 | PR labeled **`ready-run-all-tests`** | Runs all tests including optional ones (`RUN_ALL=1`, `NIGHTLY=1`) |
 | Merge to `main` | Post-merge test suite, filtered by diff between the new commit and its parent (same `source_file_dependencies` logic applies) |
@@ -97,7 +97,7 @@ regardless of which steps have `source_file_dependencies`:
 All test jobs depend on a Docker image being built from the PR's code:
 
 | Step | Hardware | Description |
-|---|---|---|
+| --- | --- | --- |
 | `image-build` | AWS builder | Main CUDA GPU image |
 | `image-build-cpu` | AWS builder | CPU-only image |
 | `image-build-hpu` | AWS builder | Intel Gaudi (HPU) image |
@@ -112,7 +112,7 @@ Images are pushed to AWS ECR (`public.ecr.aws/q9t5s3a7`):
 These are the primary GPU test groups, each defined in a separate YAML file:
 
 | Group | File | Key Tests |
-|---|---|---|
+| --- | --- | --- |
 | Attention | `attention.yaml` | V1 attention kernels (H100, B200) |
 | Basic Correctness | `basic_correctness.yaml` | CUDA memory, basic correctness, CPU offload |
 | Benchmarks | `benchmarks.yaml` | Latency/throughput benchmarks, CLI tests |
@@ -146,7 +146,7 @@ These are the primary GPU test groups, each defined in a separate YAML file:
 Tests for non-default hardware platforms:
 
 | Group | File | Notes |
-|---|---|---|
+| --- | --- | --- |
 | CPU | `cpu.yaml` | Intel CPU (kernels, compat, generation, distributed) and ARM CPU |
 | AMD | `amd.yaml` | ROCm Docker image build (gfx90a/942/950) |
 | Intel HPU/GPU | `intel.yaml` | Intel Gaudi HPU and Intel GPU (XPU) tests (soft-fail) |
@@ -161,7 +161,7 @@ each step definition:
 ### NVIDIA GPUs
 
 | Device Value | Queue | Hardware |
-|---|---|---|
+| --- | --- | --- |
 | *(omitted)* | `GPU_1` | 1× NVIDIA L4 (AWS EC2, default) |
 | `4_gpu` | `GPU_4` | 4× NVIDIA L4 (AWS EC2) |
 | `a100` | `A100` | NVIDIA A100 (Kubernetes, Roblox/EKS) |
@@ -173,7 +173,7 @@ each step definition:
 ### CPU and Other Hardware
 
 | Device Value | Hardware |
-|---|---|
+| --- | --- |
 | `cpu` | x86-64 CPU (AWS Elastic CI) |
 | `cpu-small` / `cpu-medium` | Smaller CPU instances |
 | `arm_cpu` | ARM64 CPU |
@@ -209,7 +209,7 @@ steps:
 ### Full Step Field Reference
 
 | Field | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `label` | str | required | Display name in Buildkite UI |
 | `commands` | list[str] | `[]` | Shell commands to run |
 | `device` | str | 1× L4 GPU | Hardware target (see [Hardware](#hardware-infrastructure)) |
@@ -478,7 +478,7 @@ mirror:
 ## Key Resources
 
 | Resource | URL |
-|---|---|
+| --- | --- |
 | vLLM CI on Buildkite | <https://buildkite.com/vllm> |
 | vLLM CI Dashboard | <https://vllm-ci-dashboard.vercel.app/> |
 | Test Analytics (reliability) | <https://buildkite.com/organizations/vllm/analytics/suites/ci-1/tests?branch=main&order=ASC&sort_by=reliability> |
