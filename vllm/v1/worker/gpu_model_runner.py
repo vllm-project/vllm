@@ -5653,6 +5653,7 @@ class GPUModelRunner(
         dummy_metadata = PoolingMetadata(
             prompt_lens=dummy_prompt_lens,
             prompt_token_ids=dummy_token_ids,
+            prompt_token_ids_cpu=dummy_token_ids.cpu(),
             pooling_params=[dummy_pooling_params] * num_reqs,
             pooling_states=[PoolingStates() for i in range(num_reqs)],
         )
