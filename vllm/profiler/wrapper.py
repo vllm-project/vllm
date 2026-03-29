@@ -242,9 +242,7 @@ class TorchProfilerWrapper(WorkerProfiler):
     def _start(self) -> None:
         self.profiler.start()
 
-    def _dump_profiler_summary(
-        self, sort_key: str, file_suffix: str
-    ) -> None:
+    def _dump_profiler_summary(self, sort_key: str, file_suffix: str) -> None:
         """Dump a profiler summary table sorted by the given key.
 
         Writes the table to ``{profiler_dir}/profiler_{file_suffix}_{rank}.txt``
@@ -257,9 +255,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         # Skip file write for URI paths (gs://, s3://, etc.)
         # as standard file I/O doesn't work with URI schemes
         if not _is_uri_path(profiler_dir):
-            profiler_out_file = (
-                f"{profiler_dir}/profiler_{file_suffix}_{rank}.txt"
-            )
+            profiler_out_file = f"{profiler_dir}/profiler_{file_suffix}_{rank}.txt"
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
