@@ -391,20 +391,21 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
     # Validate include_usage_policy
-    valid_usage_policies = (None, "default_include_usage", "always")
+    valid_usage_policies = (None, "always")
     if args.include_usage_policy not in valid_usage_policies:
         raise TypeError(
             f"Error: --include-usage-policy must be "
-            f"'always' or omitted, "
-            f"got '{args.include_usage_policy}'"
+            f"{list(valid_usage_policies)}, "
+            f"but got '{args.include_usage_policy}'"
         )
 
     # Validate continuous_usage_policy
     valid_continuous_usage_policies = (None, "always")
     if args.continuous_usage_policy not in valid_continuous_usage_policies:
         raise TypeError(
-            f"Error: --continuous-usage-policy must be 'always' or omitted, "
-            f"got '{args.continuous_usage_policy}'"
+            f"Error: --continuous-usage-policy must be "
+            f"{list(valid_continuous_usage_policies)}, "
+            f"but got '{args.continuous_usage_policy}'"
         )
 
     # Handle deprecated enable_force_include_usage
