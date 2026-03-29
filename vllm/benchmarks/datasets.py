@@ -2363,6 +2363,7 @@ class SonnetDataset(BenchmarkDataset):
     DEFAULT_PREFIX_LEN = 200
     DEFAULT_INPUT_LEN = 550
     DEFAULT_OUTPUT_LEN = 150
+    DEFAULT_MAX_SAMPLE_ATTEMPTS = 1000
 
     def __init__(
         self,
@@ -2413,7 +2414,9 @@ class SonnetDataset(BenchmarkDataset):
 
         samples = []
         ind = 0
-        while len(samples) < num_requests:
+        attempts = 0
+        while len(samples) < num_requests and attempts < DEFAULT_MAX_SAMPLE_ATTEMPTS:
+            attempts += 1
             extra_lines = random.choices(
                 self.data, k=num_input_lines - num_prefix_lines
             )
@@ -2433,6 +2436,12 @@ class SonnetDataset(BenchmarkDataset):
                     )
                 )
                 ind += 1
+        if len(samples) < num_requests:
+            raise RuntimeError(
+                f"Failed to generate {num_requests} samples within "
+                f"{DEFAULT_MAX_SAMPLE_ATTEMPTS} attempts. Consider increasing "
+                f"'input_len' or using 'no_oversample=True'."
+            )
         return samples
 
 
