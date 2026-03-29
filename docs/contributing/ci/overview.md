@@ -1,12 +1,11 @@
 # vLLM CI Overview
 
-This document describes the vLLM continuous integration (CI) system powered by
-[Buildkite](https://buildkite.com/vllm). It covers how CI is triggered, what is
-tested, how to add new tests, and how to investigate failures.
+This document covers how vLLM CI is triggered, what is tested, how to add new
+tests, and how to investigate failures.
 
 ## Architecture
 
-vLLM uses a **two-platform CI strategy**:
+vLLM CI runs on two platforms:
 
 | Platform | Purpose |
 |---|---|
