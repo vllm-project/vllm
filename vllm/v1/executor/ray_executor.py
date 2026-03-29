@@ -314,6 +314,17 @@ class RayDistributedExecutor(Executor):
                 " each node."
             )
 
+        # Warn users about buffer size configuration for multi-node pipeline parallelism
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if n_nodes > 1 and pp_size > 1 and envs.VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES == 0:
+            logger.info(
+                "Multi-node pipeline parallelism detected without explicit "
+                "buffer size configuration. If you encounter 'Channel closed' "
+                "errors, consider setting VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES "
+                "to a larger value (e.g., 536870912 for 512MB). "
+                "See https://github.com/vllm-project/vllm/issues/37001"
+            )
+
         # Set environment variables for the driver and workers.
         # We set CUDA_VISIBLE_DEVICES to ALL GPUs on the node for each worker.
         # This is needed because:
@@ -556,12 +567,23 @@ class RayDistributedExecutor(Executor):
         # Note: we should set this env var before importing
         # ray.dag, otherwise it will not take effect.
         os.environ.setdefault("RAY_CGRAPH_get_timeout", "300")  # noqa: SIM112
+        # Set the buffer size for Ray's Compiled Graph communication.
+        # This is important for multi-node pipeline parallelism where the default
+        # buffer size may be insufficient for large intermediate tensors.
+        if envs.VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES > 0:
+            os.environ.setdefault(
+                "RAY_CGRAPH_buffer_size_bytes",
+                str(envs.VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES),
+            )
         from ray.dag import InputNode, MultiOutputNode
 
         logger.info(
             "RAY_CGRAPH_get_timeout is set to %s",
             os.environ["RAY_CGRAPH_get_timeout"],  # noqa: SIM112
         )
+        buffer_size = os.environ.get("RAY_CGRAPH_buffer_size_bytes")
+        if buffer_size:
+            logger.info("RAY_CGRAPH_buffer_size_bytes is set to %s", buffer_size)
         logger.info(
             "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE = %s",
             envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE,

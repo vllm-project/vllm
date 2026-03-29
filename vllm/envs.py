@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
+    VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES: int = 0
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -745,6 +746,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
+    ),
+    # Sets the buffer size in bytes for Ray's Compiled Graph communication.
+    # This is particularly important for multi-node pipeline parallelism where
+    # the default buffer size may be insufficient for large intermediate tensors.
+    # When set to 0 (default), Ray's default buffer size is used.
+    # Increasing this value can help prevent "Channel closed" errors in
+    # multi-node pipeline parallel setups.
+    "VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES": lambda: int(
+        os.getenv("VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES", "0")
     ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work

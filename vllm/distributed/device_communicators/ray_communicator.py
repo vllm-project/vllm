@@ -175,7 +175,16 @@ class RayPPCommunicator(Communicator):
             raise RayChannelError("RayPPCommunicator has been destroyed.")
 
         assert self._comm is not None
-        self._comm.send(buf, peer_rank)
+        try:
+            self._comm.send(buf, peer_rank)
+        except RuntimeError as e:
+            raise RayChannelError(
+                f"Failed to send tensor to rank {peer_rank}: {e}. "
+                "If you are using multi-node pipeline parallelism and see "
+                "'Channel closed' errors, try increasing "
+                "VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES environment variable. "
+                "See https://github.com/vllm-project/vllm/issues/37001"
+            ) from e
 
     def recv(
         self,
@@ -202,14 +211,23 @@ class RayPPCommunicator(Communicator):
             raise RayChannelError("RayPPCommunicator has been destroyed.")
 
         assert self._comm is not None
-        size = torch.Size(shape)
-        buf = self._comm.recv(size, dtype, src=peer_rank)
+        try:
+            size = torch.Size(shape)
+            buf = self._comm.recv(size, dtype, src=peer_rank)
 
-        # Buffer values are undefined if NCCL ops are aborted. Therefore, we
-        # need to synchronize here and check that the channel is still
-        # open to ensure that the receive buffer is valid.
-        # TODO(swang): Avoid CUDA synchronization.
-        current_stream().synchronize()
+            # Buffer values are undefined if NCCL ops are aborted. Therefore, we
+            # need to synchronize here and check that the channel is still
+            # open to ensure that the receive buffer is valid.
+            # TODO(swang): Avoid CUDA synchronization.
+            current_stream().synchronize()
+        except RuntimeError as e:
+            raise RayChannelError(
+                f"Failed to receive tensor from rank {peer_rank}: {e}. "
+                "If you are using multi-node pipeline parallelism and see "
+                "'Channel closed' errors, try increasing "
+                "VLLM_RAY_CGRAPH_BUFFER_SIZE_BYTES environment variable. "
+                "See https://github.com/vllm-project/vllm/issues/37001"
+            ) from e
 
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
