@@ -230,9 +230,29 @@ class TurboQuantAttentionImpl(AttentionImpl):
         # Decode compressed uint8 blocks → bf16
         block_table = attn_metadata.block_table
         if hasattr(layer, "_tq_k_state"):
+            # One-shot debug: print cache stats before/after decode
+            if not hasattr(self, "_dbg_fwd_count"):
+                self._dbg_fwd_count = 0
+            self._dbg_fwd_count += 1
+            if self._dbg_fwd_count <= 3:
+                nz = key_cache.count_nonzero().item()
+                print(
+                    f"[FWD#{self._dbg_fwd_count}] "
+                    f"kv_cache={kv_cache.shape} "
+                    f"key_cache_nz={nz}/{key_cache.numel()} "
+                    f"bt={block_table.shape} "
+                    f"seq_lens={attn_metadata.seq_lens}"
+                )
             key_cache, value_cache, block_table = self._decode_turboquant_cache(
                 key_cache, value_cache, layer, block_table
             )
+            if self._dbg_fwd_count <= 3:
+                print(
+                    f"  decoded: k={key_cache.shape} "
+                    f"k_nz={key_cache.count_nonzero().item()} "
+                    f"k_norm={key_cache.float().norm():.2f} "
+                    f"bt={block_table.shape}"
+                )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
