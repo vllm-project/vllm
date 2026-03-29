@@ -144,3 +144,6 @@ void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
                             const torch::stable::Tensor& sf_offsets);
 
 #endif
+
+torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
+                                         bool inplace);
