@@ -94,7 +94,7 @@ uv pip install --pre vllm \
 
 ##### Install specific revisions
 
-If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL, example:
 
 ```bash
 export VLLM_COMMIT=5b8c30d62b754b575e043ce2fc0dcbf8a64f6306
