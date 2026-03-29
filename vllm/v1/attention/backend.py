@@ -764,7 +764,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
-    def fused_rope_kvcache_supported(self, quant_key: "QuantKey | None" = None):
+    def fused_rope_kvcache_supported(self, query_quant_key: "QuantKey | None" = None):
         """
         Does this attention implementation support RoPE(+Quant)+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
@@ -783,7 +783,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
-        attn_metadata: T,
+        attn_metadata: T | None = None,
         query_quant_scale: torch.Tensor | None = None,
         query_quant_out: torch.Tensor | None = None,
     ):

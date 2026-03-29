@@ -321,30 +321,32 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         cc = config.compilation_config
         self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
 
-        attn_layers = get_layers_from_vllm_config(config, Attention)
+        quant_key = None
+        # Only CUDA supports RoPE + Query Quant + KV Cache Pattern
         if current_platform.is_cuda():
             quant_key = QuantKey(
                 dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=True
             )
-            for _, layer in attn_layers.items():
-                if not layer.impl.fused_rope_kvcache_supported(quant_key):
-                    continue
-                for is_neox in [True, False]:
-                    for use_flashinfer_rope in [False, True]:
+
+        attn_layers = get_layers_from_vllm_config(config, Attention)
+        for _, layer in attn_layers.items():
+            if not layer.impl.fused_rope_kvcache_supported(quant_key):
+                continue
+            for is_neox in [True, False]:
+                if current_platform.is_cuda():
+                    for use_flashinfer_rope in [True, False]:
+                        assert quant_key is not None
                         RopeQuantReshapeKVCachePattern(
                             layer=layer,
                             quant_key=quant_key,
                             is_neox=is_neox,
                             use_flashinfer_rope=use_flashinfer_rope,
                         ).register(self.patterns)
-        elif current_platform.is_rocm():
-            for _, layer in attn_layers.items():
-                if layer.impl.fused_rope_kvcache_supported():
-                    for is_neox in [True, False]:
-                        RopeReshapeKVCachePattern(
-                            layer=layer,
-                            is_neox=is_neox,
-                        ).register(self.patterns)
+                elif current_platform.is_rocm():
+                    RopeReshapeKVCachePattern(
+                        layer=layer,
+                        is_neox=is_neox,
+                    ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

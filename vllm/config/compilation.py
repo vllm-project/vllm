@@ -1056,12 +1056,19 @@ class CompilationConfig:
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
 
-                # Like attn op, fuse_rope_kvcache op also needs to be a splitting op
-                # in piecewise cudagraph since it also needs to access attn_metadata.
-                if self.pass_config.fuse_rope_kvcache:
-                    self.splitting_ops.append(
-                        "vllm::fused_rope_and_unified_kv_cache_update"
-                    )
+                if (
+                    current_platform.is_cuda()
+                    and self.use_inductor_graph_partition
+                    and self.pass_config.fuse_rope_kvcache
+                ):
+                    # Flashinfer fuse_rope_kvcache op needs to be a splitting op in
+                    # piecewise cudagraph since it needs to access attn_metadata.
+                    from vllm.utils.flashinfer import has_flashinfer
+
+                    if has_flashinfer:
+                        self.splitting_ops.append(
+                            "vllm::fused_rope_and_unified_kv_cache_update"
+                        )
 
                 # unified_kv_cache_update has a string param that prevents Inductor
                 # from reusing piecewise graphs. Remove it from the compiled graph.

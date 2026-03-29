@@ -1730,11 +1730,11 @@ class FlashInferImpl(AttentionImpl):
             layer._v_scale,
         )
 
-    def fused_rope_kvcache_supported(self, quant_key: QuantKey | None = None):
+    def fused_rope_kvcache_supported(self, query_quant_key: QuantKey | None = None):
         return (
             self.support_trtllm_attn
             and self.kv_cache_dtype.startswith("fp8")
-            and quant_key == kFp8StaticTensorSym
+            and query_quant_key == kFp8StaticTensorSym
         )
 
     def do_rope_and_kv_cache_update(
@@ -1748,12 +1748,13 @@ class FlashInferImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
-        attn_metadata: FlashInferMetadata,
+        attn_metadata: FlashInferMetadata | None = None,
         query_quant_scale: torch.Tensor | None = None,
         query_quant_out: torch.Tensor | None = None,
     ):
         if attn_metadata is None:
-            # Profiling run.
+            # Skip this in piecewise cudagraph capturing since the kernel requires
+            # access to the attn_metadata
             return
 
         assert cos_sin_cache.dtype == torch.float32
