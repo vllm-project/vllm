@@ -473,8 +473,12 @@ class TurboQuantAttentionImpl(AttentionImpl):
 
         decoded_caches = []
         for cache, state in [(key_cache, k_state), (value_cache, v_state)]:
-            # Each state may have a different bit_width (asymmetric K/V)
-            bits = int(state.config.bit_width)
+            # Use mse_bits for packing (QJL reserves 1 bit for signs)
+            bits = (
+                int(state.mse_bits)
+                if state.mse_bits is not None
+                else int(state.config.bit_width)
+            )
             packed_bytes = math.ceil(normal_size * bits / 8)
 
             _, block_size, num_kv_heads, slot_bytes = cache.shape
@@ -808,8 +812,12 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 (value, v_state),
             ]
         ):
-            # Each state may have a different bit_width (asymmetric K/V)
-            bits = int(state.config.bit_width)
+            # Use mse_bits for packing (QJL reserves 1 bit for signs)
+            bits = (
+                int(state.mse_bits)
+                if state.mse_bits is not None
+                else int(state.config.bit_width)
+            )
             packed_bytes = math.ceil(normal_size * bits / 8)
 
             if state.outlier_idx is not None:
@@ -936,8 +944,12 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 (value, v_state),
             ]
         ):
-            # Each state may have a different bit_width (asymmetric K/V)
-            bits = int(state.config.bit_width)
+            # Use mse_bits for packing (QJL reserves 1 bit for signs)
+            bits = (
+                int(state.mse_bits)
+                if state.mse_bits is not None
+                else int(state.config.bit_width)
+            )
             packed_bytes = math.ceil(normal_size * bits / 8)
 
             # Split outlier / normal channels
