@@ -28,9 +28,10 @@ from vllm.lora.ops.triton_ops.lora_shrink_fp8_op import (
     _SHRINK_LORA_SCALE_PTR_DICT,
 )
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-DEVICES = [f"cuda:{0}"]
+DEVICES = [f"{current_platform.device_type}:{0}"]
 SEED = [0]
 
 _dict_lock = Lock()

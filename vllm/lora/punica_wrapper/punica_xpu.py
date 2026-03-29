@@ -14,6 +14,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
@@ -48,8 +49,24 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
+
+        # Compute captured LoRA counts for cudagraph specialization.
+        captured_lora_counts = get_captured_lora_counts(
+            self.max_loras, self.lora_config.specialize_active_lora
+        )
+
         self.token_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
+        )
+
+        self.prompt_mapping_meta = LoRAKernelMeta.make(
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
     def update_metadata(
@@ -62,6 +79,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+
+        # Prepare kernel metadata tensors
+        self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
+        self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))

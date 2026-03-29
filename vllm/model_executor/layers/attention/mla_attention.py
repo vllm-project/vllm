@@ -1039,7 +1039,7 @@ class QueryLenSupport(Enum):
 
 
 try:
-    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+    from vllm.v1.attention.backends.fa_utils import (  # type: ignore[attr-defined]
         flash_attn_varlen_func,
     )
 
@@ -1110,6 +1110,7 @@ class _DecodeConcatQuantFP8(QuantFP8):
     forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
     forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type]
     forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type]
+    forward_xpu = _make_forward(QuantFP8.forward_xpu)  # type: ignore[arg-type]
 
 
 CUDNN_WORKSPACE_SIZE = 12800
@@ -1476,7 +1477,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.aot_schedule = current_platform.is_cuda()
+        self.aot_schedule = current_platform.is_cuda() or current_platform.is_xpu()
 
         self.kv_cache_spec = kv_cache_spec
         self.q_data_type = self.determine_prefill_query_data_type(

@@ -19,7 +19,9 @@ from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.model_manager import LoRAMapping
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.xpu_worker import XPUWorker
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 NUM_LORAS = 16
@@ -61,7 +63,7 @@ def test_worker_apply_lora(qwen3_lora_files):
             max_num_seqs=32,
             max_num_partial_prefills=32,
         ),
-        device_config=DeviceConfig("cuda"),
+        device_config=DeviceConfig(current_platform.device_type),
         cache_config=CacheConfig(
             block_size=16,
             cache_dtype="auto",
@@ -70,12 +72,20 @@ def test_worker_apply_lora(qwen3_lora_files):
             max_lora_rank=8, max_cpu_loras=NUM_LORAS, max_loras=NUM_LORAS
         ),
     )
-    worker = Worker(
-        vllm_config=vllm_config,
-        local_rank=0,
-        rank=0,
-        distributed_init_method=f"file://{tempfile.mkstemp()[1]}",
-    )
+    if current_platform.is_xpu():
+        worker = XPUWorker(
+            vllm_config=vllm_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method=f"file://{tempfile.mkstemp()[1]}",
+        )
+    else:
+        worker = Worker(
+            vllm_config=vllm_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method=f"file://{tempfile.mkstemp()[1]}",
+        )
 
     with set_current_vllm_config(vllm_config):
         worker.init_device()
