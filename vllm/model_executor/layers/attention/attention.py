@@ -393,12 +393,22 @@ class Attention(nn.Module, AttentionLayerBase):
         # Fallback: if user only passed --kv-cache-dtype turboquant
         # without --quantization, create default TurboQuantConfig
         if kv_cache_dtype == "turboquant" and not hasattr(self, "_turboquant_config"):
+            import os
+
             from vllm.model_executor.layers.quantization.turboquant import (
                 TurboQuantConfig,
             )
 
+            tq_lite = os.environ.get("TQ_LITE", "0") in ("1", "true", "True")
+            tq_value_bits_str = os.environ.get("TQ_VALUE_BITS")
+            tq_value_bits: float | None = None
+            if tq_value_bits_str is not None:
+                tq_value_bits = float(tq_value_bits_str)
             self._turboquant_config = TurboQuantConfig(
-                bit_width=4, outlier_fraction=0.15
+                bit_width=4,
+                value_bit_width=tq_value_bits,
+                outlier_fraction=0.15,
+                lite_mode=tq_lite,
             )
 
         # Initialize TurboQuantState eagerly (not in forward) to avoid
@@ -422,8 +432,19 @@ class Attention(nn.Module, AttentionLayerBase):
                 layer_idx=layer_idx,
                 device=init_device,
             )
+            # Use a separate config for V if asymmetric bit allocation
+            # is enabled (value_bit_width != key bit_width).
+            v_cfg = self._turboquant_config
+            if self._turboquant_config.value_bit_width is not None:
+                from dataclasses import replace
+
+                v_cfg = replace(
+                    self._turboquant_config,
+                    bit_width=self._turboquant_config.value_bit_width,
+                    value_bit_width=None,
+                )
             self._tq_v_state = TurboQuantState(
-                config=self._turboquant_config,
+                config=v_cfg,
                 head_size=head_size,
                 layer_idx=layer_idx + 10000,
                 device=init_device,
@@ -604,7 +625,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 else 0
             )
             normal_size = self.head_size - n_outliers
-            bits = int(cfg.bit_width)
+            # Asymmetric K/V: use max bit-width for slot sizing so both
+            # K and V fit in the same slot layout.
+            k_bits = int(cfg.bit_width)
+            v_bits = int(cfg.effective_value_bit_width)
+            bits = max(k_bits, v_bits)
             outlier_bytes = n_outliers * 2  # bf16
             packed_bytes = math.ceil(normal_size * bits / 8)
             norm_bytes = 2  # fp16

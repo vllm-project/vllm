@@ -100,10 +100,12 @@ class TurboQuantConfig:
     """
 
     bit_width: float = 3
+    value_bit_width: float | None = None
     use_qjl: bool = False
     seed: int = 42
     outlier_channels: list[int] | None = None
     outlier_fraction: float = 0.0
+    lite_mode: bool = False
 
     def __post_init__(self) -> None:
         valid = {1, 2, 2.5, 3, 3.5, 4}
@@ -124,6 +126,23 @@ class TurboQuantConfig:
             raise ValueError(
                 "Specify either outlier_channels or outlier_fraction, not both"
             )
+        if self.lite_mode and self.use_qjl:
+            raise ValueError(
+                "lite_mode and use_qjl are mutually exclusive — "
+                "TQ_LITE skips rotation and QJL entirely"
+            )
+        if self.value_bit_width is not None and self.value_bit_width not in valid:
+            raise ValueError(
+                f"value_bit_width must be one of {sorted(valid)}, "
+                f"got {self.value_bit_width}"
+            )
+
+    @property
+    def effective_value_bit_width(self) -> float:
+        """Return the bit-width used for value quantization."""
+        if self.value_bit_width is not None:
+            return self.value_bit_width
+        return self.bit_width
 
     @property
     def has_outliers(self) -> bool:
@@ -289,47 +308,66 @@ class TurboQuantState:
             self.normal_idx = None
             self.normal_size = head_size
 
-        # Rotation: use Hadamard + sign flips (O(d log d)) when dimension
-        # is power of 2, fall back to QR rotation matrix (O(d²)) otherwise.
-        self._init_rotation(config.seed + layer_idx, device)
-
-        # QJL projection matrix (also only for normal channels)
-        if config.use_qjl:
-            gen = torch.Generator(device="cpu")
-            gen.manual_seed(config.seed + layer_idx + 10000)
-            self.S = torch.randn(self.normal_size, self.normal_size, generator=gen).to(
-                device
-            )
-        else:
+        # Lite mode: skip rotation (no Hadamard, no sign flips)
+        if config.lite_mode:
+            self.use_hadamard = False
+            self._hadamard_d = self.normal_size
+            self._pad_size = 0
+            self.sign_flips = None
+            self.Pi = None
+            self.PiT = None
             self.S = None
 
-        # Setup codebooks for integer or fractional bit-widths
-        # Codebook scaling uses normal_size (the dimension being quantized)
-        if config.is_fractional:
-            split = config.channel_split
-            (hi_bits, hi_ratio), (lo_bits, lo_ratio) = split
-            self.hi_bits = hi_bits
-            self.lo_bits = lo_bits
-            self.hi_channels = int(self.normal_size * hi_ratio)
-            self.lo_channels = self.normal_size - self.hi_channels
-            self.codebook_hi = _get_codebook(hi_bits, self.normal_size, device)
-            self.codebook_lo = _get_codebook(lo_bits, self.normal_size, device)
-            self.boundaries_hi = (self.codebook_hi[:-1] + self.codebook_hi[1:]) / 2.0
-            self.boundaries_lo = (self.codebook_lo[:-1] + self.codebook_lo[1:]) / 2.0
-            self.mse_bits = None  # not used for fractional
-        else:
             bw = int(config.bit_width)
-            mse_bits = bw - 1 if config.use_qjl else bw
-            mse_bits = max(mse_bits, 1)
-            self.mse_bits = mse_bits
-            # Scale codebook by 1/sqrt(hadamard_d), not 1/sqrt(normal_size),
-            # because the Hadamard pads to hadamard_d and output has
-            # std ≈ 1/sqrt(hadamard_d).
-            self.codebook = _get_codebook(
-                mse_bits, self._hadamard_d, device
-            )
+            self.mse_bits = bw
+            # Scale codebook by 1/sqrt(head_size) directly — no padding
+            self.codebook = _get_codebook(bw, self.normal_size, device)
             self.boundaries = (self.codebook[:-1] + self.codebook[1:]) / 2.0
             self.hi_bits = None
+        else:
+            # Rotation: use Hadamard + sign flips (O(d log d)) when dimension
+            # is power of 2, fall back to QR rotation matrix (O(d²)) otherwise.
+            self._init_rotation(config.seed + layer_idx, device)
+
+            # QJL projection matrix (also only for normal channels)
+            if config.use_qjl:
+                gen = torch.Generator(device="cpu")
+                gen.manual_seed(config.seed + layer_idx + 10000)
+                self.S = torch.randn(
+                    self.normal_size, self.normal_size, generator=gen
+                ).to(device)
+            else:
+                self.S = None
+
+            # Setup codebooks for integer or fractional bit-widths
+            # Codebook scaling uses normal_size (the dimension being quantized)
+            if config.is_fractional:
+                split = config.channel_split
+                (hi_bits, hi_ratio), (lo_bits, lo_ratio) = split
+                self.hi_bits = hi_bits
+                self.lo_bits = lo_bits
+                self.hi_channels = int(self.normal_size * hi_ratio)
+                self.lo_channels = self.normal_size - self.hi_channels
+                self.codebook_hi = _get_codebook(hi_bits, self.normal_size, device)
+                self.codebook_lo = _get_codebook(lo_bits, self.normal_size, device)
+                self.boundaries_hi = (
+                    self.codebook_hi[:-1] + self.codebook_hi[1:]
+                ) / 2.0
+                self.boundaries_lo = (
+                    self.codebook_lo[:-1] + self.codebook_lo[1:]
+                ) / 2.0
+                self.mse_bits = None  # not used for fractional
+            else:
+                bw = int(config.bit_width)
+                mse_bits = bw - 1 if config.use_qjl else bw
+                mse_bits = max(mse_bits, 1)
+                self.mse_bits = mse_bits
+                # Scale codebook by 1/sqrt(hadamard_d), not
+                # 1/sqrt(normal_size), because the Hadamard pads to
+                # hadamard_d and output has std ≈ 1/sqrt(hadamard_d).
+                self.codebook = _get_codebook(mse_bits, self._hadamard_d, device)
+                self.boundaries = (self.codebook[:-1] + self.codebook[1:]) / 2.0
+                self.hi_bits = None
 
     def _init_rotation(self, seed: int, device: torch.device) -> None:
         """Initialize rotation: Hadamard (O(d log d)) with padding."""
@@ -719,6 +757,7 @@ class TurboQuantVLLMConfig(QuantizationConfig):
         seed: int = 42,
         outlier_channels: list[int] | None = None,
         outlier_fraction: float = 0.0,
+        lite_mode: bool = False,
     ) -> None:
         super().__init__()
         self.tq_config = TurboQuantConfig(
@@ -727,6 +766,7 @@ class TurboQuantVLLMConfig(QuantizationConfig):
             seed=seed,
             outlier_channels=outlier_channels,
             outlier_fraction=outlier_fraction,
+            lite_mode=lite_mode,
         )
 
     @classmethod
@@ -749,17 +789,24 @@ class TurboQuantVLLMConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> TurboQuantVLLMConfig:
+        import os
+
         bit_width = config.get("bit_width", 3)
         use_qjl = config.get("use_qjl", False)
         seed = config.get("seed", 42)
         outlier_channels = config.get("outlier_channels")
         outlier_fraction = config.get("outlier_fraction", 0.0)
+        lite_mode = config.get(
+            "lite_mode",
+            os.environ.get("TQ_LITE", "0") in ("1", "true", "True"),
+        )
         return cls(
             bit_width=bit_width,
             use_qjl=use_qjl,
             seed=seed,
             outlier_channels=outlier_channels,
             outlier_fraction=outlier_fraction,
+            lite_mode=lite_mode,
         )
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):

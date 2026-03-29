@@ -477,6 +477,90 @@ class TurboQuantAttentionImpl(AttentionImpl):
 
         return decoded_caches[0], decoded_caches[1], new_block_table
 
+    def _decode_lite(
+        self,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        layer: torch.nn.Module,
+        flat_bt: torch.Tensor,
+        num_entries: int,
+        new_block_table: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Lite decode: unpack, codebook lookup, scale by norm. No Hadamard."""
+        k_state = layer._tq_k_state
+        v_state = layer._tq_v_state
+        head_size = k_state.head_size
+        normal_size = k_state.normal_size
+        n_outliers = head_size - normal_size
+        outlier_byte_count = n_outliers * 2
+
+        decoded_caches = []
+        for cache, state in [(key_cache, k_state), (value_cache, v_state)]:
+            bits = int(state.config.bit_width)
+            packed_bytes = math.ceil(normal_size * bits / 8)
+
+            _, block_size, num_kv_heads, slot_bytes = cache.shape
+            used = cache[flat_bt]
+            N = num_entries * block_size * num_kv_heads
+            flat = used.reshape(N, slot_bytes)
+
+            # Parse slot layout: [outlier_bytes | packed | norm(2B)]
+            pos = 0
+            outlier_vals = None
+            if n_outliers > 0:
+                outlier_vals = (
+                    flat[:, pos : pos + outlier_byte_count]
+                    .clone()
+                    .view(torch.bfloat16)
+                    .reshape(N, n_outliers)
+                )
+                pos += outlier_byte_count
+            flat_packed = flat[:, pos : pos + packed_bytes]
+            pos += packed_bytes
+            norms = flat[:, pos : pos + 2].clone().view(torch.float16).reshape(N)
+
+            # Unpack indices
+            if bits == 4:
+                low = flat_packed & 0x0F
+                high = (flat_packed >> 4) & 0x0F
+                indices = torch.stack([low, high], dim=-1).reshape(N, -1)[
+                    :, :normal_size
+                ]
+            elif bits == 2:
+                b0 = flat_packed & 0x03
+                b1 = (flat_packed >> 2) & 0x03
+                b2 = (flat_packed >> 4) & 0x03
+                b3 = (flat_packed >> 6) & 0x03
+                indices = torch.stack([b0, b1, b2, b3], dim=-1).reshape(N, -1)[
+                    :, :normal_size
+                ]
+            elif bits == 3:
+                indices = _unpack_3bit_vectorized(
+                    flat_packed, normal_size, cache.device
+                )
+                indices = indices[:N, :normal_size]
+            else:
+                indices = flat_packed[:, :normal_size]
+
+            # Codebook lookup + scale by norm (no inverse Hadamard)
+            reconstructed = state.codebook[indices.long()]
+            normal_decoded = (reconstructed * norms.unsqueeze(-1).float()).to(
+                torch.bfloat16
+            )
+
+            # Reassemble outlier + normal channels
+            full = torch.empty(N, head_size, dtype=torch.bfloat16, device=cache.device)
+            if state.normal_idx is not None and outlier_vals is not None:
+                full[:, state.normal_idx] = normal_decoded
+                full[:, state.outlier_idx] = outlier_vals
+            else:
+                full = normal_decoded
+
+            decoded = full.reshape(num_entries, block_size, num_kv_heads, head_size)
+            decoded_caches.append(decoded)
+
+        return decoded_caches[0], decoded_caches[1], new_block_table
+
     def do_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -615,10 +699,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
         k_state = layer._tq_k_state
         v_state = layer._tq_v_state
         head_size = k_state.head_size
-        bits = int(k_state.config.bit_width)
         normal_size = k_state.normal_size
         n_outliers = head_size - normal_size
-        packed_bytes = math.ceil(normal_size * bits / 8)
         slot_bytes = kv_cache.shape[-1]
         num_actual = key.shape[0]
 
@@ -628,6 +710,10 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 (value, v_state),
             ]
         ):
+            # Each state may have a different bit_width (asymmetric K/V)
+            bits = int(state.config.bit_width)
+            packed_bytes = math.ceil(normal_size * bits / 8)
+
             if state.outlier_idx is not None:
                 normal_x = tensor[..., state.normal_idx].contiguous()
                 outlier_x = tensor[..., state.outlier_idx]
@@ -676,6 +762,14 @@ class TurboQuantAttentionImpl(AttentionImpl):
             parts.append(norm_bytes_data)
             slot_data = torch.cat(parts, dim=-1)
 
+            # Pad to slot_bytes when asymmetric V uses fewer bits than K,
+            # leaving unused trailing bytes in the slot.
+            actual_bytes = slot_data.shape[-1]
+            if actual_bytes < slot_bytes:
+                slot_data = torch.nn.functional.pad(
+                    slot_data, (0, slot_bytes - actual_bytes), value=0
+                )
+
             num_kv_heads = tensor.shape[1]
             slot_3d = slot_data.reshape(num_actual, num_kv_heads, slot_bytes)
             cache = kv_cache[:, kv_idx]
@@ -698,10 +792,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
         k_state = layer._tq_k_state
         v_state = layer._tq_v_state
         head_size = k_state.head_size
-        bits = int(k_state.config.bit_width)
         normal_size = k_state.normal_size
         n_outliers = head_size - normal_size
-        packed_bytes = math.ceil(normal_size * bits / 8)
         slot_bytes = kv_cache.shape[-1]
         num_actual = key.shape[0]
 
@@ -711,6 +803,10 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 (value, v_state),
             ]
         ):
+            # Each state may have a different bit_width (asymmetric K/V)
+            bits = int(state.config.bit_width)
+            packed_bytes = math.ceil(normal_size * bits / 8)
+
             # Split outlier / normal channels
             if state.outlier_idx is not None:
                 normal_x = tensor[..., state.normal_idx].contiguous()
@@ -769,6 +865,13 @@ class TurboQuantAttentionImpl(AttentionImpl):
             )
             parts.append(norm_bytes_data)
             slot_data = torch.cat(parts, dim=-1)
+
+            # Pad to slot_bytes when asymmetric V uses fewer bits than K
+            actual_bytes = slot_data.shape[-1]
+            if actual_bytes < slot_bytes:
+                slot_data = torch.nn.functional.pad(
+                    slot_data, (0, slot_bytes - actual_bytes), value=0
+                )
 
             num_kv_heads = tensor.shape[1]
             slot_3d = slot_data.reshape(num_actual, num_kv_heads, slot_bytes)
