@@ -166,16 +166,16 @@ def _fused_encode_and_store_kernel(
     )
 
     # ---- Write norm as fp16 (2 bytes) ----
+    # Use scratch memory to reinterpret float16 as 2 uint8 bytes,
+    # avoiding tl.to(bitcast=True) which may not be supported.
     norm_offset = outlier_byte_offset + packed_bytes
-    # norm_val is a scalar — same across all lanes.
-    # Convert to fp16, bitcast to uint16, split into 2 bytes.
-    norm_f16 = norm_val.to(tl.float16)
-    norm_u16 = norm_f16.to(tl.uint16, bitcast=True)
-    norm_lo = (norm_u16 & 0xFF).to(tl.uint8)
-    norm_hi = ((norm_u16 >> 8) & 0xFF).to(tl.uint8)
-    # All lanes compute the same scalar; redundant writes are safe.
-    tl.store(cache_ptr + cache_base + norm_offset, norm_lo)
-    tl.store(cache_ptr + cache_base + norm_offset + 1, norm_hi)
+    scratch_f16_ptr = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.float16))
+    tl.store(scratch_f16_ptr, norm_val.to(tl.float16))
+    scratch_u8_ptr = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.uint8))
+    norm_byte0 = tl.load(scratch_u8_ptr)
+    norm_byte1 = tl.load(scratch_u8_ptr + 1)
+    tl.store(cache_ptr + cache_base + norm_offset, norm_byte0)
+    tl.store(cache_ptr + cache_base + norm_offset + 1, norm_byte1)
 
 
 def _next_power_of_2(n: int) -> int:
@@ -387,11 +387,16 @@ def _fused_decode_kernel(
     x = x * signs
 
     # ---- Scale by norm ----
+    # Use scratch memory to reinterpret 2 uint8 bytes as float16,
+    # avoiding tl.to(bitcast=True) which may not be supported.
     norm_offset = outlier_u8_count + packed_bytes
-    norm_lo = tl.load(slot_ptr + slot_base + norm_offset).to(tl.int32)
-    norm_hi = tl.load(slot_ptr + slot_base + norm_offset + 1).to(tl.int32)
-    norm_u16 = (norm_lo | (norm_hi << 8)).to(tl.uint16)
-    norm_val = norm_u16.to(tl.float16, bitcast=True).to(tl.float32)
+    scratch_u8_ptr = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.uint8))
+    norm_byte0 = tl.load(slot_ptr + slot_base + norm_offset)
+    norm_byte1 = tl.load(slot_ptr + slot_base + norm_offset + 1)
+    tl.store(scratch_u8_ptr, norm_byte0)
+    tl.store(scratch_u8_ptr + 1, norm_byte1)
+    scratch_f16_ptr = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.float16))
+    norm_val = tl.load(scratch_f16_ptr).to(tl.float32)
     x = x * norm_val
 
     # ---- Write output ----
@@ -408,29 +413,47 @@ def _fused_decode_kernel(
             mask=mask,
         )
 
-        # Copy outlier bf16 bytes from slot to output
+        # Copy outlier bf16 bytes from slot to output.
+        # Reinterpret 2 uint8 bytes as bfloat16 via scratch memory.
         outlier_dim = tl.arange(0, BLOCK_OUTLIER)
         outlier_mask = outlier_dim < n_outliers
-        # Load outlier channel positions
         outlier_positions = tl.load(
             outlier_idx_ptr + outlier_dim,
             mask=outlier_mask,
             other=0,
         )
-        # Load 2 bytes per outlier, reconstruct bf16
+        # Copy outlier bytes (2 per value) to scratch, reload as bf16
         byte_offs = outlier_dim * 2
         lo = tl.load(
             slot_ptr + slot_base + byte_offs,
             mask=outlier_mask,
             other=0,
-        ).to(tl.int32)
+        )
         hi = tl.load(
             slot_ptr + slot_base + byte_offs + 1,
             mask=outlier_mask,
             other=0,
-        ).to(tl.int32)
-        outlier_u16 = (lo | (hi << 8)).to(tl.uint16)
-        outlier_bf16 = outlier_u16.to(tl.bfloat16, bitcast=True)
+        )
+        # Write byte pairs to scratch, then load as bf16
+        scratch_outlier_u8 = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.uint8))
+        tl.store(
+            scratch_outlier_u8 + byte_offs,
+            lo,
+            mask=outlier_mask,
+        )
+        tl.store(
+            scratch_outlier_u8 + byte_offs + 1,
+            hi,
+            mask=outlier_mask,
+        )
+        scratch_outlier_bf16 = (scratch_ptr + scratch_base).to(
+            tl.pointer_type(tl.bfloat16)
+        )
+        outlier_bf16 = tl.load(
+            scratch_outlier_bf16 + outlier_dim,
+            mask=outlier_mask,
+            other=0.0,
+        )
         tl.store(
             out_ptr + out_base + outlier_positions,
             outlier_bf16,
