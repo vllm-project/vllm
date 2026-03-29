@@ -410,7 +410,13 @@ class TurboQuantAttentionImpl(AttentionImpl):
             pos += packed_bytes
             norms = flat[:, pos : pos + 2].clone().view(torch.float16).reshape(N)
 
-            if bits == 2:
+            if bits == 4:
+                low = flat_packed & 0x0F
+                high = (flat_packed >> 4) & 0x0F
+                indices = torch.stack([low, high], dim=-1).reshape(N, -1)[
+                    :, :normal_size
+                ]
+            elif bits == 2:
                 b0 = flat_packed & 0x03
                 b1 = (flat_packed >> 2) & 0x03
                 b2 = (flat_packed >> 4) & 0x03
@@ -488,7 +494,6 @@ class TurboQuantAttentionImpl(AttentionImpl):
         block_indices = clamped_slots // block_size
         block_offsets = clamped_slots % block_size
 
-        # Use fused kernel for 4-bit (single kernel: encode + pack + scatter)
         if bits == 4:
             self._encode_fused_4bit(
                 key[:num_actual],
@@ -594,7 +599,9 @@ class TurboQuantAttentionImpl(AttentionImpl):
             if normal_size % align != 0:
                 pad = align - (normal_size % align)
                 flat_indices = torch.nn.functional.pad(flat_indices, (0, pad), value=0)
-            if bits == 2:
+            if bits == 4:
+                packed = flat_indices[:, 0::2] | (flat_indices[:, 1::2] << 4)
+            elif bits == 2:
                 packed = (
                     flat_indices[:, 0::4]
                     | (flat_indices[:, 1::4] << 2)
