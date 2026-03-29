@@ -329,7 +329,7 @@ class TurboQuantAttentionImpl(AttentionImpl):
         # When K and V use the same bit-width, use the fast fused path
         # for 4-bit. With asymmetric bits, fall back to unfused which
         # handles per-state bit_width correctly.
-        if k_bits == 4 and v_bits == 4:
+        if k_bits == 4 and v_bits == 4 and not layer._tq_k_state.config.use_qjl:
             return self._decode_fused_4bit(
                 key_cache,
                 value_cache,
@@ -494,7 +494,22 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 pos += outlier_byte_count
             flat_packed = flat[:, pos : pos + packed_bytes]
             pos += packed_bytes
+
+            # QJL: read sign bytes if present
+            qjl_sign_data = None
+            qjl_r_norm = None
+            if state.config.use_qjl and state.S is not None:
+                sign_bc = math.ceil(normal_size / 8)
+                qjl_sign_data = flat[:, pos : pos + sign_bc]
+                pos += sign_bc
+
             norms = flat[:, pos : pos + 2].clone().view(torch.float16).reshape(N)
+            pos += 2
+
+            if state.config.use_qjl and state.S is not None:
+                qjl_r_norm = (
+                    flat[:, pos : pos + 2].clone().view(torch.float16).reshape(N)
+                )
 
             if bits == 4:
                 low = flat_packed & 0x0F
@@ -527,6 +542,24 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 state.codebook,
                 output_dtype=torch.bfloat16,
             ).reshape(N, normal_size)
+
+            # QJL: apply 1-bit residual correction
+            if qjl_sign_data is not None and qjl_r_norm is not None:
+                signs = torch.zeros(
+                    N,
+                    normal_size,
+                    dtype=torch.float32,
+                    device=cache.device,
+                )
+                sign_bc = math.ceil(normal_size / 8)
+                for bi in range(sign_bc):
+                    s, e = bi * 8, min(bi * 8 + 8, normal_size)
+                    for b in range(e - s):
+                        bv = ((qjl_sign_data[:, bi] >> b) & 1).float()
+                        signs[:, s + b] = bv * 2 - 1
+                scale = math.sqrt(math.pi / 2.0) / normal_size
+                qjl_corr = scale * qjl_r_norm.float().unsqueeze(-1) * (signs @ state.S)
+                normal_decoded = (normal_decoded.float() + qjl_corr).to(torch.bfloat16)
 
             full = torch.empty(N, head_size, dtype=torch.bfloat16, device=cache.device)
             if state.normal_idx is not None and outlier_vals is not None:
@@ -687,7 +720,7 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 block_offsets,
                 layer,
             )
-        elif k_bits == 4 and v_bits == 4:
+        elif k_bits == 4 and v_bits == 4 and not layer._tq_k_state.config.use_qjl:
             self._encode_fused_4bit(
                 key[:num_actual],
                 value[:num_actual],
@@ -823,10 +856,41 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 )
                 parts.append(ob)
             parts.append(packed)
+
+            # QJL: compute and store 1-bit residual signs + norm
+            if state.config.use_qjl and state.S is not None:
+                mse_recon = state.codebook[indices.reshape(N, normal_size).long()]
+                flat_normal = normal_x.reshape(N, normal_size).float()
+                n_vals = norms.reshape(N, 1).float()
+                normed = flat_normal / (n_vals + 1e-16)
+                rotated = state.rotate(normed)
+                residual_rot = rotated - mse_recon
+                residual = state.unrotate(residual_rot)
+                r_norm = torch.norm(residual, dim=-1)
+                projected = residual @ state.S.T
+                sign_bits = (projected >= 0).to(torch.uint8)
+                sign_bc = math.ceil(normal_size / 8)
+                packed_signs = torch.zeros(
+                    N,
+                    sign_bc,
+                    dtype=torch.uint8,
+                    device=tensor.device,
+                )
+                for bi in range(sign_bc):
+                    s, e = bi * 8, min(bi * 8 + 8, normal_size)
+                    for b in range(e - s):
+                        packed_signs[:, bi] |= sign_bits[:, s + b] << b
+                parts.append(packed_signs)
+
             norm_bytes_data = (
                 norms.reshape(N).to(torch.float16).view(torch.uint8).reshape(N, 2)
             )
             parts.append(norm_bytes_data)
+
+            if state.config.use_qjl and state.S is not None:
+                qjl_norm_u8 = r_norm.to(torch.float16).view(torch.uint8).reshape(N, 2)
+                parts.append(qjl_norm_u8)
+
             slot_data = torch.cat(parts, dim=-1)
 
             # Pad to slot_bytes when asymmetric V uses fewer bits than K,
