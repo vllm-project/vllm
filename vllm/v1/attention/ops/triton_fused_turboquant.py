@@ -247,6 +247,8 @@ def _fused_decode_from_slot_kernel(
     codebook_ptr,
     # Scratch: [N, BLOCK_D] float32
     scratch_ptr,
+    # Norms: [N] float16
+    norms_ptr,
     # Normal channel indices: [normal_size] int64
     normal_idx_ptr,
     # Outlier channel indices: [n_outliers] int64
@@ -313,21 +315,10 @@ def _fused_decode_from_slot_kernel(
     had_scale = 1.0 / tl.sqrt(float(BLOCK_D))
     x = x * had_scale
 
-    # ---- Sign flips ----
+    # ---- Sign flips + norm scale ----
     signs = tl.load(signs_ptr + dim_offs)
-    x = x * signs
-
-    # ---- Norm scale: read 2 bytes from slot, reinterpret as float16 ----
-    norm_offset = outlier_u8_count + packed_bytes
-    scratch_u8_norm = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.uint8))
-    tl.store(scratch_u8_norm, tl.load(slot_ptr + slot_base + norm_offset))
-    tl.store(
-        scratch_u8_norm + 1,
-        tl.load(slot_ptr + slot_base + norm_offset + 1),
-    )
-    scratch_f16_norm = (scratch_ptr + scratch_base).to(tl.pointer_type(tl.float16))
-    norm_val = tl.load(scratch_f16_norm).to(tl.float32)
-    x = x * norm_val
+    norm_val = tl.load(norms_ptr + row_idx).to(tl.float32)
+    x = x * signs * norm_val
 
     # ---- Write output ----
     if HAS_OUTLIERS:
@@ -375,8 +366,8 @@ def fused_hadamard_decode_from_slots(
 ) -> torch.Tensor:
     """Fully fused decode: single kernel from slot bytes to decoded bf16.
 
-    Zero Python tensor operations — kernel reads slot bytes directly
-    and outputs the complete decoded head vector.
+    Only Python step: norm extraction (2-byte slice + view per row).
+    Everything else in one Triton kernel.
 
     Returns: [N, head_size] bfloat16
     """
@@ -385,6 +376,15 @@ def fused_hadamard_decode_from_slots(
     BLOCK_D = sign_flips.shape[0]
     LOG2_D = int(math.log2(BLOCK_D))
     outlier_u8_count = n_outliers * 2
+    norm_offset = outlier_u8_count + packed_bytes
+
+    # Extract norms (only Python step — Triton pointer casting unreliable)
+    norms = (
+        flat_slots[:, norm_offset : norm_offset + 2]
+        .contiguous()
+        .view(torch.float16)
+        .reshape(N)
+    )
 
     has_outliers = normal_idx is not None and n_outliers > 0
     out = torch.empty(N, head_size, dtype=torch.bfloat16, device=flat_slots.device)
@@ -402,6 +402,7 @@ def fused_hadamard_decode_from_slots(
         signs_ptr=sign_flips,
         codebook_ptr=codebook,
         scratch_ptr=scratch,
+        norms_ptr=norms,
         normal_idx_ptr=normal_idx,
         outlier_idx_ptr=outlier_idx,
         out_ptr=out,
