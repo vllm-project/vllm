@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 
 from .attention import MonolithicMLAAttention
-from .ops import fused_add_rms_norm, layer_norm, rms_norm
+from .ops import fused_add_rms_norm, layer_norm, qk_rope, rms_norm, rms_norm_small
 
 
 class MonolithicDecoderLayer(nn.Module):
@@ -138,32 +138,32 @@ class MonolithicDecoderLayer(nn.Module):
                 self.rms_norm_eps,
             )
 
-        # Fused QKV A-proj + Q norm
+        # hidden_states -> q_c, kv_c, k_pe
         out: torch.Tensor | tuple = self.self_attn.fused_qkv_a_proj(hidden_states)
         if isinstance(out, tuple):
             out: torch.Tensor = out[0]
-        q_c, kv_lora = out.split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+        q_c, kv_c, k_pe = out.split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
-        q_c = rms_norm(q_c, self.attn.q_a_layernorm_weight, self.rms_norm_eps)
+
+        q_c = rms_norm_small(q_c, self.attn.q_a_layernorm_weight, self.rms_norm_eps)
+        kv_c_normed = rms_norm_small(
+            kv_c, self.attn.kv_a_layernorm_weight, self.attn.rms_norm_eps
+        )
 
         # Attention
         # 1. Q B-projection
         q = self.attn.q_b_proj(q_c)[0].view(
             -1, self.attn.num_local_heads, self.attn.qk_head_dim
         )
-
-        # 2. KV layernorm + RoPE
-        kv_c, k_pe = kv_lora.split(
-            [self.attn.kv_lora_rank, self.attn.qk_rope_head_dim], dim=-1
-        )
-        kv_c_normed = rms_norm(
-            kv_c, self.attn.kv_a_layernorm_weight, self.attn.rms_norm_eps
-        )
-
         k_pe = k_pe.unsqueeze(1)
-        q[..., self.attn.qk_nope_head_dim :], k_pe = self.attn.rotary_emb(
-            positions, q[..., self.attn.qk_nope_head_dim :], k_pe
+        qk_rope(
+            positions,
+            q,
+            k_pe,
+            self.attn.rotary_emb.cos_sin_cache,
+            self.attn.qk_nope_head_dim,
+            interleaved=True,
         )
 
         # 3. Sparse indexer

@@ -6,6 +6,56 @@ import triton.language as tl
 
 
 @triton.jit
+def _rms_norm_small_dim_kernel(
+    x_ptr,
+    x_stride,
+    w_ptr,
+    y_ptr,
+    y_stride,
+    eps,
+    HIDDEN_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    x_row_ptr = x_ptr + row_idx * x_stride
+    y_row_ptr = y_ptr + row_idx * y_stride
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < HIDDEN_SIZE
+
+    x = tl.load(x_row_ptr + block, mask=mask, other=0.0).to(tl.float32)
+    mean_sq = tl.sum(x * x, axis=0) / HIDDEN_SIZE
+    rrms = tl.rsqrt(mean_sq + eps)
+
+    w = tl.load(w_ptr + block, mask=mask).to(tl.float32)
+    y = (x * rrms) * w
+    tl.store(y_row_ptr + block, y, mask=mask)
+
+
+def rms_norm_small(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    assert x.ndim == 2
+    assert w.ndim == 1
+    num_tokens, hidden_size = x.shape
+    y = torch.empty_like(x)
+
+    _rms_norm_small_dim_kernel[(num_tokens,)](
+        x,
+        x.stride(0),
+        w,
+        y,
+        y.stride(0),
+        eps,
+        hidden_size,
+        BLOCK_SIZE=triton.next_power_of_2(hidden_size),
+    )
+    return y
+
+
+@triton.jit
 def _rms_norm_kernel(
     x_ptr,
     x_stride,
@@ -13,7 +63,6 @@ def _rms_norm_kernel(
     y_ptr,
     y_stride,
     eps,
-    W_OFFSET: tl.constexpr,
     NUM_COLS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -36,7 +85,7 @@ def _rms_norm_kernel(
         mask = offset < NUM_COLS
         x = tl.load(x_row_ptr + offset, mask=mask).to(tl.float32)
         w = tl.load(w_ptr + offset, mask=mask).to(tl.float32)
-        y = (x * rrms) * (w + W_OFFSET)
+        y = (x * rrms) * w
         tl.store(y_row_ptr + offset, y, mask=mask)
 
 
@@ -44,7 +93,6 @@ def rms_norm(
     x: torch.Tensor,
     w: torch.Tensor,
     eps: float,
-    w_offset: float = 0.0,
 ) -> torch.Tensor:
     assert x.ndim == 2
     assert w.ndim == 1
@@ -59,7 +107,6 @@ def rms_norm(
         y,
         y.stride(0),
         eps,
-        w_offset,
         hidden_size,
         BLOCK_SIZE,
     )
@@ -206,121 +253,126 @@ def layer_norm(
     return y
 
 
-# @triton.jit
-# def _qk_rope_kernel(
-#     q_ptr,
-#     q_stride0,
-#     q_stride1,
-#     k_ptr,
-#     k_stride0,
-#     k_stride1,
-#     pos_ptr,
-#     cos_sin_ptr,
-#     cos_sin_stride,
-#     NOPE_DIM: tl.constexpr,
-#     ROT_DIM: tl.constexpr,
-#     INTERLEAVED: tl.constexpr,
-#     BLOCK_SIZE: tl.constexpr,
-# ):
-#     tok_idx = tl.program_id(1)
-#     pos = tl.load(pos_ptr + tok_idx)
-
-#     block = tl.arange(0, ROT_DIM // 2)
-#     cos = tl.load(cos_sin_ptr + pos * cos_sin_stride + block)
-#     cos = cos.to(tl.float32)
-#     sin = tl.load(cos_sin_ptr + pos * cos_sin_stride + block + ROT_DIM // 2)
-#     sin = sin.to(tl.float32)
-
-#     if INTERLEAVED:
-
-#     if tl.program_id(0) == 0
-#         # Handle Q
-#         pass
-#     elif tl.program_id(0) == 1:
-#         # Handle K
-#         pass
+@triton.jit
+def _rope_kernel(
+    base_ptr,
+    head_stride,
+    cos,
+    sin,
+    NUM_HEADS: tl.constexpr,
+    HALF_ROT_DIM: tl.constexpr,
+    NOPE_DIM: tl.constexpr,
+    INTERLEAVED: tl.constexpr,
+):
+    head_offset = tl.arange(0, NUM_HEADS)
+    dim_offset = tl.arange(0, HALF_ROT_DIM)
+    base_ptr = base_ptr + head_offset[:, None] * head_stride + NOPE_DIM
+    if INTERLEAVED:
+        x1 = tl.load(base_ptr + dim_offset * 2).to(tl.float32)
+        x2 = tl.load(base_ptr + dim_offset * 2 + 1).to(tl.float32)
+        tl.store(base_ptr + dim_offset * 2, x1 * cos - x2 * sin)
+        tl.store(base_ptr + dim_offset * 2 + 1, x2 * cos + x1 * sin)
+    else:
+        x1 = tl.load(base_ptr + dim_offset).to(tl.float32)
+        x2 = tl.load(base_ptr + dim_offset + HALF_ROT_DIM).to(tl.float32)
+        tl.store(base_ptr + dim_offset, x1 * cos - x2 * sin)
+        tl.store(base_ptr + dim_offset + HALF_ROT_DIM, x2 * cos + x1 * sin)
 
 
-#     """Apply rotary position embedding to one head of one token in-place.
+@triton.jit
+def _qk_rope_kernel(
+    q_ptr,
+    q_stride0,
+    q_stride1,
+    NUM_Q_HEADS: tl.constexpr,
+    Q_NOPE_DIM: tl.constexpr,
+    k_ptr,
+    k_stride0,
+    k_stride1,
+    NUM_K_HEADS: tl.constexpr,
+    pos_ptr,
+    cos_sin_ptr,
+    cos_sin_stride,
+    HALF_ROT_DIM: tl.constexpr,
+    INTERLEAVED: tl.constexpr,
+):
+    tok_idx = tl.program_id(1)
+    pos = tl.load(pos_ptr + tok_idx)
 
-#     Grid: (num_tokens, num_heads).
-#     Each program handles one (token, head) pair, rotating ``2 * HALF_ROPE``
-#     elements starting at offset ``nope_dim`` within that head.
+    block = tl.arange(0, HALF_ROT_DIM)
+    cos = tl.load(cos_sin_ptr + pos * cos_sin_stride + block)
+    cos = cos.to(tl.float32)
+    sin = tl.load(cos_sin_ptr + pos * cos_sin_stride + block + HALF_ROT_DIM)
+    sin = sin.to(tl.float32)
 
-#     Supports both NeoX (split-half) and GPT-J (interleaved) styles.
-#     cos_sin_cache layout: ``[max_position, rotary_dim]`` where the first
-#     ``HALF_ROPE`` columns are cos and the next ``HALF_ROPE`` are sin.
-#     """
-#     tok_idx = tl.program_id(0)
-#     head_idx = tl.program_id(1)
-
-#     # Look up cos / sin for this token's position
-#     pos = tl.load(pos_ptr + tok_idx)
-#     cs_row = cos_sin_ptr + pos * stride_cs
-#     offs = tl.arange(0, HALF_ROPE)
-#     cos = tl.load(cs_row + offs).to(tl.float32)
-#     sin = tl.load(cs_row + HALF_ROPE + offs).to(tl.float32)
-
-#     # Base pointer for the rope portion of x[tok_idx, head_idx]
-#     x_base = x_ptr + tok_idx * stride_tok + head_idx * stride_head + nope_dim
-
-#     if IS_NEOX:
-#         # NeoX style: first half paired with second half
-#         x1 = tl.load(x_base + offs).to(tl.float32)
-#         x2 = tl.load(x_base + HALF_ROPE + offs).to(tl.float32)
-#         tl.store(x_base + offs, x1 * cos - x2 * sin)
-#         tl.store(x_base + HALF_ROPE + offs, x2 * cos + x1 * sin)
-#     else:
-#         # GPT-J style: interleaved even/odd pairs
-#         even = offs * 2
-#         odd = even + 1
-#         x1 = tl.load(x_base + even).to(tl.float32)
-#         x2 = tl.load(x_base + odd).to(tl.float32)
-#         tl.store(x_base + even, x1 * cos - x2 * sin)
-#         tl.store(x_base + odd, x2 * cos + x1 * sin)
+    if tl.program_id(0) == 0:
+        # Handle Q [NUM_Q_HEADS, ROT_DIM]
+        q_base_ptr = q_ptr + tok_idx * q_stride0
+        _rope_kernel(
+            q_base_ptr,
+            q_stride1,
+            cos,
+            sin,
+            NUM_Q_HEADS,
+            HALF_ROT_DIM,
+            Q_NOPE_DIM,
+            INTERLEAVED,
+        )
+    elif tl.program_id(0) == 1:
+        # Handle K [NUM_K_HEADS, ROT_DIM]
+        k_base_ptr = k_ptr + tok_idx * k_stride0
+        _rope_kernel(
+            k_base_ptr, k_stride1, cos, sin, NUM_K_HEADS, HALF_ROT_DIM, 0, INTERLEAVED
+        )
 
 
-# def deepseek_rope(
-#     positions: torch.Tensor,
-#     q: torch.Tensor,
-#     k: torch.Tensor,
-#     cos_sin_cache: torch.Tensor,
-#     qk_nope_head_dim: int,
-#     is_neox_style: bool = False,
-# ) -> None:
-#     num_tokens = positions.shape[0]
-#     num_heads = q.shape[1]
-#     rope_dim = cos_sin_cache.shape[-1]
-#     half_rope = rope_dim // 2
+def qk_rope(
+    positions: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    q_nope_dim: int,
+    interleaved: bool,
+) -> None:
+    assert q.ndim == 3
+    assert k.ndim == 3
+    assert q.shape[0] == k.shape[0]
+    assert cos_sin_cache.ndim == 2
+    assert positions.ndim == 1
+    assert q_nope_dim < q.shape[-1]
+    num_tokens, num_q_heads, _ = q.shape
+    num_tokens, num_k_heads, _ = k.shape
+    rot_dim = cos_sin_cache.shape[-1]
+    _qk_rope_kernel[(2, num_tokens)](
+        q,
+        q.stride(0),
+        q.stride(1),
+        num_q_heads,
+        q_nope_dim,
+        k,
+        k.stride(0),
+        k.stride(1),
+        num_k_heads,
+        positions,
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        rot_dim // 2,
+        interleaved,
+    )
 
-#     # Shared kernel config – rope_dim is small (typically 64), one warp is
-#     # enough per program instance.
-#     num_waprps = 1 if half_rope <= 32 else (2 if half_rope <= 64 else 4)
 
-#     # Q: grid over (tokens, heads), rope starts at nope_dim within each head
-#     _rope_kernel[(num_tokens, num_heads)](
-#         q,
-#         cos_sin_cache,
-#         positions,
-#         q.stride(0),
-#         q.stride(1),
-#         cos_sin_cache.stride(0),
-#         qk_nope_head_dim,
-#         half_rope,
-#         is_neox_style,
-#         num_warps=num_warps,
-#     )
+# if __name__ == "__main__":
+#     N = 100
+#     NUM_Q_HEADS = 128
+#     NUM_K_HEADS = 1
+#     ROPE_DIM = 64
+#     Q_NOPE_DIM = 128
+#     MAX_POS = 10000
 
-#     # K: grid over (tokens, 1), rope starts at offset 0
-#     _rope_kernel[(num_tokens, 1)](
-#         k,
-#         cos_sin_cache,
-#         positions,
-#         k.stride(0),
-#         k.stride(1),
-#         cos_sin_cache.stride(0),
-#         0,  # nope_dim = 0 for K
-#         half_rope,
-#         is_neox_style,
-#         num_warps=num_warps,
-#     )
+#     q = torch.randn(N, NUM_Q_HEADS, Q_NOPE_DIM + ROPE_DIM, device="cuda", dtype=torch.bfloat16)
+#     k = torch.randn(N, NUM_K_HEADS, ROPE_DIM, device="cuda", dtype=torch.bfloat16)
+#     positions = torch.randint(0, MAX_POS, (N,), device="cuda", dtype=torch.int64)
+#     cos_sin_cache = torch.randn(MAX_POS, ROPE_DIM * 2, device="cuda", dtype=torch.bfloat16)
+#     q, k = qk_rope(positions, q, k, cos_sin_cache, Q_NOPE_DIM, False)
+#     print(q.shape)
+#     print(k.shape)
