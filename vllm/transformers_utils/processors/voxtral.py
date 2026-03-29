@@ -60,18 +60,13 @@ class MistralCommonVoxtralProcessor(ProcessorMixin):
     def __init__(
         self,
         tokenizer: MistralTokenizer,
-        feature_extractor: MistralCommonFeatureExtractor | None = None,
+        feature_extractor: MistralCommonFeatureExtractor,
     ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
 
         # Back-compatibility for Transformers v4
         if not hasattr(self.tokenizer, "init_kwargs"):
             self.tokenizer.init_kwargs = {}
-
-        if feature_extractor is None:
-            feature_extractor = MistralCommonFeatureExtractor(
-                tokenizer.instruct.audio_encoder
-            )
 
         self.feature_extractor = feature_extractor
 
