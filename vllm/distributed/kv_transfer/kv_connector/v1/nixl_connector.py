@@ -2520,6 +2520,31 @@ class NixlConnectorWorker:
             meta.remote.engine_id
         )
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
+
+        # DCP block filtering: when D DCP > P DCP, multiple decode ranks
+        # map to the same prefill rank but need different block subsets.
+        # Determine if we need to filter blocks by DCP.
+        remote_dcp_size = 1
+        local_dcp_size = 1
+        if isinstance(self.kv_topo, DcpTpKVTopology):
+            remote_dcp_size = self.kv_topo.remote_dcp_size.get(
+                meta.remote.engine_id, 1
+            )
+            local_dcp_size = self.kv_topo.dcp_size
+        # Block filtering for DCP is NOT needed because the scheduler
+        # allocates the same blocks to all ranks on the same engine.
+        # Each decode rank reads ALL blocks from its prefill rank(s).
+        # The only special case is when reading from multiple prefill
+        # ranks (D DCP < P DCP): split local blocks across remote ranks.
+        need_dcp_block_filter = False
+        # D DCP < P DCP: decode reads from multiple prefill ranks,
+        # each with fewer blocks. Split local blocks across remote ranks.
+        need_dcp_block_split = (
+            local_dcp_size > 1
+            and remote_dcp_size > 1
+            and local_dcp_size < remote_dcp_size
+        )
+
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             if self.use_mla and tp_ratio < 0 and i > 0:
@@ -2553,12 +2578,36 @@ class NixlConnectorWorker:
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 remote_rank
             ]
+
+            # Determine block IDs for this read.
+            local_block_ids = meta.local_physical_block_ids
+            remote_block_ids = meta.remote.block_ids
+
+            if need_dcp_block_split:
+                # D DCP < P DCP: decode aggregates from multiple prefill ranks.
+                # Each prefill rank has its own blocks (e.g., all have block 1).
+                # Split LOCAL blocks across remote ranks (each remote rank
+                # fills a different local block), but use the SAME remote
+                # block IDs for each read (each prefill rank has the same
+                # block allocation).
+                num_remote = len(remote_ranks)
+                split_local, _ = self._filter_blocks_by_dcp_offset(
+                    local_block_ids,
+                    local_block_ids,  # dummy, we only care about local split
+                    i,
+                    num_remote,
+                )
+                local_block_ids = split_local
+                # remote_block_ids stays as-is (each prefill rank has same blocks)
+                if not any(len(g) > 0 for g in local_block_ids):
+                    continue
+
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
-                local_block_ids=meta.local_physical_block_ids,
-                remote_block_ids=meta.remote.block_ids,
+                local_block_ids=local_block_ids,
+                remote_block_ids=remote_block_ids,
                 remote_rank=remote_rank,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
@@ -2572,6 +2621,44 @@ class NixlConnectorWorker:
                 for rank_to_notify, agent in remote_agents.items():
                     if rank_to_notify != remote_rank:
                         self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+
+    def _filter_blocks_by_dcp_offset(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        dcp_offset: int,
+        dcp_ratio: int,
+    ) -> tuple[BlockIds, BlockIds]:
+        """Filter blocks for a specific DCP offset within a prefill rank.
+
+        When D DCP > P DCP, each prefill rank's blocks are shared by
+        dcp_ratio decode ranks. This method selects the subset of blocks
+        for a specific decode rank based on its offset within the ratio group.
+
+        With interleaved assignment:
+          block i belongs to dcp_offset if (i % dcp_ratio) == dcp_offset
+
+        Example: P DCP=2, D DCP=4, dcp_ratio=2
+          Prefill rank 0 has blocks [B0, B2] (tokens [0-15, 32-47])
+          D rank 0 (dcp_offset=0) gets B0 (tokens 0-15)
+          D rank 2 (dcp_offset=1) gets B2 (tokens 32-47)
+        """
+        filtered_local: list[list[int]] = []
+        filtered_remote: list[list[int]] = []
+        for group_idx in range(len(remote_block_ids)):
+            local_group = local_block_ids[group_idx]
+            remote_group = remote_block_ids[group_idx]
+            local_filtered = []
+            remote_filtered = []
+            for i, (local_bid, remote_bid) in enumerate(
+                zip(local_group, remote_group)
+            ):
+                if i % dcp_ratio == dcp_offset:
+                    local_filtered.append(local_bid)
+                    remote_filtered.append(remote_bid)
+            filtered_local.append(local_filtered)
+            filtered_remote.append(remote_filtered)
+        return filtered_local, filtered_remote
 
     def _read_blocks(
         self,
