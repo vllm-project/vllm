@@ -44,6 +44,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.online_moe import (
+    OnlineMoEMethodBase,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
@@ -564,23 +567,16 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer._already_called_process_weights_after_loading = True
 
 
-class Fp8MoEMethod(FusedMoEMethodBase):
-    """MoE method for FP8.
-    Supports loading FP8 checkpoints with static weight scale and
-    dynamic/static activation scale.
+class Fp8MoEKernelMixin:
+    """Fp8-specific kernel setup, quant config, and apply methods.
 
-    Also supports loading quantized FP16/BF16 model checkpoints with dynamic
-    activation scaling. The weight scaling factor will be initialized after
-    the model weights are loaded.
-
-    Args:
-        quant_config: The quantization config.
+    Mixed into both Fp8MoEMethod (checkpoint) and Fp8OnlineMoEMethod (online)
+    to share fp8 backend selection, kernel format conversion, and dispatch.
     """
 
-    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
+    def _init_fp8_backend(self, quant_config: "Fp8Config") -> None:
         self.quant_config = quant_config
-        self.weight_block_size = self.quant_config.weight_block_size
+        self.weight_block_size = quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = (
             "weight_scale_inv" if self.block_quant else "weight_scale"
@@ -605,6 +601,147 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation_key=activation_key,
             allow_vllm_cutlass=False,
         )
+
+    def _setup_kernel(
+        self,
+        layer: FusedMoE,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> None:
+        # Shuffle weights to runtime format.
+        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            fp8_backend=self.fp8_backend,
+            layer=layer,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            w13_input_scale=w13_input_scale,
+            w2_input_scale=w2_input_scale,
+        )
+
+        # Replace parameters with updated versions. Note that this helper
+        # function ensures the replacement is compatible with RL weight reloads.
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
+        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config:
+            assert self.experts_cls is not None
+            self.moe_kernel = make_fp8_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
+
+        quant_config = make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=self.weight_block_size,
+        )
+
+        # Inject biases into the quant config if the model has them
+        # (e.g. GPT-OSS biased MoE)
+        if quant_config is not None and self.moe.has_bias:
+            w13_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
+            if w13_bias is not None:
+                quant_config._w1.bias = w13_bias
+            if w2_bias is not None:
+                quant_config._w2.bias = w2_bias
+
+        return quant_config
+
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: (tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None) = None,
+    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel "
+            "initialization logic. This function should not be called."
+        )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    def apply_monolithic(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+        )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
+        )
+
+
+class Fp8MoEMethod(Fp8MoEKernelMixin, FusedMoEMethodBase):
+    """MoE method for FP8.
+    Supports loading FP8 checkpoints with static weight scale and
+    dynamic/static activation scale.
+
+    Args:
+        quant_config: The quantization config.
+    """
+
+    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
+        FusedMoEMethodBase.__init__(self, layer.moe_config)
+        self._init_fp8_backend(quant_config)
 
     def create_weights(
         self,
@@ -746,47 +883,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def _setup_kernel(
-        self,
-        layer: FusedMoE,
-        w13: torch.Tensor,
-        w2: torch.Tensor,
-        w13_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        w13_input_scale: torch.Tensor | None,
-        w2_input_scale: torch.Tensor | None,
-    ) -> None:
-        # Shuffle weights to runtime format.
-        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.fp8_backend,
-            layer=layer,
-            w13=w13,
-            w2=w2,
-            w13_scale=w13_scale,
-            w2_scale=w2_scale,
-            w13_input_scale=w13_input_scale,
-            w2_input_scale=w2_input_scale,
-        )
-
-        # Replace parameters with updated versions. Note that this helper
-        # function ensures the replacement is compatible with RL weight reloads.
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
-        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
-
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            assert self.experts_cls is not None
-            self.moe_kernel = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
-            )
-
     def process_weights_after_loading(self, layer: Module) -> None:
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
@@ -832,94 +928,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
-        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
-        a1_scale = layer.w13_input_scale
-        a2_scale = layer.w2_input_scale
-
-        quant_config = make_fp8_moe_quant_config(
-            fp8_backend=self.fp8_backend,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            block_shape=self.weight_block_size,
-        )
-
-        # Inject biases into the quant config if the model has them
-        # (e.g. GPT-OSS biased MoE)
-        if quant_config is not None and self.moe.has_bias:
-            w13_bias = getattr(layer, "w13_bias", None)
-            w2_bias = getattr(layer, "w2_bias", None)
-            if w13_bias is not None:
-                quant_config._w1.bias = w13_bias
-            if w2_bias is not None:
-                quant_config._w2.bias = w2_bias
-
-        return quant_config
-
-    @property
-    def supports_eplb(self) -> bool:
-        return True
-
-    def apply_monolithic(
-        self,
-        layer: FusedMoE,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply_monolithic(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            router_logits,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            num_expert_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            routed_scaling_factor=layer.routed_scaling_factor,
-        )
-
-    def apply(
-        self,
-        layer: FusedMoE,
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights,
-            topk_ids,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            shared_experts_input=shared_experts_input,
-        )
-
-
-class Fp8OnlineMoEMethod(Fp8MoEMethod):
+class Fp8OnlineMoEMethod(Fp8MoEKernelMixin, OnlineMoEMethodBase):
     """MoE method for online FP8 quantization.
     Supports loading quantized FP16/BF16 model checkpoints with dynamic
     activation scaling. The weight scaling factor will be initialized after
@@ -929,10 +939,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         quant_config: The quantization config.
     """
 
-    uses_meta_device: bool = True
-
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
-        super().__init__(quant_config, layer)
+        OnlineMoEMethodBase.__init__(self, layer.moe_config)
+        self._init_fp8_backend(quant_config)
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
         assert quant_config.weight_block_size is None
@@ -946,44 +955,33 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-
-        # WEIGHTS
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                device="meta",
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
+        super().create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
         )
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                device="meta",  # materialized and processed during loading
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
+    def _create_extra_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
         # BIASES (for models like GPT-OSS that have biased MoE)
         if self.moe.has_bias:
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
                     2 * intermediate_size_per_partition,
-                    device="meta",  # materialized and processed during loading
+                    device="meta",
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
@@ -995,7 +993,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 torch.zeros(
                     num_experts,
                     hidden_size,
-                    device="meta",  # materialized and processed during loading
+                    device="meta",
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
@@ -1003,12 +1001,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
-        initialize_online_processing(layer)
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
+    def _quantize_weights(self, layer: Module) -> None:
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
@@ -1035,9 +1028,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
         )
-
-        # Prevent duplicate processing (e.g., during weight reload)
-        layer._already_called_process_weights_after_loading = True
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
