@@ -201,10 +201,9 @@ class Fp8Config(QuantizationConfig):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.is_checkpoint_fp8_serialized:
-                moe_quant_method = Fp8MoEMethod(self, layer)
+                return Fp8MoEMethod(self, layer)
             else:
-                moe_quant_method = Fp8OnlineMoEMethod(self, layer)
-            return moe_quant_method
+                return Fp8OnlineMoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
