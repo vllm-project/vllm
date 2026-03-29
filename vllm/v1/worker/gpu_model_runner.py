@@ -126,6 +126,10 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
+from vllm.v1.core.kv_cache_utils import (
+    merge_attn_layers_into_pack,
+    split_attn_layers_from_pack,
+)
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -5792,6 +5796,14 @@ class GPUModelRunner(
         )
 
         kv_cache_spec = self.get_kv_cache_spec()
+        attn_pack_size = self.vllm_config.cache_config.mamba_num_attn_pages
+        # When attn_pack_size > 1 (for Mamba models), pack attention layers together
+        # to share a KV-block.
+        if attn_pack_size > 1:
+            kv_cache_spec = merge_attn_layers_into_pack(
+                attn_pack_size,
+                kv_cache_spec,
+            )
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
 
@@ -5801,6 +5813,13 @@ class GPUModelRunner(
         minimal_config = get_kv_cache_config_from_groups(
             self.vllm_config, kv_cache_groups, available_memory=0
         )
+        # When attn_pack_size > 1 (for Mamba models), split packed layers back
+        # to individual layers after generating configs.
+        if attn_pack_size > 1:
+            minimal_config = split_attn_layers_from_pack(
+                attn_pack_size,
+                minimal_config,
+            )
         self.cache_config.num_gpu_blocks_override = saved_override
 
         self.initialize_kv_cache(minimal_config)

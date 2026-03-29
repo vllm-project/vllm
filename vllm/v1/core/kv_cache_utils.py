@@ -1506,7 +1506,7 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
-def _merge_attn_layers_into_pack(
+def merge_attn_layers_into_pack(
     attn_pack_size: int,
     kv_cache_specs: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
@@ -1557,7 +1557,7 @@ def _merge_attn_layers_into_pack(
     return merged_kv_cache_specs
 
 
-def _split_attn_layers_from_pack(
+def split_attn_layers_from_pack(
     attn_pack_size: int,
     kv_cache_config: KVCacheConfig,
 ) -> KVCacheConfig:
@@ -1648,7 +1648,7 @@ def get_kv_cache_configs(
     # to share a KV-block.
     if attn_pack_size > 1:
         for i in range(len(kv_cache_specs)):
-            kv_cache_specs[i] = _merge_attn_layers_into_pack(
+            kv_cache_specs[i] = merge_attn_layers_into_pack(
                 attn_pack_size,
                 kv_cache_specs[i],
             )
@@ -1731,7 +1731,7 @@ def get_kv_cache_configs(
     # to individual layers after generating configs.
     if attn_pack_size > 1:
         for i in range(len(kv_cache_configs)):
-            kv_cache_configs[i] = _split_attn_layers_from_pack(
+            kv_cache_configs[i] = split_attn_layers_from_pack(
                 attn_pack_size,
                 kv_cache_configs[i],
             )
