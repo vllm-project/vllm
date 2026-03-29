@@ -439,7 +439,10 @@ class RocmPlatform(Platform):
                     f"this configuration. Reason: {invalid_reasons}"
                 )
             else:
-                logger.info("Using %s backend.", selected_backend)
+                logger.info_once(
+                    "Using %s backend (selected via --attention-backend).",
+                    selected_backend.name,
+                )
                 return selected_backend.get_path()
 
         # No selected backend or the selected backend is invalid,
@@ -476,12 +479,25 @@ class RocmPlatform(Platform):
         )
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
-        logger.info_once(
-            "Using %s attention backend out of potential backends: %s.",
-            selected_backend.name,
-            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
+        valid_str = (
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]"
         )
+        if invalid_reasons:
+            rejected_str = ", ".join(b.name for b in invalid_reasons)
+            logger.info(
+                "Found incompatible backend(s) [%s] with %s. "
+                "Overriding with %s out of potential backends: %s.",
+                rejected_str,
+                attn_selector_config.attn_type,
+                selected_backend.name,
+                valid_str,
+            )
+        else:
+            logger.info_once(
+                "Using %s backend out of potential backends: %s.",
+                selected_backend.name,
+                valid_str,
+            )
 
         return selected_backend.get_path()
 
@@ -649,13 +665,6 @@ class RocmPlatform(Platform):
             and "-grouped_topk" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+grouped_topk")
-        # Enable rotary embedding customop when using AITER if not disabled by user
-        if (
-            rocm_aiter_ops.is_enabled()
-            and "+rotary_embedding" not in compilation_config.custom_ops
-            and "-rotary_embedding" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rotary_embedding")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
