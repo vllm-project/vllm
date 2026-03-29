@@ -291,6 +291,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
         Uses fused Triton kernel for 4-bit (single kernel: unpack → codebook
         → inv Hadamard → norm scale → write bf16 with outlier interleaving).
         """
+        import os
+
         bits = int(layer._tq_k_state.config.bit_width)
 
         flat_bt = block_table.reshape(-1)
@@ -300,7 +302,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
             num_entries, device=block_table.device, dtype=block_table.dtype
         ).reshape(block_table.shape)
 
-        if bits == 4:
+        use_fused = not os.environ.get("TQ_UNFUSED", "")
+        if use_fused and bits == 4:
             return self._decode_fused_4bit(
                 key_cache,
                 value_cache,
@@ -486,6 +489,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
         layer: torch.nn.Module,
     ) -> None:
         """Encode K/V with outlier-aware layout into paged uint8 cache."""
+        import os
+
         num_actual = slot_mapping.shape[0]
         bits = int(layer._tq_k_state.config.bit_width)
         block_size = kv_cache.shape[2]
@@ -494,7 +499,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
         block_indices = clamped_slots // block_size
         block_offsets = clamped_slots % block_size
 
-        if bits == 4:
+        use_fused = not os.environ.get("TQ_UNFUSED", "")
+        if use_fused and bits == 4:
             self._encode_fused_4bit(
                 key[:num_actual],
                 value[:num_actual],
