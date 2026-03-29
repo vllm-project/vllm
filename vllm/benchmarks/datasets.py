@@ -2415,7 +2415,8 @@ class SonnetDataset(BenchmarkDataset):
         samples = []
         ind = 0
         attempts = 0
-        while len(samples) < num_requests and attempts < self.DEFAULT_MAX_SAMPLE_ATTEMPTS:
+        while (len(samples) < num_requests and
+               attempts < self.DEFAULT_MAX_SAMPLE_ATTEMPTS):
             attempts += 1
             extra_lines = random.choices(
                 self.data, k=num_input_lines - num_prefix_lines
