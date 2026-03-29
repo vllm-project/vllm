@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""End-to-end accuracy tests for INT8 KV cache quantization.
+"""End-to-end accuracy tests for per-token KV cache quantization.
 
 Compares logprobs between a baseline bf16 model and the same model with
-kv_cache_dtype="int8_per_token" using the Triton attention backend. Since no
-pre-calibrated INT8 KV scale checkpoints exist yet, we test with
-calculate_kv_scales=True (dynamic per-head scales from the first batch).
+per-token quantized KV cache (int8 or fp8) using the Triton attention backend.
 
-Run: pytest tests/models/quantization/test_int8_kv_cache.py -v -s
+Run: pytest tests/models/quantization/test_per_token_kv_cache.py -v -s
 """
 
 import pytest
@@ -20,37 +18,38 @@ from ..utils import check_logprobs_close
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
-    reason="INT8 KV cache requires CUDA or ROCm GPU.",
+    reason="Per-token KV cache requires CUDA or ROCm GPU.",
 )
 @pytest.mark.parametrize(
     "base_model,test_model",
     [
-        # BF16 model with dynamic INT8 KV cache quantization
         (
             "meta-llama/Llama-3.2-1B-Instruct",
             "meta-llama/Llama-3.2-1B-Instruct",
         ),
     ],
 )
+@pytest.mark.parametrize("kv_cache_dtype", ["int8_per_token", "fp8_per_token"])
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("backend", ["TRITON_ATTN"])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_int8_kv_cache_accuracy(
+def test_per_token_kv_cache_accuracy(
     vllm_runner,
     example_prompts,
     base_model: str,
     test_model: str,
+    kv_cache_dtype: str,
     max_tokens: int,
     enforce_eager: bool,
     backend: str,
     tensor_parallel_size: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Compare logprobs between bf16 baseline and INT8 KV cache.
+    """Compare logprobs between bf16 baseline and per-token quantized KV cache.
 
     Uses calculate_kv_scales (dynamic scale computation) since there are
-    no INT8-calibrated checkpoints available yet.
+    no per-token calibrated checkpoints available yet.
     """
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
@@ -75,7 +74,7 @@ def test_int8_kv_cache_accuracy(
             max_model_len=MAX_MODEL_LEN,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
-            kv_cache_dtype="int8_per_token",
+            kv_cache_dtype=kv_cache_dtype,
             calculate_kv_scales=True,
             attention_config={"backend": backend},
         ) as vllm_model:
@@ -87,5 +86,5 @@ def test_int8_kv_cache_accuracy(
             outputs_0_lst=baseline_outputs,
             outputs_1_lst=test_outputs,
             name_0="bf16_kv_cache",
-            name_1="int8_kv_cache",
+            name_1=f"{kv_cache_dtype}_kv_cache",
         )
