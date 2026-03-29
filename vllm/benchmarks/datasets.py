@@ -2363,6 +2363,7 @@ class SonnetDataset(BenchmarkDataset):
     DEFAULT_PREFIX_LEN = 200
     DEFAULT_INPUT_LEN = 550
     DEFAULT_OUTPUT_LEN = 150
+    DEFAULT_MAX_SAMPLE_ATTEMPTS = 1000
 
     def __init__(
         self,
