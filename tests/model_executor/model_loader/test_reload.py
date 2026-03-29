@@ -151,6 +151,8 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         tensor_parallel_size=tp_size,
         enable_expert_parallel=(tp_size > 1 and "DeepSeek" in base_model),
         enable_prefix_caching=False,
+        max_model_len=10,
+        max_num_seqs=1,
     ) as llm:
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
