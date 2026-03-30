@@ -22,7 +22,6 @@ def server():
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "hermes",
-        "--log-error-stack",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
