@@ -3,7 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand64
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax
 
 
 @triton.jit
@@ -203,10 +203,10 @@ def _probabilistic_rejection_kernel(
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
     start_idx = tl.load(cu_num_logits_ptr + req_idx)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_tokens = end_idx - start_idx
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
     seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
@@ -217,8 +217,9 @@ def _probabilistic_rejection_kernel(
             logit_idx = start_idx + i
             draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1)
             if temp == 0.0:
-                # Greedy sampling. Only accept the sampled draft token if
-                # it exactly matches the target argmax.
+                # Greedy sampling. Accept IFF draft matches target argmax.
+                # NOTE: Target argmax is stored directly so that resampling
+                # can be skipped upon rejection.
                 target_blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
                 target_blocks_mask = target_blocks < vocab_num_blocks
                 target_local_max = tl.load(
@@ -235,13 +236,14 @@ def _probabilistic_rejection_kernel(
                     + max_target_block_idx
                 )
                 accepted &= target_argmax == draft_sampled
+                tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
             else:
                 target_logit = tl.load(
                     target_logits_ptr + logit_idx * target_logits_stride + draft_sampled
-                ).to(tl.float64)
+                )
                 draft_logit = tl.load(
                     draft_logits_ptr + logit_idx * draft_logits_stride + draft_sampled
-                ).to(tl.float64)
+                )
                 target_lse = _compute_global_lse(
                     target_local_max_ptr,
                     target_local_max_stride,
@@ -250,7 +252,7 @@ def _probabilistic_rejection_kernel(
                     logit_idx,
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
-                ).to(tl.float64)
+                )
                 draft_lse = _compute_global_lse(
                     draft_local_max_ptr,
                     draft_local_max_stride,
@@ -259,15 +261,15 @@ def _probabilistic_rejection_kernel(
                     logit_idx,
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
-                ).to(tl.float64)
+                )
                 target_log_prob = target_logit - target_lse
                 draft_log_prob = draft_logit - draft_lse
                 pos = tl.load(pos_ptr + logit_idx)
-                u = tl_rand64(seed, pos, includes_zero=False)
+                u = tl.rand(seed, pos)
                 # Probability ratio test: p(x) > u * q(x)
                 # Equivalent log form: log_p(x) > log(u) + log_q(x)
                 accepted &= target_log_prob > tl.log(u) + draft_log_prob
-            tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+                tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
 
@@ -283,27 +285,27 @@ def _resample_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
-    # [num_logits, lse_num_blocks]
+    # [num_logits, vocab_num_blocks]
     target_local_max_ptr,
     target_local_max_stride,
-    # [num_logits, lse_num_blocks]
+    # [num_logits, vocab_num_blocks]
     target_local_sumexp_ptr,
     target_local_sumexp_stride,
     # [num_logits, V]
     draft_logits_ptr,
     draft_logits_stride,
-    # [num_logits, lse_num_blocks]
+    # [num_logits, vocab_num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
-    # [num_logits, lse_num_blocks]
+    # [num_logits, vocab_num_blocks]
     draft_local_sumexp_ptr,
     draft_local_sumexp_stride,
     # [num_reqs]
     rejected_step_ptr,
     # [num_reqs + 1]
     cu_num_logits_ptr,
-    # [num_reqs]
-    idx_mapping_ptr,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
     # [max_num_reqs]
     temp_ptr,
     # [max_num_reqs]
@@ -316,60 +318,61 @@ def _resample_kernel(
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    resample_idx = tl.load(rejected_step_ptr + req_idx)
     start_idx = tl.load(cu_num_logits_ptr + req_idx)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    rejected_token_idx = start_idx + tl.load(rejected_step_ptr + req_idx)
+    resample_token_idx = start_idx + resample_idx
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block_offsets < vocab_size
+    is_bonus = resample_token_idx == end_idx - 1
+    if temp == 0.0 and not is_bonus:
+        # Greedy + non-bonus token. No resampling needed because
+        # the target argmax is already in the sampled tensor.
+        return
+
+    block_idx = tl.program_id(1)
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
 
     # Compute the residual logits to resample the rejected token
     # from. In the case of no rejections (bonus token), we directly
     # use the target logits.
-    if temp == 0.0 or (rejected_token_idx == end_idx - 1):
-        # Greedy sampling / bonus token. In either case, use the
-        # target logits directly to reduce numerical error.
+    if is_bonus:
         residual_logits = tl.load(
-            target_logits_ptr
-            + rejected_token_idx * target_logits_stride
-            + block_offsets,
+            target_logits_ptr + resample_token_idx * target_logits_stride + block,
             mask=mask,
             other=float("-inf"),
         ).to(tl.float32)
     else:
         target_logits = tl.load(
-            target_logits_ptr
-            + rejected_token_idx * target_logits_stride
-            + block_offsets,
+            target_logits_ptr + resample_token_idx * target_logits_stride + block,
             mask=mask,
             other=float("-inf"),
-        ).to(tl.float64)
+        )
         draft_logits = tl.load(
-            draft_logits_ptr + rejected_token_idx * draft_logits_stride + block_offsets,
+            draft_logits_ptr + resample_token_idx * draft_logits_stride + block,
             mask=mask,
             other=float("-inf"),
-        ).to(tl.float64)
+        )
         target_lse = _compute_global_lse(
             target_local_max_ptr,
             target_local_max_stride,
             target_local_sumexp_ptr,
             target_local_sumexp_stride,
-            rejected_token_idx,
+            resample_token_idx,
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
-        ).to(tl.float64)
+        )
         draft_lse = _compute_global_lse(
             draft_local_max_ptr,
             draft_local_max_stride,
             draft_local_sumexp_ptr,
             draft_local_sumexp_stride,
-            rejected_token_idx,
+            resample_token_idx,
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
-        ).to(tl.float64)
+        )
         target_log_probs = target_logits - target_lse
         draft_log_probs = draft_logits - draft_lse
         # Compute the residual: max(p(x) - q(x), 0)
@@ -379,25 +382,25 @@ def _resample_kernel(
         ratio = tl.exp(draft_log_probs - target_log_probs)
         residual_logits = tl.where(
             ratio < 1.0,
-            target_log_probs + tl.log(1.0 - ratio),
+            target_log_probs + tl.log(1 - ratio),
             float("-inf"),
         ).to(tl.float32)
 
     # Resample the rejected/bonus token.
-    value, token_id = gumbel_block_argmax(
+    value, idx = gumbel_block_argmax(
         residual_logits,
+        block,
         mask,
-        block_idx,
-        req_state_idx,
-        rejected_token_idx,
+        resample_token_idx,
+        expanded_idx_mapping_ptr,
         temp_ptr,
         seed_ptr,
         pos_ptr,
         None,
         0,
-        BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=False,
     )
+    token_id = block_idx * BLOCK_SIZE + idx
     tl.store(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride
@@ -424,10 +427,32 @@ def _insert_resampled_kernel(
     resampled_local_max_ptr,
     resampled_local_max_stride,
     resample_num_blocks,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_reqs]
+    expanded_idx_mapping_ptr,
+    # [max_num_reqs]
+    temp_ptr,
     PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    resample_idx = tl.load(num_sampled_ptr + req_idx)
+    num_sampled = tl.load(num_sampled_ptr + req_idx)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    resample_token_idx = start_idx + num_sampled
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+
+    # Increment the number of sampled tokens.
+    tl.store(num_sampled_ptr + req_idx, num_sampled + 1)
+
+    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    is_bonus = resample_token_idx == end_idx - 1
+    if temp == 0.0 and not is_bonus:
+        # Greedy + non-bonus token. The target argmax is already
+        # in the sampled tensor.
+        return
+
+    # Insert the resampled token.
     block_offsets = tl.arange(0, PADDED_RESAMPLE_NUM_BLOCKS)
     block_mask = block_offsets < resample_num_blocks
     resampled_local_max = tl.load(
@@ -442,10 +467,9 @@ def _insert_resampled_kernel(
         + resampled_max_block_idx,
     )
     tl.store(
-        sampled_ptr + req_idx * sampled_stride + resample_idx,
+        sampled_ptr + req_idx * sampled_stride + num_sampled,
         resampled,
     )
-    tl.store(num_sampled_ptr + req_idx, resample_idx + 1)
 
 
 def probabilistic_rejection_sample(
@@ -564,7 +588,7 @@ def probabilistic_rejection_sample(
         num_reqs, resample_num_blocks, dtype=torch.int64
     )
     resampled_local_max = target_logits.new_empty(
-        num_reqs, resample_num_blocks, dtype=torch.float64
+        num_reqs, resample_num_blocks, dtype=torch.float32
     )
     _resample_kernel[(num_reqs, resample_num_blocks)](
         resampled_local_argmax,
@@ -585,7 +609,7 @@ def probabilistic_rejection_sample(
         draft_local_sumexp.stride(0),
         num_sampled,
         cu_num_logits,
-        idx_mapping,
+        expanded_idx_mapping,
         temperature,
         seed,
         pos,
@@ -605,6 +629,9 @@ def probabilistic_rejection_sample(
         resampled_local_max,
         resampled_local_max.stride(0),
         resample_num_blocks,
+        cu_num_logits,
+        expanded_idx_mapping,
+        temperature,
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
     )
     return sampled, num_sampled
