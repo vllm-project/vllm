@@ -57,6 +57,11 @@ def parse_args():
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-chunked-prefill", action="store_true")
+    parser.add_argument(
+        "--enable-multi-layers-mtp",
+        action="store_true",
+        help="Enable multi-layer MTP (only effective when --method=mtp).",
+    )
     parser.add_argument("--max-model-len", type=int, default=16384)
     parser.add_argument("--temp", type=float, default=0)
     parser.add_argument("--top-p", type=float, default=1.0)
@@ -66,12 +71,14 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--draft-model", type=str, default=None)
+    parser.add_argument("--tokenizer-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--disable-padded-drafter-batch", action="store_true")
     parser.add_argument("--max-num-seqs", type=int, default=None)
     parser.add_argument("--parallel-drafting", action="store_true")
     parser.add_argument("--allowed-local-media-path", type=str, default="")
+    parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
 
 
@@ -85,7 +92,11 @@ def main(args):
                 "please specify model_dir to give a mm based model"
             )
         model_dir = "meta-llama/Llama-3.1-8B-Instruct"
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    tokenizer_dir = args.tokenizer_dir
+    if tokenizer_dir is None:
+        tokenizer_dir = model_dir
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir)
 
     if args.custom_mm_prompts:
         prompts = llm_prompts = get_custom_mm_prompts(args.num_prompts)
@@ -141,6 +152,8 @@ def main(args):
             "method": "mtp",
             "num_speculative_tokens": args.num_spec_tokens,
         }
+        if args.enable_multi_layers_mtp:
+            speculative_config["enable_multi_layers_mtp"] = True
     else:
         raise ValueError(f"unknown method: {args.method}")
 

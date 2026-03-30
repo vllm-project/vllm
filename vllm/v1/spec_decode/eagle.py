@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 from importlib.util import find_spec
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -38,7 +38,7 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata, SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
@@ -76,6 +76,10 @@ class SpecDecodeBaseProposer:
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+
+        self.enable_multi_layers_mtp = self.speculative_config.enable_multi_layers_mtp
+        # number of layers in each MTP/EAGLE module
+        self.layer_num = 1
 
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -375,6 +379,23 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
+    def adjust_input(
+        self,
+        batch_size: int,
+        target_token_ids: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        common_attn_metadata: CommonAttentionMetadata,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
+        return (
+            target_token_ids,
+            target_positions,
+            target_hidden_states,
+            common_attn_metadata,
+        )
+
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
@@ -394,6 +415,7 @@ class SpecDecodeBaseProposer:
         token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata | None = None,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
         slot_mappings: dict[str, torch.Tensor]
@@ -410,6 +432,21 @@ class SpecDecodeBaseProposer:
                 target_hidden_states
             )
             assert target_hidden_states.shape[-1] == self.hidden_size
+
+        (
+            target_token_ids,
+            target_positions,
+            target_hidden_states,
+            common_attn_metadata,
+        ) = self.adjust_input(
+            batch_size=batch_size,
+            target_token_ids=target_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=token_indices_to_sample,
+            common_attn_metadata=common_attn_metadata,
+            multi_layer_eagle_metadata=multi_layer_eagle_metadata,
+        )
 
         num_tokens, token_indices_to_sample, common_attn_metadata = (
             self.set_inputs_first_pass(
@@ -435,52 +472,85 @@ class SpecDecodeBaseProposer:
             self._determine_batch_execution_and_padding(num_tokens)
         )
 
-        if self.supports_mm_inputs:
-            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
+        draft_token_ids_list = []
+        for spec_step_idx in range(self.layer_num):
+            if self.supports_mm_inputs:
+                mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
-            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
-                self.input_ids[:num_tokens],
-                multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
-            )
+                self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
+                    self.input_ids[:num_tokens],
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
 
-            input_ids = None
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
-        else:
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
-
-        model_kwargs = {
-            "input_ids": input_ids,
-            "positions": self._get_positions(num_input_tokens),
-            "inputs_embeds": inputs_embeds,
-        }
-        if self.pass_hidden_states_to_model:
-            model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
-
-        with set_forward_context(
-            per_layer_attn_metadata,
-            self.vllm_config,
-            num_tokens=num_input_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping
-            ),
-        ):
-            ret_hidden_states = self.model(**model_kwargs)
-            if not self.model_returns_tuple():
-                last_hidden_states = ret_hidden_states
-                hidden_states = last_hidden_states
+                input_ids = None
+                inputs_embeds = self.inputs_embeds[:num_input_tokens]
             else:
-                last_hidden_states, hidden_states = ret_hidden_states
+                input_ids = self.input_ids[:num_input_tokens]
+                inputs_embeds = None
 
-        sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            model_kwargs = {
+                "input_ids": input_ids,
+                "positions": self._get_positions(num_input_tokens),
+                "inputs_embeds": inputs_embeds,
+            }
+            if self.pass_hidden_states_to_model:
+                model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
 
-        # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            draft_token_ids = self._greedy_sample(sample_hidden_states)
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            if self.enable_multi_layers_mtp:
+                model_kwargs["spec_step_idx"] = spec_step_idx
+
+            with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._get_slot_mapping(
+                    num_input_tokens, common_attn_metadata.slot_mapping
+                ),
+            ):
+                ret_hidden_states = self.model(**model_kwargs)
+                if not self.model_returns_tuple():
+                    last_hidden_states = ret_hidden_states
+                    hidden_states = last_hidden_states
+                else:
+                    last_hidden_states, hidden_states = ret_hidden_states
+
+            sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            if self.enable_multi_layers_mtp:
+                logits = self.model.compute_logits(
+                    sample_hidden_states, spec_step_idx=spec_step_idx
+                )
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+
+            draft_token_ids = logits.argmax(dim=-1)
+
+            # Generate the remaining draft tokens.
+            draft_token_ids_list.append(draft_token_ids)
+
+            if spec_step_idx < self.layer_num - 1:
+                prev_token_ids = self.input_ids[:num_tokens].clone()
+                hidden_states = hidden_states[:num_tokens]
+                next_token_ids = draft_token_ids_list[-1].int()
+
+                num_tokens, token_indices_to_sample, common_attn_metadata = (
+                    self.set_inputs_first_pass(
+                        target_token_ids=prev_token_ids,
+                        next_token_ids=next_token_ids,
+                        target_positions=target_positions,
+                        target_hidden_states=hidden_states,
+                        token_indices_to_sample=token_indices_to_sample,
+                        cad=common_attn_metadata,
+                        num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                    )
+                )
+
+        # Early exit if all draft tokens are generated in one pass
+        if self.num_speculative_tokens == self.layer_num or self.parallel_drafting:
+            draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+            return draft_token_ids
 
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
@@ -489,6 +559,11 @@ class SpecDecodeBaseProposer:
         hidden_states = hidden_states[token_indices_to_sample]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
+            if self.enable_multi_layers_mtp:
+                raise NotImplementedError(
+                    "Speculative Decoding with multi-layer MTP and tree attention "
+                    "is not supported yet."
+                )
             # Draft using tree attention - requires full logits for top-k
             logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
@@ -509,7 +584,7 @@ class SpecDecodeBaseProposer:
         ):
             raise ValueError(
                 f"Unsupported attention metadata type for speculative "
-                "decoding with num_speculative_tokens > 1: "
+                "decoding with num_speculative_tokens > layer_num: "
                 f"{type(attn_metadata)}. Supported types are: "
                 f"{self.allowed_attn_types}"
             )
@@ -540,7 +615,7 @@ class SpecDecodeBaseProposer:
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
-        for token_index in range(self.num_speculative_tokens - 1):
+        for token_index in range(self.num_speculative_tokens - self.layer_num):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.

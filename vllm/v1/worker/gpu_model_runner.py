@@ -164,7 +164,8 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata, SpecDecodeMetadata
+from vllm.v1.spec_decode.multi_layer_eagle import MultiLayerEagleProposer
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
     NgramProposerGPU,
     copy_num_valid_draft_tokens,
@@ -376,6 +377,7 @@ class ExecuteModelState(NamedTuple):
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None
+    multi_layer_eagle_metadata: MultiLayerEagleMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
@@ -477,6 +479,9 @@ class GPUModelRunner(
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
+        # multi layer eagle
+        self.enable_multi_layer_eagle = False
+
         self.eplb_state: EplbState | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
         self.eep_eplb_suppressed = False
@@ -505,6 +510,9 @@ class GPUModelRunner(
         self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
+
+        self.multi_layer_eagle_num = 0
+
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -549,7 +557,17 @@ class GPUModelRunner(
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
-                self.drafter = EagleProposer(self.vllm_config, self.device, self)
+                if (
+                    self.speculative_config.enable_multi_layers_mtp
+                    and self.speculative_config.method == "mtp"
+                ):
+                    self.enable_multi_layer_eagle = True
+                    self.drafter = MultiLayerEagleProposer(
+                        self.vllm_config, self.device, self
+                    )
+                    self.multi_layer_eagle_num = self.drafter.layer_num
+                else:
+                    self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
@@ -635,6 +653,10 @@ class GPUModelRunner(
             or self.vllm_config.reasoning_config is not None,
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            multi_layer_eagle_num=self.multi_layer_eagle_num
+            if self.enable_multi_layer_eagle
+            else 0,
+            hidden_size=self.model_config.get_hidden_size(),
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -1179,6 +1201,9 @@ class GPUModelRunner(
             if self.uses_xdrope_dim > 0:
                 self._init_xdrope_positions(req_state)
 
+            if self.enable_multi_layer_eagle:
+                self._init_multi_layer_eagle_cache(req_state)
+
             reqs_to_add.append(req_state)
             # Track new requests for ngram_gpu full tensor copy
             if is_ngram_gpu:
@@ -1529,6 +1554,24 @@ class GPUModelRunner(
             req_state.mm_features,
         )
 
+    def _init_multi_layer_eagle_cache(self, req_state: CachedRequestState):
+        req_state.cached_len = torch.zeros(1, dtype=torch.int64, device=self.device)
+        req_state.cached_hidden_states = torch.zeros(
+            self.multi_layer_eagle_num,
+            self.model_config.get_hidden_size(),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        req_state.cached_token_ids = torch.zeros(
+            self.multi_layer_eagle_num, dtype=torch.int32, device=self.device
+        )
+        req_state.cached_positions = torch.zeros(
+            self.multi_layer_eagle_num, dtype=torch.int64, device=self.device
+        )
+        req_state.cached_slot_mappings = torch.zeros(
+            self.multi_layer_eagle_num, dtype=torch.int64, device=self.device
+        )
+
     def _extract_mm_kwargs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1788,6 +1831,7 @@ class GPUModelRunner(
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
+        MultiLayerEagleMetadata | None,
     ]:
         """
         :return: tuple[
@@ -2062,6 +2106,17 @@ class GPUModelRunner(
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
 
+        if self.enable_multi_layer_eagle:
+            multi_layer_eagle_metadata = MultiLayerEagleMetadata(
+                cached_len=self.input_batch.cached_len[:num_reqs],
+                cached_token_ids=self.input_batch.cached_token_ids[:num_reqs],
+                cached_hidden_states=self.input_batch.cached_hidden_states[:num_reqs],
+                cached_slot_mappings=self.input_batch.cached_slot_mappings[:num_reqs],
+                cached_positions=self.input_batch.cached_positions[:num_reqs],
+            )
+        else:
+            multi_layer_eagle_metadata = None
+
         # Hot-Swap lora model
         if self.lora_config:
             assert (
@@ -2072,10 +2127,7 @@ class GPUModelRunner(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
 
-        return (
-            logits_indices,
-            spec_decode_metadata,
-        )
+        return (logits_indices, spec_decode_metadata, multi_layer_eagle_metadata)
 
     def _build_attention_metadata(
         self,
@@ -3840,9 +3892,11 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+            logits_indices, spec_decode_metadata, multi_layer_eagle_metadata = (
+                self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                )
             )
 
             cascade_attn_prefix_lens = None
@@ -4087,6 +4141,7 @@ class GPUModelRunner(
             scheduler_output,
             logits,
             spec_decode_metadata,
+            multi_layer_eagle_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
             sample_hidden_states,
@@ -4131,6 +4186,7 @@ class GPUModelRunner(
             scheduler_output,
             logits,
             spec_decode_metadata,
+            multi_layer_eagle_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
             sample_hidden_states,
@@ -4180,6 +4236,7 @@ class GPUModelRunner(
                     sample_hidden_states,
                     aux_hidden_states,
                     spec_decode_metadata,
+                    multi_layer_eagle_metadata,
                     spec_decode_common_attn_metadata,
                     slot_mappings,
                 )
@@ -4472,6 +4529,7 @@ class GPUModelRunner(
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        multi_layer_eagle_metadata: MultiLayerEagleMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
     ) -> list[list[int]] | torch.Tensor:
@@ -4699,6 +4757,7 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
+                multi_layer_eagle_metadata=multi_layer_eagle_metadata,
             )
 
         return draft_token_ids
@@ -6501,6 +6560,10 @@ class GPUModelRunner(
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
+                multi_layer_eagle_num=self.multi_layer_eagle_num
+                if self.enable_multi_layer_eagle
+                else 0,
+                hidden_size=self.model_config.get_hidden_size(),
             )
 
         assert self._init_block_sizes == block_sizes, (
