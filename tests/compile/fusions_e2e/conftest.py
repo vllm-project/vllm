@@ -156,11 +156,20 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             else:
                 num_ranges_activated = num_compile_ranges
 
-            n_expected = tp_size * num_ranges_activated
-            assert len(log_matches) == n_expected, (
-                f"Could not find {n_expected} {match_name} "
-                f"(found {len(log_matches)}) in:\n {log_holder.text}"
-            )
+            # TODO: Remove log counting in unit tests
+            # once all matchers implement VllmFusionPatternMatcherPass
+            if match_name == "attn_quant_fusion_pass":
+                actual_match = VllmPatternMatcherPass.match_table[match_name]
+                n_expected = tp_size * num_ranges_activated
+                assert actual_match == n_expected, (
+                    f"Could not find {n_expected} {match_name} (found {actual_match})."
+                )
+            else:
+                n_expected = tp_size * num_ranges_activated
+                assert len(log_matches) == n_expected, (
+                    f"Could not find {n_expected} {match_name} "
+                    f"(found {len(log_matches)}) in:\n {log_holder.text}"
+                )
 
             expected_matches = getattr(matches, match_name)
 
@@ -215,14 +224,6 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"Expecting 0 ar_rms on "
                     f"{tp_size * (num_ranges_activated - 1)} large-range "
                     f"entries (SP took precedence), found: {log_matches}"
-                )
-            elif match_name == "attn_quant_fusion_pass":
-                # TODO: Remove log counting in unit tests
-                # once all matchers implement VllmFusionPatternMatcherPass
-                expected_matches_list = [expected_matches] * n_expected
-                assert (
-                    expected_matches_list
-                    == VllmPatternMatcherPass.match_table[match_name]
                 )
 
             else:
