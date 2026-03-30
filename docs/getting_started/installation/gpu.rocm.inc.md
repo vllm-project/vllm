@@ -37,15 +37,15 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
     Another approach is that you can use this following commands to automatically extract the wheel variants:
 
     ```bash
-    # automatically extract the vLLM version
-    export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/vllm | grep -oP 'vllm-\K[0-9.]+' | head -1)
-
     # automatically extract the available rocm variant
     export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/vllm | grep -oP 'rocm\d+' | head -1)
 
+    # automatically extract the vLLM version
+    export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/vllm | grep -oP 'vllm-\K[0-9.]+' | head -1)
+
     # inspect if the ROCm version is compatible with your environment
-    echo $VLLM_VERSION
     echo $VLLM_ROCM_VARIANT
+    echo $VLLM_VERSION
     ```
 
 To install a specific version and ROCm variant of vLLM wheel.
@@ -88,8 +88,7 @@ echo $VLLM_ROCM_VARIANT
 
 uv pip install --pre vllm \
     --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} \
-    --index-strategy unsafe-best-match \
-    --upgrade
+    --index-strategy unsafe-best-match
 ```
 
 ##### Install specific revisions
@@ -107,6 +106,7 @@ export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT}/${VLLM_
 grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
 
 # inspect the version if it is compatible with the ROCm version of your environment
+echo $VLLM_ROCM_VARIANT
 echo $VLLM_VERSION
 
 uv pip install vllm==${VLLM_VERSION} \
@@ -131,6 +131,7 @@ uv pip install vllm==${VLLM_VERSION} \
     grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
 
     # inspect the version if it is compatible with the ROCm version of your environment
+    echo $VLLM_ROCM_VARIANT
     echo $VLLM_VERSION
 
     pip install vllm==${VLLM_VERSION} \
