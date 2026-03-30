@@ -351,7 +351,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
-    "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
@@ -664,7 +663,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/permute_cols.cu"
       "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
-      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu")
+      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
+      "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
