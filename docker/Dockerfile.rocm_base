@@ -116,6 +116,7 @@ RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && git cherry-pick 555d04f \
+    && git cherry-pick dd998b6 \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
