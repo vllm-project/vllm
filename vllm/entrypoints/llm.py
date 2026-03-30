@@ -1427,8 +1427,7 @@ class LLM:
             generated scores in the same order as the input prompts.
         """
 
-        runner_type = self.runner_type
-        if runner_type != "pooling":
+        if self.runner_type != "pooling":
             raise ValueError(
                 "LLM.score() is only supported for pooling models. "
                 "Try passing `--runner pooling` to use the model as a "
@@ -1437,13 +1436,13 @@ class LLM:
 
         score_type = self.model_config.score_type
         if score_type is None:
-            raise ValueError("")
+            raise ValueError("This model does not support the Scoring API.")
 
         if (
             score_type == "cross-encoder"
             and getattr(self.model_config.hf_config, "num_labels", 0) != 1
         ):
-            raise ValueError("Score API is only enabled for num_labels == 1.")
+            raise ValueError("Scoring API is only enabled for num_labels == 1.")
 
         assert score_type in self.pooling_io_processors
         io_processor = self.pooling_io_processors[score_type]

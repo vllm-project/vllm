@@ -12,7 +12,7 @@ from vllm.entrypoints.pooling.typing import (
     OfflineOutputsContext,
     PoolingServeContext,
 )
-from vllm.inputs import EngineInput, TokensInput, tokens_input
+from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.tasks import PoolingTask, ScoreType
@@ -244,16 +244,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
         pooling_params_list = list[PoolingParams]()
-        engine_prompts = list[TokensInput]()
+        engine_inputs = list[EngineInput]()
         for q, d in input_pairs:
-            _, token_prompt = self.get_score_prompt(
+            _, engine_prompt = self.get_score_prompt(
                 data_1=q,
                 data_2=d,
                 encode_kwargs=tok_params.get_encode_kwargs(),
                 chat_template=ctx.chat_template,
             )
 
-            if token_type_ids := token_prompt.pop("token_type_ids", None):
+            if token_type_ids := engine_prompt.pop("token_type_ids", None):
                 params = ctx.pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
                 params.extra_kwargs = {"compressed_token_type_ids": compressed}
@@ -261,10 +261,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else:
                 pooling_params_list.append(ctx.pooling_params)
 
-            engine_prompts.append(tokens_input(**token_prompt))
+            engine_inputs.append(self.renderer.process_for_engine(engine_prompt))
 
         ctx.pooling_params = pooling_params_list
-        return engine_prompts
+        return engine_inputs
 
     def get_score_prompt(
         self,
@@ -332,7 +332,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
             engine_prompt["token_type_ids"] = token_type_ids
 
-        if self.supports_score_template:
+        if self.model is not None:
             self.model.post_process_tokens(engine_prompt)
 
         if mm_data is not None:

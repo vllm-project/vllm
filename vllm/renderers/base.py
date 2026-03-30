@@ -794,7 +794,11 @@ class BaseRenderer(ABC, Generic[_T]):
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
 
-    def process_for_engine(self, prompt: TokPrompt, arrival_time: float) -> EngineInput:
+    def process_for_engine(
+        self, prompt: TokPrompt, arrival_time: float | None = None
+    ) -> EngineInput:
+        arrival_time = arrival_time or time.time()
+
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
             engine_input = self._process_enc_dec(prompt)  # type: ignore[arg-type]
@@ -806,8 +810,10 @@ class BaseRenderer(ABC, Generic[_T]):
         return engine_input
 
     async def process_for_engine_async(
-        self, prompt: TokPrompt, arrival_time: float
+        self, prompt: TokPrompt, arrival_time: float | None = None
     ) -> EngineInput:
+        arrival_time = arrival_time or time.time()
+
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
             engine_input = await self._process_enc_dec_async(
@@ -828,8 +834,6 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
-        arrival_time = time.time()
-
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
@@ -838,7 +842,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
+        return [self.process_for_engine(prompt) for prompt in tok_prompts]
 
     async def render_cmpl_async(
         self,
