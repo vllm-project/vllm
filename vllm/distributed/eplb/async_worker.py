@@ -90,7 +90,7 @@ async def transfer_run_periodically(
     is_profile: bool = False,
 ) -> None:
     while True:
-        state.rearrange_event.wait()
+        state.rearrange_event.wait(stream=cuda_stream)
         logger.info("async worker woke up for EPLB transfer")
 
         assert state.is_async
