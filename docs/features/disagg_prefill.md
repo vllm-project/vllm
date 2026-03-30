@@ -111,7 +111,66 @@ Please refer to the [installation guide](../getting_started/installation/gpu.md)
     Disaggregated prefilling introduces additional KV cache transfer overhead, so network performance is critical.
     It is primarily designed for latency optimization, not throughput improvement.
 
-## Usage example
+## How to Run Disaggregated Prefilling
+- The number of Prefill and Decode instances can be scaled independently based on workload characteristics.
+- See the [Connectors](#connectors) section for the list of supported connectors.
+
+### Step 1: Start Prefill Instances
+```bash
+  CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port 8100 \
+    --max-model-len 100 \
+    --gpu-memory-utilization 0.8 \
+    --trust-remote-code \
+    --kv-transfer-config \
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"14579","kv_connector_extra_config":{"proxy_ip":"'"$VLLM_HOST_IP"'","proxy_port":"30001","http_ip":"'"$VLLM_HOST_IP"'","http_port":"8100","send_type":"PUT_ASYNC"}}' &
+```
+
+### Step 2: Start Decode Instances
+```bash
+  CUDA_VISIBLE_DEVICES=1 vllm serve "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port 8200 \
+    --max-model-len 100 \
+    --gpu-memory-utilization 0.8 \
+    --trust-remote-code \
+    --kv-transfer-config \
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":"1e10","kv_port":"14580","kv_connector_extra_config":{"proxy_ip":"'"$VLLM_HOST_IP"'","proxy_port":"30001","http_ip":"'"$VLLM_HOST_IP"'","http_port":"8200","send_type":"PUT_ASYNC"}}' &
+```
+
+### Step 3: Start the Router
+You can use a router such as:
+- https://github.com/vllm-project/router
+
+```bash
+  # When vLLM runs the NIXL connector, prefill/decode URLs are required.
+  # See a working example in scripts/llama3.1/ folder.
+  cargo run --release -- \
+    --policy consistent_hash \
+    --vllm-pd-disaggregation \
+    --prefill http://127.0.0.1:8100 \
+    #--prefill http://127.0.0.1:8101 \
+    --decode http://127.0.0.1:8200 \
+    #--decode http://127.0.0.1:8201 \
+    --host 127.0.0.1 \
+    --port 8090 \
+    --intra-node-data-parallel-size 1 \
+
+
+  # When vLLM runs the NCCL connector, ZMQ based discovery is supported.
+  # See a working example in scripts/install.sh
+  cargo run --release -- \
+    --policy consistent_hash \
+    --vllm-pd-disaggregation \
+    --vllm-discovery-address 0.0.0.0:30001 \
+    --host 0.0.0.0 \
+    --port 10001 \
+    --prefill-policy consistent_hash \
+    --decode-policy consistent_hash
+```
+
+## Connectors
 
 Choosing the right connector depends on your deployment environment, performance requirements, and infrastructure capabilities.
 Please refer to [examples/online_serving/disaggregated_prefill.sh](../../examples/online_serving/disaggregated_prefill.sh) for the example usage of disaggregated prefilling.
