@@ -10,6 +10,17 @@
         "waves_per_eu": 4,
         "matrix_instr_nonkdim": 16
     },
+    "2": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 2,
+        "SPLIT_K": 1,
+        "num_stages": 1,
+        "num_warps": 1,
+        "waves_per_eu": 2,
+        "matrix_instr_nonkdim": 16
+    },
     "4": {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 32,
