@@ -188,9 +188,11 @@ class MonolithicDecoderLayer(nn.Module):
         # Step 4. Q RoPE + Index Q RoPE + Quantize + Index weights
         fused_q(
             positions,
+            # Q RoPE
             q,
             self.attn.rotary_emb.cos_sin_cache,
             self.attn.qk_nope_head_dim,
+            # Index Q RoPE
             index_q,
             self.attn.indexer_rope_emb.cos_sin_cache,
         )

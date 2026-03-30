@@ -612,6 +612,7 @@ def _fused_q_kernel(
 ):
     tok_idx = tl.program_id(1)
     pos = tl.load(pos_ptr + tok_idx)
+    head_idx = tl.program_id(2)
 
     if tl.program_id(0) == 0:
         # Q RoPE
@@ -621,12 +622,18 @@ def _fused_q_kernel(
             pos,
             Q_HALF_ROT_DIM,
         )
+
+        # Each program processes two Q heads.
+        # Since grid[2] == NUM_INDEX_Q_HEADS == 2 * TOTAL_NUM_Q_HEADS, this ensures
+        # that all local Q heads are handled, even TP=1.
+        if 2 * head_idx >= NUM_Q_HEADS:
+            return
         _rope_kernel(
-            q_ptr + tok_idx * q_stride0,
+            q_ptr + tok_idx * q_stride0 + head_idx * 2 * q_stride1,
             q_stride1,
             cos,
             sin,
-            NUM_Q_HEADS,
+            2,
             Q_HALF_ROT_DIM,
             Q_START_OFFSET,
             True,
@@ -641,11 +648,11 @@ def _fused_q_kernel(
             INDEX_Q_HALF_ROT_DIM,
         )
         _rope_kernel(
-            index_q_ptr + tok_idx * index_q_stride0,
-            index_q_stride1,
+            index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1,
+            0,
             cos,
             sin,
-            NUM_INDEX_Q_HEADS,
+            1,
             INDEX_Q_HALF_ROT_DIM,
             0,
             False,
@@ -669,7 +676,8 @@ def fused_q(
     num_tokens = positions.shape[0]
     num_q_heads = q.shape[1]
     num_index_q_heads = index_q.shape[1]
-    _fused_q_kernel[(2, num_tokens)](
+
+    _fused_q_kernel[(2, num_tokens, num_index_q_heads)](
         positions,
         q,
         q.stride(0),
