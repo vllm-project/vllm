@@ -861,10 +861,9 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
             ),
         )
-        # Populate request stats for timing headers (SimpleContext only)
-        last_output = getattr(context, "last_output", None)
-        if last_output is not None and hasattr(last_output, "metrics"):
-            request_metadata.request_stats = last_output.metrics
+        # Populate request stats for timing headers
+        if context.last_output is not None and context.last_output.metrics is not None:
+            request_metadata.request_stats = context.last_output.metrics
             request_metadata.num_cached_tokens = num_cached_tokens
 
         response = ResponsesResponse.from_request(
