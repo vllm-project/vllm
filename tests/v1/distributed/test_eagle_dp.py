@@ -69,9 +69,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
     )
 
     prompt = "This is a test of data parallel with eagle"
-    # This test might be flaky, see
-    # https://github.com/vllm-project/vllm/issues/31913
-    num_expected_tokens = 20
+    num_expected_tokens = 100
     sampling_params = SamplingParams(
         max_tokens=num_expected_tokens,
         ignore_eos=True,
