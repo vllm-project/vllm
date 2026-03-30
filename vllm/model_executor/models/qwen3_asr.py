@@ -281,6 +281,11 @@ class Qwen3ASRForConditionalGeneration(
         ],
     }
 
+    embedding_modules = {
+        "language_model.model.embed_tokens": "input_embeddings",
+        "language_model.lm_head": "output_embeddings",
+    }
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     hf_to_vllm_mapper = WeightsMapper(
