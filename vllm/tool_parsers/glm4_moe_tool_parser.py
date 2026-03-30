@@ -17,7 +17,6 @@ from collections.abc import Sequence
 from typing import Any
 
 import regex as re
-from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -128,12 +127,14 @@ class Glm4MoeModelToolParser(ToolParser):
         if tools is None:
             return False
         for tool in tools:
-            if isinstance(tool, FunctionTool):
+            if hasattr(tool, "function"):
+                name = tool.function.name
+                parameters = tool.function.parameters
+            elif hasattr(tool, "name") and hasattr(tool, "parameters"):
                 name = tool.name
                 parameters = tool.parameters
             else:
-                name = tool.function.name
-                parameters = tool.function.parameters
+                continue
             if name != tool_name:
                 continue
             if parameters is None:
