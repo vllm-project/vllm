@@ -247,7 +247,7 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
     """
 
     def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config, "attn_quant_fusion_pass")
+        super().__init__(config, "attn_quant_fusion")
 
         dtype = config.model_config.dtype
         layers = list(get_layers_from_vllm_config(config, Attention).values())
