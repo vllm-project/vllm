@@ -31,6 +31,10 @@ class GDNAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["GDNAttentionMetadataBuilder"]:
         return GDNAttentionMetadataBuilder
 
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return True
+
 
 @dataclass
 class GDNAttentionMetadata:
