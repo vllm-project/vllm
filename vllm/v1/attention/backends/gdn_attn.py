@@ -7,6 +7,11 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fla.ops.index import (
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+)
+from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -62,6 +67,10 @@ class GDNAttentionMetadata:
     non_spec_token_indx: torch.Tensor | None = None
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
+
+    # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
+    chunk_indices: torch.Tensor | None = None
+    chunk_offsets: torch.Tensor | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -305,6 +314,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
+        chunk_indices: torch.Tensor | None = None
+        chunk_offsets: torch.Tensor | None = None
+
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
@@ -316,6 +328,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     device=query_start_loc.device,
                 )
             )
+
+            gpu_device = query_start_loc.device
+            chunk_indices = prepare_chunk_indices(
+                non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
+            ).to(device=gpu_device, non_blocking=True)
+            chunk_offsets = prepare_chunk_offsets(
+                non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
+            ).to(device=gpu_device, non_blocking=True)
         else:
             has_initial_state = None
 
@@ -423,6 +443,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,

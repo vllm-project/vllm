@@ -14,6 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
+from .utils import FLA_CHUNK_SIZE
 
 
 @triton.heuristics(
@@ -103,7 +104,8 @@ def chunk_scaled_dot_kkt_fwd(
     g: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    chunk_size: int = 64,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_size: int = FLA_CHUNK_SIZE,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     r"""
@@ -123,6 +125,9 @@ def chunk_scaled_dot_kkt_fwd(
             The chunk size. Default: 64.
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float32`
+        chunk_indices (torch.Tensor):
+            Pre-computed chunk indices. If None and cu_seqlens is provided,
+            computed internally. Default: None
 
     Returns:
         beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
@@ -132,9 +137,8 @@ def chunk_scaled_dot_kkt_fwd(
     B, T, Hg, K = k.shape
     H = beta.shape[-1]
     BT = chunk_size
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
