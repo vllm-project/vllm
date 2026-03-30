@@ -110,9 +110,7 @@ class MockOffloadingSpec(OffloadingSpec):
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
-        self.manager.prepare_load = lambda block_hashes: (
-            MockLoadStoreSpec(block_hashes)
-        )
+        self.manager.prepare_load = lambda block_hashes: MockLoadStoreSpec(block_hashes)
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:

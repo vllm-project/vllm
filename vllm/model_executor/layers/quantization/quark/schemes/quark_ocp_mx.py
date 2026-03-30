@@ -190,8 +190,8 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
         if self.input_dtype is None:
-            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = (
-                lambda x: x
+            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = lambda x: (
+                x
             )  # no input Q/DQ for weight-only
         elif self.input_dtype == "mxfp4":
             self.quant_dequant_func = quant_dequant_mxfp4

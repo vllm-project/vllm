@@ -2753,9 +2753,11 @@ class MMVUDataset(HuggingFaceDataset):
 
     DEFAULT_OUTPUT_LEN = 128
     SUPPORTED_DATASET_PATHS = {
-        "yale-nlp/MMVU": lambda x: x["question"]
-        + " "
-        + (" ".join(f"{k}.{v}" for k, v in x["choices"].items())),
+        "yale-nlp/MMVU": lambda x: (
+            x["question"]
+            + " "
+            + (" ".join(f"{k}.{v}" for k, v in x["choices"].items()))
+        ),
     }
 
     def __init__(self, **kwargs) -> None:

@@ -69,11 +69,14 @@ class XPUWorker(Worker):
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
-        ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
+        # Auto-detect XPU topology and configure CCL/OFI environment
+        from vllm.platforms.xpu_env import auto_configure_xpu_distributed
+
+        auto_configure_xpu_distributed(self.parallel_config.world_size)
+
         ENV_LOCAL_WORLD_SIZE = os.getenv(
             "LOCAL_WORLD_SIZE", str(self.parallel_config.world_size)
         )
-        os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(self.local_rank)
 

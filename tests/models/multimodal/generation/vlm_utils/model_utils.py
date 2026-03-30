@@ -321,8 +321,8 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return BatchFeature(data=inputs, tensor_type="pt")
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language.model.embed_tokens
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language.model.embed_tokens
     )
     return hf_model
 
@@ -434,8 +434,8 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.transformer.output_layer
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.transformer.output_layer
     )
     return hf_model
 
@@ -523,8 +523,8 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = H2OVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -789,8 +789,8 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = SkyworkR1VProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -898,8 +898,8 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = InternVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -1068,8 +1068,8 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, **kwargs):
@@ -1104,8 +1104,8 @@ def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, videos=None, **kwargs):

@@ -179,8 +179,8 @@ def make_mock_model(hidden: int = 8):
     # _embed_text_input_ids: delegate to SupportsMultiModal's implementation
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
-    model._embed_text_input_ids = (
-        lambda *a, **kw: SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
+    model._embed_text_input_ids = lambda *a, **kw: (
+        SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
     )
 
     # super().embed_input_ids → use SupportsMultiModal.embed_input_ids
@@ -198,10 +198,8 @@ def make_mock_model(hidden: int = 8):
         )
 
     # Bind embed_input_ids as the real method
-    model.embed_input_ids = (
-        lambda *a, **kw: Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(
-            model, *a, **kw
-        )
+    model.embed_input_ids = lambda *a, **kw: (
+        Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(model, *a, **kw)
     )
 
     # Store super-embed for use inside the method

@@ -259,9 +259,11 @@ def _nested_tensors_h2d(
 
     return json_map_leaves(
         (
-            lambda x: x.to(device=device, non_blocking=True)
-            if isinstance(x, torch.Tensor)
-            else x
+            lambda x: (
+                x.to(device=device, non_blocking=True)
+                if isinstance(x, torch.Tensor)
+                else x
+            )
         ),
         tensors,
     )

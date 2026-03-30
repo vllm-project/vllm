@@ -206,6 +206,24 @@ class XPUPlatform(Platform):
                     "falling back to PIECEWISE graph mode on XPU platform."
                 )
 
+        # Set default distributed timeout for XPU multi-GPU
+        if (
+            parallel_config.world_size > 1
+            and parallel_config.distributed_timeout_seconds is None
+        ):
+            # PCIe topologies and large TP configs need longer timeouts
+            # for CCL initialization. Default PyTorch timeout (600s for
+            # NCCL) may not suffice for 8-GPU PCIe setups.
+            if parallel_config.world_size > 4:
+                parallel_config.distributed_timeout_seconds = 1200
+            else:
+                parallel_config.distributed_timeout_seconds = 600
+            logger.info(
+                "XPU distributed timeout set to %ds for world_size=%d.",
+                parallel_config.distributed_timeout_seconds,
+                parallel_config.world_size,
+            )
+
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
