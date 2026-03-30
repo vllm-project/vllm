@@ -14,11 +14,12 @@ from unittest.mock import patch
 import pytest
 import ray
 
-from tests.distributed.ray_v2_utils import enable_ray_v2_backend  # noqa: F401
 from vllm import LLM
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
+
+pytestmark = pytest.mark.usefixtures("enable_ray_v2_backend")
 
 MODEL = "facebook/opt-125m"
 

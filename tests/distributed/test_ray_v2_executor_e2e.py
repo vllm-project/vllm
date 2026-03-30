@@ -8,9 +8,10 @@ import gc
 import os
 import pathlib
 
+import pytest
 import ray
 
-from tests.distributed.ray_v2_utils import enable_ray_v2_backend  # noqa: F401
+pytestmark = pytest.mark.usefixtures("enable_ray_v2_backend")
 
 MODEL = "facebook/opt-125m"
 
@@ -30,6 +31,11 @@ def _ray_init():
         ignore_reinit_error=True,
         runtime_env={"env_vars": {"PYTHONPATH": project_root}},
     )
+
+
+@pytest.fixture
+def ray_init():
+    _ray_init()
 
 
 class _AsyncLLMActor:
@@ -110,9 +116,7 @@ class _AsyncLLMActor:
 AsyncLLMActor = ray.remote(num_cpus=0, max_concurrency=1)(_AsyncLLMActor)
 
 
-def test_multi_replicas():
-    _ray_init()
-
+def test_multi_replicas(ray_init):
     pg1 = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
     pg2 = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
     ray.get([pg1.ready(), pg2.ready()])
@@ -133,9 +137,7 @@ def test_multi_replicas():
     assert len(out2) > 0
 
 
-def test_multi_replicas_with_bundle_indices():
-    _ray_init()
-
+def test_multi_replicas_with_bundle_indices(ray_init):
     pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 4, strategy="PACK")
     ray.get(pg.ready())
 
@@ -168,6 +170,9 @@ def test_env_var_and_runtime_env_propagation():
         os.environ[k] = v
 
     try:
+        # Called directly (not via the ray_init fixture) because sentinel
+        # env vars must be in os.environ before ray.init() so that Ray
+        # worker processes inherit them.
         _ray_init()
 
         pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")

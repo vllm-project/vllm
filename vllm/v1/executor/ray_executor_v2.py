@@ -80,6 +80,24 @@ class RayWorkerProc(WorkerProc):
     2. initialize_worker: called after GPU IDs are discovered, completes
        the full WorkerProc initialization with the correct local_rank and
        CUDA_VISIBLE_DEVICES.
+
+    CUDA_VISIBLE_DEVICES setup flow:
+
+    1. RayExecutorV2 enables RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES so Ray does
+       not set CUDA_VISIBLE_DEVICES on RayWorkerProc actors at creation time.
+    2. Each actor is scheduled with a placement group and bundle index; Ray resolves
+       the physical GPU ID for that bundle at placement time.
+    3. After placement, the worker discovers that GPU ID and sets
+       CUDA_VISIBLE_DEVICES before finishing WorkerProc initialization.
+
+    There is no workaround for this unset-and-reset sequence when the placement group
+    is externally managed: scheduling must complete before CUDA_VISIBLE_DEVICES can
+    match the GPU tied to the worker's bundle.
+
+    This sequence allows multiple vLLM instances to coexist on the same node:
+    each instance is unaware which physical devices others hold, and the
+    externally managed placement group avoids CUDA_VISIBLE_DEVICES conflicts
+    by binding workers to specific placement group bundles.
     """
 
     def __init__(
