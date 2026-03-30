@@ -1244,11 +1244,18 @@ class NemotronH_Nano_VL_V2(
         patch_size: int,
     ) -> tuple[torch.Tensor, ...]:
         """Varying-resolution path: pre-patch frames to dynamic
-        format and process with per-tubelet positional encoding."""
+        format and process with per-tubelet positional encoding.
 
-        # Pre-patch: [nf_i, 3, H_i, W_i] → patches [nf_i*(H_i/P)*(W_i/P), 3*P*P]
-        all_patch_chunks: list[torch.Tensor] = []
-        imgs_sizes: list[tuple[int, int]] = []
+        Videos are grouped into micro-batch windows by total patch count
+        to cap peak memory, mirroring the fast path's frame-based windowing.
+        """
+        # 128 frames at base 256 patches/frame (224×224, P=14).
+        max_patches_per_window = 32768
+
+        # Pre-patch all videos up front:
+        # [nf_i, 3, H_i, W_i] → [nf_i*(H_i/P)*(W_i/P), 3*P*P]
+        per_video_patches: list[torch.Tensor] = []
+        per_video_imgs_sizes: list[list[tuple[int, int]]] = []
 
         for i, nf in enumerate(num_frames_per_video):
             video = pixel_values[i]  # [nf, 3, H_i, W_i]
@@ -1260,47 +1267,74 @@ class NemotronH_Nano_VL_V2(
                 xx=patch_size,
             )
             patches = patches.reshape(-1, patches.shape[-1])
-            all_patch_chunks.append(patches)
-            imgs_sizes.extend([(H_i, W_i)] * nf)
+            per_video_patches.append(patches)
+            per_video_imgs_sizes.append([(H_i, W_i)] * nf)
 
-        all_patches = torch.cat(all_patch_chunks, dim=0).unsqueeze(
-            0
-        )  # [1, total_patches, 3*P*P]
+        # Greedy bin-pack videos into windows by total patch count.
+        windows: list[list[int]] = []
+        cur_window: list[int] = []
+        cur_patches = 0
 
-        _, vit_embeds = self.vision_model(
-            all_patches,
-            imgs_sizes=imgs_sizes,
-            num_frames=num_frames_per_video,
-        )
-        # vit_embeds: [1, total_tubelet_patches, vit_hidden]
-        vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+        for i, patches in enumerate(per_video_patches):
+            n_patches = patches.shape[0]
+            if cur_window and cur_patches + n_patches > max_patches_per_window:
+                windows.append(cur_window)
+                cur_window = []
+                cur_patches = 0
+            cur_window.append(i)
+            cur_patches += n_patches
 
-        # Build per-tubelet imgs_sizes for pixel_shuffle_dynamic_res
-        tubelet_imgs_sizes: list[tuple[int, int]] = []
-        for i, nf in enumerate(num_frames_per_video):
-            nt = math.ceil(nf / T)
-            H_i, W_i = pixel_values[i].shape[-2], pixel_values[i].shape[-1]
-            tubelet_imgs_sizes.extend([(H_i, W_i)] * nt)
+        if cur_window:
+            windows.append(cur_window)
 
-        vit_embeds = self.pixel_shuffle_dynamic_res(
-            vit_embeds, imgs_sizes=tubelet_imgs_sizes
-        )
-        vit_embeds = self.mlp1(vit_embeds)
-
-        # Split per video
         ds = self.downsample_ratio
         results: list[torch.Tensor] = []
-        token_offset = 0
-        for i, nf in enumerate(num_frames_per_video):
-            nt = math.ceil(nf / T)
-            H_i, W_i = pixel_values[i].shape[-2], pixel_values[i].shape[-1]
-            tokens_per_tubelet = int(
-                (H_i * ds // patch_size) * (W_i * ds // patch_size)
+
+        for window in windows:
+            window_patch_chunks = [per_video_patches[i] for i in window]
+            window_imgs_sizes: list[tuple[int, int]] = []
+            window_num_frames: list[int] = []
+            for i in window:
+                window_imgs_sizes.extend(per_video_imgs_sizes[i])
+                window_num_frames.append(num_frames_per_video[i])
+
+            window_patches = torch.cat(
+                window_patch_chunks, dim=0
+            ).unsqueeze(0)  # [1, window_total_patches, 3*P*P]
+
+            _, vit_embeds = self.vision_model(
+                window_patches,
+                imgs_sizes=window_imgs_sizes,
+                num_frames=window_num_frames,
             )
-            total_tokens = nt * tokens_per_tubelet
-            vid_embeds = vit_embeds[:, token_offset : token_offset + total_tokens, :]
-            results.append(vid_embeds.reshape(-1, hidden_size))
-            token_offset += total_tokens
+            vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+
+            tubelet_imgs_sizes: list[tuple[int, int]] = []
+            for i in window:
+                nf = num_frames_per_video[i]
+                nt = math.ceil(nf / T)
+                H_i, W_i = pixel_values[i].shape[-2], pixel_values[i].shape[-1]
+                tubelet_imgs_sizes.extend([(H_i, W_i)] * nt)
+
+            vit_embeds = self.pixel_shuffle_dynamic_res(
+                vit_embeds, imgs_sizes=tubelet_imgs_sizes
+            )
+            vit_embeds = self.mlp1(vit_embeds)
+
+            token_offset = 0
+            for i in window:
+                nf = num_frames_per_video[i]
+                nt = math.ceil(nf / T)
+                H_i, W_i = pixel_values[i].shape[-2], pixel_values[i].shape[-1]
+                tokens_per_tubelet = int(
+                    (H_i * ds // patch_size) * (W_i * ds // patch_size)
+                )
+                total_tokens = nt * tokens_per_tubelet
+                vid_embeds = vit_embeds[
+                    :, token_offset : token_offset + total_tokens, :
+                ]
+                results.append(vid_embeds.reshape(-1, hidden_size))
+                token_offset += total_tokens
 
         return tuple(results)
 
