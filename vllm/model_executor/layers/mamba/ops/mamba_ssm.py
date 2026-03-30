@@ -10,7 +10,7 @@ from packaging import version
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
 
@@ -75,7 +75,7 @@ def _selective_scan_update_kernel(
     out_ptr,
     state_batch_indices_ptr,
     dst_state_batch_indices_ptr,
-    pad_slot_id,
+    null_block_id,
     num_accepted_tokens_ptr,
     cu_seqlens_ptr,
     # Matrix dimensions
@@ -203,7 +203,7 @@ def _selective_scan_update_kernel(
 
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
-        mask &= state_batch_idx != pad_slot_id
+        mask &= state_batch_idx != null_block_id
     state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
 
     if HAS_DT_BIAS:
@@ -257,7 +257,7 @@ def _selective_scan_update_kernel(
         if IS_SPEC_DECODING:
             dst_idx_ptr = dst_state_batch_indices_ptr + i_t * stride_dst_state_indices_T
             token_dst_idx = tl.load(dst_idx_ptr).to(tl.int64)
-            if token_dst_idx != pad_slot_id:
+            if token_dst_idx != null_block_id:
                 token_dst_ptrs = (
                     state_ptr_base
                     + token_dst_idx * stride_state_batch
@@ -329,7 +329,7 @@ def selective_state_update(
     dt_softplus=False,
     state_batch_indices=None,
     dst_state_batch_indices=None,
-    pad_slot_id=PAD_SLOT_ID,
+    null_block_id=NULL_BLOCK_ID,
     out=None,
     num_accepted_tokens=None,
     cu_seqlens=None,
@@ -348,12 +348,12 @@ def selective_state_update(
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
-        pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
+        null_block_id: int
+            if state_batch_indices is passed, lets the kernel identify
+            padded entries that will not be processed,
+            for example: state_batch_indices = [null_block_id, 1, 20,
+            null_block_id] in this case, the kernel will not process
+            entries at indices 0 and 3
         out: Preallocated ssm output tensor. Assume same shape as x.
              In-place updated.
         num_accepted_tokens: (batch,)
@@ -488,7 +488,7 @@ def selective_state_update(
             out,
             state_batch_indices,
             dst_state_batch_indices,
-            pad_slot_id,
+            null_block_id,
             num_accepted_tokens,
             cu_seqlens,
             N,
@@ -550,7 +550,7 @@ def selective_scan_fn(
     query_start_loc=None,
     cache_indices=None,
     has_initial_state=None,
-    pad_slot_id=PAD_SLOT_ID,
+    null_block_id=NULL_BLOCK_ID,
     block_size=1024,
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
@@ -588,10 +588,10 @@ def selective_scan_fn(
         indicate if the ssm_state at the corresponding index should be
         used as initial state. Not providing argument assumes
         there's no initial state
-    pad_slot_id: int
+    null_block_id: int
         if cache_indices is passed, lets the kernel identify padding entries
         that will not be processed,
-        for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
+        for example: cache_indices = [null_block_id, 1 ,20 ,null_block_id]
         in this case, the kernel will not process entries at indices 0 and 3
     block_size: int
         The block size to align the cached states to
@@ -643,7 +643,7 @@ def selective_scan_fn(
         cache_indices,
         has_initial_state,
         ssm_states,
-        pad_slot_id,
+        null_block_id,
         block_size,
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,

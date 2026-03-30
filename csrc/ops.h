@@ -298,7 +298,7 @@ void selective_scan_fwd(
     const std::optional<torch::Tensor>& query_start_loc,
     const std::optional<torch::Tensor>& cache_indices,
     const std::optional<torch::Tensor>& has_initial_state,
-    const torch::Tensor& ssm_states, int64_t pad_slot_id, int64_t block_size,
+    const torch::Tensor& ssm_states, int64_t null_block_id, int64_t block_size,
     const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
     const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
     const std::optional<torch::Tensor>& initial_state_idx,
