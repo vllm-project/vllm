@@ -948,6 +948,7 @@ class ModelConfig:
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "cpu_awq",
+                "gguf",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
