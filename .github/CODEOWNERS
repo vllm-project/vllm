@@ -9,6 +9,7 @@
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
+/vllm/model_executor/layers/mamba/gdn_linear_attn.py @ZJY0516
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/layers/batch_invariant.py @yewentao256 
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
@@ -48,6 +49,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/attention/backends/mla @pavanimajety
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
+/vllm/v1/attention/backends/gdn_attn.py @ZJY0516
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
@@ -142,6 +144,7 @@ mkdocs.yaml @hmellor
 # Kernels
 /vllm/v1/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
+/vllm/model_executor/layers/fla @ZJY0516
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa
