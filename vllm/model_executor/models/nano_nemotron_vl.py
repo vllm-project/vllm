@@ -1298,9 +1298,9 @@ class NemotronH_Nano_VL_V2(
                 window_imgs_sizes.extend(per_video_imgs_sizes[i])
                 window_num_frames.append(num_frames_per_video[i])
 
-            window_patches = torch.cat(
-                window_patch_chunks, dim=0
-            ).unsqueeze(0)  # [1, window_total_patches, 3*P*P]
+            window_patches = torch.cat(window_patch_chunks, dim=0).unsqueeze(
+                0
+            )  # [1, window_total_patches, 3*P*P]
 
             _, vit_embeds = self.vision_model(
                 window_patches,
