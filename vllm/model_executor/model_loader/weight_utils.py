@@ -239,10 +239,12 @@ def convert_bin_to_safetensor_file(
     sf_size = os.stat(sf_filename).st_size
     pt_size = os.stat(pt_filename).st_size
     if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(f"""The file size different is more than 1%:
+        raise RuntimeError(
+            f"""The file size different is more than 1%:
          - {sf_filename}: {sf_size}
          - {pt_filename}: {pt_size}
-         """)
+         """
+        )
 
     # check if the tensors are the same
     reloaded = load_file(sf_filename)
@@ -1377,6 +1379,9 @@ def initialize_single_dummy_weight(
     high: float = 1e-3,
     seed: int = 1234,
 ) -> None:
+    if param.device.type == "meta":
+        return  # deferred to finalize_layerwise_processing (e.g. online quant)
+
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
             # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
