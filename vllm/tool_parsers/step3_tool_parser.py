@@ -8,8 +8,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -20,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.utils import random_uuid
@@ -41,8 +44,8 @@ class Step3ToolParser(ToolParser):
     TOOL_SEP = "<｜tool_sep｜>"
     SPECIAL_TOKENS = [TOOL_CALLS_BEGIN, TOOL_CALLS_END, TOOL_CALL_BEGIN, TOOL_CALL_END]
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         self.position = 0
         # Explicit state flags for robust streaming
         self.tool_block_started = False

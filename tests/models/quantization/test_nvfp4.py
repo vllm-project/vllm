@@ -14,6 +14,8 @@ from transformers import AutoTokenizer
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 
+from vllm.platforms import current_platform
+
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
@@ -83,3 +85,27 @@ def test_models(example_prompts, model_name) -> None:
         assert expected_str == generated_str, (
             f"Test{i}:\nExpected: {expected_str!r}\nvLLM: {generated_str!r}"
         )
+
+
+EAGER = [True, False]
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="modelopt_fp4 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
+@pytest.mark.parametrize("eager", EAGER)
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "flashinfer-cudnn",
+        "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
+        "flashinfer-cutlass",
+    ],
+)
+def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
+    monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
+    with vllm_runner(model, enforce_eager=eager) as llm:
+        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
+    assert output[0][1] == "1 2 3 4 5 6"

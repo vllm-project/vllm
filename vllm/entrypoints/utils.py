@@ -6,31 +6,26 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from pathlib import Path
-from typing import Any
+from http import HTTPStatus
+from logging import Logger
+from string import Template
 
+import regex as re
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
-from vllm.config import ModelConfig
+from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    load_chat_template,
-    resolve_hf_chat_template,
-    resolve_mistral_chat_template,
-)
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    GenerationError,
     StreamOptions,
 )
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.logger import init_logger
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -176,56 +171,41 @@ def cli_env_setup():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def _validate_truncation_size(
-    max_model_len: int,
-    truncate_prompt_tokens: int | None,
-    tokenization_kwargs: dict[str, Any] | None = None,
-) -> int | None:
-    if truncate_prompt_tokens is not None:
-        if truncate_prompt_tokens <= -1:
-            truncate_prompt_tokens = max_model_len
-
-        if truncate_prompt_tokens > max_model_len:
-            raise ValueError(
-                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-                f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size."
-            )
-
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-    else:
-        if tokenization_kwargs is not None:
-            tokenization_kwargs["truncation"] = False
-
-    return truncate_prompt_tokens
-
-
 def get_max_tokens(
     max_model_len: int,
-    request: ChatCompletionRequest | CompletionRequest,
+    max_tokens: int | None,
     input_length: int,
     default_sampling_params: dict,
+    override_max_tokens: int | None = None,
 ) -> int:
-    max_tokens = getattr(request, "max_completion_tokens", None) or request.max_tokens
-    default_max_tokens = max_model_len - input_length
-    max_output_tokens = current_platform.get_max_output_tokens(input_length)
+    if max_model_len < input_length:
+        raise ValueError(
+            f"Input length ({input_length}) exceeds model's maximum "
+            f"context length ({max_model_len})."
+        )
+    model_max_tokens = max_model_len - input_length
+    platform_max_tokens = current_platform.get_max_output_tokens(input_length)
+    fallback_max_tokens = (
+        max_tokens
+        if max_tokens is not None
+        else default_sampling_params.get("max_tokens")
+    )
 
     return min(
         val
         for val in (
-            default_max_tokens,
-            max_tokens,
-            max_output_tokens,
-            default_sampling_params.get("max_tokens"),
+            model_max_tokens,
+            fallback_max_tokens,
+            override_max_tokens,
+            platform_max_tokens,
         )
         if val is not None
     )
 
 
 def log_non_default_args(args: Namespace | EngineArgs):
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+
     non_default_args = {}
 
     # Handle Namespace
@@ -254,21 +234,25 @@ def log_non_default_args(args: Namespace | EngineArgs):
 
 
 def should_include_usage(
-    stream_options: StreamOptions | None, enable_force_include_usage: bool
+    stream_options: "StreamOptions | None", enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
+    if enable_force_include_usage:
+        return True, True
     if stream_options:
-        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_usage = bool(stream_options.include_usage)
         include_continuous_usage = include_usage and bool(
             stream_options.continuous_usage_stats
         )
     else:
-        include_usage, include_continuous_usage = enable_force_include_usage, False
+        include_usage, include_continuous_usage = False, False
     return include_usage, include_continuous_usage
 
 
 def process_lora_modules(
     args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
 ) -> list[LoRAModulePath]:
+    from vllm.entrypoints.openai.models.serving import LoRAModulePath
+
     lora_modules = args_lora_modules
     if default_mm_loras:
         default_mm_lora_paths = [
@@ -285,35 +269,90 @@ def process_lora_modules(
     return lora_modules
 
 
-async def process_chat_template(
-    args_chat_template: Path | str | None,
-    engine_client: EngineClient,
-    model_config: ModelConfig,
-) -> str | None:
-    resolved_chat_template = load_chat_template(args_chat_template)
-    if resolved_chat_template is not None:
-        # Get the tokenizer to check official template
-        tokenizer = await engine_client.get_tokenizer()
+def sanitize_message(message: str) -> str:
+    # Avoid leaking memory address from object reprs
+    return re.sub(r" at 0x[0-9a-f]+>", ">", message)
 
-        if isinstance(tokenizer, MistralTokenizer):
-            # The warning is logged in resolve_mistral_chat_template.
-            resolved_chat_template = resolve_mistral_chat_template(
-                chat_template=resolved_chat_template
-            )
+
+def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
+    if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
+        message = "vLLM server version %s, serving model %s"
+    else:
+        logo_template = Template(
+            "\n       ${w}█     █     █▄   ▄█${r}\n"
+            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
+            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
+            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
+        )
+        colors = {
+            "w": "\033[97;1m",  # white
+            "o": "\033[93m",  # orange
+            "b": "\033[94m",  # blue
+            "r": "\033[0m",  # reset
+        }
+        if formatter != "color":
+            # monochrome logo (no ansi escape codes)
+            colors = dict.fromkeys(colors, "")
+
+        message = logo_template.substitute(colors)
+
+    lgr.info(message, version, model_name)
+
+
+def create_error_response(
+    message: str | Exception,
+    err_type: str = "BadRequestError",
+    status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    param: str | None = None,
+) -> ErrorResponse:
+    exc: Exception | None = None
+
+    if isinstance(message, Exception):
+        exc = message
+        logger.debug(
+            "create_error_response called with %s: %s", type(exc).__name__, exc
+        )
+
+        from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
+
+        if isinstance(exc, VLLMValidationError):
+            err_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            param = exc.parameter
+        elif isinstance(exc, VLLMNotFoundError):
+            err_type = "NotFoundError"
+            status_code = HTTPStatus.NOT_FOUND
+            param = None
+        elif isinstance(exc, (ValueError, TypeError, OverflowError)):
+            # Common validation errors from user input
+            err_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            param = None
+        elif isinstance(exc, NotImplementedError):
+            err_type = "NotImplementedError"
+            status_code = HTTPStatus.NOT_IMPLEMENTED
+            param = None
+        elif isinstance(exc, GenerationError):
+            err_type = "InternalServerError"
+            status_code = exc.status_code
+            param = None
+        elif any(cls.__name__ == "TemplateError" for cls in type(exc).__mro__):
+            # jinja2.TemplateError and its subclasses (avoid importing jinja2)
+            err_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            param = None
         else:
-            hf_chat_template = resolve_hf_chat_template(
-                tokenizer=tokenizer,
-                chat_template=None,
-                tools=None,
-                model_config=model_config,
-            )
+            err_type = "InternalServerError"
+            status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+            param = None
 
-            if hf_chat_template != resolved_chat_template:
-                logger.warning(
-                    "Using supplied chat template: %s\n"
-                    "It is different from official chat template '%s'. "
-                    "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template,
-                    model_config.model,
-                )
-    return resolved_chat_template
+        message = str(exc)
+
+    return ErrorResponse(
+        error=ErrorInfo(
+            message=sanitize_message(message),
+            type=err_type,
+            code=status_code.value,
+            param=param,
+        )
+    )

@@ -35,6 +35,7 @@ LoadFormats = Literal[
     "dummy",
     "fastsafetensors",
     "gguf",
+    "instanttensor",
     "mistral",
     "npcache",
     "pt",
@@ -51,6 +52,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
     "gguf": GGUFModelLoader,
+    "instanttensor": DefaultModelLoader,
     "mistral": DefaultModelLoader,
     "npcache": DefaultModelLoader,
     "pt": DefaultModelLoader,
@@ -124,12 +126,18 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
 
 def get_model(
-    *, vllm_config: VllmConfig, model_config: ModelConfig | None = None
+    *,
+    vllm_config: VllmConfig,
+    model_config: ModelConfig | None = None,
+    prefix: str = "",
+    load_config: LoadConfig | None = None,
 ) -> nn.Module:
-    loader = get_model_loader(vllm_config.load_config)
+    loader = get_model_loader(load_config or vllm_config.load_config)
     if model_config is None:
         model_config = vllm_config.model_config
-    return loader.load_model(vllm_config=vllm_config, model_config=model_config)
+    return loader.load_model(
+        vllm_config=vllm_config, model_config=model_config, prefix=prefix
+    )
 
 
 __all__ = [

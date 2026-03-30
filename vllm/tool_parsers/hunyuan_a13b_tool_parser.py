@@ -8,8 +8,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -20,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import consume_space
@@ -29,8 +32,8 @@ logger = init_logger(__name__)
 
 
 class HunyuanA13BToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         # Initialize state for streaming mode
         self.prev_tool_calls: list[dict] = []

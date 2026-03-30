@@ -11,9 +11,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -24,6 +25,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -34,8 +36,8 @@ class SeedOssToolParser(ToolParser):
     TOOL_CALL_START = "<seed:tool_call>"
     TOOL_CALL_END = "</seed:tool_call>"
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         # --- streaming state ---
         self._reset_streaming_state()
@@ -107,7 +109,7 @@ class SeedOssToolParser(ToolParser):
         self.json_closed = False
 
     def _parse_xml_function_call(
-        self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
+        self, function_call_str: str, tools: list[Tool] | None
     ) -> ToolCall | None:
         def get_arguments_config(func_name: str) -> dict:
             if tools is None:

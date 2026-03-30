@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
+import tempfile
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -16,13 +17,14 @@ from diskcache import Cache
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
     import outlines_core as oc
+    import transformers.convert_slow_tokenizer as convert_slow_tokenizer
     import transformers.file_utils as file_utils
     import xgrammar as xgr
-    from transformers.convert_slow_tokenizer import bytes_to_unicode
 
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -30,13 +32,10 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     oc = LazyLoader("oc", globals(), "outlines_core")
     file_utils = LazyLoader("file_utils", globals(), "transformers.file_utils")
-    bytes_to_unicode = LazyLoader(
-        "bytes_to_unicode", globals(), "transformers.convert_slow_tokenizer"
+    convert_slow_tokenizer = LazyLoader(
+        "convert_slow_tokenizer", globals(), "transformers.convert_slow_tokenizer"
     )
 
-    TokenizerLike = object
-    SchedulerOutput = object
-    InputBatch = object
 
 logger = init_logger(__name__)
 
@@ -72,13 +71,12 @@ def apply_grammar_bitmask(
     # request in the batch, as the logit indices are offset by this amount.
     struct_out_req_batch_indices: dict[str, int] = {}
     cumulative_offset = 0
-    seq = sorted(input_batch.req_id_to_index.items(), key=lambda x: x[1])
-    for req_id, batch_index in seq:
+    spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+    struct_out_req_ids = set(grammar_output.structured_output_request_ids)
+    for batch_index, req_id in enumerate(input_batch.req_ids):
         logit_index = batch_index + cumulative_offset
-        cumulative_offset += len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-        )
-        if req_id in grammar_output.structured_output_request_ids:
+        cumulative_offset += len(spec_tokens.get(req_id, ()))
+        if req_id in struct_out_req_ids:
             struct_out_req_batch_indices[req_id] = logit_index
 
     out_indices = []
@@ -91,14 +89,12 @@ def apply_grammar_bitmask(
     )
     cumulative_index = 0
     for req_id in grammar_output.structured_output_request_ids:
-        num_spec_tokens = len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-        )
-        if req_id in struct_out_req_batch_indices:
-            logit_index = struct_out_req_batch_indices[req_id]
+        num_spec_tokens = len(spec_tokens.get(req_id, ()))
+        if (logit_idx := struct_out_req_batch_indices.get(req_id)) is not None:
             for i in range(1 + num_spec_tokens):
-                sorted_bitmask[logit_index + i] = grammar_bitmask[cumulative_index + i]
-                out_indices.append(logit_index + i)
+                bitmask_index = logit_idx + i
+                sorted_bitmask[bitmask_index] = grammar_bitmask[cumulative_index + i]
+                out_indices.append(bitmask_index)
         cumulative_index += 1 + num_spec_tokens
 
     # Copy async to device as tensor.
@@ -111,17 +107,33 @@ def apply_grammar_bitmask(
     # since the bitmask is already aligned with the logits.
     skip_out_indices = len(out_indices) == logits.shape[0]
 
-    index_tensor = None
-    if not skip_out_indices:
-        # xgrammar expects a python list of indices but it will actually work with
-        # a tensor. If we copy the tensor ourselves here we can do it in a non_blocking
-        # manner and there should be no cpu sync within xgrammar.
-        index_tensor = torch.tensor(
-            out_indices, dtype=torch.int32, device="cpu", pin_memory=True
-        )
-        index_tensor = index_tensor.to(logits.device, non_blocking=True)
+    if not logits.is_cpu:
+        index_tensor = None
+        if not skip_out_indices:
+            # xgrammar expects a python list of indices but it will actually work with
+            # a tensor. If we copy the tensor ourselves here we can do it in a
+            # non_blocking manner and there should be no cpu sync within xgrammar.
+            pin_memory = is_pin_memory_available()
+            index_tensor = torch.tensor(
+                out_indices, dtype=torch.int32, device="cpu", pin_memory=pin_memory
+            )
+            index_tensor = index_tensor.to(logits.device, non_blocking=True)
 
-    xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        return
+
+    # CPU case, use list for indices.
+    indices = None if skip_out_indices else out_indices
+    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
+    # See: https://github.com/vllm-project/vllm/issues/31901
+    if logits.dtype != torch.float32:
+        # Convert to float32, apply bitmask, then convert back
+        logits_fp32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
+        # Copy the modified values back to the original tensor
+        logits.copy_(logits_fp32.to(logits.dtype))
+    else:
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
 
 
 class OutlinesVocabulary:
@@ -149,21 +161,19 @@ def get_outlines_cache_path() -> str:
     if outlines_cache_dir:
         # OUTLINES_CACHE_DIR takes precedence
         return outlines_cache_dir
-    elif xdg_cache_home:
+    if xdg_cache_home:
         return os.path.join(xdg_cache_home, ".cache", "outlines")
     # If homedir is "/", we may be inside a container, and thus writing to
     # root would be problematic, so we fall back to using a tempfile.
     # Also validate the path exists, since os.path.expanduser does
     # not guarantee existence.
-    elif os.path.isdir(home_dir) and home_dir != "/":
+    if os.path.isdir(home_dir) and home_dir != "/":
         # Default Unix fallback: ~/.cache/outlines
         return os.path.join(home_dir, ".cache", "outlines")
-    else:
-        import tempfile
 
-        # home_dir may be / inside a docker container without existing user
-        tempdir = tempfile.gettempdir()
-        return os.path.join(tempdir, ".cache", "outlines")
+    # home_dir may be / inside a docker container without existing user
+    tempdir = tempfile.gettempdir()
+    return os.path.join(tempdir, ".cache", "outlines")
 
 
 def get_outlines_cache():
@@ -184,25 +194,25 @@ def get_outlines_cache():
             cache.clear()
         cache.set("__version__", outlines_version)
         return cache
-    else:
-        return LRUCache(maxsize=128)
+
+    return LRUCache(maxsize=128)
 
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def _reduced_vocabulary(
-    tokenizer: TokenizerLike,
-    eos_token_id: int,
-) -> dict[bytes, list[int]]:
+def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
     """
+    eos_token_id = tokenizer.eos_token_id
 
-    unicode_to_bytes = {v: k for k, v in bytes_to_unicode().items()}
+    unicode_to_bytes = {
+        v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
+    }
 
     def convert_token_to_string(token: str) -> str:
         string = tokenizer.convert_tokens_to_string([token])
@@ -232,7 +242,9 @@ def _reduced_vocabulary(
                 # by this point.
                 token_bytes = bytes(token_str)  # type: ignore[arg-type]
 
-            elif "\ufffd" in token_str and not re_replacement_seq.match(token_str):
+            elif (token_str == "\ufffd" and token != "\ufffd") or (
+                "\ufffd" in token_str and not re_replacement_seq.match(token_str)
+            ):
                 # Handle tokens with invalid UTF-8 sequences.
                 if re_llama_byte_token.match(token):
                     # Llama-like tokenizers use <0xXX> for incomplete sequences.
@@ -264,34 +276,13 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
 
-    try:
-        if (
-            hasattr(
-                tokenizer,
-                "eos_token_id",
-            )
-            and tokenizer.eos_token_id is not None
-        ):
-            eos_token_id = tokenizer.eos_token_id
-        else:
-            raise ValueError(
-                f"Error during structured outputs setup for outlines: Tokenizer ({type(tokenizer)}) has no `eos_token_id` property, but `eos_token_id` is required for structured outputs to work properly."  # noqa: E501
-            )
+    reduced_vocab = _reduced_vocabulary(tokenizer)
+    vocabulary = OutlinesVocabulary(
+        oc.Vocabulary(tokenizer.eos_token_id, reduced_vocab)
+    )
+    tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
-        reduced_vocab = _reduced_vocabulary(
-            tokenizer,
-            eos_token_id,  # type: ignore
-        )
-        vocabulary = OutlinesVocabulary(oc.Vocabulary(eos_token_id, reduced_vocab))
-        tokenizer._outlines_vocabulary = vocabulary  # type: ignore
-
-        return vocabulary
-    except AttributeError as e:
-        raise ValueError(
-            f"Cannot get the vocabulary of the tokenizer "
-            f"({type(tokenizer)}). The tokenizer should have a "
-            "get_vocab method."
-        ) from e
+    return vocabulary
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:

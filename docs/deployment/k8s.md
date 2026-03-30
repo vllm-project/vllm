@@ -11,7 +11,9 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 - [Helm](frameworks/helm.md)
+- [NVIDIA Dynamo](integrations/dynamo.md)
 - [InftyAI/llmaz](integrations/llmaz.md)
+- [llm-d](integrations/llm-d.md)
 - [KAITO](integrations/kaito.md)
 - [KServe](integrations/kserve.md)
 - [Kthena](integrations/kthena.md)
@@ -19,7 +21,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 - [kubernetes-sigs/lws](frameworks/lws.md)
 - [meta-llama/llama-stack](integrations/llamastack.md)
 - [substratusai/kubeai](integrations/kubeai.md)
-- [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
+- [vllm-project/AIBrix](integrations/aibrix.md)
 - [vllm-project/production-stack](integrations/production-stack.md)
 
 ## Deployment with CPUs
@@ -58,11 +60,15 @@ First, create a Kubernetes PVC and Secret for downloading and storing Hugging Fa
 Here, the `token` field stores your **Hugging Face access token**. For details on how to generate a token,
 see the [Hugging Face documentation](https://huggingface.co/docs/hub/en/security-tokens).
 
-Next, start the vLLM server as a Kubernetes Deployment and Service:
+Next, start the vLLM server as a Kubernetes Deployment and Service.
+
+Note that you will want to configure your vLLM image based on your processor arch:
 
 ??? console "Config"
 
     ```bash
+    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest       # use this for x86_64
+    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest # use this for arm64
     cat <<EOF |kubectl apply -f -
     apiVersion: apps/v1
     kind: Deployment
@@ -80,7 +86,7 @@ Next, start the vLLM server as a Kubernetes Deployment and Service:
         spec:
           containers:
           - name: vllm
-            image: vllm/vllm-openai:latest
+            image: $VLLM_IMAGE
             command: ["/bin/sh", "-c"]
             args: [
               "vllm serve meta-llama/Llama-3.2-1B-Instruct"

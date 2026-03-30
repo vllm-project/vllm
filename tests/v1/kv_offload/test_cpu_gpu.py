@@ -6,30 +6,20 @@ import time
 import pytest
 import torch
 
-from vllm.platforms import current_platform
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.spec import (
+    CanonicalKVCacheRef,
+    CanonicalKVCaches,
+    CanonicalKVCacheTensor,
+)
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
-
-BACKENDS_TO_TEST = [FlashAttentionBackend]
-
-if not current_platform.is_rocm():
-    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
-    BACKENDS_TO_TEST.append(FlashInferBackend)
-
-    from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnMLABackend
-
-    BACKENDS_TO_TEST.append(FlashAttnMLABackend)
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_BLOCKS = [256]
-GPU_BLOCK_SIZES = [16]
-GPU_BLOCKS_PER_CPU_BLOCK = [1, 3]
-HEAD_SIZES = [64]
-NUM_HEADS = [8]
-NUM_LAYERS = [4]
-DTYPES = [torch.bfloat16]
+GPU_PAGE_SIZES = [512, 1024]
+BLOCK_SIZE_FACTORS = [1, 3]
+NUM_TENSORS = [4]
 SEEDS = [0]
 CUDA_DEVICES = ["cuda:0"]
 NUM_MAPPINGS = [3]
@@ -37,155 +27,145 @@ NUM_MAPPINGS = [3]
 
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("gpu_block_size", GPU_BLOCK_SIZES)
-@pytest.mark.parametrize("gpu_blocks_per_cpu_block", GPU_BLOCKS_PER_CPU_BLOCK)
+@pytest.mark.parametrize("gpu_page_size_bytes", GPU_PAGE_SIZES)
+@pytest.mark.parametrize("block_size_factor", BLOCK_SIZE_FACTORS)
 @pytest.mark.parametrize("num_gpu_blocks", NUM_GPU_BLOCKS)
 @pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
-@pytest.mark.parametrize("num_layers", NUM_LAYERS)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("num_tensors", NUM_TENSORS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_transfer(
+    default_vllm_config,
     gpu_to_cpu: bool,
     num_mappings: int,
-    head_size: int,
-    num_heads: int,
-    gpu_block_size: int,
-    gpu_blocks_per_cpu_block: int,
+    gpu_page_size_bytes: int,
+    block_size_factor: int,
     num_gpu_blocks: int,
     num_cpu_blocks: int,
-    num_layers: int,
-    dtype: torch.dtype,
+    num_tensors: int,
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
-    # create per-layer GPU KV caches based on available attn_backends
-    attn_backends_list = BACKENDS_TO_TEST
-
-    gpu_caches = {}
-    attn_backends = {}
-    for i in range(num_layers):
-        layer_name = f"layer {i}"
-
-        attn_backend = attn_backends_list[i % len(attn_backends_list)]
-        attn_backends[layer_name] = attn_backend
-
-        gpu_cache_shape = attn_backend.get_kv_cache_shape(
-            num_gpu_blocks, gpu_block_size, num_heads, head_size
+    # build CanonicalKVCacheTensor list: one per tensor
+    kv_cache_tensors: list[CanonicalKVCacheTensor] = []
+    for i in range(num_tensors):
+        gpu_tensor = torch.randint(
+            -128,
+            127,
+            (num_gpu_blocks, gpu_page_size_bytes),
+            dtype=torch.int8,
+            device=device,
         )
-        gpu_caches[layer_name] = torch.rand(gpu_cache_shape, dtype=dtype, device=device)
+        kv_cache_tensors.append(
+            CanonicalKVCacheTensor(
+                tensor=gpu_tensor,
+                page_size_bytes=gpu_page_size_bytes,
+            )
+        )
 
-    # create handler
-    cpu_block_size = gpu_blocks_per_cpu_block * gpu_block_size
+    # one group containing all tensors, one data ref per tensor
+    kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]] = [
+        [
+            CanonicalKVCacheRef(
+                tensor_idx=i,
+                page_size_bytes=gpu_page_size_bytes,
+            )
+            for i in range(num_tensors)
+        ]
+    ]
+
+    kv_caches = CanonicalKVCaches(
+        tensors=kv_cache_tensors,
+        group_data_refs=kv_cache_groups_data_refs,
+    )
     handlers = CpuGpuOffloadingHandlers(
-        attn_backends=attn_backends,
-        gpu_block_size=gpu_block_size,
-        cpu_block_size=cpu_block_size,
+        kv_caches=kv_caches,
+        block_size_factor=block_size_factor,
         num_cpu_blocks=num_cpu_blocks,
-        gpu_caches=gpu_caches,
     )
 
     # select block mappings
-    gpu_blocks = random.sample(
-        range(num_gpu_blocks), num_mappings * gpu_blocks_per_cpu_block
-    )
+    gpu_blocks = random.sample(range(num_gpu_blocks), num_mappings * block_size_factor)
     cpu_blocks = random.sample(range(num_cpu_blocks), num_mappings)
 
-    # convert cpu blocks to gpu block size
-    cpu_blocks_in_gpu_block_size = []
-    for cpu_block in cpu_blocks:
-        base_block_id = cpu_block * gpu_blocks_per_cpu_block
-        for i in range(gpu_blocks_per_cpu_block):
-            cpu_blocks_in_gpu_block_size.append(i + base_block_id)
+    # expand cpu blocks to gpu-page granularity for uniform comparison:
+    # each cpu block maps to block_size_factor consecutive sub-blocks
+    cpu_blocks_expanded = [
+        cpu_block * block_size_factor + j
+        for cpu_block in cpu_blocks
+        for j in range(block_size_factor)
+    ]
 
-    # maybe skip a GPU block to test reading from the middle of a CPU block
+    # maybe skip some GPU blocks to test reading from the middle of a CPU block
     if not gpu_to_cpu:
-        gpu_blocks = gpu_blocks[gpu_blocks_per_cpu_block - 1 :]
-        cpu_blocks_in_gpu_block_size = cpu_blocks_in_gpu_block_size[
-            gpu_blocks_per_cpu_block - 1 :
-        ]
+        blocks_to_skip = block_size_factor - 1
+        gpu_blocks = gpu_blocks[blocks_to_skip:]
+        cpu_blocks_expanded = cpu_blocks_expanded[blocks_to_skip:]
 
     # set transfer direction
     if gpu_to_cpu:
         handler = handlers.gpu_to_cpu_handler
-        src_spec_class = GPULoadStoreSpec
-        dst_spec_class = CPULoadStoreSpec
-        src_blocks = gpu_blocks
-        dst_blocks = cpu_blocks
-        src_blocks_in_gpu_block_size = gpu_blocks
-        dst_blocks_in_gpu_block_size = cpu_blocks_in_gpu_block_size
-        dst_size_in_gpu_blocks = num_cpu_blocks * gpu_blocks_per_cpu_block
+        src_spec = GPULoadStoreSpec(gpu_blocks, group_sizes=(len(gpu_blocks),))
+        dst_spec = CPULoadStoreSpec(cpu_blocks)
+        dst_to_src = dict(zip(cpu_blocks_expanded, gpu_blocks))
+        num_dst_sub_blocks = num_cpu_blocks * block_size_factor
     else:
         handler = handlers.cpu_to_gpu_handler
-        src_spec_class = CPULoadStoreSpec
-        dst_spec_class = GPULoadStoreSpec
-        src_blocks = cpu_blocks
-        dst_blocks = gpu_blocks
-        src_blocks_in_gpu_block_size = cpu_blocks_in_gpu_block_size
-        dst_blocks_in_gpu_block_size = gpu_blocks
-        dst_size_in_gpu_blocks = num_gpu_blocks
-
-    # build dst -> src mapping
-    dst_to_src = {}
-    for src_block, dst_block in zip(
-        src_blocks_in_gpu_block_size, dst_blocks_in_gpu_block_size
-    ):
-        dst_to_src[dst_block] = src_block
-
-    # build transfer specs
-    src_spec = src_spec_class(src_blocks)
-    dst_spec = dst_spec_class(dst_blocks)
+        src_spec = CPULoadStoreSpec(cpu_blocks)
+        dst_spec = GPULoadStoreSpec(gpu_blocks, group_sizes=(len(gpu_blocks),))
+        dst_to_src = dict(zip(gpu_blocks, cpu_blocks_expanded))
+        num_dst_sub_blocks = num_gpu_blocks
 
     # clone src and dst tensors before transfer
-    orig_src_caches = [x.clone() for x in handler.src_tensors]
-    orig_dst_caches = [x.clone() for x in handler.dst_tensors]
+    orig_src_tensors = [x.clone() for x in handler.src_tensors]
+    orig_dst_tensors = [x.clone() for x in handler.dst_tensors]
 
     # call transfer function
+    start_time = time.time()
     assert handler.transfer_async(1, (src_spec, dst_spec))
-    assert set({x[0] for x in handler._transfers}) == {1}
+    assert set({x.job_id for x in handler._transfers}) == {1}
 
     # wait for transfer to complete
     end_time = time.time() + 10
     while time.time() < end_time:
         finished = handler.get_finished()
         if finished:
-            assert finished == [(1, True)]
+            assert finished[0].job_id == 1
+            assert finished[0].success
+            assert (
+                finished[0].transfer_type == ("GPU", "CPU")
+                if gpu_to_cpu
+                else ("CPU", "GPU")
+            )
+            assert finished[0].transfer_size == (
+                len(gpu_blocks) * handler.group_block_size_in_bytes[0]
+            )
+            assert finished[0].transfer_time > 0
+            assert finished[0].transfer_time < (time.time() - start_time)
             break
         time.sleep(0.1)
 
     # verify src tensors did not change
-    for orig_tensor, tensor in zip(orig_src_caches, handler.src_tensors):
+    for orig_tensor, tensor in zip(orig_src_tensors, handler.src_tensors):
         assert torch.equal(orig_tensor, tensor)
 
-    # verify dst tensors
-    for dst_block in range(dst_size_in_gpu_blocks):
-        src_block_candidate = dst_to_src.get(dst_block)
-        for src_cache, dst_cache, orig_dst_cache, kv_dim in zip(
-            handler.src_tensors,
-            handler.dst_tensors,
-            orig_dst_caches,
-            handler.kv_dim_before_num_blocks,
-        ):
-            if kv_dim:
-                # iterate over key, value
-                for i in range(2):
-                    if src_block_candidate is not None:
-                        expected_value = src_cache[i][src_block_candidate]
-                    else:
-                        expected_value = orig_dst_cache[i][dst_block]
-                    torch.testing.assert_close(
-                        dst_cache[i][dst_block].cpu(), expected_value.cpu()
-                    )
+    # verify dst tensors at gpu-page granularity.
+    for src_tensor, dst_tensor, orig_dst_tensor in zip(
+        handler.src_tensors,
+        handler.dst_tensors,
+        orig_dst_tensors,
+    ):
+        # view both GPU and CPU tensors as (n, gpu_page_size_bytes) for comparison.
+        src_view = src_tensor.view(-1, gpu_page_size_bytes)
+        dst_view = dst_tensor.view(-1, gpu_page_size_bytes)
+        orig_dst_view = orig_dst_tensor.view(-1, gpu_page_size_bytes)
+        for dst_sub_block in range(num_dst_sub_blocks):
+            src_sub_block = dst_to_src.get(dst_sub_block)
+            if src_sub_block is not None:
+                expected = src_view[src_sub_block]
             else:
-                if src_block_candidate is not None:
-                    expected_value = src_cache[src_block_candidate]
-                else:
-                    expected_value = orig_dst_cache[dst_block]
-                torch.testing.assert_close(
-                    dst_cache[dst_block].cpu(), expected_value.cpu()
-                )
+                expected = orig_dst_view[dst_sub_block]
+            torch.testing.assert_close(dst_view[dst_sub_block].cpu(), expected.cpu())

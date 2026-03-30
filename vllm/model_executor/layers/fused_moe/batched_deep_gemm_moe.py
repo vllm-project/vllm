@@ -7,11 +7,22 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    get_fp8_min_max,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -19,6 +30,7 @@ from vllm.utils.deep_gemm import (
     fp8_m_grouped_gemm_nt_masked,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
+    is_deep_gemm_supported,
 )
 from vllm.utils.math_utils import cdiv, round_up
 
@@ -106,7 +118,10 @@ def _silu_mul_fp8_quant_deep_gemm(
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
 
-        y_s = tl.maximum(tl.max(tl.abs(y)), eps) / fp8_max
+        # Use multiply-by-reciprocal to match PyTorch's tensor/scalar
+        # division precision (Triton GPU fast-division for constexpr
+        # divisors can introduce 1-ULP error).
+        y_s = tl.maximum(tl.max(tl.abs(y)), eps) * (1.0 / fp8_max)
         if ceil_ue8m0:
             y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
 
@@ -179,7 +194,7 @@ def persistent_masked_m_silu_mul_quant(
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
-    fp8_dtype = torch.float8_e4m3fn
+    fp8_dtype = current_platform.fp8_dtype()
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
 
     ys_shape, ys_strides, ys_dtype = scales_shape_stride_dtype(E, T, G, quant_scale_fmt)
@@ -199,11 +214,14 @@ def persistent_masked_m_silu_mul_quant(
         device_id=y.device.index
     ).to_int()
 
-    if cuda_arch >= 80:
+    if current_platform.is_cuda() and cuda_arch >= 80:
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y, tokens_per_expert, y_q, y_s, ceil_ue8m0
         )
     else:
+        # Triton fallback for ROCm -- the C++ kernel is guarded by
+        # #ifndef USE_ROCM in activation_kernels.cu.
+        # https://github.com/ROCm/aiter/issues/2420
         stride_cnt_e = tokens_per_expert.stride()[0]
 
         # Static grid over experts and H-groups.
@@ -213,13 +231,11 @@ def persistent_masked_m_silu_mul_quant(
         stride_i_e, stride_i_t, stride_i_h = y.stride()
         stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
 
-        f_info = torch.finfo(fp8_dtype)
-        fp8_max = f_info.max
-        fp8_min = f_info.min
+        fp8_min, fp8_max = get_fp8_min_max()
         eps: float = 1e-10
         assert y_s.dtype == torch.float32, (
-            "_silu_mul_fp8_quant_deep_gemm does"
-            "not support {y_s.dtype} scales. Only torch.float32 supported."
+            "_silu_mul_fp8_quant_deep_gemm Triton fallback does not "
+            f"support {y_s.dtype} scales. Only torch.float32 supported."
         )
         _silu_mul_fp8_quant_deep_gemm[grid](
             y,
@@ -250,35 +266,55 @@ def persistent_masked_m_silu_mul_quant(
     return y_q, y_s
 
 
-class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
     ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
         quant_config: Quantization configuration
         """
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
 
-    def supports_chunking(self) -> bool:
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return is_deep_gemm_supported()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
         return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_expert_map(self) -> bool:
         return False
@@ -305,15 +341,19 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
         # end up sending their tokens. This needs to be fixed.
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
+        workspace2 = (num_experts, max_num_tokens * num_dispatchers, activation_out_dim)
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output)
 
@@ -352,7 +392,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,

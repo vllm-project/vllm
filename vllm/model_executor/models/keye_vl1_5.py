@@ -14,13 +14,13 @@ from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.inputs import ModalityData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
-    ModalityData,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -274,16 +274,6 @@ class KeyeVL1_5Projector(nn.Module):
         return hidden_states.view(*dims, -1)
 
 
-class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
-    def get_max_frame_per_video(self) -> int:
-        return 2048
-
-    def get_supported_mm_limits(
-        self,
-    ) -> Mapping[str, int | None]:
-        return {"image": None, "video": 1}
-
-
 def _keye_field_config(
     hf_inputs: Mapping[str, torch.Tensor],
 ):
@@ -365,9 +355,32 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
+class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
+    def get_data_parser(self):
+        return KeyeVL1_5MultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
+    def get_max_frame_per_video(self) -> int:
+        return 2048
+
+    def get_supported_mm_limits(
+        self,
+    ) -> Mapping[str, int | None]:
+        return {"image": None, "video": 1}
+
+
 class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return KeyeVL1_5MultiModalDataParser()
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override to use the text path instead of token path to use the
+        # video-specific logic in processing_keye.py
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     def _get_prompt_updates(
         self,

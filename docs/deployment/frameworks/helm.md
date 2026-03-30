@@ -17,6 +17,8 @@ Before you begin, ensure that you have the following:
 
 ## Installing the chart
 
+This guide uses the Helm chart at [examples/online_serving/chart-helm](../../../examples/online_serving/chart-helm).
+
 To install the chart with the release name `test-vllm`:
 
 ```bash
@@ -49,7 +51,7 @@ chart **including persistent volumes** and deletes the release.
 The following table describes configurable parameters of the chart in `values.yaml`:
 
 | Key | Type | Default | Description |
-|-----|------|---------|-------------|
+| --- | ---- | ------- | ----------- |
 | autoscaling | object | {"enabled":false,"maxReplicas":100,"minReplicas":1,"targetCPUUtilizationPercentage":80} | Autoscaling configuration |
 | autoscaling.enabled | bool | false | Enable autoscaling |
 | autoscaling.maxReplicas | int | 100 | Maximum replicas |

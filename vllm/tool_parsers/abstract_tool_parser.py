@@ -5,17 +5,24 @@ import importlib
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
+from typing import TypeAlias
 
-from openai.types.responses.response_format_text_json_schema_config import (
+from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
+    ResponseTextConfig,
 )
+from openai.types.responses.tool import Tool as ResponsesTool
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
-    ResponseTextConfig,
 )
 from vllm.logger import init_logger
 from vllm.sampling_params import (
@@ -28,6 +35,8 @@ from vllm.utils.import_utils import import_from_path
 
 logger = init_logger(__name__)
 
+Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
+
 
 class ToolParser:
     """
@@ -36,7 +45,11 @@ class ToolParser:
     derived classes.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+    ):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -44,6 +57,7 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
+        self.tools = tools
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -63,10 +77,12 @@ class ToolParser:
         # Set structured output params for tool calling
         if json_schema_from_tool is not None:
             if isinstance(request, ChatCompletionRequest):
-                request.structured_outputs = StructuredOutputsParams()
                 # tool_choice: "Forced Function" or "required" will override
                 # structured output json settings to make tool calling work correctly
-                request.structured_outputs.json = json_schema_from_tool
+                request.structured_outputs = StructuredOutputsParams(
+                    json=json_schema_from_tool  # type: ignore[call-arg]
+                )
+                request.response_format = None
             if isinstance(request, ResponsesRequest):
                 request.text = ResponseTextConfig()
                 request.text.format = ResponseFormatTextJSONSchemaConfig(

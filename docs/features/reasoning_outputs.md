@@ -5,14 +5,14 @@ vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.
 Reasoning models return an additional `reasoning` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
 
 !!! warning
-    `reasoning` used to be called `reasoning_content`. For now, `reasoning_content` will continue to work. However, we encourage you to migrate to `reasoning` in case `reasoning_content` is removed in future.
+    `reasoning` used to be called `reasoning_content`. To migrate, directly replace `reasoning_content` with `reasoning`.
 
 ## Supported Models
 
 vLLM currently supports the following reasoning models:
 
 | Model Series | Parser Name | Structured Output Support | Tool Calling |
-|--------------|-------------|------------------|-------------|
+| ------------ | ----------- | ---------------- | ----------- |
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
@@ -204,6 +204,117 @@ The reasoning content is also available when both tool calling and the reasoning
 
 For more examples, please refer to [examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py](../../examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py).
 
+## Server-Level Default Chat Template Kwargs
+
+You can set default `chat_template_kwargs` at the server level using the `--default-chat-template-kwargs` CLI argument. This is useful for configuring reasoning behavior across all requests without requiring clients to specify it in each request.
+
+### Disabling Thinking Mode by Default
+
+For models like Qwen3 where thinking is enabled by default, you can disable it server-wide:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+    --reasoning-parser qwen3 \
+    --default-chat-template-kwargs '{"enable_thinking": false}'
+```
+
+### Enabling Thinking Mode by Default
+
+For models like IBM Granite 3.2 or DeepSeek-V3.1 where thinking is disabled by default, you can enable it server-wide:
+
+```bash
+vllm serve ibm-granite/granite-3.2-2b-instruct \
+    --reasoning-parser granite \
+    --default-chat-template-kwargs '{"thinking": true}'
+```
+
+### Request-Level Override
+
+Request-level `chat_template_kwargs` always take priority over server defaults. For example, if the server is started with `enable_thinking=false`, a client can still enable it for a specific request:
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}}  # Overrides server default
+)
+```
+
+## Thinking Budget Control
+
+Some models, such as [Qwen3](https://qwen.readthedocs.io/en/latest/getting_started/quickstart.html#thinking-budget), [DeepSeek](https://www.alibabacloud.com/help/en/model-studio/deep-thinking), and [Nemotron3](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16), support a thinking budget that limits the maximum number of tokens used for reasoning.
+
+Token counting starts from `think_start_str`. Once the reasoning token count reaches the configured `thinking_token_budget`, vLLM forces the model to produce `think_end_str`, effectively terminating the reasoning block.
+
+To use this feature:
+
+- `--reasoning-parser` enables reasoning extraction.
+- `--reasoning-config` defines the reasoning boundary tokens (e.g., `think_start_str`, `think_end_str`).
+- `thinking_token_budget` (a sampling parameter) sets the per-request reasoning token limit.
+
+If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
+
+`--reasoning-config` accepts a JSON object corresponding to  
+[ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
+
+| Field             | Type           | Description                                      |
+|-------------------|----------------|--------------------------------------------------|
+| `think_start_str` | `str \| null`  | String that marks the start of reasoning content |
+| `think_end_str`   | `str \| null`  | String that marks the end of reasoning content   |
+
+!!! note
+    `think_end_str` can include a transition phrase before the think end token. For example, setting `think_end_str` to `"I have to give the solution based on the thinking directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
+
+### Online Serving
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+    --reasoning-parser qwen3 \
+    --reasoning-config '{"think_start_str": "<think>", "think_end_str": "I have to give the solution based on the thinking directly now.</think>"}'
+```
+
+Then make a request with `thinking_token_budget` to limit the reasoning tokens:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+      { "role": "user", "content": "9.11 and 9.8, which is greater?" }
+    ],
+    "extra_body": {
+      "thinking_token_budget": 10
+    }
+  }'
+```
+
+### Offline Inference
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.config import ReasoningConfig
+
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    reasoning_config=ReasoningConfig(
+        think_start_str="<think>",
+        think_end_str="I have to give the solution based on the thinking directly now.</think>",
+    ),
+)
+
+sampling_params = SamplingParams(thinking_token_budget=10)
+
+messages = [
+    {"role": "user", "content": "9.11 and 9.8, which is greater?"},
+]
+
+outputs = llm.chat(messages, sampling_params=sampling_params)
+
+for output in outputs:
+    print("text:", output.outputs[0].text)
+```
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
@@ -218,7 +329,8 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
     # import the required packages
 
     from vllm.reasoning import ReasoningParser, ReasoningParserManager
-    from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
     # define a reasoning parser and register it to vllm
     # the name list in register_module can be used

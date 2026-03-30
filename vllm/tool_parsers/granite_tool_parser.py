@@ -8,8 +8,10 @@ import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -20,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
@@ -42,8 +45,8 @@ class GraniteToolParser(ToolParser):
     are all set
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         # for granite 3.0, the token `<|tool_call|>`
         self.bot_token = "<|tool_call|>"
         # for granite 3.1, the string `<tool_call>`

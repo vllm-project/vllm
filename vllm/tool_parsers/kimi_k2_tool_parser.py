@@ -6,8 +6,10 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -18,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -25,8 +28,8 @@ logger = init_logger(__name__)
 
 
 class KimiK2ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
@@ -122,7 +125,6 @@ class KimiK2ToolParser(ToolParser):
             if variant in cleaned:
                 cleaned = cleaned.replace(variant, "")
                 found_end = True
-
         return cleaned, found_begin, found_end
 
     def _reset_section_state(self) -> None:
@@ -238,6 +240,7 @@ class KimiK2ToolParser(ToolParser):
             self.in_tool_section = True
             self.token_buffer = buffered_text  # Use cleaned buffer
             self.section_char_count = 0  # Reset counter for new section
+
         if found_section_end and self.in_tool_section:
             logger.debug("Detected section end marker")
             # CRITICAL: Don't exit early if tool_call_end is in this chunk.
@@ -252,13 +255,18 @@ class KimiK2ToolParser(ToolParser):
             else:
                 # No tool call ending, safe to exit immediately
                 logger.debug("Exiting tool section")
-                remaining = buffered_text
                 self._reset_section_state()
-                # Return remaining text as reasoning content if non-empty
-                if remaining.strip():
-                    return DeltaMessage(content=remaining)
-                # Return empty delta to maintain function contract
-                # (always returns DeltaMessage)
+                # Extract any content AFTER the section end marker in delta_text
+                # (don't use buffered_text as it contains tool call data)
+                post_section_content = ""
+                for variant in self.tool_calls_end_token_variants:
+                    if variant in delta_text:
+                        parts = delta_text.split(variant, 1)
+                        if len(parts) > 1:
+                            post_section_content = parts[1]
+                        break
+                if post_section_content.strip():
+                    return DeltaMessage(content=post_section_content)
                 return DeltaMessage(content="")
         else:
             self.token_buffer = buffered_text
@@ -316,12 +324,12 @@ class KimiK2ToolParser(ToolParser):
                 and prev_tool_end_count == cur_tool_end_count
                 and self.tool_call_end_token not in delta_text
             ):
-                # CRITICAL FIX: Suppress content if in tool section but
-                # no tool calls started
+                # Suppress content between section begin and first tool begin
+                # (header noise). Don't suppress content between tools to avoid
+                # breaking potential delimiter characters.
                 if self.in_tool_section and cur_tool_start_count == 0:
                     logger.debug(
-                        "In tool section but no tool calls started yet. "
-                        "Suppressing: %s",
+                        "In tool section before first tool, suppressing: %s",
                         delta_text,
                     )
                     # Return empty delta to maintain iterator contract
@@ -441,7 +449,7 @@ class KimiK2ToolParser(ToolParser):
                 if current_tool_call_matches:
                     tool_id, tool_args = current_tool_call_matches.groups()
                     tool_name = tool_id.split(":")[0].split(".")[-1]
-                    current_tool_call["id"] = tool_id
+                    current_tool_call["id"] = tool_id.strip()
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
                 else:
@@ -451,7 +459,7 @@ class KimiK2ToolParser(ToolParser):
                     if current_tool_call_name_matches:
                         (tool_id_str,) = current_tool_call_name_matches.groups()
                         tool_name = tool_id_str.split(":")[0].split(".")[-1]
-                        current_tool_call["id"] = tool_id_str
+                        current_tool_call["id"] = tool_id_str.strip()
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
                     else:
@@ -488,6 +496,9 @@ class KimiK2ToolParser(ToolParser):
             if tool_call_portion is None:
                 # if there's text but not tool calls, send that -
                 # otherwise None to skip chunk
+                # CRITICAL: Never return content if we're in a tool section
+                if self.in_tool_section:
+                    return None
                 delta = (
                     DeltaMessage(content=delta_text)
                     if text_portion is not None

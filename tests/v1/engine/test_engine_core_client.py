@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import importlib
+import inspect
 import os
 import signal
 import time
 import uuid
+from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -20,24 +24,40 @@ from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import AsyncMPClient, EngineCoreClient, SyncMPClient
+from vllm.v1.engine.core_client import (
+    AsyncMPClient,
+    DPLBAsyncMPClient,
+    EngineCoreClient,
+    SyncMPClient,
+)
 from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.pool.late_interaction import (
+    LATE_INTERACTION_MODE_CACHE_QUERY,
+    LATE_INTERACTION_MODE_SCORE_DOC,
+)
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA-alike platforms.",
+        allow_module_level=True,
+    )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quantization kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
+TEST_MODULE = "tests.v1.engine.test_engine_core_client"
+
+_REQUEST_COUNTER = 0
 
 
 def make_request(
@@ -46,18 +66,174 @@ def make_request(
     if not prompt_tokens_ids:
         prompt_tokens_ids = PROMPT_TOKENS
 
+    global _REQUEST_COUNTER
+    _REQUEST_COUNTER += 1
+    request_id = f"request-{_REQUEST_COUNTER}"
     return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
+        external_req_id=f"{request_id}-{uuid.uuid4()}",
         prompt_token_ids=prompt_tokens_ids,
         mm_features=None,
         sampling_params=params,
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+def _reload_envs_module():
+    import vllm.envs as envs_mod
+
+    cache_clear = getattr(getattr(envs_mod, "__getattr__", None), "cache_clear", None)
+    if cache_clear is not None:
+        cache_clear()
+    return importlib.reload(envs_mod)
+
+
+def _reload_core_client_module():
+    module = importlib.import_module("vllm.v1.engine.core_client")
+    return importlib.reload(module)
+
+
+def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
+    timeout_value = 654
+    monkeypatch.setenv("VLLM_ENGINE_READY_TIMEOUT_S", str(timeout_value))
+
+    # Ensure that the environment variable is loaded if caching is enabled
+    _reload_envs_module()
+    core_client_mod = _reload_core_client_module()
+
+    poll_timeouts: list[int] = []
+
+    class ShadowSocket:
+        def poll(self, timeout: int) -> int:
+            # Capture the timeout value for each poll call
+            poll_timeouts.append(timeout)
+            return 1
+
+        def recv_multipart(self):
+            return (b"\x00\x00", b"ready")
+
+    class DummySocket:
+        def send_multipart(self, _msg, *, copy: bool = False, track: bool = False):
+            if track:
+                return SimpleNamespace(done=True)
+
+        def recv_multipart(self, *, copy: bool = False):
+            return (b"", b"")
+
+        def close(self, *, linger: int = 0):
+            pass
+
+        def bind(self, _address):
+            pass
+
+        def connect(self, _address):
+            pass
+
+        def setsockopt(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
+    monkeypatch.setattr(
+        core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
+    )
+
+    parallel_config = SimpleNamespace(
+        data_parallel_size=1,
+        data_parallel_rank=0,
+        data_parallel_index=0,
+        data_parallel_size_local=1,
+        data_parallel_rank_local=None,
+        data_parallel_hybrid_lb=False,
+        data_parallel_external_lb=False,
+        local_engines_only=False,
+        enable_elastic_ep=False,
+    )
+    vllm_config = SimpleNamespace(parallel_config=parallel_config)
+
+    client = core_client_mod.MPClient(
+        asyncio_mode=False,
+        vllm_config=vllm_config,
+        executor_class=object,
+        log_stats=False,
+        client_addresses={
+            "input_address": "inproc://input",
+            "output_address": "inproc://output",
+        },
+    )
+    try:
+        # timeout_value is in seconds, but poll receives milliseconds
+        assert poll_timeouts == [timeout_value * 1000]
+    finally:
+        client.shutdown()
+
+
+def _make_pooling_request(
+    request_id: str, *, mode: str | None = None, query_key: str | None = None
+) -> EngineCoreRequest:
+    late_interaction_params = None
+    if mode is not None and query_key is not None:
+        late_interaction_params = LateInteractionParams(
+            mode=mode,
+            query_key=query_key,
+        )
+
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(
+            task="token_embed",
+            late_interaction_params=late_interaction_params,
+        ),
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def test_dplb_late_interaction_sticky_routing():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[0, 0], [0, 0], [0, 0]]
+    client.eng_start_index = 0
+
+    query_key = "rerank-abc-query-0"
+    query_request = _make_pooling_request(
+        "query-req", mode=LATE_INTERACTION_MODE_CACHE_QUERY, query_key=query_key
+    )
+    doc_request = _make_pooling_request(
+        "doc-req", mode=LATE_INTERACTION_MODE_SCORE_DOC, query_key=query_key
+    )
+
+    query_engine = client.get_core_engine_for_request(query_request)
+    doc_engine = client.get_core_engine_for_request(doc_request)
+
+    assert query_engine == doc_engine
+    assert client.reqs_in_flight["query-req"] == query_engine
+    assert client.reqs_in_flight["doc-req"] == doc_engine
+
+
+def test_dplb_non_late_interaction_still_uses_lb():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[2, 1], [0, 0], [1, 0]]
+    client.eng_start_index = 0
+
+    request = make_request(SamplingParams(max_tokens=1))
+    chosen_engine = client.get_core_engine_for_request(request)
+
+    assert chosen_engine == client.core_engines[1]
+    assert client.lb_engines[1][0] == 1
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -122,10 +298,205 @@ def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None)
     return msg
 
 
+@dataclass
+class TestMessage:
+    """Test dataclass for verifying custom type serialization."""
+
+    message: str
+
+
+# Dummy utility function to monkey-patch into engine core.
+def echo_dc(
+    self,
+    msg: str,
+    return_list: bool = False,
+) -> TestMessage | list[TestMessage]:
+    print(f"echo dc util function called: {msg}")
+    val = None if msg is None else TestMessage(msg)
+    # Return dataclass to verify support for returning custom types
+    # (for which there is special handling to make it work with msgspec).
+    return [val for _ in range(3)] if return_list else val
+
+
+# Dummy utility function to test dict serialization with custom types.
+def echo_dc_dict(
+    self,
+    msg: str,
+    return_dict: bool = False,
+) -> TestMessage | dict[str, TestMessage]:
+    print(f"echo dc dict util function called: {msg}")
+    val = None if msg is None else TestMessage(msg)
+    # Return dict of dataclasses to verify support for returning dicts
+    # with custom value types.
+    if return_dict:
+        return {"key1": val, "key2": val, "key3": val}
+    else:
+        return val
+
+
+# Dummy utility function to test nested structures with custom types.
+def echo_dc_nested(
+    self,
+    msg: str,
+    structure_type: str = "list_of_dicts",
+) -> Any:
+    print(f"echo dc nested util function called: {msg}, structure: {structure_type}")
+    val = None if msg is None else TestMessage(msg)
+
+    structures = {
+        "list_of_dicts": [{"a": val, "b": val}, {"c": val, "d": val}],
+        "dict_of_lists": {"list1": [val, val], "list2": [val, val]},
+        "deep_nested": {"outer": [{"inner": [val, val]}, {"inner": [val]}]},
+    }
+    return structures.get(structure_type, val)
+
+
+def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
+    """Utility that returns a Future completed once the engine is idle
+    (tests deferred utility path).
+    """
+    future: Future = Future()
+
+    def idle(engine: EngineCore):
+        future.set_result(value)
+
+    self._idle_state_callbacks.append(idle)
+    return future
+
+
+# --- Fixtures for subprocess patching ---
+# These create sitecustomize.py files that patch EngineCore in spawned
+# subprocesses. This is necessary because ROCm requires 'spawn' multiprocessing
+# start method, which creates fresh Python interpreters that don't inherit
+# monkey-patches from the parent process.
+
+
+@pytest.fixture
+def subprocess_echo_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have echo method.
+
+    This is needed because ROCm uses 'spawn' multiprocessing start method,
+    which creates a fresh Python interpreter that doesn't inherit monkey-patches.
+    By using sitecustomize.py, we ensure the patch is applied when Python starts.
+    """
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "import time",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(echo),
+                "EngineCore.echo = echo",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
+@pytest.fixture
+def subprocess_echo_dc_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have echo_dc method."""
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from dataclasses import dataclass",
+                "",
+                inspect.getsource(TestMessage),
+                f"TestMessage.__module__ = '{TEST_MODULE}'",
+                "",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(echo_dc),
+                "EngineCore.echo_dc = echo_dc",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
+@pytest.fixture
+def subprocess_echo_dc_dict_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have echo_dc_dict method."""
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from dataclasses import dataclass",
+                "",
+                inspect.getsource(TestMessage),
+                f"TestMessage.__module__ = '{TEST_MODULE}'",
+                "",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(echo_dc_dict),
+                "EngineCore.echo_dc_dict = echo_dc_dict",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
+@pytest.fixture
+def subprocess_echo_dc_nested_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have echo_dc_nested method."""
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from dataclasses import dataclass",
+                "from typing import Any",
+                "",
+                inspect.getsource(TestMessage),
+                f"TestMessage.__module__ = '{TEST_MODULE}'",
+                "",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(echo_dc_nested),
+                "EngineCore.echo_dc_nested = echo_dc_nested",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
+@pytest.fixture
+def subprocess_future_echo_patch(monkeypatch, tmp_path):
+    """Create sitecustomize.py so spawned subprocesses have future_echo method."""
+    sc = tmp_path / "sitecustomize.py"
+    sc.write_text(
+        "\n".join(
+            [
+                "from concurrent.futures import Future",
+                "from typing import Any",
+                "",
+                "from vllm.v1.engine.core import EngineCore",
+                inspect.getsource(future_echo),
+                "EngineCore.future_echo = future_echo",
+            ]
+        )
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(tmp_path), os.getenv("PYTHONPATH")])),
+    )
+
+
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(
-    monkeypatch: pytest.MonkeyPatch, multiprocessing_mode: bool
+    monkeypatch: pytest.MonkeyPatch,
+    multiprocessing_mode: bool,
+    subprocess_echo_patch,
 ):
     with monkeypatch.context() as m:
         # Monkey-patch core engine utility function to test.
@@ -212,7 +583,10 @@ def test_engine_core_client(
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
+async def test_engine_core_client_asyncio(
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_echo_patch,
+):
     with monkeypatch.context() as m:
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo", echo, raising=False)
@@ -305,66 +679,10 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             client.shutdown()
 
 
-@dataclass
-class MyDataclass:
-    message: str
-
-
-# Dummy utility function to monkey-patch into engine core.
-def echo_dc(
-    self,
-    msg: str,
-    return_list: bool = False,
-) -> MyDataclass | list[MyDataclass]:
-    print(f"echo dc util function called: {msg}")
-    val = None if msg is None else MyDataclass(msg)
-    # Return dataclass to verify support for returning custom types
-    # (for which there is special handling to make it work with msgspec).
-    return [val for _ in range(3)] if return_list else val
-
-
-# Dummy utility function to test dict serialization with custom types.
-def echo_dc_dict(
-    self,
-    msg: str,
-    return_dict: bool = False,
-) -> MyDataclass | dict[str, MyDataclass]:
-    print(f"echo dc dict util function called: {msg}")
-    val = None if msg is None else MyDataclass(msg)
-    # Return dict of dataclasses to verify support for returning dicts
-    # with custom value types.
-    if return_dict:
-        return {"key1": val, "key2": val, "key3": val}
-    else:
-        return val
-
-
-# Dummy utility function to test nested structures with custom types.
-def echo_dc_nested(
-    self,
-    msg: str,
-    structure_type: str = "list_of_dicts",
-) -> Any:
-    print(f"echo dc nested util function called: {msg}, structure: {structure_type}")
-    val = None if msg is None else MyDataclass(msg)
-
-    if structure_type == "list_of_dicts":  # noqa
-        # Return list of dicts: [{"a": val, "b": val}, {"c": val, "d": val}]
-        return [{"a": val, "b": val}, {"c": val, "d": val}]
-    elif structure_type == "dict_of_lists":
-        # Return dict of lists: {"list1": [val, val], "list2": [val, val]}
-        return {"list1": [val, val], "list2": [val, val]}
-    elif structure_type == "deep_nested":
-        # Return deeply nested: {"outer": [{"inner": [val, val]},
-        # {"inner": [val]}]}
-        return {"outer": [{"inner": [val, val]}, {"inner": [val]}]}
-    else:
-        return val
-
-
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_return(
     monkeypatch: pytest.MonkeyPatch,
+    subprocess_echo_dc_patch,
 ):
     with monkeypatch.context() as m:
         # Must set insecure serialization to allow returning custom types.
@@ -393,10 +711,10 @@ async def test_engine_core_client_util_method_custom_return(
             core_client: AsyncMPClient = client
 
             result = await core_client.call_utility_async("echo_dc", "testarg2", False)
-            assert isinstance(result, MyDataclass) and result.message == "testarg2"
+            assert isinstance(result, TestMessage) and result.message == "testarg2"
             result = await core_client.call_utility_async("echo_dc", "testarg2", True)
             assert isinstance(result, list) and all(
-                isinstance(r, MyDataclass) and r.message == "testarg2" for r in result
+                isinstance(r, TestMessage) and r.message == "testarg2" for r in result
             )
 
             # Test returning None and list of Nones
@@ -412,6 +730,7 @@ async def test_engine_core_client_util_method_custom_return(
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_dict_return(
     monkeypatch: pytest.MonkeyPatch,
+    subprocess_echo_dc_dict_patch,
 ):
     with monkeypatch.context() as m:
         # Must set insecure serialization to allow returning custom types.
@@ -443,7 +762,7 @@ async def test_engine_core_client_util_method_custom_dict_return(
             result = await core_client.call_utility_async(
                 "echo_dc_dict", "testarg3", False
             )
-            assert isinstance(result, MyDataclass) and result.message == "testarg3"
+            assert isinstance(result, TestMessage) and result.message == "testarg3"
 
             # Test dict return with custom value types
             result = await core_client.call_utility_async(
@@ -452,7 +771,7 @@ async def test_engine_core_client_util_method_custom_dict_return(
             assert isinstance(result, dict) and len(result) == 3
             for key, val in result.items():
                 assert key in ["key1", "key2", "key3"]
-                assert isinstance(val, MyDataclass) and val.message == "testarg3"
+                assert isinstance(val, TestMessage) and val.message == "testarg3"
 
             # Test returning dict with None values
             result = await core_client.call_utility_async("echo_dc_dict", None, True)
@@ -468,6 +787,7 @@ async def test_engine_core_client_util_method_custom_dict_return(
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_nested_structures(
     monkeypatch: pytest.MonkeyPatch,
+    subprocess_echo_dc_nested_patch,
 ):
     with monkeypatch.context() as m:
         # Must set insecure serialization to allow returning custom types.
@@ -504,21 +824,21 @@ async def test_engine_core_client_util_method_nested_structures(
                 if i == 0:
                     assert "a" in item and "b" in item
                     assert (
-                        isinstance(item["a"], MyDataclass)
+                        isinstance(item["a"], TestMessage)
                         and item["a"].message == "nested1"
                     )
                     assert (
-                        isinstance(item["b"], MyDataclass)
+                        isinstance(item["b"], TestMessage)
                         and item["b"].message == "nested1"
                     )
                 else:
                     assert "c" in item and "d" in item
                     assert (
-                        isinstance(item["c"], MyDataclass)
+                        isinstance(item["c"], TestMessage)
                         and item["c"].message == "nested1"
                     )
                     assert (
-                        isinstance(item["d"], MyDataclass)
+                        isinstance(item["d"], TestMessage)
                         and item["d"].message == "nested1"
                     )
 
@@ -531,7 +851,7 @@ async def test_engine_core_client_util_method_nested_structures(
             for key, lst in result.items():
                 assert isinstance(lst, list) and len(lst) == 2
                 for item in lst:
-                    assert isinstance(item, MyDataclass) and item.message == "nested2"
+                    assert isinstance(item, TestMessage) and item.message == "nested2"
 
             # Test deeply nested: {"outer": [{"inner": [val, val]},
             # {"inner": [val]}]}
@@ -548,7 +868,7 @@ async def test_engine_core_client_util_method_nested_structures(
             inner_list1 = inner_dict1["inner"]
             assert isinstance(inner_list1, list) and len(inner_list1) == 2
             for item in inner_list1:
-                assert isinstance(item, MyDataclass) and item.message == "nested3"
+                assert isinstance(item, TestMessage) and item.message == "nested3"
 
             # Second dict in outer list should have "inner" with 1 item
             inner_dict2 = outer_list[1]
@@ -556,7 +876,7 @@ async def test_engine_core_client_util_method_nested_structures(
             inner_list2 = inner_dict2["inner"]
             assert isinstance(inner_list2, list) and len(inner_list2) == 1
             assert (
-                isinstance(inner_list2[0], MyDataclass)
+                isinstance(inner_list2[0], TestMessage)
                 and inner_list2[0].message == "nested3"
             )
 
@@ -570,6 +890,48 @@ async def test_engine_core_client_util_method_nested_structures(
                 for val in item.values():
                     assert val is None
 
+        finally:
+            client.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_future_utility_async(
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_future_echo_patch,
+):
+    """Test that a utility returning a Future completes when the future is done
+    (engine uses add_done_callback).
+    """
+    with monkeypatch.context() as m:
+        m.setattr(EngineCore, "future_echo", future_echo, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            core_client: AsyncMPClient = client
+
+            # Completes after 2 engine steps (num_wait_loops=2)
+            result = await core_client.call_utility_async(
+                "future_echo", "future_result", 2
+            )
+            assert result == "future_result"
+
+            # None is a valid result (num_wait_loops=0 → completes on first step)
+            result = await core_client.call_utility_async("future_echo", None, 0)
+            assert result is None
         finally:
             client.shutdown()
 
@@ -636,6 +998,7 @@ def test_kv_cache_events(
         )
         assert event.parent_block_hash is None, "Parent block hash should be None"
         assert event.lora_id is None, "Lora id should be None"
+        assert event.lora_name is None, "Lora name should be None"
         assert len(event.token_ids) == num_blocks * block_size, (
             "Token ids should be the same as the custom tokens"
         )

@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Generator, MutableMapping
 from dataclasses import asdict, dataclass, field, fields
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import regex as re
 import torch
@@ -323,7 +323,7 @@ class TensorizerConfig(MutableMapping):
                 " is unstable and may lead to errors."
             )
 
-    def open_stream(self, tensorizer_args: Optional["TensorizerArgs"] = None):
+    def open_stream(self, tensorizer_args: "TensorizerArgs | None" = None):
         if tensorizer_args is None:
             tensorizer_args = self._construct_tensorizer_args()
 
@@ -539,6 +539,8 @@ def deserialize_tensorizer_model(
         )
     before_mem = get_mem_usage()
     start = time.perf_counter()
+    device_index = torch.accelerator.current_device_index()
+    device_type = current_platform.device_type
     with (
         open_stream(
             tensorizer_config.tensorizer_uri, mode="rb", **tensorizer_args.stream_kwargs
@@ -546,9 +548,7 @@ def deserialize_tensorizer_model(
         TensorDeserializer(
             stream,
             dtype=tensorizer_config.dtype,
-            device=f"xpu:{torch.xpu.current_device()}"
-            if current_platform.is_xpu()
-            else f"cuda:{torch.cuda.current_device()}",
+            device=f"{device_type}:{device_index}",
             **tensorizer_args.deserialization_kwargs,
         ) as deserializer,
     ):
@@ -674,7 +674,8 @@ def serialize_vllm_model(
             key = f.read()
         encryption_params = EncryptionParams(key=key)
 
-    output_file = tensorizer_args.tensorizer_uri
+    if (output_file := tensorizer_args.tensorizer_uri) is None:
+        raise ValueError("tensorizer_uri must be specified for serialization.")
     if tensorizer_config._is_sharded:
         from vllm.distributed import get_tensor_model_parallel_rank
 
@@ -762,9 +763,12 @@ def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
     if tensor_path.endswith(".safetensors"):
         tensors = safetensors.torch.load_file(tensor_path)
     elif tensor_path.endswith(".bin"):
-        tensors = torch.load(tensor_path)
+        tensors = torch.load(tensor_path, weights_only=True)
     else:
-        raise ValueError("Unsupported file: %s", tensor_path)
+        raise ValueError(
+            f"Unsupported adapter model file: {tensor_path}. "
+            f"Must be a .safetensors or .bin file."
+        )
 
     with open(config_path) as f:
         config = json.load(f)

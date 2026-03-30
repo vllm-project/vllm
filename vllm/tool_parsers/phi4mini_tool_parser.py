@@ -9,8 +9,10 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
@@ -18,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -33,8 +36,12 @@ class Phi4MiniJsonToolParser(ToolParser):
     are all set
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
-        super().__init__(tokenizer)
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        tools: list[Tool] | None = None,
+    ) -> None:
+        super().__init__(tokenizer, tools)
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode

@@ -1,3 +1,7 @@
+---
+toc_depth: 3
+---
+
 # GPU
 
 vLLM is a Python library that supports the following GPU variants. Select your GPU type to see vendor specific instructions:
@@ -84,6 +88,8 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ### Pre-built images
 
+--8<-- [start:pre-built-images]
+
 === "NVIDIA CUDA"
 
     --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-images"
@@ -96,7 +102,11 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
 
+--8<-- [end:pre-built-images]
+
 ### Build image from source
+
+--8<-- [start:build-image-from-source]
 
 === "NVIDIA CUDA"
 
@@ -109,6 +119,8 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
+
+--8<-- [end:build-image-from-source]
 
 ## Supported features
 

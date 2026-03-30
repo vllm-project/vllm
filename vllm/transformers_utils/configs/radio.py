@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Radio vision model configuration"""
 
+from typing import Any
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
@@ -36,12 +38,23 @@ class RadioConfig(PretrainedConfig):
         layer_norm_eps: The epsilon used by the layer normalization layers.
         initializer_factor: A factor for initializing all weight matrices.
         hidden_act: The non-linear activation function in the encoder.
-        max_img_size: Maximum image size for position embeddings.
+        cpe_max_size: Maximum image size for position embeddings.
         norm_mean: Mean values for image normalization (RGB channels).
             Defaults to (0.48145466, 0.4578275, 0.40821073)).
         norm_std: Standard deviation values for image normalization
             (RGB channels). Defaults to (0.26862954, 0.26130258, 0.27577711)).
-        reg_tokens: Number of register tokens to use.
+        register_multiple: Number of register tokens to use.
+        teachers: A list of teacher model configurations. Each teacher configuration is
+            a dict with keys like "name" and some may have "use_summary".
+        cls_token_per_teacher: Whether to use a separate CLS token for each teacher.
+        video_temporal_patch_size: Number of consecutive video frames grouped into
+            a single tubelet for temporal compression. Default 1 (no compression).
+            When > 1, a dedicated video_embedder (3*T*P*P -> hidden) is created
+            alongside the image embedder (3*P*P -> hidden).
+        separate_video_embedder: When True and video_temporal_patch_size > 1, use a
+            dedicated video patch embedder (3*T*P*P -> hidden) separate from the
+            image embedder (3*P*P -> hidden). When False, a single embedder with
+            input size 3*T*P*P is used for both (images are duplicated T times).
     """
 
     model_type = "radio"
@@ -57,10 +70,14 @@ class RadioConfig(PretrainedConfig):
         layer_norm_eps: float = 1e-6,
         initializer_factor: float = 1.0,
         hidden_act: str = "gelu",
-        max_img_size: int = 2048,
+        cpe_max_size: int = 2048,
         norm_mean: tuple[float, float, float] | list = OPENAI_CLIP_MEAN,
         norm_std: tuple[float, float, float] | list = OPENAI_CLIP_STD,
-        reg_tokens: int | None = None,
+        register_multiple: int | None = None,
+        teachers: list[dict[str, Any]] | None = None,
+        cls_token_per_teacher: bool = False,
+        video_temporal_patch_size: int = 1,
+        separate_video_embedder: bool = True,
         **kwargs,
     ):
         self.model_name = model_name
@@ -78,12 +95,16 @@ class RadioConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.initializer_factor = initializer_factor
         self.hidden_act = hidden_act
-        self.max_img_size = max_img_size
+        self.cpe_max_size = cpe_max_size
         self.norm_mean = (
             list(norm_mean) if isinstance(norm_mean, (tuple, list)) else norm_mean
         )
         self.norm_std = (
             list(norm_std) if isinstance(norm_std, (tuple, list)) else norm_std
         )
-        self.reg_tokens = reg_tokens
+        self.register_multiple = register_multiple
+        self.teachers = teachers if teachers is not None else []
+        self.cls_token_per_teacher = cls_token_per_teacher
+        self.video_temporal_patch_size = video_temporal_patch_size
+        self.separate_video_embedder = separate_video_embedder
         super().__init__(**kwargs)

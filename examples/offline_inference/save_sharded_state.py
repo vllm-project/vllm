@@ -9,7 +9,6 @@ Example usage:
 
 python save_sharded_state.py \
     --model /path/to/load \
-    --quantization deepspeedfp \
     --tensor-parallel-size 8 \
     --output /path/to/save
 
@@ -18,12 +17,10 @@ Then, the model can be loaded with
 llm = LLM(
     model="/path/to/save",
     load_format="sharded_state",
-    quantization="deepspeedfp",
     tensor_parallel_size=8,
 )
 """
 
-import dataclasses
 import os
 import shutil
 from pathlib import Path
@@ -62,7 +59,7 @@ def main(args):
     if not Path(model_path).is_dir():
         raise ValueError("model path must be a local directory")
     # Create LLM instance from arguments
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     # Prepare output directory
     Path(args.output).mkdir(exist_ok=True)
     # Dump worker states to output directory

@@ -23,7 +23,8 @@ router = APIRouter()
 async def sleep(raw_request: Request):
     # get POST params
     level = raw_request.query_params.get("level", "1")
-    await engine_client(raw_request).sleep(int(level))
+    mode = raw_request.query_params.get("mode", "abort")
+    await engine_client(raw_request).sleep(int(level), mode)
     # FIXME: in v0 with frontend multiprocessing, the sleep command
     # is sent but does not finish yet when we return a response.
     return Response(status_code=200)
@@ -44,7 +45,6 @@ async def wake_up(raw_request: Request):
 
 @router.get("/is_sleeping")
 async def is_sleeping(raw_request: Request):
-    logger.info("check whether the engine is sleeping")
     is_sleeping = await engine_client(raw_request).is_sleeping()
     return JSONResponse(content={"is_sleeping": is_sleeping})
 
@@ -52,9 +52,5 @@ async def is_sleeping(raw_request: Request):
 def attach_router(app: FastAPI):
     if not envs.VLLM_SERVER_DEV_MODE:
         return
-    logger.warning(
-        "SECURITY WARNING: Development endpoints are enabled! "
-        "This should NOT be used in production!"
-    )
 
     app.include_router(router)

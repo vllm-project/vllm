@@ -118,15 +118,18 @@ direct_register_custom_op(
 )
 
 
+# --8<-- [start:apply_rotary_emb]
 @CustomOp.register("apply_rotary_emb")
 class ApplyRotaryEmb(CustomOp):
+    # --8<-- [end:apply_rotary_emb]
+
     def __init__(
         self,
         enforce_enable: bool = False,
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super().__init__(enforce_enable)
+        super().__init__(enforce_enable=enforce_enable)
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
 
@@ -178,6 +181,37 @@ class ApplyRotaryEmb(CustomOp):
             output = output.to(origin_dtype)
         return output
 
+    def _pre_process(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Size, torch.dtype]:
+        origin_shape = x.shape
+        if len(origin_shape) == 3:
+            # x: [seq_len, num_heads, head_size]
+            x = x.unsqueeze(0)
+
+        origin_dtype = x.dtype
+        if self.enable_fp32_compute:
+            x = x.float()
+            cos = cos.float()
+            sin = sin.float()
+
+        return x, cos, sin, origin_shape, origin_dtype
+
+    def _post_process(
+        self,
+        output: torch.Tensor,
+        origin_shape: torch.Size,
+        origin_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if len(origin_shape) == 3:
+            output = output.squeeze(0)
+        if self.enable_fp32_compute:
+            output = output.to(origin_dtype)
+        return output
+
     def forward_native(
         self,
         x: torch.Tensor,
@@ -197,31 +231,19 @@ class ApplyRotaryEmb(CustomOp):
     ) -> torch.Tensor:
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
-        origin_dtype = x.dtype
-        if self.enable_fp32_compute:
-            x = x.float()
-            cos = cos.float()
-            sin = sin.float()
-
-        origin_shape = x.shape
-        if len(origin_shape) == 3:
-            # x: [seq_len, num_heads, head_size]
-            x = x.unsqueeze(0)
+        x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
         """
         Arguments of apply_rotary_emb() in vllm_flash_attn:
             x: [batch_size, seq_len, nheads, headdim]
             cos, sin: [seqlen_rotary, rotary_dim / 2]
-            interleaved: defalut as False (Neox-style).
+            interleaved: default as False (Neox-style).
             ...
         """
         interleaved = not self.is_neox_style
         output = apply_rotary_emb(x, cos, sin, interleaved)
 
-        if len(origin_shape) == 3:
-            output = output.squeeze(0)
-        if self.enable_fp32_compute:
-            output = output.to(origin_dtype)
+        output = self._post_process(output, origin_shape, origin_dtype)
         return output
 
     def forward_hip(
@@ -231,22 +253,13 @@ class ApplyRotaryEmb(CustomOp):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         if self.apply_rotary_emb_flash_attn is not None:
-            origin_dtype = x.dtype
-            if self.enable_fp32_compute:
-                x = x.float()
-                cos = cos.float()
-                sin = sin.float()
-
-            origin_shape = x.shape
-            if len(origin_shape) == 3:
-                # x: [seq_len, num_heads, head_size]
-                x = x.unsqueeze(0)
+            x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
             """
             Arguments of apply_rotary() in flash_attn:
                 x: [batch_size, seq_len, nheads, headdim]
                 cos, sin: [seqlen_rotary, rotary_dim / 2]
-                interleaved: defalut as False (Neox-style).
+                interleaved: default as False (Neox-style).
                 ...
             """
             interleaved = not self.is_neox_style
@@ -254,17 +267,23 @@ class ApplyRotaryEmb(CustomOp):
                 x, cos, sin, interleaved=interleaved
             ).type_as(x)
 
-            if len(origin_shape) == 3:
-                output = output.squeeze(0)
-            if self.enable_fp32_compute:
-                output = output.to(origin_dtype)
+            output = self._post_process(output, origin_shape, origin_dtype)
         else:
             # Falling back to PyTorch native implementation.
             output = self.forward_native(x, cos, sin)
 
         return output
 
+    def forward_cpu(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        # TODO (bigPYJ1151): need to enable fused CPU ROPE here
+        return self.forward_native(x, cos, sin)
+
     def extra_repr(self) -> str:
         s = f"is_neox_style={self.is_neox_style}"
-        s += f"enable_fp32_compute={self.enable_fp32_compute}"
+        s += f", enable_fp32_compute={self.enable_fp32_compute}"
         return s

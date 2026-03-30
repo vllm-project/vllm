@@ -4,8 +4,8 @@
 #include "common/memory_desc.hpp"
 #include "common/memory.hpp"
 
-#include "dnnl_helper.h"
-#include "scratchpad_manager.h"
+#include "cpu/utils.hpp"
+#include "cpu/dnnl_helper.h"
 
 static dnnl::engine& default_engine() {
   static dnnl::engine engine(dnnl::engine::kind::cpu, 0);
@@ -237,12 +237,17 @@ W8A8MatMulPrimitiveHandler::W8A8MatMulPrimitiveHandler(const Args& args)
   };
   dnnl::memory::desc original_b_md({b_k_size_, b_n_size_}, b_type_,
                                    {b_k_stride_, b_n_stride_});
+
+  // dummy M size for prepacking weights
+  // Prepacking weights improves performance and avoid runtime reorders
+  constexpr dnnl_dim_t kProbeM = 128;
+
   prepack_weight(args.b_ptr, original_b_md,
                  create_primitive_desc(
-                     MSizeCacheKey{.a_m_size = DNNL_RUNTIME_DIM_VAL,
+                     MSizeCacheKey{.a_m_size = kProbeM,
                                    .use_bias = false,
                                    .bias_type = dnnl::memory::data_type::undef},
-                     true)
+                     /*first_time=*/true)
                      .weights_desc());
   init_runtime_memory_cache(args);
 }
@@ -274,7 +279,7 @@ void W8A8MatMulPrimitiveHandler::execute(ExecArgs& args) {
 
   auto&& [scratchpad_storage, scratchpad_mem_desc] = get_runtime_memory_ptr(5);
   scratchpad_storage->set_data_handle(
-      DNNLScratchPadManager::get_dnnl_scratchpad_manager()->get_data<void>());
+      cpu_utils::ScratchPadManager::get_scratchpad_manager()->get_data<void>());
 
   matmul.execute(default_stream(), memory_cache_);
   default_stream().wait();
@@ -294,7 +299,7 @@ dnnl::matmul W8A8MatMulPrimitiveHandler::get_matmul_cache(
 
   return m_size_cache_->get_or_create(key, [&]() {
     dnnl::matmul::primitive_desc desc = this->create_primitive_desc(key, false);
-    auto manager = DNNLScratchPadManager::get_dnnl_scratchpad_manager();
+    auto manager = cpu_utils::ScratchPadManager::get_scratchpad_manager();
     manager->realloc(desc.scratchpad_desc().get_size());
     return dnnl::matmul(desc);
   });
@@ -403,21 +408,19 @@ MatMulPrimitiveHandler::MatMulPrimitiveHandler(const Args& args)
   dnnl::memory::desc original_b_md({b_k_size_, b_n_size_}, b_type_,
                                    {b_k_stride_, b_n_stride_});
 
+  // dummy M size for prepacking weights
+  // Prepacking weights improves performance and avoid runtime reorders
+  constexpr dnnl_dim_t kProbeM = 128;
+
   prepack_weight(args.b_ptr, original_b_md,
                  create_primitive_desc(
-                     MSizeCacheKey{
-#ifdef VLLM_USE_ACL
-                         // Arm Compute Library (ACL) backend for oneDNN does
-                         // not support runtime
-                         // dimensions, so we set M to a default value
-                         .a_m_size = 128,
-                         .a_m_stride = b_k_size_,
-#else
-                         .a_m_size = DNNL_RUNTIME_DIM_VAL,
-                         .a_m_stride = DNNL_RUNTIME_DIM_VAL,
-#endif
-                         .use_bias = false,
-                         .bias_type = dnnl::memory::data_type::undef},
+                     MSizeCacheKey{// Use a concrete M so oneDNN's kernel
+                                   // selector can choose an optimally blocked
+                                   // weight layout.
+                                   .a_m_size = kProbeM,
+                                   .a_m_stride = b_k_size_,
+                                   .use_bias = false,
+                                   .bias_type = dnnl::memory::data_type::undef},
                      true)
                      .weights_desc());
   init_runtime_memory_cache(args);
@@ -470,7 +473,7 @@ void MatMulPrimitiveHandler::execute(ExecArgs& args) {
 
   auto&& [scratchpad_storage, scratchpad_mem_desc] = get_runtime_memory_ptr(3);
   scratchpad_storage->set_data_handle(
-      DNNLScratchPadManager::get_dnnl_scratchpad_manager()->get_data<void>());
+      cpu_utils::ScratchPadManager::get_scratchpad_manager()->get_data<void>());
 
   matmul.execute(default_stream(), memory_cache_);
   default_stream().wait();
@@ -486,7 +489,7 @@ dnnl::matmul MatMulPrimitiveHandler::get_matmul_cache(
   }
   return m_size_cache_->get_or_create(key, [&]() {
     dnnl::matmul::primitive_desc desc = this->create_primitive_desc(key, false);
-    auto manager = DNNLScratchPadManager::get_dnnl_scratchpad_manager();
+    auto manager = cpu_utils::ScratchPadManager::get_scratchpad_manager();
     manager->realloc(desc.scratchpad_desc().get_size());
     return dnnl::matmul(desc);
   });

@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed import get_dcp_group, get_pcp_group
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -40,3 +41,17 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"but the impl {layer_impl.__class__.__name__} "
                     "does not support PCP."
                 )
+
+
+def get_total_cp_world_size():
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        # PCP might not be initialized in testing
+        pcp_world_size = 1
+    try:
+        dcp_world_size = get_dcp_group().world_size
+    except AssertionError:
+        # DCP might not be initialized in testing
+        dcp_world_size = 1
+    return dcp_world_size * pcp_world_size

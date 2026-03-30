@@ -4,6 +4,7 @@
 from typing import Any
 
 import pytest
+import torch
 from transformers import SiglipModel
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
@@ -38,6 +39,7 @@ def _run_test(
     *,
     dtype: str,
     tokenization_kwargs: dict[str, Any] | None = None,
+    attention_config: dict[str, Any] | None = None,
 ) -> None:
     if tokenization_kwargs is None:
         tokenization_kwargs = {}
@@ -49,6 +51,7 @@ def _run_test(
         enforce_eager=True,
         max_model_len=64,
         gpu_memory_utilization=0.7,
+        attention_config=attention_config,
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(
             input_texts, images=input_images, tokenization_kwargs=tokenization_kwargs
@@ -66,12 +69,15 @@ def _run_test(
             if "pixel_values" in inputs:
                 pooled_output = hf_model.model.get_image_features(
                     pixel_values=inputs.pixel_values,
-                ).squeeze(0)
+                )
             else:
                 pooled_output = hf_model.model.get_text_features(
                     input_ids=inputs.input_ids,
-                ).squeeze(0)
+                )
 
+            if not isinstance(pooled_output, torch.Tensor):
+                pooled_output = pooled_output.pooler_output
+            pooled_output = pooled_output.squeeze(0)
             all_outputs.append(pooled_output.tolist())
 
         hf_outputs = all_outputs
@@ -90,6 +96,7 @@ def test_models_text(
     hf_runner,
     vllm_runner,
     image_assets,
+    siglip_attention_config,
     model: str,
     dtype: str,
 ) -> None:
@@ -108,6 +115,7 @@ def test_models_text(
             "padding": "max_length",
             "max_length": 64,
         },  # siglip2 was trained with this padding setting.
+        attention_config=siglip_attention_config,
     )
 
 
@@ -117,6 +125,7 @@ def test_models_image(
     hf_runner,
     vllm_runner,
     image_assets,
+    siglip_attention_config,
     model: str,
     dtype: str,
 ) -> None:
@@ -133,6 +142,7 @@ def test_models_image(
         input_images,
         model,
         dtype=dtype,
+        attention_config=siglip_attention_config,
     )
 
 
@@ -141,6 +151,7 @@ def test_models_image(
 def test_models_text_image_no_crash(
     vllm_runner,
     image_assets,
+    siglip_attention_config,
     model: str,
     dtype: str,
 ) -> None:
@@ -154,6 +165,7 @@ def test_models_text_image_no_crash(
         enforce_eager=True,
         max_model_len=64,
         gpu_memory_utilization=0.7,
+        attention_config=siglip_attention_config,
     ) as vllm_model:
         with pytest.raises(ValueError, match="not both"):
             vllm_model.embed(texts, images=images)

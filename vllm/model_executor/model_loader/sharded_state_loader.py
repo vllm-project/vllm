@@ -6,6 +6,7 @@ import glob
 import os
 import time
 from collections.abc import Generator
+from copy import copy
 from typing import Any
 
 import torch
@@ -42,7 +43,7 @@ class ShardedStateLoader(BaseModelLoader):
         extra_config = (
             {}
             if load_config.model_loader_extra_config is None
-            else load_config.model_loader_extra_config.copy()
+            else copy(load_config.model_loader_extra_config)
         )
         self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
         if extra_config:
@@ -110,8 +111,8 @@ class ShardedStateLoader(BaseModelLoader):
         from vllm.distributed import get_tensor_model_parallel_rank
 
         model_weights = model_config.model
-        if hasattr(model_config, "model_weights"):
-            model_weights = model_config.model_weights
+        if model_weights_override := model_config.model_weights:
+            model_weights = model_weights_override
         local_model_path = model_weights
 
         rank = get_tensor_model_parallel_rank()

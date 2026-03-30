@@ -7,12 +7,12 @@ import random
 import pytest
 import torch
 
-from vllm.attention.ops.flashmla import (
+from vllm.triton_utils import triton
+from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
     is_flashmla_dense_supported,
 )
-from vllm.triton_utils import triton
 
 
 def cal_diff(
@@ -57,7 +57,7 @@ def test_flash_mla(
     init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.manual_seed(0)
     random.seed(0)
 

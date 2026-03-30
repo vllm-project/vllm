@@ -7,17 +7,8 @@
 #include <vector>
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
+                 int64_t block_size_in_bytes,
                  const torch::Tensor& block_mapping);
-
-// Note: the key_caches and value_caches vectors are constant but
-// not the Tensors they contain. The vectors need to be const refs
-// in order to satisfy pytorch's C++ operator registration code.
-void copy_blocks(std::vector<torch::Tensor> const& key_caches,
-                 std::vector<torch::Tensor> const& value_caches,
-                 const torch::Tensor& block_mapping);
-
-void copy_blocks_mla(std::vector<torch::Tensor> const& kv_caches,
-                     const torch::Tensor& block_mapping);
 
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
@@ -36,6 +27,13 @@ void concat_and_cache_mla(torch::Tensor& kv_c, torch::Tensor& k_pe,
                           torch::Tensor& kv_cache, torch::Tensor& slot_mapping,
                           const std::string& kv_cache_dtype,
                           torch::Tensor& scale);
+
+// NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
+void concat_and_cache_mla_rope_fused(
+    torch::Tensor& positions, torch::Tensor& q_pe, torch::Tensor& k_pe,
+    torch::Tensor& kv_c, torch::Tensor& rope_cos_sin_cache, bool rope_is_neox,
+    torch::Tensor& kv_cache_slot_mapping, torch::Tensor& kv_cache,
+    const std::string& kv_cache_dtype, torch::Tensor& kv_cache_quant_scale);
 
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
@@ -75,6 +73,12 @@ void indexer_k_quant_and_cache(
     torch::Tensor& slot_mapping,  // [num_tokens]
     int64_t quant_block_size,     // quantization block size
     const std::string& scale_fmt);
+
+// Concatenate query nope and rope for MLA/DSA attention
+void concat_mla_q(
+    torch::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
+    torch::Tensor& q_pe,     // [num_tokens, num_heads, rope_dim]
+    torch::Tensor& q_out);   // [num_tokens, num_heads, nope_dim + rope_dim]
 
 // Extract function to gather quantized K cache
 void cp_gather_indexer_k_quant_cache(
