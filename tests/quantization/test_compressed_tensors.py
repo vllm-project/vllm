@@ -5,14 +5,20 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from unittest.mock import Mock
+
 import pytest
 import torch
-from compressed_tensors.quantization import QuantizationType
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+    QuantizationStrategy,
+    QuantizationType,
+)
 
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensors24,
+    CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A8Fp8,
@@ -27,9 +33,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    sparse_cutlass_supported,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
@@ -196,7 +200,7 @@ def test_compressed_tensors_w8a8_logprobs(
     )
 
     if current_platform.is_rocm():
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
 
 def test_compressed_tensors_no_enforce_eager(vllm_runner):
@@ -359,283 +363,6 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
 
     with vllm_runner(model_path, attention_config={"backend": "FLASH_ATTN"}) as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=4)
-        assert output
-
-
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="Sparse FP8 is not yet supported on this GPU type.",
-)
-def _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy, format="dense"):
-    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-    assert isinstance(qkv_proj.scheme, CompressedTensors24)
-
-    assert qkv_proj.scheme.weight_quant.strategy == weight_strategy
-    assert qkv_proj.scheme.input_quant.strategy == input_strategy
-    assert qkv_proj.scheme.quantized
-    assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
-    sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
-    assert sparsity_map.get("Linear").format == format
-    assert sparsity_map.get("Linear").sparsity_structure == "2:4"
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(90),
-    reason="Sparse FP8 is not yet supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "args_2of4",
-    [
-        (
-            "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-2of4-testing",
-            "channel",
-            "token",
-        ),
-        (
-            "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Static-Per-Tensor-testing",
-            "channel",
-            "tensor",
-        ),
-        (
-            "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Static-testing",
-            "tensor",
-            "tensor",
-        ),
-        (
-            "nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-IA-Per-Tensor-Weight-testing",
-            "tensor",
-            "token",
-        ),
-    ],
-)
-def test_compressed_tensors_2of4_quant_fp8(vllm_runner, args_2of4):
-    model, weight_strategy, input_strategy = args_2of4
-    with vllm_runner(model, enforce_eager=True) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert qkv_proj.scheme.weights_dtype == torch.float8_e4m3fn
-            _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy)
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        print(output)
-        assert output
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(90),
-    reason="Sparse FP8 is not yet supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "args_2of4",
-    [
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_per_tok_dyn_act_fp8-BitM",
-            "channel",
-            "token",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_tensor_act_fp8-BitM",
-            "channel",
-            "tensor",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_per_tok_dyn_act_fp8-BitM",
-            "tensor",
-            "token",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_tensor_act_fp8-BitM",
-            "tensor",
-            "tensor",
-        ),
-    ],
-)
-def test_compressed_tensors_2of4_quant_fp8_compressed(vllm_runner, args_2of4):
-    model, weight_strategy, input_strategy = args_2of4
-    with vllm_runner(model, enforce_eager=True) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert qkv_proj.scheme.weights_dtype == torch.float8_e4m3fn
-            _test_2of4_quant_models(
-                qkv_proj,
-                weight_strategy,
-                input_strategy,
-                format="sparse-24-bitmask",
-            )
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        print(output)
-        assert output
-
-
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="cutlass is not yet supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "args_2of4",
-    [
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_per_tok_dyn_act_int8-BitM",
-            "channel",
-            "token",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_tensor_act_int8-BitM",
-            "channel",
-            "tensor",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_per_tok_dyn_act_int8-BitM",
-            "tensor",
-            "token",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_tensor_act_int8-BitM",
-            "tensor",
-            "tensor",
-        ),
-    ],
-)
-def test_compressed_tensors_2of4_quant_int8_compressed(vllm_runner, args_2of4):
-    model, weight_strategy, input_strategy = args_2of4
-    with vllm_runner(model, enforce_eager=True) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert qkv_proj.scheme.weights_dtype == torch.int8
-            _test_2of4_quant_models(
-                qkv_proj,
-                weight_strategy,
-                input_strategy,
-                format="sparse-24-bitmask",
-            )
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        print(output)
-        assert output
-
-
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="Sparse FP8 is not yet supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "args_2of4",
-    [
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Dynamic-IA-Per-Channel-Weight-testing",
-            "channel",
-            "token",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Static-testing",
-            "tensor",
-            "tensor",
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Dynamic-IA-Per-Tensor-Weight-testing",
-            "tensor",
-            "token",
-        ),
-    ],
-)
-def test_compressed_tensors_2of4_quant_int8(vllm_runner, args_2of4):
-    model, weight_strategy, input_strategy = args_2of4
-    with vllm_runner(model, enforce_eager=True) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert qkv_proj.scheme.weights_dtype == torch.int8
-            _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy)
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        print(output)
-        assert output
-
-
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="2of4 Sparse is not yet supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "args_2of4",
-    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-2of4-Sparse-Dense-Compressor")],
-)
-def test_compressed_tensors_2of4_sparse(vllm_runner, args_2of4):
-    model = args_2of4
-    with vllm_runner(model, enforce_eager=True) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensors24)
-
-            assert qkv_proj.scheme.weight_quant is None
-            assert qkv_proj.scheme.input_quant is None
-            assert not qkv_proj.scheme.quantized
-            assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
-            sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
-            assert sparsity_map.get("Linear").format == "dense"
-            assert sparsity_map.get("Linear").sparsity_structure == "2:4"
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        print(output)
-        assert output
-
-
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="Cutlass is not yet supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "args_2of4", [("nm-testing/llama2.c-stories42M-pruned2.4-compressed")]
-)
-def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
-    model = args_2of4
-    with vllm_runner(model, enforce_eager=True) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensors24)
-
-            assert qkv_proj.scheme.weight_quant is None
-            assert qkv_proj.scheme.input_quant is None
-            assert not qkv_proj.scheme.quantized
-            assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
-            sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
-            assert sparsity_map.get("Linear").format == "sparse-24-bitmask"
-            assert sparsity_map.get("Linear").sparsity_structure == "2:4"
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        print(output)
         assert output
 
 
@@ -839,3 +566,72 @@ def test_w4a16_moe_torch_compile(vllm_runner):
     ) as llm:
         output = llm.generate_greedy("Hi", max_tokens=1)
         assert output
+
+
+def _make_ct_config(*, target: str = "Linear") -> CompressedTensorsConfig:
+    """Build a minimal CompressedTensorsConfig with INT8 channel quant."""
+    weight_quant = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.CHANNEL,
+        symmetric=True,
+        dynamic=False,
+    )
+    return CompressedTensorsConfig(
+        target_scheme_map={
+            target: {
+                "weights": weight_quant,
+                "input_activations": None,
+                "format": "pack-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+        sparsity_scheme_map={},
+        sparsity_ignore_list=[],
+    )
+
+
+def test_get_quant_method_returns_linear_method_for_parallel_lm_head():
+    """ParallelLMHead whose name matches a target must get a quantised method."""
+    config = _make_ct_config(target="re:.*lm_head")
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert isinstance(method, CompressedTensorsLinearMethod), (
+        f"Expected CompressedTensorsLinearMethod, got {type(method).__name__}"
+    )
+
+
+def test_get_quant_method_returns_none_for_ignored_parallel_lm_head():
+    """ParallelLMHead on the ignore list should be left unquantized (None)."""
+    config = _make_ct_config(target="re:.*lm_head")
+    config.ignore = ["re:.*lm_head"]
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert method is None, (
+        f"Expected None for ignored ParallelLMHead, got {type(method).__name__}"
+    )
+
+
+def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
+    """ParallelLMHead with target='Linear' (typical real model) must not crash.
+
+    Most compressed-tensors models only target 'Linear'. ParallelLMHead does
+    not match that target, so get_quant_method should return None (unquantized)
+    instead of raising ValueError.
+    """
+    config = _make_ct_config(target="Linear")
+    mock_lm_head = Mock(spec=ParallelLMHead)
+    mock_lm_head.__class__ = ParallelLMHead
+
+    method = config.get_quant_method(mock_lm_head, prefix="model.lm_head")
+
+    assert method is None, (
+        f"Expected None for unmatched ParallelLMHead, got {type(method).__name__}"
+    )

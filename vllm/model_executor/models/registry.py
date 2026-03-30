@@ -30,6 +30,7 @@ from vllm.config import (
 )
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
+from vllm.tasks import ScoreType
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
 from vllm.utils.hashing import safe_hash
 
@@ -48,8 +49,6 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     requires_raw_input_tokens,
-    supports_cross_encoding,
-    supports_late_interaction,
     supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
@@ -61,6 +60,7 @@ from .interfaces_base import (
     get_attn_type,
     get_default_seq_pooling_type,
     get_default_tok_pooling_type,
+    get_score_type,
     is_pooling_model,
     is_text_generation_model,
 )
@@ -75,6 +75,7 @@ _TEXT_GENERATION_MODELS = {
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
+    "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
     # baichuan-7b, upper case 'C' in the class name
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
@@ -123,14 +124,16 @@ _TEXT_GENERATION_MODELS = {
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
     "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
-    "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),  # noqa: E501
-    "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),  # noqa: E501
+    "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),
+    "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
     "Grok1ModelForCausalLM": ("grok1", "GrokForCausalLM"),
     "Grok1ForCausalLM": ("grok1", "GrokForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
+    "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
+    "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -140,7 +143,7 @@ _TEXT_GENERATION_MODELS = {
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
-    "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),  # noqa: E501
+    "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -170,6 +173,7 @@ _TEXT_GENERATION_MODELS = {
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
     "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
@@ -189,6 +193,8 @@ _TEXT_GENERATION_MODELS = {
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
+    "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
+    "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
     "SeedOssForCausalLM": ("seed_oss", "SeedOssForCausalLM"),
     "Step1ForCausalLM": ("step1", "Step1ForCausalLM"),
     "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
@@ -208,19 +214,15 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
-    "HF_ColBERT": ("colbert", "ColBERTModel"),
-    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
-    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    "ErnieModel": ("ernie", "ErnieEmbeddingModel"),
+    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
-    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
-    "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
-    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
@@ -235,8 +237,6 @@ _EMBEDDING_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
-    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
@@ -246,24 +246,17 @@ _EMBEDDING_MODELS = {
         "VoyageQwen3BidirectionalEmbedModel",
     ),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
-    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
+    "LlamaNemotronVLModel": ("nemotron_vl", "LlamaNemotronVLForEmbedding"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
         "LlavaNextForConditionalGeneration",
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
-    "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
-    "ColQwen3": ("colqwen3", "ColQwen3Model"),
-    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
-    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
+    "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
-    "LlamaNemotronVLModel": (
-        "nemotron_vl",
-        "LlamaNemotronVLForEmbedding",
-    ),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
@@ -271,14 +264,49 @@ _EMBEDDING_MODELS = {
     "Terratorch": ("terratorch", "Terratorch"),
 }
 
-_CROSS_ENCODER_MODELS = {
-    "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+_LATE_INTERACTION_MODELS = {
+    # [Text-only]
+    "HF_ColBERT": ("colbert", "ColBERTModel"),
+    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
+    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    "ColBERTLfm2Model": ("colbert", "ColBERTLfm2Model"),
+    # [Multimodal]
+    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
+    "ColQwen3": ("colqwen3", "ColQwen3Model"),
+    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),
+    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
+}
+
+_REWARD_MODELS = {
+    "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
+    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
+}
+
+_TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ErnieForTokenClassification": ("ernie", "ErnieForTokenClassification"),
+    "ModernBertForTokenClassification": (
+        "modernbert",
+        "ModernBertForTokenClassification",
+    ),
+    "Qwen3ASRForcedAlignerForTokenClassification": (
+        "qwen3_asr_forced_aligner",
+        "Qwen3ASRForcedAlignerForTokenClassification",
+    ),
+}
+
+_SEQUENCE_CLASSIFICATION_MODELS = {
+    "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
+    "ErnieForSequenceClassification": ("ernie", "ErnieForSequenceClassification"),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
@@ -287,14 +315,16 @@ _CROSS_ENCODER_MODELS = {
         "modernbert",
         "ModernBertForSequenceClassification",
     ),
-    "ModernBertForTokenClassification": (
-        "modernbert",
-        "ModernBertForTokenClassification",
-    ),
     "RobertaForSequenceClassification": ("roberta", "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": (
         "roberta",
         "RobertaForSequenceClassification",
+    ),
+    # [Multimodal]
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
+    "LlamaNemotronVLForSequenceClassification": (
+        "nemotron_vl",
+        "LlamaNemotronVLForSequenceClassification",
     ),
 }
 
@@ -336,13 +366,17 @@ _MULTIMODAL_MODELS = {
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
     ),
-    "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),  # noqa: E501
+    "FireRedASR2ForConditionalGeneration": (
+        "fireredasr2",
+        "FireRedASR2ForConditionalGeneration",
+    ),
+    "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
     ),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
-    "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
+    "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),
     "Gemma3nForConditionalGeneration": (
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
@@ -351,7 +385,7 @@ _MULTIMODAL_MODELS = {
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
     "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),
-    "GlmOcrForConditionalGeneration": ("glm_ocr", "GlmOcrForConditionalGeneration"),  # noqa: E501
+    "GlmOcrForConditionalGeneration": ("glm_ocr", "GlmOcrForConditionalGeneration"),
     "GraniteSpeechForConditionalGeneration": (
         "granite_speech",
         "GraniteSpeechForConditionalGeneration",
@@ -361,13 +395,7 @@ _MULTIMODAL_MODELS = {
         "hunyuan_vision",
         "HunYuanVLForConditionalGeneration",
     ),
-    "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
-    "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
-    "OpenCUAForConditionalGeneration": (
-        "opencua",
-        "OpenCUAForConditionalGeneration",
-    ),
     "InternS1ForConditionalGeneration": (
         "interns1",
         "InternS1ForConditionalGeneration",
@@ -385,23 +413,22 @@ _MULTIMODAL_MODELS = {
         "Idefics3ForConditionalGeneration",
     ),
     "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
-    "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),  # noqa: E501
     "KananaVForConditionalGeneration": ("kanana_v", "KananaVForConditionalGeneration"),
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KeyeVL1_5ForConditionalGeneration": (
         "keye_vl1_5",
         "KeyeVL1_5ForConditionalGeneration",
     ),
-    "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
-    "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
-    "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),  # noqa: E501
+    "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
+    "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),
+    "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),
     "LightOnOCRForConditionalGeneration": (
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
     ),
     "Lfm2VlForConditionalGeneration": ("lfm2_vl", "Lfm2VLForConditionalGeneration"),
+    "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
-    "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
@@ -415,7 +442,7 @@ _MULTIMODAL_MODELS = {
         "llava_onevision",
         "LlavaOnevisionForConditionalGeneration",
     ),
-    "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),  # noqa: E501
+    "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiniMaxVL01ForConditionalGeneration": (
         "minimax_vl_01",
@@ -429,7 +456,9 @@ _MULTIMODAL_MODELS = {
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
+    "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
+    "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
     "OpenPanguVLForConditionalGeneration": (
         "openpangu_vl",
         "OpenPanguVLForConditionalGeneration",
@@ -448,9 +477,9 @@ _MULTIMODAL_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
-    "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
-    "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),  # noqa: E501
-    "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),
+    "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),
+    "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "Qwen2_5_VLForConditionalGeneration": (
         "qwen2_5_vl",
         "Qwen2_5_VLForConditionalGeneration",
@@ -475,42 +504,44 @@ _MULTIMODAL_MODELS = {
         "qwen3_asr",
         "Qwen3ASRForConditionalGeneration",
     ),
-    "Qwen3ASRRealtimeGeneration": (
-        "qwen3_asr_realtime",
-        "Qwen3ASRRealtimeGeneration",
-    ),
-    "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
+    "Qwen3ASRRealtimeGeneration": ("qwen3_asr_realtime", "Qwen3ASRRealtimeGeneration"),
+    "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),
     "Qwen3VLMoeForConditionalGeneration": (
         "qwen3_vl_moe",
         "Qwen3VLMoeForConditionalGeneration",
     ),
-    "Qwen3_5ForConditionalGeneration": (
-        "qwen3_5",
-        "Qwen3_5ForConditionalGeneration",
-    ),
+    "Qwen3_5ForConditionalGeneration": ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
     "Qwen3_5MoeForConditionalGeneration": (
         "qwen3_5",
         "Qwen3_5MoeForConditionalGeneration",
     ),
+    "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
-    "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),  # noqa: E501
-    "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
+    "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),
+    "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
+    "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
+    "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),
     "Tarsier2ForConditionalGeneration": (
         "qwen2_vl",
         "Tarsier2ForConditionalGeneration",
     ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
-    "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
-    "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),  # noqa: E501
+    "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
+    "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
     # [Encoder-decoder]
+    "CohereAsrForConditionalGeneration": (
+        "cohere_asr",
+        "CohereAsrForConditionalGeneration",
+    ),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",
     ),
-    "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
+    "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
 }
 
 _SPECULATIVE_DECODING_MODELS = {
+    "ExtractHiddenStatesModel": ("extract_hidden_states", "ExtractHiddenStatesModel"),
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
@@ -523,6 +554,8 @@ _SPECULATIVE_DECODING_MODELS = {
         "mistral_large_3_eagle",
         "EagleMistralLarge3ForCausalLM",
     ),
+    "Eagle3DeepseekV2ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
+    "Eagle3DeepseekV3ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
@@ -591,7 +624,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
 _VLLM_MODELS = {
     **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
-    **_CROSS_ENCODER_MODELS,
+    **_LATE_INTERACTION_MODELS,
+    **_REWARD_MODELS,
+    **_TOKEN_CLASSIFICATION_MODELS,
+    **_SEQUENCE_CLASSIFICATION_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
     **_TRANSFORMERS_SUPPORTED_MODELS,
@@ -611,12 +647,15 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Phi4MultimodalForCausalLM": "0.12.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
-    "BartModel": "0.10.2",
-    "BartForConditionalGeneration": "0.10.2",
     "DonutForConditionalGeneration": "0.10.2",
-    "Florence2ForConditionalGeneration": "0.10.2",
-    "MBartForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
+}
+
+_OOT_SUPPORTED_MODELS = {
+    "BartModel": "https://github.com/vllm-project/bart-plugin",
+    "BartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
+    "Florence2ForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
+    "MBartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
 }
 
 
@@ -628,8 +667,7 @@ class _ModelInfo:
     attn_type: AttnTypeStr
     default_seq_pooling_type: SequencePoolingType
     default_tok_pooling_type: TokenPoolingType
-    supports_cross_encoding: bool
-    supports_late_interaction: bool
+    score_type: ScoreType
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
     requires_raw_input_tokens: bool
@@ -652,8 +690,7 @@ class _ModelInfo:
             default_seq_pooling_type=get_default_seq_pooling_type(model),
             default_tok_pooling_type=get_default_tok_pooling_type(model),
             attn_type=get_attn_type(model),
-            supports_cross_encoding=supports_cross_encoding(model),
-            supports_late_interaction=supports_late_interaction(model),
+            score_type=get_score_type(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
                 model
@@ -917,6 +954,14 @@ class _ModelRegistry:
                     "Please use an older version of vLLM if you want to "
                     "use this model architecture."
                 )
+            if arch in _OOT_SUPPORTED_MODELS:
+                plugin_url = _OOT_SUPPORTED_MODELS[arch]
+
+                raise ValueError(
+                    f"Model architecture {arch} is not supported in-tree anymore. "
+                    f"Please install the plugin at {plugin_url} if you want to "
+                    "use this model architecture."
+                )
 
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
@@ -1150,14 +1195,6 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_pooling_model
-
-    def is_cross_encoder_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,

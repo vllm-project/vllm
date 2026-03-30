@@ -9,9 +9,9 @@ import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.mcp.tool_server import MCPToolServer
 
-from ....utils import RemoteOpenAIServer
 from .conftest import (
     BASE_TEST_ENV,
     events_contain_type,
@@ -42,7 +42,7 @@ class TestMCPToolServerUnit:
     Note: The wildcard "*" is normalized to None by
     _extract_allowed_tools_from_mcp_requests before reaching this layer,
     so we only test None and specific tool filtering here.
-    See test_serving_responses.py for "*" normalization tests.
+    See responses/test_serving_responses.py for "*" normalization tests.
     """
 
     def test_get_tool_description(self):

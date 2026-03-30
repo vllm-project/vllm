@@ -20,7 +20,8 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -134,10 +135,11 @@ class AsyncLLM(EngineClient):
         self.renderer = renderer = renderer_from_config(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
+            self.renderer,
             self.model_config.io_processor_plugin,
         )
 
-        # Convert TokPrompt --> EngineCoreRequest.
+        # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
         # Converts EngineCoreOutputs --> RequestOutput.
@@ -262,16 +264,15 @@ class AsyncLLM(EngineClient):
     def __del__(self):
         self.shutdown()
 
-    def shutdown(self):
+    def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
-
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
 
         if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+            engine_core.shutdown(timeout=timeout)
 
         handler = getattr(self, "output_handler", None)
         if handler is not None:
@@ -289,7 +290,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         prompt: EngineCoreRequest
         | PromptType
-        | ProcessorInputs
+        | EngineInput
         | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
@@ -529,7 +530,7 @@ class AsyncLLM(EngineClient):
         self,
         prompt: EngineCoreRequest
         | PromptType
-        | ProcessorInputs
+        | EngineInput
         | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
@@ -647,7 +648,11 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
-        logger_manager = self.logger_manager
+        # We use a mutable list for logger_manager so that it can be updated
+        # during elastic EP scaling (see scale_elastic_ep) without creating
+        # a circular reference via self.
+        self._logger_ref = [self.logger_manager]
+        logger_ref = self._logger_ref
         renderer = self.renderer
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
@@ -691,8 +696,8 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
-                    if logger_manager:
-                        logger_manager.record(
+                    if logger_ref[0]:
+                        logger_ref[0].record(
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
@@ -771,7 +776,7 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType | ProcessorInputs,
+        prompt: PromptType | EngineInput,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
@@ -884,7 +889,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.renderer.clear_mm_cache()
+        await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(
@@ -976,17 +981,13 @@ class AsyncLLM(EngineClient):
                 new_data_parallel_size,
             )
             return
-        logger.info(
-            "Waiting for requests to drain before scaling up to %s engines...",
-            new_data_parallel_size,
-        )
-        await self.wait_for_requests_to_drain(drain_timeout)
-        logger.info(
-            "Requests have been drained, proceeding with scale to %s engines",
-            new_data_parallel_size,
-        )
-        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+
+        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+            logger.info(
+                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
+                "waiting for requests to drain before scaling"
+            )
+            await self.wait_for_requests_to_drain(drain_timeout)
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -999,6 +1000,18 @@ class AsyncLLM(EngineClient):
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
             )
+            # Update the mutable ref so output_handler picks up the
+            # new logger without creating a circular reference via self.
+            if hasattr(self, "_logger_ref"):
+                self._logger_ref[0] = self.logger_manager
+            self.logger_manager.log_engine_initialized()
+
+        set_scaling_elastic_ep(True)
+        try:
+            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        finally:
+            set_scaling_elastic_ep(False)
 
     @property
     def is_running(self) -> bool:

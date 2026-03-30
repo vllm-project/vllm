@@ -3,11 +3,11 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -20,7 +20,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.batch_invariant import (
     linear_batch_invariant,
-    vllm_is_batch_invariant,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -28,7 +27,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
-    is_layer_moe_router_gate,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -64,6 +62,12 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptNvFp4LinearMethod",
     "PetitNvFp4LinearMethod",
 ]
+
+
+def register_weight_loader_v2_supported_method(cls):
+    """Decorator to register a LinearMethod as supporting weight_loader_v2."""
+    WEIGHT_LOADER_V2_SUPPORTED.append(cls.__name__)
+    return cls
 
 
 def adjust_marlin_shard(
@@ -132,44 +136,6 @@ def adjust_scalar_to_fused_array(
         loaded_weight = loaded_weight[0]
 
     return param_data[shard_id], loaded_weight
-
-
-# TODO(Isotr0py): We might need a more flexible structure to handle
-# bitsandbytes shard offsets.
-def left_shift_bitsandbytes_4bit_shard(
-    bnb_weight_attrs: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """
-    Separate the BitsAndBytes 4-bit shard.
-
-    For example, given bnb weight attributes as below:
-    {
-        'bnb_shard_offsets': array([0, 4, 8, 16]),
-        'bnb_quant_state': {0: ..., 1: ..., 2: ...},
-    }
-
-    The function will return:
-    {
-        'bnb_shard_offsets': array([0, 4]),
-        'bnb_quant_state': {0: ...},
-    }
-    and
-    {
-        'bnb_shard_offsets': array([0, 4, 12]),
-        'bnb_quant_state': {0: ..., 1: ...},
-    }
-    """
-    shard_offsets = bnb_weight_attrs["bnb_shard_offsets"]
-    offset_l = shard_offsets[:2]
-    offset_r = shard_offsets[1:] - shard_offsets[1]
-    quant_state_l = {0: bnb_weight_attrs["bnb_quant_state"][0]}
-    quant_state_r = {
-        i - 1: bnb_weight_attrs["bnb_quant_state"][i]
-        for i in range(1, len(shard_offsets) - 1)
-    }
-    left = dict(bnb_shard_offsets=offset_l, bnb_quant_state=quant_state_l)
-    right = dict(bnb_shard_offsets=offset_r, bnb_quant_state=quant_state_r)
-    return left, right
 
 
 class LinearMethodBase(QuantizeMethodBase):
@@ -257,11 +223,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (
-            vllm_is_batch_invariant()
-            and current_platform.is_cuda_alike()
-            and is_layer_moe_router_gate(getattr(layer, "prefix", ""))
-        ):
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
@@ -788,10 +750,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             )
             current_shard_offset = 0
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-            if use_bitsandbytes_4bit and isinstance(loaded_shard_id, tuple):
+            if (
+                use_bitsandbytes_4bit
+                and isinstance(loaded_shard_id, tuple)
+                and self.tp_size > 1
+            ):
                 raise NotImplementedError(
                     "Shard id with multiple indices is not supported "
-                    "for BNB quantization yet."
+                    "for BNB quantization with TP yet."
                 )
             shard_offsets: list[tuple[int, int, int]] = []
             for i, output_size in enumerate(output_sizes):
@@ -802,6 +768,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Quantization.
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
+                # Add check to adjust the size/offset for FP8 block scales
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.packed_factor
                     shard_offset = shard_offset // param.packed_factor
@@ -859,9 +832,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
             if use_bitsandbytes_4bit:
-                shard_size = loaded_weight.shape[output_dim]
-                shard_offset = loaded_weight.shape[output_dim] * loaded_shard_id
-
+                index = list(itertools.accumulate([0] + self.output_sizes))
+                orig_offsets = {
+                    str(i): (index[i], size) for i, size in enumerate(self.output_sizes)
+                }
+                orig_offsets["total"] = (self.output_size, 0)
+                shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
+                    param, orig_offsets, str(loaded_shard_id)
+                )
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             start_idx = self.tp_rank * shard_size
             if not is_sharded_weight:
@@ -1247,6 +1225,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # Special case for Quantized Weights.
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
+                # Add check to adjust the size/offset for FP8 block scales
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.packed_factor
                     shard_offset = shard_offset // param.packed_factor
@@ -1531,10 +1516,10 @@ class RowParallelLinear(LinearBase):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            splitted_input = split_tensor_along_last_dim(
+            split_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size
             )
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            input_parallel = split_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         assert self.quant_method is not None

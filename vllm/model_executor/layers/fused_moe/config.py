@@ -228,6 +228,7 @@ class FusedMoEQuantConfig:
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
+    is_nvfp4_scale_swizzled: bool = True
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -345,7 +346,7 @@ class FusedMoEQuantConfig:
 
     @property
     def use_fp8_w8a8(self) -> bool:
-        return self.quant_dtype == torch.float8_e4m3fn
+        return self.quant_dtype == current_platform.fp8_dtype()
 
     @property
     def use_int8_w8a8(self) -> bool:
@@ -475,6 +476,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
+        is_nvfp4_scale_swizzled: bool = True,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -504,6 +506,7 @@ class FusedMoEQuantConfig:
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
+        - is_nvfp4_scale_swizzled: Whether to swizzle the nvfp4 scale swizzling.
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -536,6 +539,7 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
+            is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -562,7 +566,7 @@ def fp8_w8a8_moe_quant_config(
     Construct a quant config for fp8 activations and fp8 weights.
     """
     return FusedMoEQuantConfig.make(
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         w1_scale=w1_scale,
         g1_alphas=g1_alphas,
         w2_scale=w2_scale,
@@ -737,6 +741,7 @@ def nvfp4_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    is_nvfp4_scale_swizzled: bool = True,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -754,6 +759,7 @@ def nvfp4_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=None,
+        is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
     )
 
 
@@ -951,9 +957,17 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @property
-    def use_fi_all2allv_kernels(self):
+    def use_fi_nvl_two_sided_kernels(self):
+        return self.use_all2all_kernels and (
+            self.all2all_backend == "flashinfer_all2allv"
+            or self.all2all_backend == "flashinfer_nvlink_two_sided"
+        )
+
+    @property
+    def use_fi_nvl_one_sided_kernels(self):
         return (
-            self.use_all2all_kernels and self.all2all_backend == "flashinfer_all2allv"
+            self.use_all2all_kernels
+            and self.all2all_backend == "flashinfer_nvlink_one_sided"
         )
 
     @property
@@ -961,14 +975,19 @@ class FusedMoEParallelConfig:
         return self.use_deepep_ll_kernels
 
     @property
-    def use_naive_all2all_kernels(self):
-        return self.use_all2all_kernels and (
-            self.all2all_backend in ["naive", "allgather_reducescatter"]
+    def use_ag_rs_all2all_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "allgather_reducescatter"
         )
 
     @property
     def use_mori_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "mori"
+
+    @property
+    def use_nixl_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "nixl_ep"
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
@@ -1125,7 +1144,7 @@ class FusedMoEParallelConfig:
             ep_rank=0,
             sp_size=1,
             use_ep=False,
-            all2all_backend="naive",
+            all2all_backend="allgather_reducescatter",
             enable_eplb=False,
         )
 
@@ -1150,6 +1169,11 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
+    # Defaults to hidden_dim if not specified.
+    hidden_dim_unpadded: int | None = None
+    # Defaults to intermediate_size_per_partition if not specified.
+    intermediate_size_per_partition_unpadded: int | None = None
+
     moe_backend: str = "auto"
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
     has_bias: bool = False
@@ -1172,6 +1196,13 @@ class FusedMoEConfig:
 
         if self.router_logits_dtype is None:
             self.router_logits_dtype = self.in_dtype
+
+        if self.hidden_dim_unpadded is None:
+            self.hidden_dim_unpadded = self.hidden_dim
+        if self.intermediate_size_per_partition_unpadded is None:
+            self.intermediate_size_per_partition_unpadded = (
+                self.intermediate_size_per_partition
+            )
 
     @property
     def tp_size(self):
@@ -1230,9 +1261,17 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_mori_kernels
 
     @property
-    def use_fi_all2allv_kernels(self):
-        return self.moe_parallel_config.use_fi_all2allv_kernels
+    def use_fi_nvl_two_sided_kernels(self):
+        return self.moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     @property
-    def use_naive_all2all_kernels(self):
-        return self.moe_parallel_config.use_naive_all2all_kernels
+    def use_fi_nvl_one_sided_kernels(self):
+        return self.moe_parallel_config.use_fi_nvl_one_sided_kernels
+
+    @property
+    def use_ag_rs_all2all_kernels(self):
+        return self.moe_parallel_config.use_ag_rs_all2all_kernels
+
+    @property
+    def use_nixl_ep_kernels(self):
+        return self.moe_parallel_config.use_nixl_ep_kernels

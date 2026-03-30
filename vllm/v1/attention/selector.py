@@ -49,7 +49,6 @@ def get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     kv_cache_dtype: str | None,
-    block_size: int | None,
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
@@ -70,6 +69,12 @@ def get_attn_backend(
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
+
+    cache_config = vllm_config.cache_config
+    if cache_config is not None and cache_config.user_specified_block_size:
+        block_size = cache_config.block_size
+    else:
+        block_size = None
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
@@ -144,8 +149,8 @@ def _cached_get_mamba_attn_backend(
         selected_backend = MambaAttentionBackendEnum[backend_name]
     except KeyError as e:
         raise ValueError(
-            f"Invalid mamba attention backend type: '{backend_name}'. Valid "
-            f"backends are: {list(MambaAttentionBackendEnum.__members__.keys())}"
+            f"Invalid mamba attention backend type: '{mamba_type}'. Valid "
+            f"types are: {list(MAMBA_TYPE_TO_BACKEND_MAP.keys())}"
         ) from e
 
     mamba_attn_backend = selected_backend.get_class()
