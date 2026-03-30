@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
@@ -608,6 +609,36 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_vllm_cutlass=False,
         )
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: "FusedMoEParallelConfig",
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            block_n = self.weight_block_size[0]
+            if intermediate_size_per_partition % block_n != 0:
+                padded = (
+                    (intermediate_size_per_partition + block_n - 1) // block_n * block_n
+                )
+                logger.info_once(
+                    "Padding MoE intermediate size per partition from %d to "
+                    "%d for FP8 block quantization alignment (block_n=%d).",
+                    intermediate_size_per_partition,
+                    padded,
+                    block_n,
+                )
+                intermediate_size_per_partition = padded
+        return hidden_size, intermediate_size_per_partition
+
     def create_weights(
         self,
         layer: Module,
@@ -635,13 +666,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # NOTE: To ensure proper alignment of the block-wise quantization
             # scales, the output_size of the weights for both the gate and up
             # layers must be divisible by block_n.
-            # Required by column parallel or enabling merged weights
-            if intermediate_size_per_partition % block_n != 0:
-                raise ValueError(
-                    f"The output_size of gate's and up's weight = "
-                    f"{intermediate_size_per_partition} is not divisible by "
-                    f"weight quantization block_n = {block_n}."
-                )
+            # Required by column parallel or enabling merged weights.
+            # This is guaranteed by maybe_roundup_sizes() which pads
+            # intermediate_size_per_partition to the next block_n multiple.
+            assert intermediate_size_per_partition % block_n == 0, (
+                f"intermediate_size_per_partition={intermediate_size_per_partition} "
+                f"should have been padded to a multiple of block_n={block_n}"
+            )
             if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
                 # Required by row parallel
                 raise ValueError(
