@@ -132,6 +132,7 @@ class MediaConnector:
         if media_cache:
             try:
                 os.makedirs(media_cache, exist_ok=True)
+                # Verify the directory is writable before enabling caching
                 test_file = os.path.join(media_cache, ".cache_test")
                 Path(test_file).touch()
                 os.remove(test_file)
@@ -198,6 +199,7 @@ class MediaConnector:
         """Evict expired entries first, then LRU until under size limit."""
         cache_dir = Path(self._media_cache_dir)  # type: ignore[arg-type]
         entries = []
+        expired = []
         total_size = 0
         now = time.time()
         for f in cache_dir.iterdir():
@@ -209,13 +211,16 @@ class MediaConnector:
                 continue
             age = now - stat.st_mtime
             if age > self._media_cache_ttl_secs:
-                f.unlink(missing_ok=True)
+                expired.append(f)
                 continue
             total_size += stat.st_size
             # Never evict the file we just wrote
             if exclude is not None and f.name == exclude.name:
                 continue
             entries.append((stat.st_mtime, stat.st_size, f))
+
+        for f in expired:
+            f.unlink(missing_ok=True)
 
         if total_size <= self._media_cache_max_bytes:
             return
@@ -230,7 +235,7 @@ class MediaConnector:
 
     def _media_cache_path(self, url: str) -> Path:
         url_hash = hashlib.sha256(url.encode()).hexdigest()[:20]
-        ext = Path(url.split("?")[0]).suffix or ""
+        ext = Path(url.split("?", 1)[0]).suffix or ""
         return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type]
 
     def _load_data_url(
