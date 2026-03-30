@@ -57,7 +57,6 @@ def test_select_default_backend_by_platform(
         moe_config = make_dummy_moe_config()
         selected_backend = select_unquantized_moe_backend(
             moe_config=moe_config,
-            use_ep=False,
             use_dp=False,
         )
 
@@ -90,7 +89,6 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
         moe_config = make_dummy_moe_config()
         selected_backend = select_unquantized_moe_backend(
             moe_config=moe_config,
-            use_ep=False,
             use_dp=False,
         )
 
@@ -129,7 +127,6 @@ def test_select_cuda_flashinfer_trtllm_backend(
 
         selected_backend = select_unquantized_moe_backend(
             moe_config=moe_config,
-            use_ep=True,
             use_dp=False,
         )
 
@@ -171,7 +168,6 @@ def test_select_cuda_flashinfer_cutlass_backend(
 
         selected_backend = select_unquantized_moe_backend(
             moe_config=moe_config,
-            use_ep=True,  # CUTLASS requires EP
             use_dp=False,  # CUTLASS doesn't support DP
         )
 
