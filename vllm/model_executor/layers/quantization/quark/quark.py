@@ -73,7 +73,11 @@ class QuarkConfig(QuantizationConfig):
 
         quant_config = getattr(self.hf_config, "quantization_config", None)
         if quant_config is not None:
-            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
+            weight_config = quant_config["global_quant_config"]["weight"]
+            if isinstance(weight_config, list):
+                quant_dtype = weight_config[0]["dtype"]
+            else:
+                quant_dtype = weight_config["dtype"]
             model_type = self.hf_config.model_type
             if quant_dtype == "fp4" and model_type == "deepseek_v3":
                 self.dynamic_mxfp4_quant = True
