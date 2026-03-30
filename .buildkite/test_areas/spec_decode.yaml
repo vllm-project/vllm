@@ -11,6 +11,17 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
 
+- label: Spec Decode Eagle Nightly B200
+  timeout_in_minutes: 30
+  device: b200
+  torch_nightly: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+
 - label: Spec Decode Speculators + MTP
   timeout_in_minutes: 30
   source_file_dependencies:
