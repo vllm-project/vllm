@@ -286,7 +286,6 @@ class ExtractHiddenStatesProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        seq_lens: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,

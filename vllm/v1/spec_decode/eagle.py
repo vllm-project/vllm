@@ -818,7 +818,6 @@ class SpecDecodeBaseProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        seq_lens_cpu: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,

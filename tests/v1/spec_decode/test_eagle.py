@@ -111,11 +111,6 @@ def test_prepare_next_token_ids():
 
     num_requests = 4
     num_speculative_tokens = 4
-    batch_spec = BatchSpec(
-        seq_lens=[num_speculative_tokens + 1] * num_requests,
-        query_lens=[num_speculative_tokens + 1] * num_requests,
-    )
-
     req_ids = [f"req_{i + 1}" for i in range(num_requests)]
     mock_input_batch = mock.MagicMock(spec=InputBatch)
     mock_input_batch.req_ids = req_ids
@@ -165,19 +160,12 @@ def test_prepare_next_token_ids():
 
     assert torch.equal(next_token_ids_from_cpu, expected_next_token_ids_tensor)
 
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
-    )
-
     expected_valid_sampled_tokens_count = torch.tensor(
         [2, 5, 0, 0], dtype=torch.int32, device=device
     )
 
     next_token_ids_from_padded, valid_sampled_tokens_count = (
         proposer.prepare_next_token_ids_padded(
-            common_attn_metadata.seq_lens_cpu,
             sampled_token_ids_tensor,
             mock_requests,
             mock_input_batch,
