@@ -89,7 +89,8 @@ class GateLinear(ReplicatedLinear):
 
         # fp32 specialized kernel eligibility (SM90+, exact dims, fp32 weight)
         self.allow_fp32_router_gemm = (
-            self.weight.dtype == torch.float32
+            not bias
+            and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
             and is_hopper_or_blackwell
             and output_size in self.FP32_SUPPORTED_NUM_EXPERTS

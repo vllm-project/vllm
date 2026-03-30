@@ -81,15 +81,15 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
             and num_experts in GPT_OSS_SUPPORTED_NUM_EXPERTS
             and hidden_size in GPT_OSS_SUPPORTED_HIDDEN_SIZES
         )
-        allow_fp32_router_gemm = (
+        is_fp32_router_model = (
             is_hopper_or_blackwell
             and num_experts in FP32_SUPPORTED_NUM_EXPERTS
             and hidden_size in FP32_SUPPORTED_HIDDEN_SIZES
-            and batch_size <= FP32_MAX_TOKENS
         )
+        allow_fp32_router_gemm = is_fp32_router_model and batch_size <= FP32_MAX_TOKENS
 
         # Weight dtype: fp32 kernel requires fp32 weights; others use bf16.
-        weight_dtype = torch.float32 if allow_fp32_router_gemm else torch.bfloat16
+        weight_dtype = torch.float32 if is_fp32_router_model else torch.bfloat16
         mat_a = torch.randn(
             (batch_size, hidden_size), dtype=torch.bfloat16, device="cuda"
         ).contiguous()
@@ -122,8 +122,11 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
                     ops.fp32_router_gemm(mat_a, mat_b)
                 elif allow_gpt_oss_router_gemm:
                     ops.gpt_oss_router_gemm(mat_a, mat_b, bias)
+                elif is_fp32_router_model:
+                    # batch_size > FP32_MAX_TOKENS: fall back to F.linear
+                    F.linear(mat_a.float(), mat_b)
                 else:
-                    raise ValueError("Unsupported router gemm")
+                    F.linear(mat_a, mat_b)
 
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             runner, quantiles=quantiles
