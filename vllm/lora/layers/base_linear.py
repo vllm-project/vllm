@@ -9,7 +9,11 @@ from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -190,7 +194,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        if self._enable_stream:
+        # is_forward_context_available for tower modules
+        if self._enable_stream and is_forward_context_available():
             output_size = sum(self.output_slices)
             return torch.ops.vllm.lora_linear_async(
                 self.layer_name, output_size, x, bias
