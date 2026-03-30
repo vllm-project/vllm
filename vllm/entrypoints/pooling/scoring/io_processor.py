@@ -106,20 +106,8 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         assert isinstance(ctx.prompts, ScoringData)
-
-        encoder_config = self.model_config.encoder_config or {}
-        truncate_prompt_tokens = (
-            None
-            if ctx.tokenization_kwargs is None
-            else ctx.tokenization_kwargs.pop("truncate_prompt_tokens", None)
-        )
-
-        tok_params = TokenizeParams(
-            max_total_tokens=self.model_config.max_model_len,
-            max_output_tokens=0,
-            truncate_prompt_tokens=truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            max_total_tokens_param="max_model_len",
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
         )
         return self._pre_process(ctx.prompts, tok_params)
 
@@ -231,27 +219,27 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         from vllm.model_executor.model_loader import get_model_cls
         from vllm.model_executor.models.interfaces import supports_score_template
 
-        self.model = get_model_cls(self.model_config)
-        self.supports_score_template = supports_score_template(self.model)
+        model = get_model_cls(self.model_config)
+        self.supports_score_template = supports_score_template(model)
+        self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
+        self.tokenizer = self.renderer.get_tokenizer()
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         assert isinstance(ctx.prompts, ScoringData)
 
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
         data_1 = ctx.prompts.data_1
         data_2 = ctx.prompts.data_2
+
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        pooling_params = ctx.pooling_params
-
-        if pooling_params is None:
-            pooling_params = PoolingParams(task="classify")
-
-        assert isinstance(pooling_params, PoolingParams)
-
-        if pooling_params.task is None:
-            pooling_params.task = "classify"
+        if ctx.pooling_params is None:
+            ctx.pooling_params = PoolingParams(task="classify")
+        assert isinstance(ctx.pooling_params, PoolingParams)
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
@@ -261,17 +249,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             _, token_prompt = self.get_score_prompt(
                 data_1=q,
                 data_2=d,
-                tokenization_kwargs=ctx.tokenization_kwargs or {},
+                encode_kwargs=tok_params.get_encode_kwargs(),
                 chat_template=ctx.chat_template,
             )
 
             if token_type_ids := token_prompt.pop("token_type_ids", None):
-                params = pooling_params.clone()
+                params = ctx.pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
                 params.extra_kwargs = {"compressed_token_type_ids": compressed}
                 pooling_params_list.append(params)
             else:
-                pooling_params_list.append(pooling_params)
+                pooling_params_list.append(ctx.pooling_params)
 
             engine_prompts.append(tokens_input(**token_prompt))
 
@@ -280,13 +268,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     def get_score_prompt(
         self,
-        tokenization_kwargs: dict[str, Any],
         data_1: ScoreData,
         data_2: ScoreData,
+        encode_kwargs: dict[str, Any],
         chat_template: str | None = None,
     ):
         model_config = self.model_config
-        tokenizer = self.renderer.tokenizer
+        tokenizer = self.tokenizer
 
         prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
             data_1,
@@ -299,18 +287,18 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 full_prompt = _apply_model_score_template(
                     model_config, prompt_1, prompt_2
                 )
-                prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+                prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             else:
                 if self.use_sep_token:
                     # cross_encoder models defaults to using separating token.
                     prompt_inputs = tokenizer(
-                        text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
+                        text=prompt_1, text_pair=prompt_2, **encode_kwargs
                     )
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
                     # `llm as reranker` defaults to not using separating token.
                     full_prompt = prompt_1 + prompt_2
-                    prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
+                    prompt_inputs = tokenizer(text=full_prompt, **encode_kwargs)
             return full_prompt, prompt_inputs
 
         # FIXME: For now, we only apply a template when one is explicitly provided.
@@ -335,7 +323,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     tools=None,
                     tokenize=False,
                 )
-                prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+                prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             except ChatTemplateResolutionError:
                 full_prompt, prompt_inputs = default_tokenizer_encode()
 

@@ -1463,16 +1463,13 @@ class LLM:
 
         processor_inputs = io_processor.pre_process_offline(ctx)
 
-        print(processor_inputs)
-
-        if ctx.pooling_params is None:
-            ctx.pooling_params = PoolingParams()
-
         seq_lora_requests = self._lora_request_to_seq(
             lora_request, len(processor_inputs)
         )
+
+        if ctx.pooling_params is None:
+            ctx.pooling_params = PoolingParams()
         params_seq = self._params_to_seq(ctx.pooling_params, len(processor_inputs))
-        seq_priority = self._priority_to_seq(None, len(processor_inputs))
 
         for param in params_seq:
             if param.task is None:
@@ -1480,6 +1477,8 @@ class LLM:
             elif param.task != pooling_task:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
                 raise ValueError(msg)
+
+        seq_priority = self._priority_to_seq(None, len(processor_inputs))
 
         self._render_and_add_requests(
             prompts=processor_inputs,
