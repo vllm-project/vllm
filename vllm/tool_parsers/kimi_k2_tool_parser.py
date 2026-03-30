@@ -202,6 +202,7 @@ class KimiK2ToolParser(ToolParser):
             return None
         diff = tool_args[len(prev) :]
         self.streamed_args_for_tool[index] = tool_args
+        self.prev_tool_call_arr[index]["arguments"] = tool_args
         return diff
 
     def extract_tool_calls_streaming(
