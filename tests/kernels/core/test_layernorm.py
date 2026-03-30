@@ -20,7 +20,7 @@ else:
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
-ADD_RESIDUAL = [False, True] if not on_gfx90a else [True]
+ADD_RESIDUAL = [False, True] if not on_mi250 else [True]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
