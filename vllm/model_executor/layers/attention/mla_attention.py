@@ -252,9 +252,6 @@ from vllm.model_executor.models.nan_check_helper import (
 from vllm.model_executor.models.nan_check_helper import (
     stash_if_nan as _nan_stash_if_nan,
 )
-from vllm.model_executor.models.nan_check_helper import (
-    mark_kv_cache_write as _nan_mark_kv_write,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
@@ -589,11 +586,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_c_normed,
                 k_pe,
                 self_kv_cache,
-                _slots,
+                slot_mapping.get(self.layer_name),
                 self.kv_cache_dtype,
                 self._k_scale,
             )
-            _nan_mark_kv_write(self_kv_cache, _slots, self._nan_layer_idx)
             _nan_mark_mla(
                 kv_c_normed, 6, self._nan_layer_idx
             )  # after kv_cache_update (input unchanged)

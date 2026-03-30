@@ -190,6 +190,44 @@ def mark_kv_cache_write(
     _kv_write_nan_counts[layer_idx] += n
 
 
+_kv_cache_checked = False
+
+
+def check_kv_caches(layers) -> None:
+    """Check page 0 (null block) of each layer's KV cache for NaN.
+
+    Called outside compiled/CUDA graph region (from forward()).
+    Only reports once.
+    """
+    global _kv_cache_checked
+    if not _per_layer_checks_enabled or _kv_cache_checked:
+        return
+    for layer in layers:
+        attn = getattr(layer, 'self_attn', None)
+        if attn is None:
+            continue
+        kv = getattr(attn, 'kv_cache', None)
+        if kv is None or not isinstance(kv, torch.Tensor) or kv.numel() == 0:
+            continue
+        page0 = kv[0]  # [num_heads, head_dim] or [block_size, head_dim]
+        if _is_fp8(page0.dtype):
+            raw = page0.view(torch.uint8)
+            n = ((raw == 0x7F) | (raw == 0xFF)).sum().item()
+        else:
+            n = torch.isnan(page0).sum().item()
+        if n > 0:
+            _kv_cache_checked = True
+            layer_idx = getattr(layer, 'layer_idx', '?')
+            f = _get_log()
+            msg = (f"[KV_CACHE_PAGE0_NAN] layer={layer_idx} "
+                   f"nan_count={n} page0_shape={list(page0.shape)} "
+                   f"dtype={kv.dtype}\n")
+            f.write(msg)
+            f.flush()
+            print(msg, file=sys.stderr, end="", flush=True)
+            return
+
+
 def mark_kv_stale_fp8_nan(
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,
