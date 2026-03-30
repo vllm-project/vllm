@@ -188,11 +188,14 @@ def legacy_routing(
     if sm_first:
         logits = torch.softmax(logits, dim=-1)
     sparse_logits = topk(logits, n_expts_act, apply_softmax=not sm_first)
-    return legacy_routing_from_sparsematrix(
-        sparse_logits,
-        logits.shape[-1],
-        n_expts_act,
-    )
+    if isinstance(sparse_logits, tuple):
+        topk_weights, topk_ids_raw, bitmatrix = sparse_logits
+        return legacy_routing_from_bitmatrix(
+            bitmatrix, topk_weights, topk_ids_raw, logits.shape[-1], n_expts_act
+        )
+    topk_ids = sparse_logits.indx.to(torch.long)
+    topk_weights = sparse_logits.vals
+    return make_routing_data(topk_ids, topk_weights, logits.shape[-1])
 
 
 def triton_kernel_moe_forward(
