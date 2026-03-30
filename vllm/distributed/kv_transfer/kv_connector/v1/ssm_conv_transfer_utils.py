@@ -99,6 +99,14 @@ def derive_mamba_conv_split(
         MambaConvSplitInfo with per-rank x_local, b_local, conv_rows, and
         conv_dtype_size.
     """
+    if mamba_spec.mamba_type != "mamba2":
+        raise NotImplementedError(
+            f"3-read conv transfer only supports Mamba2 models, "
+            f"got mamba_type={mamba_spec.mamba_type!r}.  "
+            f"Mamba1 SSM temporal shape is (intermediate_size // tp, state_size) "
+            f"which cannot be used to reconstruct intermediate_size."
+        )
+
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
