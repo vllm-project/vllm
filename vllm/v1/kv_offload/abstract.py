@@ -67,6 +67,8 @@ class OffloadingEvent:
     # If blocks are removed, otherwise None
     evicted_groups: list[int] | None = None
 
+    stored_groups: list[int] | None = None
+
 
 class OffloadingManager(ABC):
     @abstractmethod

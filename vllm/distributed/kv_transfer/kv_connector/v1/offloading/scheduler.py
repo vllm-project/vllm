@@ -353,4 +353,5 @@ class OffloadingConnectorScheduler:
                     block_size=event.block_size,
                     medium=event.medium,
                     lora_name=None,
+                    stored_groups=event.stored_groups,
                 )

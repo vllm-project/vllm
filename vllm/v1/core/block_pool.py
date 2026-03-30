@@ -315,6 +315,7 @@ class BlockPool:
                     if request.lora_request
                     else None,
                     extra_keys=extra_keys_list if extra_keys_list else None,
+                    stored_groups=[kv_cache_group_id],
                 )
             )
 
