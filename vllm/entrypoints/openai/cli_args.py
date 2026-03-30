@@ -281,6 +281,17 @@ class FrontendArgs(BaseFrontendArgs):
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
+    dns_aid_enabled: bool = False
+    """Enable DNS-AID SVCB service-discovery registration on startup.
+    Requires the 'dns-aid' optional dependency (pip install vllm[dns-aid])."""
+    dns_aid_name: str | None = None
+    """DNS-AID agent name for this endpoint. Defaults to a slugified version
+    of the model name (e.g. 'meta-llama-llama-3-70b-instruct').
+    Also settable via DNS_AID_NAME env var."""
+    dns_aid_zone: str | None = None
+    """DNS zone in which the SVCB record is published
+    (e.g. 'example.internal'). Required when --dns-aid-enabled is set.
+    Also settable via DNS_AID_ZONE env var."""
 
     @classmethod
     def _customize_cli_kwargs(

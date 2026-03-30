@@ -1069,6 +1069,8 @@ setup(
         "helion": ["helion==0.3.3"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
+        # Optional deps for DNS-AID SVCB endpoint registration
+        "dns-aid": ["dns-aid"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",
