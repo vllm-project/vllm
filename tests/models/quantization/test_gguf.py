@@ -90,6 +90,12 @@ GEMMA3_CONFIG = GGUFTestConfig(
     gguf_filename="gemma-3-270m-it-qat-Q4_0.gguf",
 )
 
+QWEN3_5_CONFIG = GGUFTestConfig(
+    original_model="Qwen/Qwen3.5-0.8B",
+    gguf_repo="ddh0/Qwen3.5-GGUF",
+    gguf_filename="Qwen3.5-0.8B-9.71bpw.gguf",
+)
+
 MODELS = [
     # LLAMA_CONFIG, # broken: https://github.com/vllm-project/vllm/issues/19458
     QWEN2_CONFIG,
@@ -100,6 +106,7 @@ MODELS = [
     DOLPHIN_CONFIG,
     GEMMA3_CONFIG,
     # STARCODER_CONFIG, # broken
+    # QWEN3_5_CONFIG, # hybrid Mamba/Attention model, needs GDN attention support
 ]
 
 
