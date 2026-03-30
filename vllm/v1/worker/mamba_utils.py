@@ -3,6 +3,7 @@
 import dataclasses
 import itertools
 from collections.abc import Callable
+from math import prod
 from typing import Any
 
 import torch
@@ -13,8 +14,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
@@ -271,3 +273,54 @@ def postprocess_mamba(
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(copy_bufs)
+
+
+def get_hybrid_attention_mamba_layout(
+    kv_cache_shape: tuple[int, ...],
+    kv_cache_stride: tuple[int, ...],
+    kv_cache_spec: AttentionSpec,
+    layer_idx: int,
+    kernel_num_blocks: int,
+    kernel_block_size: int,
+) -> tuple[tuple[int, ...], int]:
+    """
+    Compute the stride and storage offset for the hybrid attention+mamba layout.
+
+    Args:
+        kv_cache_shape: The shape of the KV cache tensor.
+        kv_cache_stride: The stride of the KV cache tensor.
+        kv_cache_spec: The specification of the KV cache.
+        layer_idx: The index of the layer.
+        kernel_num_blocks: The number of kernel blocks.
+        kernel_block_size: The size of the kernel block.
+    Returns:
+        A tuple containing the target stride and storage offset.
+    """
+    target_stride_list = list(kv_cache_stride)
+    storage_offset = 0
+
+    attn_pack_size = kv_cache_spec.pack_size
+    kernel_blocks_idx = kv_cache_shape.index(kernel_num_blocks)
+    if kv_cache_shape[0] == 2:
+        # Hybrid attention+mamba uses (2, num_blocks, ...) logical shape but
+        # (num_blocks, 2, ...) physical layout.
+        assert kv_cache_shape[1] != 2, (
+            "Fail to determine whether the layout is "
+            "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
+            f"a tensor of shape {kv_cache_shape}"
+        )
+        assert kernel_blocks_idx == 1
+        hidden_size = prod(kv_cache_shape[2:])
+        target_stride_list[0] = hidden_size
+        target_stride_list[1] = 2 * hidden_size
+    if attn_pack_size > 1:
+        target_stride_list[kernel_blocks_idx] *= attn_pack_size
+        dtype_size = get_dtype_size(kv_cache_spec.dtype)
+        num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
+        num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+        num_element_per_attn_pack = (
+            num_element_per_page // num_blocks_per_kv_block // attn_pack_size
+        )
+        attn_pack_idx = layer_idx % attn_pack_size
+        storage_offset = attn_pack_idx * num_element_per_attn_pack
+    return tuple(target_stride_list), storage_offset

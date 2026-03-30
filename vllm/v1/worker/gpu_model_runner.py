@@ -126,6 +126,10 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
+from vllm.v1.core.kv_cache_utils import (
+    merge_attn_layers_into_pack,
+    split_attn_layers_from_pack,
+)
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -5789,6 +5793,14 @@ class GPUModelRunner(
         )
 
         kv_cache_spec = self.get_kv_cache_spec()
+        attn_pack_size = self.vllm_config.cache_config.mamba_num_attn_pages
+        # When attn_pack_size > 1 (for Mamba models), pack attention layers together
+        # to share a KV-block.
+        if attn_pack_size > 1:
+            kv_cache_spec = merge_attn_layers_into_pack(
+                attn_pack_size,
+                kv_cache_spec,
+            )
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
 
@@ -5798,6 +5810,13 @@ class GPUModelRunner(
         minimal_config = get_kv_cache_config_from_groups(
             self.vllm_config, kv_cache_groups, available_memory=0
         )
+        # When attn_pack_size > 1 (for Mamba models), split packed layers back
+        # to individual layers after generating configs.
+        if attn_pack_size > 1:
+            minimal_config = split_attn_layers_from_pack(
+                attn_pack_size,
+                minimal_config,
+            )
         self.cache_config.num_gpu_blocks_override = saved_override
 
         self.initialize_kv_cache(minimal_config)
@@ -6557,7 +6576,14 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
-        has_attn, has_mamba = False, False
+
+        # Pre-scan to determine whether there are mamba layers.
+        has_mamba = False
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, MambaSpec):
+                has_mamba = True
+
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -6565,14 +6591,13 @@ class GPUModelRunner(
                 # There may be a last group for layers without kv cache.
                 continue
             kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
-            for layer_name in group.layer_names:
+            for layer_idx, layer_name in enumerate(group.layer_names):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    has_attn = True
                     num_blocks_per_kv_block = (
                         kv_cache_spec.block_size // kernel_block_size
                     )
@@ -6599,19 +6624,31 @@ class GPUModelRunner(
                     kv_cache_shape = tuple(
                         kv_cache_shape[i] for i in kv_cache_stride_order
                     )
+                    kv_cache_stride = tuple(torch.empty(kv_cache_shape).stride())
+                    storage_offset = 0
                     # Maintain original KV shape view.
                     inv_order = [
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+                    if has_mamba:
+                        kv_cache_stride, storage_offset = (
+                            mamba_utils.get_hybrid_attention_mamba_layout(
+                                kv_cache_shape=kv_cache_shape,
+                                kv_cache_stride=kv_cache_stride,
+                                kv_cache_spec=kv_cache_spec,
+                                layer_idx=layer_idx,
+                                kernel_num_blocks=kernel_num_blocks,
+                                kernel_block_size=kernel_block_size,
+                            )
+                        )
+                    kv_caches[layer_name] = torch.as_strided(
+                        raw_tensor.view(dtype),
+                        size=kv_cache_shape,
+                        stride=kv_cache_stride,
+                        storage_offset=storage_offset,
+                    ).permute(*inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
@@ -6637,37 +6674,7 @@ class GPUModelRunner(
                 else:
                     raise NotImplementedError
 
-        if has_attn and has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
-
         return kv_caches
-
-    def _update_hybrid_attention_mamba_layout(
-        self, kv_caches: dict[str, torch.Tensor]
-    ) -> None:
-        """
-        Update the layout of attention layers from (2, num_blocks, ...) to
-        (num_blocks, 2, ...).
-
-        Args:
-            kv_caches: The KV cache buffer of each layer.
-        """
-
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            for layer_name in group.layer_names:
-                kv_cache = kv_caches[layer_name]
-                if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
-                    assert kv_cache.shape[1] != 2, (
-                        "Fail to determine whether the layout is "
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                        f"a tensor of shape {kv_cache.shape}"
-                    )
-                    hidden_size = kv_cache.shape[2:].numel()
-                    kv_cache.as_strided_(
-                        size=kv_cache.shape,
-                        stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                    )
 
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
