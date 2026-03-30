@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -207,6 +208,7 @@ class RequestState:
     @classmethod
     def from_new_request(
         cls,
+        vllm_config: VllmConfig,
         tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
         prompt: str | None,
@@ -225,6 +227,7 @@ class RequestState:
                 request=request,
             )
             detokenizer = IncrementalDetokenizer.from_new_request(
+                vllm_config=vllm_config,
                 tokenizer=tokenizer,
                 request=request,
             )
@@ -415,12 +418,14 @@ class OutputProcessor:
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         tokenizer: TokenizerLike | None,
         *,
         log_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
     ):
+        self.vllm_config = vllm_config
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.stream_interval = stream_interval
@@ -520,6 +525,7 @@ class OutputProcessor:
             return
 
         req_state = RequestState.from_new_request(
+            vllm_config=self.vllm_config,
             tokenizer=self.tokenizer,
             request=request,
             prompt=prompt,

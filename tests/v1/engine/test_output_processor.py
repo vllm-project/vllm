@@ -14,6 +14,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
+from vllm.config import VllmConfig
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -55,10 +56,13 @@ def test_incremental_detokenization(
     stream_interval: int,
     dummy_test_vectors,
 ):
+    vllm_config = VllmConfig()
     output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=stream_interval
+        vllm_config=vllm_config,
+        tokenizer=dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=stream_interval,
     )
-
     # Make N requests.
     requests = [
         EngineCoreRequest(
@@ -474,7 +478,10 @@ def test_logprobs_processor(
     num_prompt_logprobs: int | None,
     dummy_test_vectors,
 ):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    vllm_config = VllmConfig()
+    output_processor = OutputProcessor(
+        vllm_config=vllm_config, tokenizer=dummy_test_vectors.tokenizer, log_stats=False
+    )
 
     # Make N requests.
     request_id_list = [
@@ -648,7 +655,10 @@ def test_stop_token(
     )  # '<|end_of_text|>'
     stop_token_ids = [128009] if not is_eos_test else None  # '<|eot_id|>'
 
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    vllm_config = VllmConfig()
+    output_processor = OutputProcessor(
+        vllm_config=vllm_config, tokenizer=dummy_test_vectors.tokenizer, log_stats=False
+    )
     # Dummy engine core outputs, with control tokens suffixed to test stops
     suffix_token = [eos_token_id] if is_eos_test else stop_token_ids
     assert suffix_token is not None and isinstance(suffix_token[0], int)
@@ -762,7 +772,10 @@ def test_stop_string(
     num_sample_logprobs: int | None,
     dummy_test_vectors,
 ):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    vllm_config = VllmConfig()
+    output_processor = OutputProcessor(
+        vllm_config=vllm_config, tokenizer=dummy_test_vectors.tokenizer, log_stats=False
+    )
 
     # Make N requests.
     request_id_list = [
@@ -895,7 +908,10 @@ def test_stop_string(
 
 
 def test_iteration_stats(dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    vllm_config = VllmConfig()
+    output_processor = OutputProcessor(
+        vllm_config=vllm_config, tokenizer=dummy_test_vectors.tokenizer, log_stats=True
+    )
     engine_core_timestamp = time.monotonic()
 
     # Make N requests.
@@ -971,8 +987,11 @@ def test_iteration_stats(dummy_test_vectors):
 @pytest.mark.parametrize("log_stats", [True, False])
 def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     """Test LoRA request lifecycle tracking through waiting -> running -> finished."""
+    vllm_config = VllmConfig()
     output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer, log_stats=log_stats
+        vllm_config=vllm_config,
+        tokenizer=dummy_test_vectors.tokenizer,
+        log_stats=log_stats,
     )
     engine_core_timestamp = time.monotonic()
 
@@ -1304,7 +1323,10 @@ async def test_cumulative_output_collector_n():
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
 @pytest.mark.parametrize("abort_by", ["internal", "external"])
 def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    vllm_config = VllmConfig()
+    output_processor = OutputProcessor(
+        vllm_config=vllm_config, tokenizer=dummy_test_vectors.tokenizer, log_stats=True
+    )
     requests = [
         EngineCoreRequest(
             request_id=f"request-{idx}",
