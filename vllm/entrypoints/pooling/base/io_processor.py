@@ -13,14 +13,12 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.entrypoints.pooling.base.protocol import (
-    ChatRequestMixin,
-    CompletionRequestMixin,
-)
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.typing import (
     OfflineInputsContext,
     OfflineOutputsContext,
+    PoolingChatLikeRequest,
+    PoolingCompletionLikeRequest,
     PoolingServeContext,
 )
 from vllm.inputs import EngineInput, SingletonPrompt
@@ -59,7 +57,7 @@ class PoolingIOProcessor:
     def pre_process_online(self, ctx: PoolingServeContext):
         request = ctx.request
 
-        if isinstance(ctx.request, ChatRequestMixin):
+        if isinstance(ctx.request, PoolingChatLikeRequest):
             self._validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
@@ -72,7 +70,7 @@ class PoolingIOProcessor:
                 default_template_content_format=self.chat_template_content_format,
                 default_template_kwargs=None,
             )
-        elif isinstance(request, CompletionRequestMixin):
+        elif isinstance(request, PoolingCompletionLikeRequest):
             engine_inputs = self._preprocess_completion_online(
                 request,
                 prompt_input=request.input,
