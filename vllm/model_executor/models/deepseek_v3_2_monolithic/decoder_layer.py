@@ -16,11 +16,8 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 
 from .allreduce_rms import AllReduceRMSParams, allreduce_add_rms_norm
 from .attention import MonolithicMLAAttention
-from .ops import (
-    fused_norm_rope,
-    fused_q,
-    rms_norm,
-)
+from .ops import fused_norm_rope, fused_q, rms_norm
+from .sparse_indexer import sparse_attn_indexer
 
 
 class MonolithicDecoderLayer(nn.Module):
@@ -214,7 +211,21 @@ class MonolithicDecoderLayer(nn.Module):
         )
 
         # Step 5. Sparse indexer.
-        self.attn.indexer_op(hidden_states, index_q_fp8, index_k, index_weights)
+        sparse_attn_indexer(
+            hidden_states,
+            self.attn.indexer_k_cache.prefix,
+            self.attn.indexer_k_cache.kv_cache,
+            index_q_fp8,
+            index_k,
+            index_weights,
+            self.attn.indexer_quant_block_size,  # 128
+            "ue8m0",  # scale_fmt
+            self.attn.topk_tokens,  # topk_tokens
+            self.attn.index_head_dim,  # head_dim
+            self.attn.max_model_len,  # max_model_len
+            self.attn.max_total_seq_len,  # max_total_seq_len
+            self.attn.topk_indices_buffer,  # topk_indices_buffer
+        )
 
         # Step 6. MLA attention.
         attn_out = self.attn.mla_attn(
