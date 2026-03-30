@@ -1971,9 +1971,6 @@ class TestNChoicesParserIsolation:
                 yield  # async generator that yields nothing
 
         tokenizer = get_tokenizer(MODEL_NAME)
-        reasoning_parser = None
-        if getattr(serving_chat, "reasoning_parser_cls", None):
-            reasoning_parser = serving_chat.reasoning_parser_cls(tokenizer)
 
         async for _ in serving_chat.chat_completion_stream_generator(
             request=req,
@@ -1985,7 +1982,6 @@ class TestNChoicesParserIsolation:
             request_metadata=RequestResponseMetadata(
                 request_id=req.request_id, model_name=req.model
             ),
-            reasoning_parser=reasoning_parser,
         ):
             pass
 
@@ -2054,6 +2050,7 @@ class TestNChoicesParserIsolation:
         )
         await self._run_stream(serving_chat, req)
 
+        assert len(instances) <= 2
         first, last = instances[0], instances[-1]
 
         # choice 0 completes its reasoning block: state transitions REASONING → CONTENT.
