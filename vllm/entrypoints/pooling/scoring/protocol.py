@@ -158,3 +158,6 @@ class ScoreResponse(OpenAIBaseModel):
     model: str
     data: list[ScoreResponseData]
     usage: UsageInfo
+
+
+ScoringResponse: TypeAlias = RerankResponse | ScoreResponse

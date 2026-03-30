@@ -349,7 +349,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if chat_template is None:
             full_prompt, prompt_inputs = default_tokenizer_encode()
         else:
-            # FIXME: Try applying a score template from the CLI arg or tokenizer_config.json
+            # FIXME:
+            # Try applying a score template from the CLI arg or tokenizer_config.json
             # If that fails because there is no such template,
             # fall back to the default implementation.
             try:

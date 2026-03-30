@@ -23,14 +23,12 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
+    PoolingBytesResponse,
     PoolingChatRequest,
     PoolingCompletionRequest,
     PoolingResponse,
 )
-from vllm.entrypoints.pooling.scoring.protocol import (
-    ScoreResponse,
-    ScoringRequest,
-)
+from vllm.entrypoints.pooling.scoring.protocol import ScoringRequest, ScoringResponse
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
@@ -58,7 +56,8 @@ AnyPoolingResponse: TypeAlias = (
     | EmbeddingResponse
     | EmbeddingBytesResponse
     | PoolingResponse
-    | ScoreResponse
+    | PoolingBytesResponse
+    | ScoringResponse
 )
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
