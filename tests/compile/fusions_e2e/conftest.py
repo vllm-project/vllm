@@ -7,7 +7,6 @@ import pytest
 import regex as re
 
 from vllm import LLM, SamplingParams
-from vllm.compilation.passes.vllm_inductor_pass import get_match_table
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
@@ -55,7 +54,9 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     )
 
     # Fetch match table from each worker via RPC and sum across workers.
-    worker_tables = llm.llm_engine.engine_core.collective_rpc(get_match_table)
+    worker_tables = llm.llm_engine.engine_core.collective_rpc(
+        "get_compilation_match_table"
+    )
     combined: defaultdict[str, int] = defaultdict(int)
     for table in worker_tables:
         for k, v in table.items():
