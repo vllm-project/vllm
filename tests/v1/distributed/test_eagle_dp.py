@@ -80,16 +80,8 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
     )
 
     async def generate_with_timeout(given_engine: AsyncLLM):
-        # Pin to DP rank 0 so both eagle and non-eagle runs use the same
-        # rank.  Different ranks can produce different greedy outputs due
-        # to incomplete cross-GPU batch-invariance (see #31913).  This
-        # test's purpose is to verify EAGLE correctness, not cross-rank
-        # determinism.
         async for out in given_engine.generate(
-            request_id="test-eagle-dp",
-            prompt=prompt,
-            sampling_params=sampling_params,
-            data_parallel_rank=0,
+            request_id="test-eagle-dp", prompt=prompt, sampling_params=sampling_params
         ):
             token_ids = out.outputs[0].token_ids
             assert len(token_ids) == num_expected_tokens
