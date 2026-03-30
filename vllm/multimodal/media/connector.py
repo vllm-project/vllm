@@ -133,9 +133,8 @@ class MediaConnector:
             try:
                 os.makedirs(media_cache, exist_ok=True)
                 # Verify the directory is writable before enabling caching
-                test_file = os.path.join(media_cache, ".cache_test")
-                Path(test_file).touch()
-                os.remove(test_file)
+                with tempfile.NamedTemporaryFile(dir=media_cache, delete=True):
+                    pass
                 self._media_cache_dir = media_cache
                 self._media_cache_max_bytes = (
                     envs.VLLM_MEDIA_CACHE_MAX_SIZE_MB * 1024 * 1024
