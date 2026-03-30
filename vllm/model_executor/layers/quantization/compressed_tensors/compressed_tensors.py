@@ -62,6 +62,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -178,6 +179,15 @@ class CompressedTensorsConfig(QuantizationConfig):
 
             else:
                 return quant_method
+
+        if isinstance(layer, ParallelLMHead):
+            try:
+                quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            except ValueError:
+                quant_scheme = None
+            if quant_scheme is not None:
+                layer.scheme = quant_scheme
+                return CompressedTensorsLinearMethod(self)
 
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
