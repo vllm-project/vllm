@@ -6399,6 +6399,12 @@ class GPUModelRunner(
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
         self.compilation_config.cudagraph_mode = cudagraph_mode
+        # Attention backend checks may downgrade full cudagraphs to pure
+        # piecewise mode after VllmConfig.post_init(); keep runtime SP state
+        # aligned with the final cudagraph mode before any dispatch decisions.
+        self.vllm_config.reconcile_sequence_parallelism_for_cudagraph_mode(
+            refresh_derived_state=True
+        )
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )

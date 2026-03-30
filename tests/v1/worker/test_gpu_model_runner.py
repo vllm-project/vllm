@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 import torch
@@ -8,12 +10,15 @@ import torch
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    CompilationConfig,
+    CUDAGraphMode,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -25,7 +30,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -38,7 +43,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import select_common_block_size
+from vllm.v1.worker.utils import (
+    is_residual_scattered_for_sp,
+    select_common_block_size,
+)
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
@@ -198,6 +206,78 @@ def _make_mock_backend_for_kernel_block_size(
 
 def _make_kv_cache_spec() -> FullAttentionSpec:
     return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
+
+
+def test_check_and_update_cudagraph_mode_disables_sp_for_piecewise_downgrade():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=16,
+            max_num_batched_tokens=2048,
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=ParallelConfig(tensor_parallel_size=2),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            cudagraph_capture_sizes=[1, 2, 4, 15],
+            compile_sizes=["cudagraph_capture_sizes"],
+            splitting_ops=list(CompilationConfig()._attention_ops),
+            pass_config=PassConfig(
+                enable_sp=True,
+                fuse_gemm_comms=True,
+                sp_min_token_num=512,
+            ),
+        ),
+    )
+    runner.compilation_config = runner.vllm_config.compilation_config
+    runner.parallel_config = runner.vllm_config.parallel_config
+    runner.uniform_decode_query_len = 1
+    runner.cudagraph_dispatcher = Mock()
+    runner.speculative_config = None
+    runner.kv_cache_config = None
+    runner.vllm_config.model_config = Mock(enforce_eager=False)
+    runner.vllm_config._set_cudagraph_sizes()
+
+    assert runner.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+    assert runner.compilation_config.pass_config.enable_sp
+    assert runner.compilation_config.pass_config.fuse_gemm_comms
+    assert runner.compilation_config.cudagraph_capture_sizes == [2, 4]
+    assert runner.compilation_config.max_cudagraph_capture_size == 4
+    assert runner.compilation_config.compile_sizes == [2, 4]
+    assert 511 in runner.compilation_config.compile_ranges_endpoints
+
+    class MockBuilder:
+        @classmethod
+        def get_cudagraph_support(
+            cls, vllm_config: VllmConfig, kv_cache_spec: FullAttentionSpec
+        ) -> AttentionCGSupport:
+            return AttentionCGSupport.NEVER
+
+    class MockBackend:
+        @staticmethod
+        def get_builder_cls():
+            return MockBuilder
+
+    kv_cache_group = Mock()
+    kv_cache_group.kv_cache_spec = Mock()
+
+    GPUModelRunner._check_and_update_cudagraph_mode(
+        runner, [{MockBackend}], [kv_cache_group]
+    )
+
+    assert runner.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    assert not runner.compilation_config.pass_config.enable_sp
+    assert not runner.compilation_config.pass_config.fuse_gemm_comms
+    assert runner.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 15]
+    assert runner.compilation_config.max_cudagraph_capture_size == 15
+    assert runner.compilation_config.compile_sizes == [1, 2, 4, 15]
+    assert 511 not in runner.compilation_config.compile_ranges_endpoints
+    assert not is_residual_scattered_for_sp(runner.vllm_config, 4)
+    runner.cudagraph_dispatcher.initialize_cudagraph_keys.assert_called_once_with(
+        CUDAGraphMode.PIECEWISE, 1
+    )
 
 
 def test_select_common_block_size_prefers_manager_block_size():

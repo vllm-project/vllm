@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field, fields
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -281,9 +281,9 @@ class PassConfig:
         TODO also log the compile ranges for which this is enabled.
         """
         enabled_fusions = [
-            f.name[len("fuse_") :]
-            for f in fields(self)
-            if getattr(self, f.name) and f.name.startswith("fuse_")
+            name[len("fuse_") :]
+            for name, value in vars(self).items()
+            if value and name.startswith("fuse_")
         ]
 
         if enabled_fusions:
@@ -518,6 +518,11 @@ class CompilationConfig:
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
 
+    _user_compile_sizes: list[int | str] | None = field(default=None, init=False)
+    """Original user-specified compile sizes before post-init rewrites."""
+    _user_compilation_inputs_snapshotted: bool = field(default=False, init=False)
+    """Whether the original user-facing compilation inputs were snapshotted."""
+
     compile_ranges_endpoints: list[int] | None = None
     """Endpoints for Inductor compile ranges.
     The compile ranges are
@@ -532,6 +537,9 @@ class CompilationConfig:
     graph for compile size 4 will be compiled and used instead of the graph
     for range [1, 8].
     """
+
+    _user_compile_ranges_endpoints: list[int] | None = field(default=None, init=False)
+    """Original user-specified compile range endpoints before SP rewrites."""
 
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
@@ -590,6 +598,9 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
+
+    _user_cudagraph_capture_sizes: list[int] | None = field(default=None, init=False)
+    """Original user-specified cudagraph sizes before post-init rewrites."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
@@ -646,6 +657,9 @@ class CompilationConfig:
     max_num_seqs, and prevents capture of many large graphs (>512) that would
     greatly increase startup time with limited performance benefit.
     """
+
+    _user_max_cudagraph_capture_size: int | None = field(default=None, init=False)
+    """Original user-specified max cudagraph size before post-init rewrites."""
 
     dynamic_shapes_config: DynamicShapesConfig = field(
         default_factory=DynamicShapesConfig
@@ -739,6 +753,11 @@ class CompilationConfig:
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
+            "_user_compile_sizes",
+            "_user_compilation_inputs_snapshotted",
+            "_user_compile_ranges_endpoints",
+            "_user_cudagraph_capture_sizes",
+            "_user_max_cudagraph_capture_size",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -756,6 +775,11 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "traced_files": True,
+            "_user_compile_sizes": True,
+            "_user_compilation_inputs_snapshotted": True,
+            "_user_compile_ranges_endpoints": True,
+            "_user_cudagraph_capture_sizes": True,
+            "_user_max_cudagraph_capture_size": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
             },
@@ -1012,10 +1036,15 @@ class CompilationConfig:
         """
 
         computed_compile_sizes: list[int] = []
-        if self.compile_sizes is not None:
+        user_compile_sizes = (
+            self._user_compile_sizes
+            if self._user_compilation_inputs_snapshotted
+            else self.compile_sizes
+        )
+        if user_compile_sizes is not None:
             # de-duplicate the sizes provided by the config
-            self.compile_sizes = list(set(self.compile_sizes))
-            for x in self.compile_sizes:
+            dedup_compile_sizes = list(set(user_compile_sizes))
+            for x in dedup_compile_sizes:
                 if isinstance(x, str):
                     assert x == "cudagraph_capture_sizes", (
                         "Unrecognized size type in compile_sizes, "

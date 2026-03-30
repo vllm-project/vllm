@@ -69,6 +69,10 @@ def test_copy_pass():
     inductor_pass = FixFunctionalizationPass(vllm_config)
     copied_inductor_pass = copy.deepcopy(inductor_pass)
     assert (
+        copied_inductor_pass.compilation_config.cudagraph_mode
+        == vllm_config.compilation_config.cudagraph_mode
+    )
+    assert (
         copied_inductor_pass.compilation_config.use_inductor_graph_partition
         == vllm_config.compilation_config.use_inductor_graph_partition
     )
@@ -387,8 +391,8 @@ def test_should_split():
         (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         # max from list
         ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # piecewise compilation disables SP, so sizes are not filtered by TP
-        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
+        # FULL_AND_PIECEWISE keeps the existing hybrid SP behavior
+        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # limited by the max_tokens
         ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # the list should contain at least 1 element when use cudagraph
@@ -445,7 +449,11 @@ def test_cudagraph_sizes_post_init(
         )
 
 
-def test_disable_sp_for_piecewise_compilation():
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if not cudagraph mode supported",
+)
+def test_disable_sp_for_pure_piecewise_compilation():
     with patch("vllm.config.parallel.cuda_device_count_stateless", return_value=2):
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=[1, 2, 4, 15],
@@ -457,7 +465,7 @@ def test_disable_sp_for_piecewise_compilation():
                 eliminate_noops=True,
                 sp_min_token_num=512,
             ),
-            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
         engine_args = EngineArgs(
             model="facebook/opt-125m",

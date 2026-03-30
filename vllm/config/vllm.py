@@ -1092,7 +1092,8 @@ class VllmConfig:
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
         )
-        self._disable_sequence_parallelism_for_piecewise_compilation()
+        self._snapshot_user_compilation_inputs()
+        self.reconcile_sequence_parallelism_for_cudagraph_mode()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -1312,23 +1313,51 @@ class VllmConfig:
             or len(self.compilation_config.splitting_ops or []) == 0
         )
 
-    def _disable_sequence_parallelism_for_piecewise_compilation(self) -> None:
-        pass_config = self.compilation_config.pass_config
-        if not pass_config.enable_sp:
+    def _snapshot_user_compilation_inputs(self) -> None:
+        compilation_config = self.compilation_config
+        if compilation_config._user_compilation_inputs_snapshotted:
             return
+        if compilation_config._user_compile_ranges_endpoints is None:
+            compilation_config._user_compile_ranges_endpoints = copy.deepcopy(
+                compilation_config.compile_ranges_endpoints
+            )
+        if compilation_config._user_cudagraph_capture_sizes is None:
+            compilation_config._user_cudagraph_capture_sizes = copy.deepcopy(
+                compilation_config.cudagraph_capture_sizes
+            )
+        if compilation_config._user_max_cudagraph_capture_size is None:
+            compilation_config._user_max_cudagraph_capture_size = (
+                compilation_config.max_cudagraph_capture_size
+            )
+        if compilation_config._user_compile_sizes is None:
+            compilation_config._user_compile_sizes = copy.deepcopy(
+                compilation_config.compile_sizes
+            )
+        compilation_config._user_compilation_inputs_snapshotted = True
+
+    def reconcile_sequence_parallelism_for_cudagraph_mode(
+        self, *, refresh_derived_state: bool = False
+    ) -> bool:
+        if not self.compilation_config.pass_config.enable_sp:
+            return False
 
         if (
             self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+            or self.compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE
             or self._uses_full_graph_compilation()
         ):
-            return
+            return False
 
         logger.warning_once(
             "Sequence parallelism requires full-graph compilation; "
             "disabling it for piecewise compilation."
         )
-        pass_config.enable_sp = False
-        pass_config.fuse_gemm_comms = False
+        self.compilation_config.pass_config.enable_sp = False
+        self.compilation_config.pass_config.fuse_gemm_comms = False
+        if refresh_derived_state:
+            self._set_compile_ranges()
+            self._set_cudagraph_sizes()
+        return True
 
     def _set_max_num_scheduled_tokens(self):
         """
@@ -1407,9 +1436,15 @@ class VllmConfig:
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             # determine the initial max_cudagraph_capture_size
-            max_cudagraph_capture_size = (
-                self.compilation_config.max_cudagraph_capture_size
-            )
+            if self.compilation_config._user_compilation_inputs_snapshotted:
+                user_max_cudagraph_capture_size = (
+                    self.compilation_config._user_max_cudagraph_capture_size
+                )
+            else:
+                user_max_cudagraph_capture_size = (
+                    self.compilation_config.max_cudagraph_capture_size
+                )
+            max_cudagraph_capture_size = user_max_cudagraph_capture_size
             if max_cudagraph_capture_size is None:
                 decode_query_len = 1
                 if (
@@ -1423,19 +1458,28 @@ class VllmConfig:
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
+            assert max_cudagraph_capture_size is not None
             assert max_cudagraph_capture_size >= 1, (
                 "Maximum cudagraph size should be greater than or equal to 1 "
                 "when using cuda graph."
             )
 
             # determine the cudagraph_capture_sizes
-            if self.compilation_config.cudagraph_capture_sizes is not None:
-                assert len(self.compilation_config.cudagraph_capture_sizes) > 0, (
+            if self.compilation_config._user_compilation_inputs_snapshotted:
+                user_cudagraph_capture_sizes = (
+                    self.compilation_config._user_cudagraph_capture_sizes
+                )
+            else:
+                user_cudagraph_capture_sizes = (
+                    self.compilation_config.cudagraph_capture_sizes
+                )
+            if user_cudagraph_capture_sizes is not None:
+                assert len(user_cudagraph_capture_sizes) > 0, (
                     "cudagraph_capture_sizes should contain at least one element "
                     "when using cuda graph."
                 )
                 # de-duplicate the sizes provided by the config
-                dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
+                dedup_sizes = list(set(user_cudagraph_capture_sizes))
                 cudagraph_capture_sizes = [
                     i for i in dedup_sizes if i <= max_num_tokens
                 ]
@@ -1478,15 +1522,15 @@ class VllmConfig:
                 cudagraph_capture_sizes[-1] if cudagraph_capture_sizes else 0
             )
             if (
-                self.compilation_config.max_cudagraph_capture_size is not None
-                and self.compilation_config.max_cudagraph_capture_size != valid_max_size
+                user_max_cudagraph_capture_size is not None
+                and user_max_cudagraph_capture_size != valid_max_size
             ):
                 # raise error only when both two flags are user-specified
                 # and they are inconsistent with each other
-                if self.compilation_config.cudagraph_capture_sizes is not None:
+                if user_cudagraph_capture_sizes is not None:
                     raise ValueError(
                         "customized max_cudagraph_capture_size"
-                        f"(={self.compilation_config.max_cudagraph_capture_size}) "
+                        f"(={user_max_cudagraph_capture_size}) "
                         "should be consistent with the max value of "
                         f"cudagraph_capture_sizes(={valid_max_size})"
                     )
@@ -1498,9 +1542,9 @@ class VllmConfig:
             # always set the final max_cudagraph_capture_size
             self.compilation_config.max_cudagraph_capture_size = valid_max_size
 
-            if self.compilation_config.cudagraph_capture_sizes is not None and len(
+            if user_cudagraph_capture_sizes is not None and len(
                 cudagraph_capture_sizes
-            ) < len(self.compilation_config.cudagraph_capture_sizes):
+            ) < len(user_cudagraph_capture_sizes):
                 # If users have specified capture sizes, we only need to
                 # compare the lens before and after modification since the modified
                 # list is only the subset of the original list.
@@ -1509,7 +1553,7 @@ class VllmConfig:
                         "cudagraph_capture_sizes specified in compilation_config"
                         " %s is overridden by config %s"
                     ),
-                    self.compilation_config.cudagraph_capture_sizes,
+                    user_cudagraph_capture_sizes,
                     cudagraph_capture_sizes,
                 )
             # always write back the final sizes
@@ -1598,8 +1642,14 @@ class VllmConfig:
                         compile_range_end,
                     )
 
-        if compilation_config.compile_ranges_endpoints is not None:
-            for x in compilation_config.compile_ranges_endpoints:
+        if compilation_config._user_compilation_inputs_snapshotted:
+            user_compile_ranges_endpoints = (
+                compilation_config._user_compile_ranges_endpoints
+            )
+        else:
+            user_compile_ranges_endpoints = compilation_config.compile_ranges_endpoints
+        if user_compile_ranges_endpoints is not None:
+            for x in user_compile_ranges_endpoints:
                 assert isinstance(x, int)
                 assert x > 0, f"Invalid compile range endpoint: {x}"
                 if compile_range_end is not None and x < compile_range_end and x > 1:
