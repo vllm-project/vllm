@@ -1933,9 +1933,29 @@ class GPUModelRunner(
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            self.num_accepted_tokens.np[:num_reqs] = (
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            )
+            # In async mode, condense() may have copied stale values (from before
+            # the GPU→CPU copy completed). Repopulate using prev_positions mapping
+            # to get values from the correct OLD indices.
+            if self.use_async_scheduling and prev_req_id_to_index:
+                # Repopulate entire CPU array using prev_positions mapping
+                for i in range(num_reqs):
+                    prev_idx = self.prev_positions.np[i]
+                    if prev_idx >= 0:
+                        self.num_accepted_tokens.np[i] = (
+                            self.input_batch.num_accepted_tokens_cpu[prev_idx]
+                        )
+                        # Update the CPU array for consistency
+                        self.input_batch.num_accepted_tokens_cpu[i] = (
+                            self.input_batch.num_accepted_tokens_cpu[prev_idx]
+                        )
+                    else:
+                        self.num_accepted_tokens.np[i] = 1  # New request
+                        self.input_batch.num_accepted_tokens_cpu[i] = 1
+            else:
+                # Non-async: condense() copied correct values, use directly
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
