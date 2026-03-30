@@ -32,7 +32,18 @@ def maybe_create_thinking_budget_state_holder(
 
 
 class ThinkingBudgetStateHolder:
-    """Tracks thinking sections and forces end tokens when budget is exceeded."""
+    """Tracks thinking sections and forces end tokens when budget is exceeded.
+
+    Includes a soft budget zone over the last 30% of the token budget.
+    Instead of a single hard cut, the logit for the end-of-thinking token is
+    progressively boosted relative to the model's own logit distribution,
+    encouraging a natural stopping point before the hard force at 100%.
+    The soft bias applies on the standard decoding path only; speculative
+    decoding keeps the existing hard-force behavior.
+    """
+
+    # Fraction of budget where the soft zone begins (0.7 = last 30%).
+    _SOFT_ZONE_START_FRAC = 0.7
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
@@ -65,6 +76,12 @@ class ThinkingBudgetStateHolder:
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
         self.cu_num_tokens: dict[int, int] = {}
+        # Pre-built tensor for end token IDs (used by the soft bias).
+        self._end_ids = (
+            torch.tensor(self.think_end_token_ids, device=device, dtype=torch.long)
+            if self.think_end_token_ids
+            else None
+        )
 
         if self.num_spec_tokens > 0:
             self._mask_capacity = max_num_reqs * (self.num_spec_tokens + 1)
@@ -216,6 +233,7 @@ class ThinkingBudgetStateHolder:
         return {
             "in_think": in_think,
             "in_end": in_end,
+            "soft_progress": 0.0,  # 0..1 ramp through the soft budget zone
             "check_count_down": countdown,
             "think_count": think_count,
             "end_count": 0,
@@ -273,10 +291,14 @@ class ThinkingBudgetStateHolder:
         )
         predicted_countdown = current_step_countdown - len(state["spec_token_ids"]) - 1
         # We only proceed further if we have counted down the thinking budget
-        # to 0 or less and when we are in the "in think" mode.
+        # into the soft zone (last 30% of the budget) or to 0 or less, and
+        # when we are in the "in think" mode. Taking the early return inside
+        # the soft zone would freeze ``think_count`` and skip the ramp.
+        budget = state["thinking_token_budget"]
+        soft_span = budget - int(budget * self._SOFT_ZONE_START_FRAC)
         if (
             not state.get("in_end", False)
-            and predicted_countdown >= 0
+            and predicted_countdown >= soft_span
             and state["start_thinking"] > -1
         ):
             state["check_count_down"] = current_step_countdown
@@ -378,6 +400,17 @@ class ThinkingBudgetStateHolder:
             else:
                 state["check_count_down"] = state["thinking_token_budget"]
 
+            # Soft zone: ramp progress from 0.0 to 1.0 over the last 30% of
+            # the budget; 0.0 outside the zone or when not thinking.
+            soft_start = int(budget * self._SOFT_ZONE_START_FRAC)
+            if state["in_think"] and state["think_count"] > soft_start:
+                state["soft_progress"] = min(
+                    1.0,
+                    (state["think_count"] - soft_start) / max(1, budget - soft_start),
+                )
+            else:
+                state["soft_progress"] = 0.0
+
             total_thinking_tokens = (
                 state["think_count"] + len(state["spec_token_ids"]) + 1
             )
@@ -394,6 +427,7 @@ class ThinkingBudgetStateHolder:
                 # where budget is exceeded.
                 state["in_think"] = False
                 state["in_end"] = True
+                state["soft_progress"] = 0.0
                 state["end_count"] = 0
                 state["check_count_down"] = state["thinking_token_budget"]
                 remaining_budget = state["thinking_token_budget"] - state["think_count"]
@@ -433,6 +467,7 @@ class ThinkingBudgetStateHolder:
                     {
                         "in_end": False,
                         "end_count": 0,
+                        "soft_progress": 0.0,
                         "check_count_down": state["thinking_token_budget"],
                     }
                 )
@@ -509,6 +544,26 @@ class ThinkingBudgetStateHolder:
                                     state["force_index"] = []
                                 else:
                                     state["bonus_token_forced"] = True
+            elif (
+                not self.in_spec_mode
+                and self._end_ids is not None
+                and state.get("soft_progress", 0.0) > 0.0
+            ):
+                # Adaptive soft bias: boost the end-of-thinking logit
+                # relative to the current gap between the top logit and the
+                # end token.
+                #   progress=0%   -> target = end_logit (no change)
+                #   progress=50%  -> target = top_logit (equal)
+                #   progress=100% -> target = top + gap (dominates)
+                row = self.cu_num_tokens[seq_idx]
+                if row < logits.shape[0]:
+                    top_logit = logits[row].max().item()
+                    end_logit = logits[row, self._end_ids[0]].item()
+                    gap = max(top_logit - end_logit, 1.0)
+                    target = end_logit + 2.0 * gap * state["soft_progress"]
+                    logits[row, self._end_ids] = torch.clamp(
+                        logits[row, self._end_ids], min=target
+                    )
 
         if active_indices_cpu:
             device = logits.device
