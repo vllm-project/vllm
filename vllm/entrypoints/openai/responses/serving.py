@@ -54,6 +54,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
+    UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
@@ -865,6 +866,11 @@ class OpenAIServingResponses(OpenAIServing):
         if context.last_output is not None and context.last_output.metrics is not None:
             request_metadata.request_stats = context.last_output.metrics
             request_metadata.num_cached_tokens = num_cached_tokens
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_generated_tokens,
+                total_tokens=num_prompt_tokens + num_generated_tokens,
+            )
 
         response = ResponsesResponse.from_request(
             request,
