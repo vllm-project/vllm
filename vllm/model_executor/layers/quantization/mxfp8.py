@@ -183,16 +183,15 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        if layer.weight.device == torch.device("meta"):
-            weight = ModelWeightParameter(
-                data=torch.empty_like(layer.weight, device=layer._load_device),
-                input_dim=1,
-                output_dim=0,
-                weight_loader=layer.weight.weight_loader,
-            )
-            _copy_missing_attrs(layer.weight, weight)
-            layer.register_parameter("weight", weight)
-            initialize_single_dummy_weight(layer.weight)
+        weight = ModelWeightParameter(
+            data=torch.empty_like(layer.weight, device=layer._load_device),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=layer.weight.weight_loader,
+        )
+        _copy_missing_attrs(layer.weight, weight)
+        layer.register_parameter("weight", weight)
+        initialize_single_dummy_weight(layer.weight)
 
         weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
 
@@ -309,28 +308,23 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        if layer.w13_weight.device == torch.device("meta"):
-            w13_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w13_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w13_weight, w13_weight)
-            layer.register_parameter("w13_weight", w13_weight)
-            initialize_single_dummy_weight(layer.w13_weight)
-        if layer.w2_weight.device == torch.device("meta"):
-            w2_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w2_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w2_weight, w2_weight)
-            layer.register_parameter("w2_weight", w2_weight)
-            initialize_single_dummy_weight(layer.w2_weight)
+        w13_weight = torch.nn.Parameter(
+            torch.empty_like(layer.w13_weight, device=layer._load_device),
+            requires_grad=False,
+        )
+        set_weight_attrs(w13_weight, {"weight_loader": layer.w13_weight.weight_loader})
+        _copy_missing_attrs(layer.w13_weight, w13_weight)
+        layer.register_parameter("w13_weight", w13_weight)
+        initialize_single_dummy_weight(layer.w13_weight)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty_like(layer.w2_weight, device=layer._load_device),
+            requires_grad=False,
+        )
+        set_weight_attrs(w2_weight, {"weight_loader": layer.w2_weight.weight_loader})
+        _copy_missing_attrs(layer.w2_weight, w2_weight)
+        layer.register_parameter("w2_weight", w2_weight)
+        initialize_single_dummy_weight(layer.w2_weight)
 
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
