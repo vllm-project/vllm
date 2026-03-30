@@ -218,13 +218,25 @@ class TestBuildAgentRecord:
             )
         assert record.name == "my-llama._agents.example.internal"
 
-    def test_tp_nonzero_rank(self, fake_dns_aid):
+    def test_nonzero_global_rank_skips(self, fake_dns_aid):
+        """Any non-zero global rank is skipped, regardless of topology."""
         with patch.object(dns_aid_mod, "_is_global_rank_zero", return_value=False):
-            result = build_agent_record(
-                _make_args(),
-                _make_engine_client(tensor_parallel_size=2),
+            # TP > 1
+            assert (
+                build_agent_record(
+                    _make_args(),
+                    _make_engine_client(tensor_parallel_size=2),
+                )
+                is None
             )
-        assert result is None
+            # TP = 1 (e.g. PP-only or DP-only)
+            assert (
+                build_agent_record(
+                    _make_args(),
+                    _make_engine_client(tensor_parallel_size=1),
+                )
+                is None
+            )
 
     def test_quant_none(self, monkeypatch, fake_dns_aid):
         """When quantization is None, the hint should be 'none'."""

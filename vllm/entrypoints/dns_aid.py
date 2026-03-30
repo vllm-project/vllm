@@ -131,11 +131,7 @@ def build_agent_record(
 
     # Only global rank 0 registers so that exactly one record exists per
     # deployment, regardless of TP/PP/DP topology.
-    try:
-        tp_size = engine_client.vllm_config.parallel_config.tensor_parallel_size
-    except Exception:
-        tp_size = 1
-    if tp_size > 1 and not _is_global_rank_zero():
+    if not _is_global_rank_zero():
         logger.debug("DNS-AID: skipping registration on non-zero global rank.")
         return None
 
