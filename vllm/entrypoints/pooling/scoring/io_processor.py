@@ -44,6 +44,7 @@ class ScoringIOProcessor(PoolingIOProcessor):
         if is_mistral_tokenizer(tokenizer):
             raise ValueError("MistralTokenizer not supported for cross-encoding")
 
+        self.tokenizer = tokenizer
         self.architecture = self.model_config.architecture
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.pad_token_id = tokenizer.pad_token_id
@@ -179,11 +180,9 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
         if len(emb_data_1) == 1:
             emb_data_1 = emb_data_1 * len(emb_data_2)
 
-        tokenizer = self.renderer.get_tokenizer()
-
         final_res_batch: list[PoolingRequestOutput] = []
         padding: list[int] = []
-        if (pad_token_id := tokenizer.pad_token_id) is not None:
+        if (pad_token_id := self.pad_token_id) is not None:
             padding = [pad_token_id]
 
         # Compute MaxSim scores
@@ -223,7 +222,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.supports_score_template = supports_score_template(model)
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
-        self.tokenizer = self.renderer.get_tokenizer()
 
     #######################################
     # online APIs
@@ -275,7 +273,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tok_params: TokenizeParams,
         pooling_params: PoolingParams | None,
         chat_template: str | None = None,
-    ) -> (Sequence[EngineInput], list[PoolingParams]):
+    ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
         data_1 = scoring_data.data_1
         data_2 = scoring_data.data_2
 
@@ -305,6 +303,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else:
                 pooling_params_list.append(pooling_params)
 
+            tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
             engine_inputs.append(self.renderer.process_for_engine(engine_prompt))
         return engine_inputs, pooling_params_list
 

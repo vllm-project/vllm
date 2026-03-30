@@ -135,16 +135,22 @@ class PoolingServing:
                 else ctx.prompt_request_ids[i]
             )
 
+            params = (
+                pooling_params[i]
+                if isinstance(pooling_params, list)
+                else pooling_params
+            )
+
             self._log_inputs(
                 prompt_request_id,
                 engine_input,
-                params=pooling_params,
+                params=params,
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
                 engine_input,
-                pooling_params,
+                params,
                 prompt_request_id,
                 lora_request=ctx.lora_request,
                 trace_headers=trace_headers,
