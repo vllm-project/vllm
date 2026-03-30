@@ -84,6 +84,11 @@ class VllmInductorPass(InductorPass):
         logger.debug("%s completed in %.1f ms", self.pass_name, duration_ms)
 
 
+def get_match_table() -> dict[str, int]:
+    """Return a snapshot of the match table."""
+    return dict(VllmPatternMatcherPass.match_table)
+
+
 class VllmPatternMatcherPass(VllmInductorPass):
     """
     A VllmInductorPass that uses the Inductor pattern matcher.
