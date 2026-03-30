@@ -166,6 +166,7 @@ class MonolithicDecoderLayer(nn.Module):
         index_weights, _ = self.attn.indexer_weights_proj(hidden_states)
 
         # Step 2. Q RMS norm + KV RMS norm + KV RoPE + Index K layer norm + RoPE
+        #         + Init topk indices
         q_c, kv_c = fused_norm_rope(
             positions,
             # Q RMS norm
@@ -185,6 +186,8 @@ class MonolithicDecoderLayer(nn.Module):
             self.attn.indexer_k_norm.bias,
             self.attn.rms_norm_eps,
             self.attn.indexer_rope_emb.cos_sin_cache,
+            # Top k indices
+            self.attn.topk_indices_buffer,
         )
 
         # Step 3. q_c -> q
