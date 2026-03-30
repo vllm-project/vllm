@@ -1980,8 +1980,12 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if model_config is not None and model_config.has_inner_state:
-            unsupported.append("hybrid/mamba models")
+        if (
+            model_config is not None
+            and model_config.has_inner_state
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            unsupported.append("hybrid/mamba models with align cache mode")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
