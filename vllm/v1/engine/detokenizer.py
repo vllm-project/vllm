@@ -353,8 +353,6 @@ class StopChecker:
         if (rp := self.reasoning_parser) is not None:
             # Reasoning not ended => do not check stop strings.
             if not self.reasoning_ended:
-                print("token_ids", len(token_ids))
-                print("new_token_ids", len(new_token_ids))
                 self.reasoning_ended = rp.is_reasoning_end_streaming(
                     token_ids, new_token_ids
                 )
