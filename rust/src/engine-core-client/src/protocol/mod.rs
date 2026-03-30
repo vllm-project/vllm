@@ -1,3 +1,4 @@
+use std::any::type_name;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
@@ -466,10 +467,19 @@ pub fn decode_msgpack<T>(bytes: &[u8]) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    Ok(rmp_serde::from_slice(bytes)?)
+    fn decode_value_preview(bytes: &[u8]) -> String {
+        match decode_value(bytes) {
+            Ok(value) => format!("{value}"),
+            Err(error) => format!("<value decode failed: {error}>"),
+        }
+    }
+
+    rmp_serde::from_slice(bytes).map_err(|error| Error::DecodeWithMessage {
+        target_type: type_name::<T>(),
+        message: format!("{error}; value fallback: {}", decode_value_preview(bytes)),
+    })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn decode_value(bytes: &[u8]) -> Result<Value> {
     Ok(rmpv::decode::read_value(&mut Cursor::new(bytes))?)
 }
@@ -632,5 +642,15 @@ mod tests {
         }
         .into_typed_result::<()>("sleep")
         .unwrap();
+    }
+
+    #[test]
+    fn decode_msgpack_includes_type_name_and_value_fallback() {
+        let error = decode_msgpack::<u64>(
+            &rmp_serde::to_vec_named(&BTreeMap::from([("status", "READY")])).unwrap(),
+        )
+        .unwrap_err();
+
+        expect_test::expect![[r#"messagepack decode failed for u64: wrong msgpack marker FixMap(1); value fallback: {"status": "READY"}"#]].assert_eq(&error.to_report_string());
     }
 }

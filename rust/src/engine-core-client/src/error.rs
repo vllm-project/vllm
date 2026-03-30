@@ -13,6 +13,11 @@ pub enum Error {
     Encode(#[from] rmp_serde::encode::Error),
     #[error("messagepack decode failed")]
     Decode(#[from] rmp_serde::decode::Error),
+    #[error("messagepack decode failed for {target_type}: {message}")]
+    DecodeWithMessage {
+        target_type: &'static str,
+        message: String,
+    },
     #[error("messagepack value decode failed")]
     ValueDecode(#[from] rmpv::decode::Error),
     #[error("messagepack ext value encode failed")]

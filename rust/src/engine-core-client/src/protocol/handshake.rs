@@ -21,7 +21,7 @@ pub struct ReadyMessage {
     #[serde(default)]
     pub dp_stats_address: Option<String>,
     #[serde(default)]
-    pub parallel_config_hash: Option<u64>,
+    pub parallel_config_hash: Option<String>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

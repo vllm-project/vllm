@@ -17,6 +17,7 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
 
 use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
+use crate::protocol::stats::SchedulerStats;
 use crate::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
     EngineCoreRequestType, EngineCoreSamplingParams, MaybeWireLogprobs, UtilityOutput,
@@ -295,7 +296,7 @@ fn is_engine_core_dead(error: &Error) -> bool {
 
 fn is_decode_error(error: &Error) -> bool {
     match error {
-        Error::Decode(_) | Error::ValueDecodeExt { .. } => true,
+        Error::Decode(_) | Error::DecodeWithMessage { .. } | Error::ValueDecodeExt { .. } => true,
         Error::Shared(error) => is_decode_error(error),
         _ => false,
     }
@@ -694,6 +695,95 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let _ = shutdown1_tx.send(());
     engine0_task.await.unwrap();
     engine1_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinator_accepts_stats_only_outputs() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let engine_task = tokio::spawn(async move {
+        let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+        let mut coordinator = engine
+            .coordinator
+            .take()
+            .expect("coordinator sockets should be present");
+
+        let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+        assert_eq!((wave, exclude_engine), (0, 0));
+
+        send_outputs(
+            &mut coordinator.output_push,
+            EngineCoreOutputs {
+                engine_index: 0,
+                scheduler_stats: Some(Box::new(SchedulerStats {
+                    num_running_reqs: 1,
+                    current_wave: 0,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let add = recv_engine_message(&mut engine.dealer).await;
+        assert_eq!(add[0].as_ref(), &[0x00]);
+        let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+        assert_eq!(request.request_id, "req-stats");
+
+        send_outputs(
+            &mut engine.push,
+            EngineCoreOutputs {
+                engine_index: 0,
+                outputs: vec![request_output(
+                    "req-stats",
+                    vec![],
+                    Some(EngineCoreFinishReason::Length),
+                )],
+                finished_requests: Some(BTreeSet::from(["req-stats".to_string()])),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let _ = shutdown_rx.await;
+    });
+
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address: ipc.handshake_endpoint(),
+            engine_count: 1,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+            enable_inproc_coordinator: true,
+        },
+        &ipc,
+    )
+    .await;
+
+    let mut stream = client
+        .call(sample_request_with_id("req-stats"))
+        .await
+        .unwrap();
+    let final_output = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_output.request_id, "req-stats");
+    assert_eq!(
+        final_output.finish_reason,
+        Some(EngineCoreFinishReason::Length)
+    );
+    assert!(client.is_healthy());
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
     client.shutdown().await.unwrap();
 }
 
