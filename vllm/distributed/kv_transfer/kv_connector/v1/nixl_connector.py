@@ -55,9 +55,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_fa_transfer_config import (
     HeteroTPTransferConfig,
     create_transfer_config,
-    fa_divisor,
-    should_skip_fa,
-    uses_split_handles,
 )
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -2103,7 +2100,7 @@ class NixlConnectorWorker:
         )
 
         ### (Optional) Register local agent memory regions. MLA is not split.
-        cfg = self._transfer_configs.get(engine_id)
+        transfer_cfg = self._transfer_configs.get(engine_id)
         if (
             tp_ratio < 0
             and not self.use_mla
@@ -2112,19 +2109,20 @@ class NixlConnectorWorker:
             abs_tp = -tp_ratio
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
-            if uses_split_handles(cfg):
+            if transfer_cfg is not None and transfer_cfg.needs_split_handles:
                 # ---- HMA path: FA and Mamba use different split factors ----
                 # Replaces old uniform-divide loop below.  FA entries are
                 # divided by physical_fa_num_reads, Mamba by abs_tp.
-                assert cfg is not None  # for type narrowing
-                for p_idx, p_rank in enumerate(cfg.transfer_targets):
+                for p_idx, p_rank in enumerate(transfer_cfg.transfer_targets):
                     handle_data: list[tuple[int, int, int]] = []
-                    _skip = cfg.should_skip_fa(p_rank)
-                    fa_slot = cfg.fa_head_slot(p_rank) if not _skip else 0
+                    _skip = transfer_cfg.should_skip_fa(p_rank)
+                    fa_slot = transfer_cfg.fa_head_slot(p_rank) if not _skip else 0
 
                     for j, (addr, local_len, tp) in enumerate(self.src_blocks_data):
                         if j < self.num_descs:
-                            fa_chunk = local_len // max(1, cfg.physical_fa_num_reads)
+                            fa_chunk = local_len // max(
+                                1, transfer_cfg.physical_fa_num_reads
+                            )
                             handle_data.append(
                                 (addr + fa_slot * fa_chunk, fa_chunk, tp)
                             )
@@ -2143,10 +2141,10 @@ class NixlConnectorWorker:
                 logger.info(
                     "HMA split handles: targets=%s, fa_reads=%s, "
                     "fa_entry=%s, mamba_reads=%s, num_descs=%s",
-                    cfg.transfer_targets,
-                    cfg.physical_fa_num_reads,
-                    cfg.fa_entry_size,
-                    cfg.mamba_num_reads,
+                    transfer_cfg.transfer_targets,
+                    transfer_cfg.physical_fa_num_reads,
+                    transfer_cfg.fa_entry_size,
+                    transfer_cfg.mamba_num_reads,
                     self.num_descs,
                 )
             else:
@@ -2189,17 +2187,20 @@ class NixlConnectorWorker:
                 if tp_ratio < 0 and not self.use_mla:
                     # OLD: local_block_len = local_block_len // (-tp_ratio)
                     # NEW: FA divides by physical_fa_num_reads, mamba by abs_tp.
-                    local_block_len = local_block_len // fa_divisor(
-                        cfg, -tp_ratio, is_mamba=mamba
+                    divisor = (
+                        transfer_cfg.physical_fa_num_reads
+                        if transfer_cfg is not None and not mamba
+                        else -tp_ratio
                     )
+                    local_block_len = local_block_len // divisor
                 # OLD: rank_offset = (
                 #     self.tp_rank % tp_ratio * remote_kv_block_len
                 #     if indexes_into_remote else 0
                 # )
                 # NEW: delegate to HeteroTPTransferConfig which handles
                 # D-replicated case (D_TP > K) with head-based offset.
-                if cfg is not None:
-                    rank_offset = cfg.fa_rank_offset(remote_kv_block_len)
+                if transfer_cfg is not None:
+                    rank_offset = transfer_cfg.fa_rank_offset(remote_kv_block_len)
                 elif indexes_into_remote:
                     rank_offset = self.tp_rank % tp_ratio * remote_kv_block_len
                 else:
@@ -2236,9 +2237,12 @@ class NixlConnectorWorker:
                     if tp_ratio < 0 and not self.use_mla:
                         # OLD: second_split = second_split // (-tp_ratio)
                         # NEW: FA divides by physical_fa_num_reads, mamba by abs_tp.
-                        second_split = second_split // fa_divisor(
-                            cfg, -tp_ratio, is_mamba=mamba
+                        divisor = (
+                            transfer_cfg.physical_fa_num_reads
+                            if transfer_cfg is not None and not mamba
+                            else -tp_ratio
                         )
+                        second_split = second_split // divisor
                     for block_id in range(num_blocks):
                         block_offset = block_id * page_size
                         addr = base_addr + block_offset + rank_offset
@@ -2818,8 +2822,10 @@ class NixlConnectorWorker:
 
             # For HMA models: P ranks outside fa_read_targets only
             # contribute mamba data.  Empty FA groups so NIXL skips them.
-            hma_cfg = self._transfer_configs.get(meta.remote.engine_id)
-            skip_fa = should_skip_fa(hma_cfg, remote_rank)
+            transfer_cfg = self._transfer_configs.get(meta.remote.engine_id)
+            skip_fa = transfer_cfg is not None and transfer_cfg.should_skip_fa(
+                remote_rank
+            )
             if skip_fa:
                 num_groups = len(meta.local_physical_block_ids)
                 local_ids: BlockIds = [

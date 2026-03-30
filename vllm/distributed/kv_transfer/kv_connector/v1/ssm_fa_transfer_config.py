@@ -368,39 +368,3 @@ def create_transfer_config(
     )
     logger.info("Created %s", cfg.describe())
     return cfg
-
-
-# ---------------------------------------------------------------------------
-# Convenience helpers (hide None-checks from caller)
-# ---------------------------------------------------------------------------
-
-
-def uses_split_handles(
-    cfg: HeteroTPTransferConfig | None,
-) -> bool:
-    """True when HMA-aware per-P-rank split handles are needed."""
-    return cfg is not None and cfg.needs_split_handles
-
-
-def should_skip_fa(
-    cfg: HeteroTPTransferConfig | None,
-    p_rank: int,
-) -> bool:
-    """True when this P rank contributes only mamba data (no FA)."""
-    return cfg is not None and cfg.should_skip_fa(p_rank)
-
-
-def fa_divisor(
-    cfg: HeteroTPTransferConfig | None,
-    abs_tp: int,
-    *,
-    is_mamba: bool,
-) -> int:
-    """Return the correct divisor for local_block_len in register_remote_blocks.
-
-    FA entries divide by physical_fa_num_reads (may differ from abs_tp
-    when P is replicated).  Mamba entries always divide by abs_tp.
-    """
-    if cfg is not None and not is_mamba:
-        return cfg.physical_fa_num_reads
-    return abs_tp
