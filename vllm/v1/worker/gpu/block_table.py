@@ -14,15 +14,18 @@ class BlockTables:
     def __init__(
         self,
         block_sizes: list[int],
+        kernel_block_sizes: list[int],
         max_num_reqs: int,
         max_num_batched_tokens: int,
         max_model_len: int,
         device: torch.device,
+        max_num_blocks: list[int] | None = None,
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ):
         self.block_sizes = block_sizes
+        self.kernel_block_sizes = kernel_block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_model_len = max_model_len
@@ -32,17 +35,39 @@ class BlockTables:
         self.cp_rank = cp_rank
         self.cp_interleave = cp_interleave
 
+        if len(self.kernel_block_sizes) != len(self.block_sizes):
+            raise ValueError(
+                f"kernel_block_sizes length ({len(self.kernel_block_sizes)}) "
+                f"must match block_sizes length ({len(self.block_sizes)})"
+            )
+
         self.num_kv_cache_groups = len(self.block_sizes)
+        if max_num_blocks is None:
+            max_num_blocks = [
+                cdiv(self.max_model_len, block_size * self.cp_size)
+                for block_size in self.block_sizes
+            ]
+        if len(max_num_blocks) != self.num_kv_cache_groups:
+            raise ValueError(
+                f"max_num_blocks length ({len(max_num_blocks)}) "
+                f"must match block_sizes length ({len(self.block_sizes)})"
+            )
+
+        self.blocks_per_kv_block: list[int] = []
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
             block_size = self.block_sizes[i]
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
+            kernel_block_size = self.kernel_block_sizes[i]
+            if block_size % kernel_block_size != 0:
+                raise ValueError(
+                    f"kernel_block_size {kernel_block_size} must divide "
+                    f"kv_manager_block_size {block_size} evenly"
+                )
+            blocks_per_kv_block = block_size // kernel_block_size
+            self.blocks_per_kv_block.append(blocks_per_kv_block)
             block_table = StagedWriteTensor(
-                (self.max_num_reqs, max_num_blocks),
+                (self.max_num_reqs, max_num_blocks[i] * blocks_per_kv_block),
                 dtype=torch.int32,
                 device=device,
             )
@@ -55,9 +80,14 @@ class BlockTables:
             dtype=torch.int64,
             device=self.device,
         )
+        self.max_num_blocks_per_group = torch.tensor(
+            [b.gpu.shape[1] for b in self.block_tables],
+            dtype=torch.int32,
+            device=self.device,
+        )
 
         self.block_sizes_tensor = torch.tensor(
-            self.block_sizes, dtype=torch.int32, device=self.device
+            self.kernel_block_sizes, dtype=torch.int32, device=self.device
         )
         self.num_blocks = UvaBackedTensor(
             (self.num_kv_cache_groups, self.max_num_reqs),
@@ -92,9 +122,24 @@ class BlockTables:
     ) -> None:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
-            block_ids = new_block_ids[i]
+            block_ids = self._map_to_kernel_blocks(i, new_block_ids[i])
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = start + len(block_ids)
+
+    def _map_to_kernel_blocks(
+        self,
+        group_id: int,
+        kv_manager_block_ids: list[int],
+    ) -> list[int]:
+        blocks_per_kv_block = self.blocks_per_kv_block[group_id]
+        if blocks_per_kv_block == 1 or not kv_manager_block_ids:
+            return kv_manager_block_ids
+
+        return [
+            block_id * blocks_per_kv_block + offset
+            for block_id in kv_manager_block_ids
+            for offset in range(blocks_per_kv_block)
+        ]
 
     def apply_staged_writes(self) -> None:
         # TODO(woosuk): This can be inefficient since it launches one kernel per
@@ -115,10 +160,10 @@ class BlockTables:
             self.block_table_ptrs,
             self.input_block_table_ptrs,
             self.block_table_strides,
+            self.max_num_blocks_per_group,
             self.num_blocks.gpu,
             self.num_blocks.gpu.stride(0),
             num_reqs,
-            self.input_block_tables[0].shape[1],  # max_num_blocks
             BLOCK_SIZE=1024,  # type: ignore
         )
         return tuple(bt[:num_reqs_padded] for bt in self.input_block_tables)
@@ -175,10 +220,10 @@ def _gather_block_tables_kernel(
     src_block_table_ptrs,  # [num_kv_cache_groups]
     dst_block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
+    max_num_blocks_ptr,  # [num_kv_cache_groups]
     num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
     num_blocks_stride,
     num_reqs,  # actual number of requests (for padding)
-    max_num_blocks,  # stride for zeroing padded rows
     BLOCK_SIZE: tl.constexpr,
 ):
     # kv cache group id
@@ -186,6 +231,7 @@ def _gather_block_tables_kernel(
     batch_idx = tl.program_id(1)
 
     stride = tl.load(block_table_strides + group_id)
+    max_num_blocks = tl.load(max_num_blocks_ptr + group_id)
     dst_block_table_ptr = _load_ptr(dst_block_table_ptrs + group_id, tl.int32)
     dst_row_ptr = dst_block_table_ptr + batch_idx * stride
 
