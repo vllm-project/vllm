@@ -305,11 +305,6 @@ class SimpleCPUOffloadScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> SimpleCPUOffloadMetadata:
-        # Preempted reqs may have pending loads whose GPU/CPU blocks are still touched
-        for req_id in scheduler_output.preempted_req_ids or ():
-            if req_id in self._reqs_to_load:
-                self._cleanup_load_request(req_id)
-
         # --- Stores ---
         store_event = -1
         store_gpu, store_cpu, store_req_ids = self.prepare_store_specs(scheduler_output)
