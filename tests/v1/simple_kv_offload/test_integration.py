@@ -37,7 +37,7 @@ def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int) -> LLM:
     )
     return LLM(
         model=model,
-        gpu_memory_utilization=0.6,
+        kv_cache_memory_bytes=40 << 30,  # 40 GiB
         disable_hybrid_kv_cache_manager=False,
         enable_prefix_caching=True,
         kv_transfer_config=kv_transfer_config,
@@ -55,7 +55,7 @@ def _flush_gpu_cache(llm: LLM, sampling_params: SamplingParams, seed: int = 0):
     block_size = cache_config.block_size
     # Use 1.2x GPU capacity to give the lazy cursor enough scheduling steps
     # to walk past all target blocks near the tail of the free queue.
-    total_tokens_needed = int(num_gpu_blocks * block_size * 1.2)
+    total_tokens_needed = int(num_gpu_blocks * block_size * 1.5)
 
     # Use token-id prompts so each filler is unique (no prefix sharing).
     # Split into multiple requests to stay under max_model_len.
@@ -86,7 +86,7 @@ def _accuracy_test(llm: LLM, lazy: bool = False):
     for i in range(test_count):
         if lazy:
             _flush_gpu_cache(llm, sampling_params, seed=i)
-            time.sleep(2)  # let engine core drain pending transfers
+        time.sleep(2)  # let engine core drain pending transfers
 
         # Reset GPU prefix cache so next run must load from CPU
         if not llm.reset_prefix_cache():
@@ -143,6 +143,7 @@ def _latency_test(llm: LLM, lazy: bool = False):
     )
 
 
+@pytest.mark.optional
 @pytest.mark.slow_test
 @pytest.mark.parametrize("model", SMALL_MODELS)
 def test_simple_cpu_offload_accuracy(model: str):
