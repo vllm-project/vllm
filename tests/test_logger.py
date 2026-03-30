@@ -472,10 +472,33 @@ def test_request_logger_log_outputs_integration():
 
         assert "Received request %s" in input_call[0]
         assert input_call[1] == "test-integration"
-        assert "Test prompt" in input_call[4]
+        # Prompts at INFO require explicit --enable-log-request-prompts (security).
+        assert input_call[4] == ""
 
         assert "Generated response %s%s" in output_call[0]
         assert output_call[1] == "test-integration"
+
+
+def test_request_logger_log_inputs_prompt_at_info_when_opt_in():
+    mock_logger = MagicMock()
+
+    with patch("vllm.entrypoints.logger.logger", mock_logger):
+        request_logger = RequestLogger(
+            max_log_len=None, log_prompts_at_info=True
+        )
+        request_logger.log_inputs(
+            request_id="test-prompt-info",
+            prompt="Hello",
+            prompt_token_ids=None,
+            prompt_embeds=None,
+            params=None,
+            lora_request=None,
+        )
+
+        mock_logger.info.assert_called_once()
+        input_call = mock_logger.info.call_args[0]
+        assert input_call[1] == "test-prompt-info"
+        assert "Hello" in input_call[4]
 
 
 def test_streaming_complete_logs_full_text_content():
