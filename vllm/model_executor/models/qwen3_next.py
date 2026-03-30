@@ -266,14 +266,12 @@ class Qwen3NextAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **(
-                {
-                    "layer_idx": extract_layer_index(prefix),
-                    "dual_chunk_attention_config": self.dual_chunk_attention_config,
-                }
-                if self.dual_chunk_attention_config
-                else {}
-            ),
+            **{
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": self.dual_chunk_attention_config,
+            }
+            if self.dual_chunk_attention_config
+            else {},
         )
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
