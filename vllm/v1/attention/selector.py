@@ -29,6 +29,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_mm_prefix: bool = False
     use_per_head_quant_scales: bool = False
     attn_type: str = AttentionType.DECODER
+    model_architectures: tuple[str, ...] = ()
 
     def __repr__(self):
         return (
@@ -41,8 +42,14 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_sparse={self.use_sparse}, "
             f"use_mm_prefix={self.use_mm_prefix}, "
             f"use_per_head_quant_scales={self.use_per_head_quant_scales}, "
-            f"attn_type={self.attn_type})"
+            f"attn_type={self.attn_type}, "
+            f"model_architectures={self.model_architectures})"
         )
+
+    def validation_kwargs(self) -> dict[str, object]:
+        config = self._asdict()
+        config.pop("model_architectures", None)
+        return config
 
 
 def get_attn_backend(
@@ -69,12 +76,23 @@ def get_attn_backend(
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
+    model_config = vllm_config.model_config
 
     cache_config = vllm_config.cache_config
     if cache_config is not None and cache_config.user_specified_block_size:
         block_size = cache_config.block_size
     else:
         block_size = None
+
+    model_architectures: list[str] = []
+    if model_config is not None:
+        model_architectures.extend(model_config.architectures or [])
+        resolved_architecture = model_config.architecture
+        if (
+            resolved_architecture is not None
+            and resolved_architecture not in model_architectures
+        ):
+            model_architectures.append(resolved_architecture)
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
@@ -87,6 +105,7 @@ def get_attn_backend(
         use_mm_prefix=use_mm_prefix,
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
+        model_architectures=tuple(model_architectures),
     )
 
     return _cached_get_attn_backend(
