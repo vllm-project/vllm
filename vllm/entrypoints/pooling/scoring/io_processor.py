@@ -40,14 +40,10 @@ class ScoringIOProcessor(PoolingIOProcessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        tokenizer = self.renderer.get_tokenizer()
-        if is_mistral_tokenizer(tokenizer):
-            raise ValueError("MistralTokenizer not supported for cross-encoding")
-
-        self.tokenizer = tokenizer
+        self.tokenizer = self.renderer.get_tokenizer()
         self.architecture = self.model_config.architecture
         self.is_multimodal_model = self.model_config.is_multimodal_model
-        self.pad_token_id = tokenizer.pad_token_id
+        self.pad_token_id = self.tokenizer.pad_token_id
 
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
@@ -83,7 +79,15 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
         scoring_data = self.valid_inputs(data_1, data_2)
         tok_params = request.build_tok_params(self.model_config)
-        engine_inputs = self._pre_process(scoring_data, tok_params)
+        engine_inputs = self._pre_process(
+            scoring_data,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
 
         ctx.engine_inputs = engine_inputs
         ctx.intermediates = len(scoring_data.data_1)
@@ -126,6 +130,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         self,
         scoring_data: ScoringData,
         tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
         data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
         data_2 = score_data_to_prompts(
@@ -133,7 +138,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         )
 
         return self._preprocess_completion_offline(
-            prompts=data_1 + data_2, tok_params=tok_params
+            prompts=data_1 + data_2, tok_params=tok_params, prompt_extras=prompt_extras
         )
 
     def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
@@ -215,6 +220,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        if is_mistral_tokenizer(self.tokenizer):
+            raise ValueError("MistralTokenizer not supported for cross-encoding")
+
         from vllm.model_executor.model_loader import get_model_cls
         from vllm.model_executor.models.interfaces import supports_score_template
 
@@ -241,8 +249,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         scoring_data = self.valid_inputs(data_1, data_2)
         tok_params = request.build_tok_params(self.model_config)
         pooling_params = self.create_pooling_params(request)
+
         engine_inputs, pooling_params_list = self._pre_process(
-            scoring_data, tok_params, pooling_params, chat_template=self.chat_template
+            scoring_data,
+            tok_params,
+            pooling_params,
+            chat_template=self.chat_template,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
         )
 
         ctx.engine_inputs = engine_inputs
@@ -273,7 +290,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tok_params: TokenizeParams,
         pooling_params: PoolingParams | None,
         chat_template: str | None = None,
+        prompt_extras: dict[str, Any] | None = None,
     ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
+        # todo: support prompt_extras
         arrival_time = time.time()
 
         data_1 = scoring_data.data_1

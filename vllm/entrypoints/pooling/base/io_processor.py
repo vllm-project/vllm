@@ -208,6 +208,7 @@ class PoolingIOProcessor:
         self,
         prompts: PromptType | Sequence[PromptType],
         tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
         prompts = prompt_to_seq(prompts)
         parsed_prompts = [
@@ -220,8 +221,7 @@ class PoolingIOProcessor:
         ]
 
         return self.renderer.render_cmpl(
-            parsed_prompts,
-            tok_params,
+            parsed_prompts, tok_params, prompt_extras=prompt_extras
         )
 
     def _validate_chat_template(

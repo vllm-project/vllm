@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.pooling.utils import enable_scoring_api
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -21,23 +22,6 @@ else:
     SupportedTask = object
 
 logger = init_logger(__name__)
-
-
-def enable_scoring_api(
-    supported_tasks: tuple["SupportedTask", ...],
-    model_config: ModelConfig | None = None,
-) -> bool:
-    if any(t in supported_tasks for t in ("embed", "token_embed")):
-        return True
-
-    if model_config is not None and "classify" in supported_tasks:
-        num_labels = getattr(model_config.hf_config, "num_labels", 0)
-        if num_labels != 1:
-            logger.debug_once("Scoring API is only enabled for num_labels == 1.")
-            return False
-        return True
-
-    return False
 
 
 def register_pooling_api_routers(
