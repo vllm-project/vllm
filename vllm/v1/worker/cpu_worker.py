@@ -108,6 +108,15 @@ class CPUWorker(Worker):
             if ret:
                 logger.info(ret)
 
+        # After the thread binding, changing thread num is not allowed
+        def skip_set_num_threads(x: int):
+            logger.warning(
+                "CPU backend doesn't allow to use "
+                "`torch.set_num_threads` after the thread binding, skip it."
+            )
+
+        torch.set_num_threads = skip_set_num_threads
+
         # Note: unique identifier for creating allreduce shared memory
         os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
         # Initialize the distributed environment.
