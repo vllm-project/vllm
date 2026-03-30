@@ -108,10 +108,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> FusedMoEPrepareAndFinalizeModular | None:
-        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
-            return None
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -129,6 +126,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 quant_config=self.moe_quant_config,
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+            )
+        elif (
+            self.unquantized_backend == UnquantizedMoeBackend.AITER
+            and rocm_aiter_ops.is_fused_moe_enabled()
+        ):
+            from .rocm_aiter_fused_moe import AiterExperts
+
+            logger.debug("AiterExperts %s", self.moe)
+            return AiterExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
