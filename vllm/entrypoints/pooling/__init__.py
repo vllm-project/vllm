@@ -33,7 +33,7 @@ def enable_scoring_api(
     if model_config is not None and "classify" in supported_tasks:
         num_labels = getattr(model_config.hf_config, "num_labels", 0)
         if num_labels != 1:
-            logger.debug_once("Score API is only enabled for num_labels == 1.")
+            logger.debug_once("Scoring API is only enabled for num_labels == 1.")
             return False
         return True
 

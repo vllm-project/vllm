@@ -213,25 +213,6 @@ def parse_score_data(
     return prompt_1, prompt_2, mm_items, mm_uuids
 
 
-from vllm.model_executor.models.interfaces import supports_score_template
-
-
-def _apply_model_score_template(
-    model_config: ModelConfig, prompt_1: str, prompt_2: str
-) -> str:
-    # NOTE(Simon): lazy import to avoid bring in all dependencies (e.g. gguf)
-    from vllm.model_executor.model_loader import get_model_cls
-
-    model = get_model_cls(model_config)
-    if supports_score_template(model):
-        full_prompt = model.get_score_template(prompt_1, prompt_2)
-        if full_prompt is None:
-            raise ValueError("Get empty score template from model")
-        return full_prompt
-
-    raise ValueError(f"Unsupported model architecture: {model_config.architecture}")
-
-
 def compress_token_type_ids(token_type_ids: list[int]) -> int:
     """
     Return position of the first 1 or the length of the list

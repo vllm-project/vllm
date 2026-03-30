@@ -22,7 +22,6 @@ from ...chat_utils import ChatTemplateResolutionError
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreData, ScoreInputs, ScoringData
 from .utils import (
-    _apply_model_score_template,
     compress_token_type_ids,
     compute_maxsim_score,
     parse_score_data,
@@ -325,9 +324,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         def default_tokenizer_encode():
             if self.supports_score_template:
-                full_prompt = _apply_model_score_template(
-                    model_config, prompt_1, prompt_2
-                )
+                assert self.model is not None
+                full_prompt = self.model.get_score_template(prompt_1, prompt_2)
+                if full_prompt is None:
+                    raise ValueError("Get empty score template from model")
+
                 prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             else:
                 if self.use_sep_token:
