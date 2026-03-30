@@ -325,6 +325,7 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         chunk_size = self.mamba_chunk_size
+        assert chunk_size is not None
         end_position = num_computed_tokens + num_new_tokens
         aligned_end = (end_position // chunk_size) * chunk_size
         if aligned_end <= num_computed_tokens:
