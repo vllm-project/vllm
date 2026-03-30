@@ -77,6 +77,10 @@ EAGLE3_MODEL_CONFIGS = [
         id="qwen3-30b-moe-vl-eagle3",
         marks=[
             pytest.mark.slow_test,
+            pytest.mark.skipif(
+                current_platform.is_xpu(),
+                reason="The tests are skipped on xpu platform.",
+            ),
         ],
         rtol=0.15,  # Higher tolerance due to small absolute values at position 2
     ),
@@ -90,7 +94,7 @@ DEFAULT_MAX_MODEL_LEN = 16384
 DEFAULT_RTOL = 0.05
 
 # TP sizes to test
-TP_SIZES = [1, 2, 4]
+TP_SIZES = [2, 4] if current_platform.is_xpu() else [1, 2, 4]
 
 
 # Backends excluded from testing due to significantly different behavior
@@ -141,7 +145,7 @@ def get_attention_backend_params() -> list[str]:
 
 
 def get_tp_size_params() -> list[pytest.param]:
-    num_gpus = torch.accelerator.device_count() if torch.cuda.is_available() else 1
+    num_gpus = current_platform.device_count() or 1
     return [pytest.param(tp, id=f"tp{tp}") for tp in TP_SIZES if tp <= num_gpus]
 
 
@@ -165,6 +169,8 @@ def get_mt_bench_prompts(
         no_stream=True,
         disable_shuffle=False,
         skip_chat_template=False,
+        trust_remote_code=True,
+        enable_multimodal_chat=False,
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
@@ -208,10 +214,10 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
     }
 
 
-@large_gpu_mark(min_gb=40)
+@large_gpu_mark(min_gb=20 if current_platform.is_xpu() else 40)
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="This test is only supported on CUDA platform.",
+    not current_platform.is_cuda() and not current_platform.is_xpu(),
+    reason="This test is only supported on CUDA/XPU platform.",
 )
 @pytest.mark.parametrize(
     "model_config",
@@ -250,6 +256,7 @@ def test_eagle3_acceptance_length(
             gpu_memory_utilization=0.7,
             disable_log_stats=False,
             max_model_len=DEFAULT_MAX_MODEL_LEN,
+            enforce_eager=bool(current_platform.is_xpu()),
         ) as vllm_runner:
             tokenizer = vllm_runner.llm.get_tokenizer()
             prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)

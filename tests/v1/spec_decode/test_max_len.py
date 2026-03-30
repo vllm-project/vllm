@@ -38,7 +38,11 @@ def test_ngram_max_len(num_speculative_tokens: int):
 def test_eagle_max_len(
     monkeypatch: pytest.MonkeyPatch, num_speculative_tokens: int, attn_backend: str
 ):
-    if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
+    if (
+        attn_backend == "TRITON_ATTN"
+        and not current_platform.is_rocm()
+        and not current_platform.is_xpu()
+    ):
         pytest.skip(
             "TRITON_ATTN does not support "
             "multi-token eagle spec decode on current platform"
