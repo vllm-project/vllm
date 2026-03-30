@@ -8,6 +8,12 @@ import msgspec
 import pytest
 import zmq
 
+from tests.utils import create_new_process_for_each_test
+from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
+from vllm.usage.usage_lib import UsageContext
+from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.utils import (
     STARTUP_FAILURE,
     STARTUP_HELLO,
@@ -19,6 +25,16 @@ from vllm.v1.engine.utils import (
     StartupErrorPayload,
     wait_for_engine_startup,
 )
+from vllm.v1.executor.abstract import Executor
+from vllm.v1.worker.worker_base import WorkerBase
+
+
+class FailingStartupWorker(WorkerBase):
+    def init_device(self) -> None:
+        self.device = None
+
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        raise RuntimeError("simulated worker startup failure")
 
 
 class FakeHandshakeSocket:
@@ -257,3 +273,52 @@ def test_wait_for_engine_startup_fails_when_ready_races_with_dead_process(
     message = str(exc_info.value)
     assert "Engine core initialization failed." in message
     assert "Failed core proc(s): EngineCore(pid=1234, exitcode=1)" in message
+
+
+@create_new_process_for_each_test("spawn")
+def test_engine_core_client_surfaces_worker_startup_failure():
+    """End-to-end regression: a worker startup exception must propagate
+    through WorkerProc -> ready pipe -> MultiprocExecutor -> EngineCoreProc
+    -> handshake -> EngineCoreClient.make_client() with the structured
+    error format intact.
+
+    Note: VLLM_WORKER_MULTIPROC_METHOD is intentionally not set here.
+    The error propagation path is identical for fork and spawn workers,
+    and the decorator already controls how the *test* process is spawned.
+    """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("V1 multiprocessing startup is only supported on CUDA-alike.")
+
+    model_name = "facebook/opt-125m"
+    engine_args = EngineArgs(
+        model=model_name,
+        distributed_executor_backend="mp",
+        worker_cls="tests.v1.engine.test_startup_error_reporting."
+        "FailingStartupWorker",
+        enforce_eager=True,
+    )
+    try:
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
+    except OSError:
+        pytest.skip(f"{model_name} is unavailable in this environment.")
+
+    executor_class = Executor.get_class(vllm_config)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        with set_default_torch_num_threads(1):
+            EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=False,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=False,
+            )
+
+    message = str(exc_info.value)
+    assert "Engine core initialization failed." in message
+    assert "Failed core proc(s): VllmWorker-0(pid=" in message
+    assert "Source: VllmWorker-0 (rank=0, pid=" in message
+    assert "Root cause: RuntimeError: simulated worker startup failure" in message
+    assert "Child traceback:" in message
