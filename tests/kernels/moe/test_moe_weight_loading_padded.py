@@ -266,13 +266,11 @@ class TestWeightLoadingWithPaddedHiddenSize:
         original_packed = 2688  # original packed size
 
         # Build a param that looks like a BnB 4-bit MoE weight.
-        param_data = torch.zeros(num_experts, padded_packed, 1,
-                                 dtype=torch.uint8)
+        param_data = torch.zeros(num_experts, padded_packed, 1, dtype=torch.uint8)
         param = torch.nn.Parameter(param_data, requires_grad=False)
         param.use_bitsandbytes_4bit = True
 
-        loaded_weight = torch.randint(
-            0, 255, (original_packed, 1), dtype=torch.uint8)
+        loaded_weight = torch.randint(0, 255, (original_packed, 1), dtype=torch.uint8)
 
         # Minimal FusedMoE mock so weight_loader reaches the BnB path.
         moe = MagicMock(spec=FusedMoE)
@@ -285,7 +283,10 @@ class TestWeightLoadingWithPaddedHiddenSize:
         # Call the real weight_loader (unbound) with our mock as self.
         with pytest.raises(ValueError, match="BitsAndBytes"):
             FusedMoE.weight_loader(
-                moe, param, loaded_weight,
-                weight_name="w2", shard_id="w2",
+                moe,
+                param,
+                loaded_weight,
+                weight_name="w2",
+                shard_id="w2",
                 expert_id=0,
             )
