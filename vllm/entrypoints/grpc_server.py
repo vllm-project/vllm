@@ -20,7 +20,6 @@ Example:
 
 import argparse
 import asyncio
-import logging
 import signal
 import sys
 import time
@@ -48,14 +47,6 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
-
-# Attach the smg_grpc_servicer logger to the vllm logging hierarchy so its
-# INFO/DEBUG messages use the same handler and format as vllm loggers.
-_vllm_logger = logging.getLogger("vllm")
-_servicer_logger = logging.getLogger("smg_grpc_servicer")
-_servicer_logger.handlers = _vllm_logger.handlers
-_servicer_logger.setLevel(_vllm_logger.level)
-_servicer_logger.propagate = False
 
 
 async def serve_grpc(args: argparse.Namespace):
