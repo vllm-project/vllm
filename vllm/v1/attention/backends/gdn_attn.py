@@ -122,9 +122,7 @@ class GDNAttentionMetadataBuilder(
 
         all_prefix_caching_enabled = vllm_config.cache_config.mamba_cache_mode == "all"
 
-        # 64 is a hardcoded value in the FLA GDN kernel.
-        # https://github.com/fla-org/flash-linear-attention/blob/2e7336262c11f8bc6cd6a94b1eb5ee353ae8b4cd/fla/ops/common/chunk_delta_h.py#L439  # noqa: E501
-        self.chunk_size = 64
+        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         if all_prefix_caching_enabled and (
             kv_cache_spec.block_size % self.chunk_size != 0
         ):
