@@ -208,7 +208,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -4943,28 +4943,24 @@ class GPUModelRunner(
 
         # begin loading weights
         logger.info_once("Reloading weights inplace...", scope="local")
-        load_device = (
-            self.vllm_config.load_config.device or self.vllm_config.device_config.device
-        )
-        with torch.device(load_device):
-            if is_checkpoint_format:
-                # load weights from checkpoint/ original model format
-                initialize_layerwise_reload(model)
-                loaded_weights = model.load_weights(weights_iterator)
-                finalize_layerwise_reload(model, self.model_config)
+        if is_checkpoint_format:
+            # load weights from checkpoint/ original model format
+            initialize_layerwise_reload(model)
+            loaded_weights = model.load_weights(weights_iterator)
+            finalize_layerwise_reload(model, self.model_config)
 
-            else:
-                # load weights from kernel format
-                logger.warning_once(
-                    "Reloading with `is_checkpoint_format=True` requires that "
-                    "weights be in kernel format and already sharded",
-                    scope="local",
-                )
-                loaded_weights = set()
-                for name, loaded_weight in weights_iterator:
-                    param = model.get_parameter(name)  # TODO: buffers?
-                    param.copy_(loaded_weight)
-                    loaded_weights.add(name)
+        else:
+            # load weights from kernel format
+            logger.warning_once(
+                "Reloading with `is_checkpoint_format=True` requires that "
+                "weights be in kernel format and already sharded",
+                scope="local",
+            )
+            loaded_weights = set()
+            for name, loaded_weight in weights_iterator:
+                param = model.get_parameter(name)  # TODO: buffers?
+                param.copy_(loaded_weight)
+                loaded_weights.add(name)
 
         # logging and validation
         counter_after_reloading = time.perf_counter()
@@ -5653,6 +5649,7 @@ class GPUModelRunner(
         dummy_metadata = PoolingMetadata(
             prompt_lens=dummy_prompt_lens,
             prompt_token_ids=dummy_token_ids,
+            prompt_token_ids_cpu=dummy_token_ids.cpu(),
             pooling_params=[dummy_pooling_params] * num_reqs,
             pooling_states=[PoolingStates() for i in range(num_reqs)],
         )
@@ -5972,9 +5969,7 @@ class GPUModelRunner(
                 SupportsEncoderCudaGraph,
                 supports_encoder_cudagraph,
             )
-            from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
-                EncoderCudaGraphManager,
-            )
+            from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
             raw_model = self.get_model()
             if supports_encoder_cudagraph(raw_model):

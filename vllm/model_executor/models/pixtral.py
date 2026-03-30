@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from transformers import PixtralVisionConfig
+from transformers import BatchFeature, PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
@@ -25,6 +25,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -37,7 +38,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     NestedTensors,
 )
@@ -61,7 +61,11 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
+from vllm.transformers_utils.processors.pixtral import (
+    MistralCommonImageProcessor,
+    MistralCommonPixtralProcessor,
+)
+from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -127,18 +131,20 @@ class PixtralProcessingInfo(BaseProcessingInfo):
 
         return tokenizer
 
+    def get_image_processor(self) -> MistralCommonImageProcessor:
+        return MistralCommonImageProcessor(self.get_tokenizer().instruct.mm_encoder)
+
     def get_hf_processor(self, **kwargs) -> MistralCommonPixtralProcessor:
-        return self.ctx.init_processor(
-            MistralCommonPixtralProcessor,
+        return MistralCommonPixtralProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=self.get_image_processor(),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_hf_processor().image_processor
+        image_processor = self.get_image_processor()
         max_image_size = image_processor.mm_encoder.mm_config.max_image_size
 
         return ImageSize(width=max_image_size, height=max_image_size)
@@ -212,6 +218,27 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(images=MultiModalFieldConfig.batched("image"))
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            # Avoid padding issue
+            tok_kwargs={**tok_kwargs, "return_tensors": None},
+        )
+
+        # Missing batch dimension
+        if is_list_of(outputs["input_ids"], int):
+            outputs["input_ids"] = [outputs["input_ids"]]
+
+        return outputs
 
     def _get_prompt_updates(
         self,
