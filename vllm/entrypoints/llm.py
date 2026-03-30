@@ -164,12 +164,6 @@ class LLM:
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
-        swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
-            This can be used for temporarily storing the states of the requests
-            when their `best_of` sampling parameters are larger than 1. If all
-            requests will have `best_of=1`, you can safely set this to 0.
-            Noting that `best_of` is only supported in V0. Otherwise, too small
-            values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -240,7 +234,6 @@ class LLM:
         chat_template: Path | str | None = None,
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
-        swap_space: float = 4,
         cpu_offload_gb: float = 0,
         offload_group_size: int = 0,
         offload_num_in_group: int = 1,
@@ -264,6 +257,17 @@ class LLM:
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
+
+        if "swap_space" in kwargs:
+            kwargs.pop("swap_space")
+            import warnings
+
+            warnings.warn(
+                "The 'swap_space' parameter is deprecated and ignored. "
+                "It will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
@@ -353,7 +357,6 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
-            swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
@@ -394,7 +397,7 @@ class LLM:
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
         self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
-        self.init_pooling_io_processors = init_pooling_io_processors(
+        self.pooling_io_processors = init_pooling_io_processors(
             supported_tasks=supported_tasks,
             model_config=self.model_config,
             renderer=self.renderer,
@@ -733,10 +736,6 @@ class LLM:
             if prompt["type"] == "embeds":
                 raise NotImplementedError(
                     "Embedding prompt not supported for beam search"
-                )
-            if prompt["type"] == "enc_dec":
-                raise NotImplementedError(
-                    "Encoder-decoder prompt not supported for beam search"
                 )
 
             instances.append(
@@ -1175,8 +1174,8 @@ class LLM:
                     )
                     raise ValueError(msg)
 
-            if pooling_task in self.init_pooling_io_processors:
-                io_processor = self.init_pooling_io_processors[pooling_task]
+            if pooling_task in self.pooling_io_processors:
+                io_processor = self.pooling_io_processors[pooling_task]
                 processor_inputs = io_processor.pre_process_offline(
                     prompts_seq, tokenization_kwargs
                 )
@@ -1195,7 +1194,7 @@ class LLM:
                 outputs = self._run_engine(
                     use_tqdm=use_tqdm, output_type=PoolingRequestOutput
                 )
-                outputs = io_processor.post_process(outputs)
+                outputs = io_processor.post_process_offline(outputs)
             else:
                 outputs = self._run_completion(
                     prompts=prompts_seq,
@@ -1478,9 +1477,9 @@ class LLM:
             data_1 = data_1 * len(data_2)
 
         if pooling_params is None:
-            pooling_params = PoolingParams(task="score")
+            pooling_params = PoolingParams(task="classify")
         elif pooling_params.task is None:
-            pooling_params.task = "score"
+            pooling_params.task = "classify"
 
         pooling_params_list = list[PoolingParams]()
 
@@ -1585,8 +1584,11 @@ class LLM:
             )
 
         supported_tasks = self.supported_tasks
+        score_type = self.model_config.score_type
+        is_late_interaction = score_type == "late-interaction"
+        is_cross_encoder = score_type == "cross-encoder"
+
         # Late interaction models (e.g., ColBERT) use token_embed for scoring
-        is_late_interaction = model_config.is_late_interaction
         if not is_late_interaction and all(
             t not in supported_tasks for t in ("embed", "classify")
         ):
@@ -1596,13 +1598,10 @@ class LLM:
                 "`--convert embed` or `--convert classify`."
             )
 
-        if (
-            model_config.is_cross_encoder
-            and getattr(model_config.hf_config, "num_labels", 0) != 1
-        ):
+        if is_cross_encoder and getattr(model_config.hf_config, "num_labels", 0) != 1:
             raise ValueError("Score API is only enabled for num_labels == 1.")
 
-        if not model_config.is_cross_encoder and chat_template is not None:
+        if not is_cross_encoder and chat_template is not None:
             raise ValueError(
                 "chat_template is only supported for cross-encoder models."
             )
@@ -1623,7 +1622,7 @@ class LLM:
         )
         encode_kwargs = tok_params.get_encode_kwargs()
 
-        if model_config.is_cross_encoder:
+        if is_cross_encoder:
             return self._cross_encoding_score(
                 score_data_1,
                 score_data_2,

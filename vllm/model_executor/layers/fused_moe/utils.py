@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -202,7 +203,7 @@ def _mxfp8_e4m3_quantize(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
-    assert block_shape is None
+    assert block_shape is None or block_shape == [1, 32]
     return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
 
 
@@ -269,7 +270,7 @@ def moe_kernel_quantize_input(
         # weights are already dequantized, and we proceed with normal
         # activation quantization below.
 
-    if quant_dtype == torch.float8_e4m3fn:
+    if quant_dtype == current_platform.fp8_dtype():
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
@@ -323,27 +324,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-def _validate_scale_shape(
-    a: torch.Tensor,
-    a_scale: torch.Tensor | None,
-    per_act_token_quant: bool,
-    block_shape: list[int] | None,
-) -> None:
-    if a_scale is None:
-        return
-
-    if not per_act_token_quant and block_shape is None:
-        assert a_scale.numel() == 1, f"{a_scale.shape}"
-    elif per_act_token_quant:
-        assert a_scale.shape[0] == a.shape[0] and a_scale.shape[1] == 1, (
-            f"{a_scale.shape[0]} == {a.shape[0]} and {a_scale.shape[1]} == 1"
-        )
-    else:
-        assert block_shape is not None
-        expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
-        assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
 
 
 # Torch custom ops can't deal with outputs aliasing inputs so we need to

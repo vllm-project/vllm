@@ -51,12 +51,11 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
 
 
 def dequantize_to_dtype(
-    tensor_fp4,
-    tensor_sf,
-    global_scale,
-    dtype,
-    device,
-    block_size=16,
+    tensor_fp4: torch.Tensor,
+    tensor_sf: torch.Tensor,
+    global_scale: torch.Tensor | float,
+    dtype: torch.dtype,
+    block_size: int = 16,
     swizzle: bool | None = True,
 ):
     """Dequantize the fp4 tensor back to high precision.
@@ -187,7 +186,6 @@ def run_nvfp4_emulations(
         weight_scale_swizzled.data,
         weight_global_scale,
         output_dtype,
-        x.device,
         group_size,
         swizzle=swizzle,
     )

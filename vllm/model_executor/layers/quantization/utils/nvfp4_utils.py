@@ -22,18 +22,10 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
+from vllm.utils.import_utils import has_fbgemm_gpu
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
-
-
-def has_fbgemm() -> bool:
-    try:
-        import fbgemm_gpu  # noqa: F401
-
-        return True
-    except Exception:
-        return False
 
 
 # NOTE: This is ordered by preferred backend.
@@ -76,7 +68,7 @@ def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]
         if not supported:
             reason = "FlashInfer is required"
     elif backend == NvFp4LinearBackend.FBGEMM:
-        supported = has_fbgemm()
+        supported = has_fbgemm_gpu()
         if not supported:
             reason = "fbgemm_gpu is required"
 
@@ -204,6 +196,12 @@ def convert_to_nvfp4_linear_kernel_format(
     layer.weights_padding_cols = 0
 
     if backend == NvFp4LinearBackend.MARLIN:
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression "
+            "will be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
         prepare_fp4_layer_for_marlin(layer)
     elif backend == NvFp4LinearBackend.FLASHINFER_TRTLLM:
         weight, weight_scale = prepare_weights_for_nvfp4_flashinfer_trtllm(
