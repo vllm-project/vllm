@@ -400,18 +400,11 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
             tq_lite = os.environ.get("TQ_LITE", "0") in ("1", "true", "True")
-            tq_qjl = os.environ.get("TQ_QJL", "0") in ("1", "true", "True")
             tq_bits = int(os.environ.get("TQ_BITS", "4"))
-            tq_value_bits_str = os.environ.get("TQ_VALUE_BITS")
-            tq_value_bits: float | None = None
-            if tq_value_bits_str is not None:
-                tq_value_bits = float(tq_value_bits_str)
             self._turboquant_config = TurboQuantConfig(
                 bit_width=tq_bits,
-                value_bit_width=tq_value_bits,
                 outlier_fraction=0.15,
                 lite_mode=tq_lite,
-                use_qjl=tq_qjl,
             )
 
         # Initialize TurboQuantState eagerly (not in forward) to avoid
@@ -634,17 +627,9 @@ class Attention(nn.Module, AttentionLayerBase):
             v_bits = int(cfg.effective_value_bit_width)
             bits = max(k_bits, v_bits)
             outlier_bytes = n_outliers * 2  # bf16
-            # For QJL: use (bits-1) for MSE, 1 bit for QJL signs
-            mse_bits = bits - 1 if cfg.use_qjl else bits
-            mse_bits = max(mse_bits, 1)
-            packed_bytes = math.ceil(normal_size * mse_bits / 8)
-            qjl_sign_bytes = math.ceil(normal_size / 8) if cfg.use_qjl else 0
-            qjl_norm_bytes = 2 if cfg.use_qjl else 0  # fp16
+            packed_bytes = math.ceil(normal_size * bits / 8)
             norm_bytes = 2  # fp16
-            slot_bytes = (
-                outlier_bytes + packed_bytes + qjl_sign_bytes
-                + norm_bytes + qjl_norm_bytes
-            )
+            slot_bytes = outlier_bytes + packed_bytes + norm_bytes
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,

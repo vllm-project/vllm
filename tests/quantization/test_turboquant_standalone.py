@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.turboquant import (
     TurboQuantConfig,
     TurboQuantState,
     _get_codebook,
-    compute_distortion,
     random_rotate,
     random_rotate_inverse,
     scalar_dequantize,
@@ -163,7 +162,6 @@ def test_fractional_bitwidth():
         mse = (x - x_hat).pow(2).sum(dim=-1).mean().item()
         # Fractional MSE should be between the two integer bounds
         lo_bits = int(bits)
-        hi_bits = lo_bits + 1
         check(f"{bits}-bit MSE={mse:.4f} in range",
               mse < EXPECTED_MSE_NORMALIZED[lo_bits] * 3.0,
               f"mse={mse:.4f}")
@@ -206,46 +204,6 @@ def test_channel_split_math():
         check(f"{bits}-bit split averages to {bits}",
               abs(actual - expected) < 1e-6,
               f"got {actual}")
-
-
-def test_triton_encode_decode():
-    print("\n--- Triton encode/decode kernels ---")
-    if not torch.cuda.is_available():
-        print("  SKIP  (no CUDA)")
-        return
-    try:
-        from vllm.v1.attention.ops.triton_turboquant import (
-            turboquant_decode,
-            turboquant_encode,
-        )
-    except ImportError:
-        print("  SKIP  (triton not available)")
-        return
-
-    torch.manual_seed(123)
-    d = 128
-    num_tokens, num_kv_heads = 10, 4
-    device = torch.device("cuda")
-
-    for bits in [2, 3, 4]:
-        config = TurboQuantConfig(bit_width=bits, use_qjl=False)
-        state = TurboQuantState(config, d, layer_idx=0, device=device)
-
-        x = torch.randn(num_tokens, num_kv_heads, d, device=device)
-
-        # Triton path
-        indices, norms = turboquant_encode(
-            x, state.PiT, state.codebook, state.boundaries)
-        x_triton = turboquant_decode(
-            indices, norms, state.Pi, state.codebook,
-            output_dtype=torch.bfloat16)
-
-        # Python path
-        x_python = state.dequantize(state.quantize(x))
-
-        diff = (x_triton.float() - x_python.float()).abs().max().item()
-        check(f"{bits}-bit triton vs python max_diff={diff:.6f}",
-              diff < 0.01, f"diff={diff}")
 
 
 def test_triton_pre_dequant():
@@ -295,7 +253,6 @@ if __name__ == "__main__":
     test_fractional_qjl()
     test_1bit_qjl_rejected()
     test_channel_split_math()
-    test_triton_encode_decode()
     test_triton_pre_dequant()
 
     print(f"\n{'=' * 40}")

@@ -380,8 +380,6 @@ class TurboQuantState:
         self._hadamard_d = next_power_of_2(d)
         self._pad_size = self._hadamard_d - d
         self.sign_flips = _generate_sign_flips(self._hadamard_d, seed, device)
-        self.Pi = None
-        self.PiT = None
 
     def rotate(self, x: Tensor) -> Tensor:
         """Apply rotation: sign flip → pad → Hadamard → trim."""
