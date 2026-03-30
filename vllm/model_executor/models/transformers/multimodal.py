@@ -22,17 +22,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config.utils import getattr_iter
+from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
-from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalInputs,
     PlaceholderRange,
-    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
@@ -180,7 +177,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Process multi-modal inputs to be used in vLLM.
 
@@ -262,7 +259,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         with timing_ctx.record("get_mm_hashes"):
             mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
@@ -272,30 +269,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     supports_multimodal_raw_input_only = True
-
-    # Backwards compatibility for prev released models. State dicts back then
-    # had different formats and cannot be loaded with `AutoModel` mapping as is
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "language_model.model": "model.language_model",
-            "text_model.model": "model.text_model",
-            "vision_tower": "model.vision_tower",
-            "vqmodel": "model.vqmodel",
-            "visual": "model.visual",
-            "vision_model": "model.vision_model",
-            "vision_embed_tokens": "model.vision_embed_tokens",
-            "image_newline": "model.image_newline",
-            "multi_modal_projector": "model.multi_modal_projector",
-            "text_model.lm_head": "lm_head",
-            "language_model.lm_head": "lm_head",
-            # Qwen models used "model" as the name for the language model.
-            # Therefore, we must map each of submodule explicitly to avoid
-            # conflicts with newer models that use "model.language_model".
-            "model.embed_tokens": "model.language_model.embed_tokens",
-            "model.layers": "model.language_model.layers",
-            "model.norm": "model.language_model.norm",
-        }
-    )
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
@@ -473,20 +446,21 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
         # can't accept arbitrary args, even if its value is `None`
         kwargs = {}
-        if mm_token_type_ids:
-            if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
-                import inspect
+        if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
+            import inspect
 
-                sig = inspect.signature(self.model.get_rope_index)
-                params = sig.parameters
-                self._get_rope_index_accepts_mm_token_type_ids = (
-                    "mm_token_type_ids" in params
-                    or any(
-                        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-                    )
-                )
-            if self._get_rope_index_accepts_mm_token_type_ids:
+            sig = inspect.signature(self.model.get_rope_index)
+            params = sig.parameters
+            self._get_rope_index_accepts_mm_token_type_ids = (
+                "mm_token_type_ids" in params
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            )
+        if self._get_rope_index_accepts_mm_token_type_ids:
+            if mm_token_type_ids:
                 kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
+            else:
+                shape = (1, len(input_tokens))
+                kwargs["mm_token_type_ids"] = torch.zeros(*shape, dtype=torch.int)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
