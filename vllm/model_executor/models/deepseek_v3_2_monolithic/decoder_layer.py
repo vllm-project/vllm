@@ -13,6 +13,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
 from .allreduce_rms import AllReduceRMSParams, allreduce_add_rms_norm
 from .attention import MonolithicMLAAttention
@@ -49,6 +50,8 @@ class MonolithicDecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
+        self.indexer_workspace_size = get_max_prefill_buffer_size(vllm_config)
+        self.max_model_len = vllm_config.model_config.max_model_len
 
         # LayerNorm weights (raw)
         dtype = torch.get_default_dtype()
@@ -220,11 +223,11 @@ class MonolithicDecoderLayer(nn.Module):
             index_weights,
             self.attn.indexer_quant_block_size,  # 128
             "ue8m0",  # scale_fmt
-            self.attn.topk_tokens,  # topk_tokens
-            self.attn.index_head_dim,  # head_dim
-            self.attn.max_model_len,  # max_model_len
-            self.attn.max_total_seq_len,  # max_total_seq_len
-            self.attn.topk_indices_buffer,  # topk_indices_buffer
+            self.attn.topk_tokens,
+            self.attn.index_head_dim,
+            self.max_model_len,
+            self.indexer_workspace_size,
+            self.attn.topk_indices_buffer,
         )
 
         # Step 6. MLA attention.
