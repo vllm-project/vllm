@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Generator
+from typing import TYPE_CHECKING, cast
 
 import gguf
 import regex as re
@@ -23,9 +24,13 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names,
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator,
+    gguf_quant_weights_iterator_multi,
 )
 from vllm.transformers_utils.gguf_utils import detect_gguf_multimodal
 from vllm.utils.torch_utils import set_default_torch_dtype
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.gguf import GGUFConfig
 
 logger = init_logger(__name__)
 
@@ -69,6 +74,31 @@ class GGUFModelLoader(BaseModelLoader):
             "(expected local file, <repo_id>/<filename>.gguf, "
             "or <repo_id>:<quant_type>)"
         )
+
+    @staticmethod
+    def _get_all_gguf_files(model_path: str) -> list[str]:
+        """Discover all GGUF shard files from a single shard path.
+
+        Supports variable-width shard indices by dynamically detecting
+        the padding from the original filename.
+        E.g. ``*-00001-of-00005.gguf`` → all 5 shards,
+             ``*-01-of-15.gguf`` → all 15 shards.
+        """
+        match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
+        if not match:
+            return [model_path]
+        total = int(match.group(2))
+        num_digits = len(match.group(1))
+        prefix = model_path[: match.start(1)]
+        suffix = model_path[match.end(2) :]
+        files = []
+        for i in range(1, total + 1):
+            shard_path = f"{prefix}{i:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
+            if os.path.isfile(shard_path):
+                files.append(shard_path)
+        if files:
+            logger.info("Discovered %d GGUF shard files", len(files))
+        return files if files else [model_path]
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """
@@ -141,6 +171,29 @@ class GGUFModelLoader(BaseModelLoader):
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
+        if model_type == "minimax_m2":
+            model_type = "minimax-m2"
+            # GGUF layer map assumes merged expert weights
+            # map them manually like deepseek2
+            for idx in range(config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.exp_probs_b.bias"] = (
+                    f"model.layers.{idx}.block_sparse_moe.e_score_correction_bias"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+                    f"model.layers.{idx}.block_sparse_moe.experts.0.w2.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
+                    f"model.layers.{idx}.block_sparse_moe.experts.0.w1.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
+                    f"model.layers.{idx}.block_sparse_moe.experts.0.w3.weight"
+                )
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.block_sparse_moe\.experts\.(gate_up_proj|down_proj)"
+                    )
+                )
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
@@ -184,6 +237,13 @@ class GGUFModelLoader(BaseModelLoader):
 
             state_dict = {
                 revert_hf_rename(name): tensor for name, tensor in state_dict.items()
+            }
+
+        if model_type == "minimax-m2" and not hf_checkpoint_map:
+            # Reverse HF convention: mlp -> block_sparse_moe
+            state_dict = {
+                name.replace(".mlp.", ".block_sparse_moe."): tensor
+                for name, tensor in state_dict.items()
             }
 
         def find_hf_name_in_tensor_map(hf_name: str) -> str | None:
@@ -273,9 +333,10 @@ class GGUFModelLoader(BaseModelLoader):
         model_name_or_path: str,
         gguf_to_hf_name_map: dict[str, str],
     ) -> dict[str, str]:
-        weight_type_map = get_gguf_weight_type_map(
-            model_name_or_path, gguf_to_hf_name_map
-        )
+        gguf_files = self._get_all_gguf_files(model_name_or_path)
+        weight_type_map = {}
+        for f in gguf_files:
+            weight_type_map.update(get_gguf_weight_type_map(f, gguf_to_hf_name_map))
         is_multimodal = hasattr(model_config.hf_config, "vision_config")
         if is_multimodal:
             mmproj_file = detect_gguf_multimodal(model_name_or_path)
@@ -317,7 +378,15 @@ class GGUFModelLoader(BaseModelLoader):
             )
             yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
 
-        yield from gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
+        gguf_files = self._get_all_gguf_files(model_name_or_path)
+        if len(gguf_files) > 1:
+            yield from gguf_quant_weights_iterator_multi(
+                gguf_files, gguf_to_hf_name_map
+            )
+        else:
+            yield from gguf_quant_weights_iterator(
+                model_name_or_path, gguf_to_hf_name_map
+            )
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)
@@ -336,9 +405,11 @@ class GGUFModelLoader(BaseModelLoader):
         local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
-        if "lm_head.weight" in get_gguf_extra_tensor_names(
-            local_model_path, gguf_weights_map
-        ):
+        gguf_files = self._get_all_gguf_files(local_model_path)
+        all_extra_names = []
+        for f in gguf_files:
+            all_extra_names.extend(get_gguf_extra_tensor_names(f, gguf_weights_map))
+        if "lm_head.weight" in all_extra_names:
             model_config.hf_config.update({"tie_word_embeddings": True})
 
         weight_type_map = self._get_gguf_weight_type(
@@ -350,10 +421,9 @@ class GGUFModelLoader(BaseModelLoader):
             for name, weight_type in weight_type_map.items()
             if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
         ]
-        logger.debug(
-            "GGUF unquantized modules: %s",
-            unquant_names,
-        )
+        logger.debug("GGUF unquantized modules: %s", unquant_names)
+        if TYPE_CHECKING:
+            vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
         vllm_config.quant_config.unquantized_modules.extend(unquant_names)
 
         target_device = torch.device(device_config.device)
