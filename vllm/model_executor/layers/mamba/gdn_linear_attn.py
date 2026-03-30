@@ -587,6 +587,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """
         num_tokens = hidden_states.size(0)
 
+        assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on XPU."
+
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
