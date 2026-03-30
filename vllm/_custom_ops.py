@@ -401,6 +401,169 @@ def rotary_embedding(
     )
 
 
+def mla_absorption_bmm(
+    out: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+) -> None:
+    """CUTLASS FP8×FP8→FP8 batched GEMM for MLA absorption BMM.
+
+    Writes strided output: out[:, :, :N] where N = b.size(1).
+
+    Args:
+        out: [B, N_heads, D_cols] fp8 — output tensor (D_cols >= N)
+        a:   [N_heads, B, K] fp8 — q_nope, contiguous
+        b:   [N_heads, N, K] fp8 — W_UK, contiguous
+        scale_a: [1] float — combined epilogue scale
+        scale_b: [1] float — typically 1.0
+    """
+    torch.ops._C.mla_absorption_bmm(out, a, b, scale_a, scale_b)
+
+
+def mla_absorption_bmm_bf16(
+    out: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+) -> None:
+    """CUTLASS BF16×BF16→FP8 batched GEMM for MLA absorption BMM.
+
+    Both inputs are BF16 (W_UK pre-dequantized during model init).
+    Output is FP8 via ScaledEpilogue — no runtime quantization needed.
+
+    Args:
+        out: [B, N_heads, D_cols] fp8 — output tensor (D_cols >= N)
+        a:   [N_heads, B, K] bf16 — q_nope, contiguous
+        b:   [N_heads, N, K] bf16 — W_UK (pre-dequantized), contiguous
+        scale_a: [1] float — epilogue scale (q_scale)
+        scale_b: [1] float — typically 1.0
+    """
+    torch.ops._C.mla_absorption_bmm_bf16(out, a, b, scale_a, scale_b)
+
+
+def mla_rope_quantize_fp8(
+    q_rope_in: torch.Tensor,
+    k_rope_in: torch.Tensor,
+    q_nope_in: torch.Tensor,
+    k_nope_in: torch.Tensor,
+    q_rope_out: torch.Tensor,
+    k_rope_out: torch.Tensor,
+    q_nope_out: torch.Tensor,
+    k_nope_out: torch.Tensor,
+    inv_freq: torch.Tensor,
+    pos_ids: torch.Tensor,
+    quant_scale_q: float,
+    quant_scale_kv: float,
+    interleave: bool,
+    enable_pdl: bool,
+) -> None:
+    torch.ops._C.mla_rope_quantize_fp8(
+        q_rope_in,
+        k_rope_in,
+        q_nope_in,
+        k_nope_in,
+        q_rope_out,
+        k_rope_out,
+        q_nope_out,
+        k_nope_out,
+        inv_freq,
+        pos_ids,
+        quant_scale_q,
+        quant_scale_kv,
+        interleave,
+        enable_pdl,
+    )
+
+
+def mla_rope_quantize_fp8_fused_cache(
+    q_rope_in: torch.Tensor,
+    q_nope_in: torch.Tensor,
+    q_rope_out: torch.Tensor,
+    q_nope_out: torch.Tensor,
+    k_rope_in: torch.Tensor,
+    k_nope_in: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    inv_freq: torch.Tensor,
+    pos_ids: torch.Tensor,
+    quant_scale_q: float,
+    quant_scale_kv: float,
+    interleave: bool,
+    enable_pdl: bool,
+) -> None:
+    torch.ops._C.mla_rope_quantize_fp8_fused_cache(
+        q_rope_in,
+        q_nope_in,
+        q_rope_out,
+        q_nope_out,
+        k_rope_in,
+        k_nope_in,
+        kv_cache,
+        slot_mapping,
+        inv_freq,
+        pos_ids,
+        quant_scale_q,
+        quant_scale_kv,
+        interleave,
+        enable_pdl,
+    )
+
+
+def mla_fused_cache_rope(
+    q_rope_in: torch.Tensor,
+    q_rope_out: torch.Tensor,
+    k_rope_in: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    inv_freq: torch.Tensor,
+    pos_ids: torch.Tensor,
+    num_kv_heads: int,
+    no_rope_dim: int,
+    quant_scale_q: float,
+    quant_scale_kv: float,
+    interleave: bool,
+) -> None:
+    torch.ops._C.mla_fused_cache_rope(
+        q_rope_in,
+        q_rope_out,
+        k_rope_in,
+        kv_cache,
+        slot_mapping,
+        inv_freq,
+        pos_ids,
+        num_kv_heads,
+        no_rope_dim,
+        quant_scale_q,
+        quant_scale_kv,
+        interleave,
+    )
+
+
+def mla_fused_cache_nope(
+    q_nope_in: torch.Tensor,
+    q_nope_out: torch.Tensor,
+    k_nope_in: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    num_kv_heads: int,
+    quant_scale_q: float,
+    quant_scale_kv: float,
+) -> None:
+    torch.ops._C.mla_fused_cache_nope(
+        q_nope_in,
+        q_nope_out,
+        k_nope_in,
+        kv_cache,
+        slot_mapping,
+        num_kv_heads,
+        quant_scale_q,
+        quant_scale_kv,
+    )
+
+
 # layer norm ops
 def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float

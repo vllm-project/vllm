@@ -147,6 +147,35 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
+void mla_absorption_bmm(torch::Tensor& out, torch::Tensor const& a,
+                        torch::Tensor const& b, torch::Tensor const& scale_a,
+                        torch::Tensor const& scale_b);
+
+void mla_absorption_bmm_bf16(torch::Tensor& out, torch::Tensor const& a,
+                             torch::Tensor const& b,
+                             torch::Tensor const& scale_a,
+                             torch::Tensor const& scale_b);
+
+void mla_fused_cache_rope(torch::Tensor& q_rope_in, torch::Tensor& q_rope_out,
+                          torch::Tensor& k_rope_in, torch::Tensor& kv_cache,
+                          torch::Tensor& slot_mapping, torch::Tensor& inv_freq,
+                          torch::Tensor& pos_ids, int64_t num_kv_heads,
+                          int64_t no_rope_dim, double quant_scale_q,
+                          double quant_scale_kv, bool interleave);
+
+void mla_fused_cache_nope(torch::Tensor& q_nope_in, torch::Tensor& q_nope_out,
+                          torch::Tensor& k_nope_in, torch::Tensor& kv_cache,
+                          torch::Tensor& slot_mapping, int64_t num_kv_heads,
+                          double quant_scale_q, double quant_scale_kv);
+
+void mla_rope_quantize_fp8(torch::Tensor& q_rope_in, torch::Tensor& k_rope_in,
+                           torch::Tensor& q_nope_in, torch::Tensor& k_nope_in,
+                           torch::Tensor& q_rope_out, torch::Tensor& k_rope_out,
+                           torch::Tensor& q_nope_out, torch::Tensor& k_nope_out,
+                           torch::Tensor& inv_freq, torch::Tensor& pos_ids,
+                           double quant_scale_q, double quant_scale_kv,
+                           bool interleave, bool enable_pdl);
+
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
