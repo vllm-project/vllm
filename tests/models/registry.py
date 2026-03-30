@@ -1163,6 +1163,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     #     "JackFram/llama-160m",
     #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
     # ),
+    # [DFlash]
+    "DFlashDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.5-4B",
+        speculative_model="z-lab/Qwen3.5-4B-DFlash",
+        use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     # [Eagle]
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
