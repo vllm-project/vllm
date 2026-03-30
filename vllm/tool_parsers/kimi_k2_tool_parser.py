@@ -149,13 +149,13 @@ class KimiK2ToolParser(ToolParser):
             end = current_text.find(self.tool_call_end_token, tc_start)
 
             if end != -1:
-                tool_call = current_text[tc_start:end].strip()
+                tool_call = current_text[tc_start:end]
                 pos = end + len(self.tool_call_end_token)
             else:
-                tool_call = current_text[tc_start:].strip()
+                tool_call = current_text[tc_start:]
                 overlap = partial_tag_overlap(tool_call, self.tool_call_end_token)
                 if overlap:
-                    tool_call = tool_call[:-overlap].strip()
+                    tool_call = tool_call[:-overlap]
 
             results.append(tool_call)
 
@@ -190,7 +190,7 @@ class KimiK2ToolParser(ToolParser):
         if arg_pos == -1:
             return None, None
         header = tool_call[:arg_pos].strip()
-        tool_args = tool_call[arg_pos + len(self.tool_call_arg_token) :].strip()
+        tool_args = tool_call[arg_pos + len(self.tool_call_arg_token) :]
         return header, tool_args
 
     def _compute_args_diff(self, index: int, tool_args: str | None) -> str | None:
