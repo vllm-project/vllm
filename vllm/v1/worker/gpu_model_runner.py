@@ -580,7 +580,9 @@ class GPUModelRunner(
             else:
                 self.effective_drafter_max_model_len = self.max_model_len
         self.use_async_spec_decode = (
-            self.use_async_scheduling and self.num_spec_tokens > 0
+            self.use_async_scheduling
+            and self.num_spec_tokens > 0
+            and self.vllm_config.parallel_config.data_parallel_size == 1
         )
 
         # Request states.
