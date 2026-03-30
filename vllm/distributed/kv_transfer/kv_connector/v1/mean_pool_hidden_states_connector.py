@@ -32,14 +32,20 @@ However, in case of a server crash, stale files may accumulate in
 the `shared_storage_path`. It is the user's responsibility to handle
 periodic cleanup of this directory.
 
+Note on last-layer hidden states:
+    Hidden states are captured by ``_maybe_add_hidden_state`` **before** the
+    final RMSNorm (``model.norm``). This means the last valid layer index
+    (``num_hidden_layers``) returns the **pre-norm** output, which differs
+    from HuggingFace's ``output_hidden_states`` where the last entry is
+    **post-norm**. For indices < ``num_hidden_layers``, vLLM and HF match.
+
 Limitations:
     The extract_hidden_states method piggybacks on the speculative decoding
     framework.
 
     - Online serving (``vllm serve``): NOT supported.
-    - Offline batched inference (``llm.generate(prompts, ...)``): Supported
-      ONLY with ``max_tokens=1``.
-    - Offline single-request inference: Fully supported
+    - Offline batched inference (``llm.generate(prompts, ...)``): Fully
+      supported.
 """
 
 import os
