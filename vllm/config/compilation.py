@@ -1065,7 +1065,7 @@ class CompilationConfig:
                     # piecewise cudagraph since it needs to access attn_metadata.
                     from vllm.utils.flashinfer import has_flashinfer
 
-                    if has_flashinfer:
+                    if has_flashinfer():
                         self.splitting_ops.append(
                             "vllm::fused_rope_and_unified_kv_cache_update"
                         )
