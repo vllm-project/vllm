@@ -1275,7 +1275,9 @@ def wait_for_engine_startup(
                 )
             continue
         event_targets = {target for target, _ in events}
-        if handshake_socket not in event_targets:
+        handshake_ready = handshake_socket in event_targets
+        other_ready = any(target is not handshake_socket for target in event_targets)
+        if not handshake_ready:
             raise build_startup_failure_exception(
                 "Engine core initialization failed.",
                 failed_processes=get_failed_processes(),
@@ -1322,6 +1324,12 @@ def wait_for_engine_startup(
                 failed_processes=merge_failed_processes(
                     get_failed_processes(), msg.error
                 ),
+                failed_processes_label="Failed core proc(s)",
+            )
+        if other_ready:
+            raise build_startup_failure_exception(
+                "Engine core initialization failed.",
+                failed_processes=get_failed_processes(),
                 failed_processes_label="Failed core proc(s)",
             )
 

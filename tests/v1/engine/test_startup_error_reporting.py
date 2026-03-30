@@ -10,7 +10,10 @@ import zmq
 
 from vllm.v1.engine.utils import (
     STARTUP_FAILURE,
+    STARTUP_HELLO,
+    STARTUP_READY,
     CoreEngine,
+    EngineZmqAddresses,
     EngineStartupMessage,
     FailedProcessInfo,
     StartupErrorPayload,
@@ -187,3 +190,70 @@ def test_wait_for_engine_startup_dedupes_failed_process_for_error_source(
     assert "Failed core proc(s): EngineCore(pid=1234, signal=9)" in message
     assert "Source: EngineCore (pid=1234)" in message
     assert "Root cause: RuntimeError: bad config" in message
+
+
+def test_wait_for_engine_startup_fails_when_ready_races_with_dead_process(
+    monkeypatch,
+):
+    handshake_socket = FakeHandshakeSocket(
+        [
+            (
+                (0).to_bytes(2, "little"),
+                msgspec.msgpack.encode(
+                    EngineStartupMessage(
+                        status=STARTUP_HELLO,
+                        local=True,
+                        headless=False,
+                    )
+                ),
+            ),
+            (
+                (0).to_bytes(2, "little"),
+                msgspec.msgpack.encode(
+                    EngineStartupMessage(
+                        status=STARTUP_READY,
+                        local=True,
+                        headless=False,
+                        num_gpu_blocks=1,
+                    )
+                ),
+            ),
+        ]
+    )
+    sentinel = object()
+    proc_manager = SimpleNamespace(
+        sentinels=lambda: [sentinel],
+        finished_procs=lambda: [
+            FailedProcessInfo(name="EngineCore", pid=1234, exitcode=1)
+        ],
+    )
+    monkeypatch.setattr(
+        zmq,
+        "Poller",
+        lambda: FakePoller(
+            [
+                [(handshake_socket, zmq.POLLIN)],
+                [(handshake_socket, zmq.POLLIN), (sentinel, zmq.POLLIN)],
+            ]
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        wait_for_engine_startup(
+            handshake_socket=handshake_socket,
+            addresses=EngineZmqAddresses(inputs=[], outputs=[]),
+            core_engines=[CoreEngine(index=0, local=True)],
+            parallel_config=SimpleNamespace(
+                data_parallel_size_local=1,
+                data_parallel_hybrid_lb=False,
+                data_parallel_external_lb=False,
+            ),
+            coordinated_dp=False,
+            cache_config=SimpleNamespace(num_gpu_blocks=0),
+            proc_manager=proc_manager,
+            coord_process=None,
+        )
+
+    message = str(exc_info.value)
+    assert "Engine core initialization failed." in message
+    assert "Failed core proc(s): EngineCore(pid=1234, exitcode=1)" in message
