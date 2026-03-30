@@ -40,7 +40,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
 | ---------------------------- | ---------------------------------------- | ---------------------------------------- | ---------------------------------------- | ------------- | ---------------------------------------- |
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
+| `fuse_attn_quant`\*          | FP8 static\*, FP8 per-group‡\*, NVFP4\*  | FP8 static\*, FP8 per-group‡\*           | FP8 static\*, FP8 per-group‡\*           | —             | FP8 static\*                             |
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static(untested)\*                   |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
@@ -57,6 +57,9 @@ for per-backend details.
 † `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
 other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
 SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
+
+‡ FP8 per-group dynamic quantization fusion is only supported on the `TRITON_ATTN` backend.
+Requires `head_size % group_size == 0`. Supports `group_size=128` and `group_size=64`.
 
 ## Enabling / Disabling Fusions
 
@@ -140,6 +143,10 @@ standard `Attention` and `MLAAttention` (used by DeepSeek-V2/V3/R1 models). Patt
 - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
 - `ROCM_ATTN`: ROCm
 - `ROCM_AITER_UNIFIED_ATTN`: ROCm with AITER
+
+`Attention → FP8 dynamic per-group quant` (group_size=128/64):
+
+- `TRITON_ATTN`: CUDA (requires `head_size % group_size == 0`)
 
 `Attention → NVFP4 dynamic quant`:
 
