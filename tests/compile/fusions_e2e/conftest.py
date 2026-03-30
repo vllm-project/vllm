@@ -169,12 +169,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             # TODO: Remove log counting in unit tests
             # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            if match_name == "attn_quant_fusion":
-                actual_match = match_table.get(match_name, 0)
-                assert actual_match == n_expected, (
-                    f"Could not find {n_expected} {match_name} (found {actual_match})."
-                )
-            else:
+            if match_name != "attn_quant_fusion":
                 assert len(log_matches) == n_expected, (
                     f"Could not find {n_expected} {match_name} "
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
@@ -235,6 +230,12 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"entries (SP took precedence), found: {log_matches}"
                 )
 
+            elif match_name == "attn_quant_fusion":
+                actual_match = match_table.get(match_name, 0)
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
+                )
             else:
                 expected_matches_list = [expected_matches] * n_expected
                 assert sorted(log_matches) == expected_matches_list, (
