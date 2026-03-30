@@ -61,23 +61,48 @@ def _get_priority_backends(
 ) -> list[Fp8MoeBackend]:
     """
     Get available backends in priority order based on platform and config.
-
-    This function can be extended to become more complex as needed.
+    Only backends supported by the current platform are included.
     """
 
-    _AVAILABLE_BACKENDS = [
-        Fp8MoeBackend.AITER,
-        Fp8MoeBackend.FLASHINFER_TRTLLM,
-        Fp8MoeBackend.FLASHINFER_CUTLASS,
-        Fp8MoeBackend.DEEPGEMM,
-        Fp8MoeBackend.VLLM_CUTLASS,
-        Fp8MoeBackend.TRITON,
-        Fp8MoeBackend.MARLIN,
-        Fp8MoeBackend.BATCHED_DEEPGEMM,
-        Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-        Fp8MoeBackend.BATCHED_TRITON,
-        Fp8MoeBackend.XPU,
-    ]
+    if current_platform.is_rocm():
+        _AVAILABLE_BACKENDS = [
+            Fp8MoeBackend.AITER,
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.BATCHED_TRITON,
+        ]
+    elif current_platform.is_cuda():
+        _AVAILABLE_BACKENDS = [
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            Fp8MoeBackend.FLASHINFER_CUTLASS,
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.MARLIN,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_TRITON,
+        ]
+    elif current_platform.is_xpu():
+        _AVAILABLE_BACKENDS = [
+            Fp8MoeBackend.XPU,
+            Fp8MoeBackend.TRITON,
+        ]
+    else:
+        # Fallback for unknown platforms: include all backends and let
+        # is_supported_config() filter them.
+        _AVAILABLE_BACKENDS = [
+            Fp8MoeBackend.AITER,
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            Fp8MoeBackend.FLASHINFER_CUTLASS,
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.MARLIN,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_TRITON,
+            Fp8MoeBackend.XPU,
+        ]
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))
@@ -93,11 +118,6 @@ def _get_priority_backends(
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_CUTLASS)
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
-
-    if current_platform.is_xpu():
-        # XPU platform supports TritonExperts and XPUExpertsFp8,
-        # move XPU backend to the front.
-        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.XPU)
 
     return _AVAILABLE_BACKENDS
 
@@ -300,8 +320,10 @@ def select_fp8_moe_backend(
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
             # If the user rejects FlashInfer remove those backends.
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_CUTLASS)
+            if Fp8MoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
+            if Fp8MoeBackend.FLASHINFER_CUTLASS in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_CUTLASS)
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
@@ -349,8 +371,10 @@ def select_fp8_moe_backend(
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
         if not envs.VLLM_USE_DEEP_GEMM or not envs.VLLM_MOE_USE_DEEP_GEMM:
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
+            if Fp8MoeBackend.DEEPGEMM in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
+            if Fp8MoeBackend.BATCHED_DEEPGEMM in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
         else:
             backend = (
                 Fp8MoeBackend.DEEPGEMM
@@ -371,7 +395,8 @@ def select_fp8_moe_backend(
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
+            if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
             backend = Fp8MoeBackend.AITER
             return _return_or_raise(
@@ -379,8 +404,10 @@ def select_fp8_moe_backend(
             )
 
     if not allow_vllm_cutlass:
-        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
-        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_VLLM_CUTLASS)
+        if Fp8MoeBackend.VLLM_CUTLASS in AVAILABLE_BACKENDS:
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
+        if Fp8MoeBackend.BATCHED_VLLM_CUTLASS in AVAILABLE_BACKENDS:
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_VLLM_CUTLASS)
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
