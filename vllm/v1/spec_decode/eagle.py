@@ -823,18 +823,15 @@ class SpecDecodeBaseProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Use num_tokens_no_spec - 1 (last committed token) instead of
-        # seq_lens_cpu, which is inflated by async-scheduling placeholders
-        # and causes get_token_id() to return -1. See #38098.
+        # Compute backup token indices from committed tokens only.
+        # num_tokens_no_spec - 1 gives the last committed token index.
+        # In async mode, seq_lens would be inflated by draft placeholders
+        # and cause get_token_id() to return -1. See #38098.
         num_reqs = gpu_input_batch.num_reqs
-        actual_last_token_idx = (
-            gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1
-        ).tolist()
+        seq_lens = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    int(actual_last_token_idx[i])
-                )
+                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens[i])
                 for i in range(num_reqs)
             ],
             dtype=np.int32,
