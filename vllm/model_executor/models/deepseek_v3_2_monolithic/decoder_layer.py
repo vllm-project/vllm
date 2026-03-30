@@ -16,7 +16,12 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 
 from .attention import MonolithicMLAAttention
-from .ops import fused_add_rms_norm, layer_norm, qk_rope, rms_norm, rms_norm_small
+from .ops import (
+    fused_add_rms_norm,
+    fused_norm_rope,
+    fused_q,
+    rms_norm,
+)
 
 
 class MonolithicDecoderLayer(nn.Module):
@@ -138,55 +143,57 @@ class MonolithicDecoderLayer(nn.Module):
                 self.rms_norm_eps,
             )
 
-        # hidden_states -> q_c, kv_c, k_pe
+        # Step 1. hidden_states -> q_c, kv_c, k_pe
+        #                          index_k
+        #                          index_weights
         out: torch.Tensor | tuple = self.self_attn.fused_qkv_a_proj(hidden_states)
         if isinstance(out, tuple):
             out: torch.Tensor = out[0]
         q_c, kv_c, k_pe = out.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
+        index_k, _ = self.attn.indexer_wk(hidden_states)
+        index_weights, _ = self.attn.indexer_weights_proj(hidden_states)
 
-        q_c = rms_norm_small(q_c, self.attn.q_a_layernorm_weight, self.rms_norm_eps)
-        kv_c_normed = rms_norm_small(
-            kv_c, self.attn.kv_a_layernorm_weight, self.attn.rms_norm_eps
-        )
-
-        # Attention
-        # 1. Q B-projection
-        q = self.attn.q_b_proj(q_c)[0].view(
-            -1, self.attn.num_local_heads, self.attn.qk_head_dim
-        )
-        k_pe = k_pe.unsqueeze(1)
-        qk_rope(
+        # Step 2. Q RMS norm + KV RMS norm + KV RoPE + Index K layer norm + RoPE
+        q_c, kv_c = fused_norm_rope(
             positions,
-            q,
+            # Q RMS norm
+            q_c,
+            self.attn.q_a_layernorm_weight,
+            self.rms_norm_eps,
+            # KV RMS norm
+            kv_c,
+            self.attn.kv_a_layernorm_weight,
+            self.attn.rms_norm_eps,
+            # KV RoPE
             k_pe,
             self.attn.rotary_emb.cos_sin_cache,
-            self.attn.qk_nope_head_dim,
-            interleaved=True,
-        )
-
-        # 3. Sparse indexer
-        index_q, _ = self.attn.indexer_wq_b(q_c)
-        index_q = index_q.view(-1, self.attn.index_n_heads, self.attn.index_head_dim)
-
-        index_k, _ = self.attn.indexer_wk(hidden_states)
-        index_k = layer_norm(
+            # Index K layer norm + RoPE
             index_k,
             self.attn.indexer_k_norm.weight,
             self.attn.indexer_k_norm.bias,
-            eps=self.attn.rms_norm_eps,
-        )
-        index_k = index_k.unsqueeze(1)
-        qk_rope(
-            positions,
-            index_q,
-            index_k,
+            self.attn.rms_norm_eps,
             self.attn.indexer_rope_emb.cos_sin_cache,
-            q_start_offset=0,
-            interleaved=False,
         )
-        index_k = index_k.squeeze(1)
+
+        # Step 3. q_c -> q
+        #                index_q
+        q = self.attn.q_b_proj(q_c)[0].view(
+            -1, self.attn.num_local_heads, self.attn.qk_head_dim
+        )
+        index_q, _ = self.attn.indexer_wq_b(q_c)
+        index_q = index_q.view(-1, self.attn.index_n_heads, self.attn.index_head_dim)
+
+        # Step 4. Q RoPE + Index Q RoPE + Quantize + Index weights
+        fused_q(
+            positions,
+            q,
+            self.attn.rotary_emb.cos_sin_cache,
+            self.attn.qk_nope_head_dim,
+            index_q,
+            self.attn.indexer_rope_emb.cos_sin_cache,
+        )
 
         index_q_fp8, index_q_scale = per_token_group_quant_fp8(
             index_q.view(-1, self.attn.index_head_dim),
@@ -199,7 +206,6 @@ class MonolithicDecoderLayer(nn.Module):
         )
         index_q_scale = index_q_scale.view(-1, self.attn.index_n_heads, 1)
 
-        index_weights, _ = self.attn.indexer_weights_proj(hidden_states)
         index_weights = (
             index_weights.unsqueeze(-1)
             * index_q_scale
@@ -212,7 +218,7 @@ class MonolithicDecoderLayer(nn.Module):
         # 4-7. KV cache update + W_UK_T absorption + sparse attn + W_UV
         attn_out = self.attn.mla_attn(
             q,
-            kv_c_normed,
+            kv_c,
             k_pe,
             output_shape=(
                 hidden_states.shape[0],
