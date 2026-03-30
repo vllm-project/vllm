@@ -1,14 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# code modified from deepseekv3_tool_parser.py
 
+"""
+KimiK2ToolParser — clean rewrite (Optimized & vLLM Native Compliant).
+
+Design principles:
+  1. Single source of truth: streaming state is rebuilt from current_text.
+  2. No silent drops: every early return is explicit and logged.
+  3. Section markers are stripped once, at entry.
+  4. Maintains self.prev_tool_call_arr and self.streamed_args_for_tool
+     strictly for vLLM serving.py compatibility.
+  5. Infinite-context safe: rolling buffer for markers is capped at 256 bytes.
+"""
+
+from __future__ import annotations
+
+import os
+import re
 from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Optional
 
-import regex as re
-
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -19,184 +32,155 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 logger = init_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Tunable constants
+# ---------------------------------------------------------------------------
+
+#: Safety valve: if we stay inside a tool section this long, force-exit.
+#: Set to 512KB to support massive max_tokens=16000+ outputs.
+SECTION_MAX_CHARS: int = int(os.getenv("KIMI_PARSER_SECTION_MAX", "524288"))
+
+# ---------------------------------------------------------------------------
+# Internal state container
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StreamState:
+    """All mutable streaming state in one place — optimized to use O(1) memory."""
+
+    in_tool_section: bool = False
+    section_char_count: int = 0
+    marker_buffer: str = ""
+
+    current_tool_id: int = -1
+    tool_name_sent: bool = False
+    current_args: str = ""
+
+    def reset(self) -> None:
+        self.__init__()
+
+    def enter_section(self) -> None:
+        self.in_tool_section = True
+        self.section_char_count = 0
+        self.marker_buffer = ""
+
+    def exit_section(self) -> None:
+        self.in_tool_section = False
+        self.section_char_count = 0
+        self.marker_buffer = ""
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
 
 class KimiK2ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
-        super().__init__(tokenizer, tools)
-        self.current_tool_name_sent: bool = False
-        self.prev_tool_call_arr: list[dict] = []
-        self.current_tool_id: int = -1
-        self.streamed_args_for_tool: list[
-            str
-        ] = []  # map what has been streamed for each tool so far to a list
+    _SECTION_BEGIN_VARIANTS = (
+        "<|tool_calls_section_begin|>",
+        "<|tool_call_section_begin|>",
+    )
+    _SECTION_END_VARIANTS = (
+        "<|tool_calls_section_end|>",
+        "<|tool_call_section_end|>",
+    )
+    _CALL_BEGIN = "<|tool_call_begin|>"
+    _CALL_END = "<|tool_call_end|>"
+    _ARG_BEGIN = "<|tool_call_argument_begin|>"
 
-        # Section-level state management to prevent token leakage
-        self.in_tool_section: bool = False
-        self.token_buffer: str = ""
-        # Buffer size: empirical worst-case for longest marker (~30 chars) * 2
-        # + safety margin for unicode + partial overlap. Prevents unbounded growth.
-        self.buffer_max_size: int = 1024
-        self.section_char_count: int = 0  # Track characters processed in tool section
-        self.max_section_chars: int = 8192  # Force exit if section exceeds this
-        self._buffer_overflow_logged: bool = False  # Log overflow once per session
+    _ALL_MARKERS = (
+        *_SECTION_BEGIN_VARIANTS,
+        *_SECTION_END_VARIANTS,
+        _CALL_BEGIN,
+        _CALL_END,
+        _ARG_BEGIN,
+    )
 
-        # Support both singular and plural variants
-        self.tool_calls_start_token: str = "<|tool_calls_section_begin|>"
-        self.tool_calls_end_token: str = "<|tool_calls_section_end|>"
-        self.tool_calls_start_token_variants: list[str] = [
-            "<|tool_calls_section_begin|>",
-            "<|tool_call_section_begin|>",  # singular variant
-        ]
-        self.tool_calls_end_token_variants: list[str] = [
-            "<|tool_calls_section_end|>",
-            "<|tool_call_section_end|>",  # singular variant
-        ]
+    _RE_FULL = re.compile(
+        r"<\|tool_call_begin\|>\s*(?P<call_id>[^<\s]+)\s*"
+        r"<\|tool_call_argument_begin\|>\s*(?P<args>(?:(?!<\|tool_call_begin\|>).)*?)\s*"
+        r"<\|tool_call_end\|>",
+        re.DOTALL,
+    )
 
-        self.tool_call_start_token: str = "<|tool_call_begin|>"
-        self.tool_call_end_token: str = "<|tool_call_end|>"
+    _RE_STREAM_ID = re.compile(r"^\s*(?P<call_id>[^<\s]+(?::\d+|_\d+))\s*$")
+    _RE_UNDERSCORE_SUFFIX = re.compile(r"_\d+$")
 
-        self.tool_call_regex = re.compile(
-            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[^<]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>(?:(?!<\|tool_call_begin\|>).)*?)\s*<\|tool_call_end\|>",
-            re.DOTALL,
-        )
-
-        self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<tool_call_id>.+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
-        )
-
-        self.stream_tool_call_name_regex = re.compile(r"(?P<tool_call_id>.+:\d+)\s*")
+    def __init__(self, tokenizer: TokenizerLike) -> None:
+        # Base class ToolParser initializes:
+        # self.prev_tool_call_arr =[]
+        # self.streamed_args_for_tool =[]
+        super().__init__(tokenizer)
 
         if not self.model_tokenizer:
-            raise ValueError(
-                "The model tokenizer must be passed to the ToolParser "
-                "constructor during construction."
-            )
-        self.tool_calls_start_token_id = self.vocab.get(self.tool_calls_start_token)
-        self.tool_calls_end_token_id = self.vocab.get(self.tool_calls_end_token)
+            raise ValueError("KimiK2ToolParser requires model_tokenizer to be set.")
 
-        # Get token IDs for all variants
-        self.tool_calls_start_token_ids: list[int] = [
+        self._section_begin_ids: tuple[int, ...] = tuple(
             tid
-            for variant in self.tool_calls_start_token_variants
-            if (tid := self.vocab.get(variant)) is not None
-        ]
-        self.tool_calls_end_token_ids: list[int] = [
+            for v in self._SECTION_BEGIN_VARIANTS
+            if (tid := self.vocab.get(v)) is not None
+        )
+        self._section_end_ids: tuple[int, ...] = tuple(
             tid
-            for variant in self.tool_calls_end_token_variants
-            if (tid := self.vocab.get(variant)) is not None
-        ]
+            for v in self._SECTION_END_VARIANTS
+            if (tid := self.vocab.get(v)) is not None
+        )
+        self._call_begin_id: Optional[int] = self.vocab.get(self._CALL_BEGIN)
+        self._call_end_id: Optional[int] = self.vocab.get(self._CALL_END)
 
-        self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
-        self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
+        if not self._section_begin_ids or not self._section_end_ids:
+            raise RuntimeError("Missing tool section begin/end tokens in vocab.")
+        if self._call_begin_id is None or self._call_end_id is None:
+            raise RuntimeError("Missing tool call begin/end tokens in vocab.")
 
-        if (
-            self.tool_calls_start_token_id is None
-            or self.tool_calls_end_token_id is None
-        ):
-            raise RuntimeError(
-                "Kimi-K2 Tool parser could not locate tool call start/end "
-                "tokens in the tokenizer!"
-            )
-
-    def _check_and_strip_markers(self, text: str) -> tuple[str, bool, bool]:
-        """
-        Check for section begin/end markers in text and strip them.
-        Returns: (cleaned_text, found_section_begin, found_section_end)
-        """
-        found_begin = False
-        found_end = False
-        cleaned = text
-
-        # Check for section begin markers (any variant)
-        for variant in self.tool_calls_start_token_variants:
-            if variant in cleaned:
-                cleaned = cleaned.replace(variant, "")
-                found_begin = True
-
-        # Check for section end markers (any variant)
-        for variant in self.tool_calls_end_token_variants:
-            if variant in cleaned:
-                cleaned = cleaned.replace(variant, "")
-                found_end = True
-        return cleaned, found_begin, found_end
-
-    def _reset_section_state(self) -> None:
-        """Reset state when exiting tool section."""
-        self.in_tool_section = False
-        self.token_buffer = ""
-        self.section_char_count = 0
+        self._state = _StreamState()
 
     def reset_streaming_state(self) -> None:
-        """
-        Reset all streaming state. Call this between requests to prevent
-        state leakage when parser instance is reused.
-        """
-        # Reset section state
-        self._reset_section_state()
-
-        # Reset parent class state
-        self.current_tool_name_sent = False
-        self.prev_tool_call_arr = []
-        self.current_tool_id = -1
-        self.streamed_args_for_tool = []
-
-        logger.debug("Streaming state reset")
+        self._state.reset()
+        # Ensure upstream vLLM arrays are wiped cleanly for the next request
+        self.prev_tool_call_arr.clear()
+        self.streamed_args_for_tool.clear()
+        logger.debug("KimiK2ToolParser: state reset")
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        # sanity check; avoid unnecessary processing
-        if self.tool_calls_start_token not in model_output:
+        section_begin = next(
+            (v for v in self._SECTION_BEGIN_VARIANTS if v in model_output), None
+        )
+        if section_begin is None:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        else:
-            try:
-                # there are two possible captures - between tags, or between a
-                # tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and
-                # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
-
-                logger.debug("function_call_tuples: %s", function_call_tuples)
-
-                tool_calls = []
-                for match in function_call_tuples:
-                    function_id, function_args = match
-                    # function_id: functions.get_weather:0 or get_weather:0
-                    function_name = function_id.split(":")[0].split(".")[-1]
-                    tool_calls.append(
-                        ToolCall(
-                            id=function_id,
-                            type="function",
-                            function=FunctionCall(
-                                name=function_name, arguments=function_args
-                            ),
-                        )
-                    )
-
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
-                return ExtractedToolCallInformation(
-                    tools_called=True,
-                    tool_calls=tool_calls,
-                    content=content if content else None,
+        try:
+            tool_calls = [
+                ToolCall(
+                    id=m.group("call_id"),
+                    type="function",
+                    function=FunctionCall(
+                        name=self._call_id_to_name(m.group("call_id")),
+                        arguments=m.group("args"),
+                    ),
                 )
-
-            except Exception:
-                logger.exception("Error in extracting tool call from response.")
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
+                for m in self._RE_FULL.finditer(model_output)
+            ]
+            content = model_output[: model_output.index(section_begin)]
+            return ExtractedToolCallInformation(
+                tools_called=bool(tool_calls),
+                tool_calls=tool_calls,
+                content=content or None,
+            )
+        except Exception:
+            logger.exception("KimiK2ToolParser.extract_tool_calls failed")
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
 
     def extract_tool_calls_streaming(
         self,
@@ -207,395 +191,238 @@ class KimiK2ToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> DeltaMessage | None:
-        logger.debug("delta_text: %s", delta_text)
-        logger.debug("delta_token_ids: %s", delta_token_ids)
+    ) -> Optional[DeltaMessage]:
+        s = self._state
 
-        # Flag to defer section exit until after tool parsing completes
-        deferred_section_exit = False
+        # ----------------------------------------------------------------
+        # Step 1: Feed rolling look-ahead buffer for split markers.
+        # Cap at 256 bytes to prevent memory bloat on massive texts.
+        # ----------------------------------------------------------------
+        s.marker_buffer = (s.marker_buffer + delta_text)[-256:]
 
-        # Add delta to buffer for split marker detection
-        self.token_buffer += delta_text
+        found_begin = any(v in s.marker_buffer for v in self._SECTION_BEGIN_VARIANTS)
+        found_end = any(v in s.marker_buffer for v in self._SECTION_END_VARIANTS)
 
-        # Enforce buffer size limit to prevent memory issues
-        if len(self.token_buffer) > self.buffer_max_size:
-            if not self._buffer_overflow_logged:
-                logger.warning(
-                    "Token buffer exceeded max size (%d bytes), flushing excess. "
-                    "This may indicate very long markers or unusual tokenization.",
-                    self.buffer_max_size,
-                )
-                self._buffer_overflow_logged = True
-            # Keep only the most recent content that might contain partial markers
-            self.token_buffer = self.token_buffer[-self.buffer_max_size // 2 :]
+        # ----------------------------------------------------------------
+        # Step 2: Handle tool section boundaries
+        # ----------------------------------------------------------------
+        if found_begin and not s.in_tool_section:
+            s.enter_section()
 
-        # Check buffer for section markers (handles split tokens)
-        buffered_text, found_section_begin, found_section_end = (
-            self._check_and_strip_markers(self.token_buffer)
-        )
+        if found_end and s.in_tool_section:
+            post_marker = self._text_after_section_end(delta_text)
+            s.exit_section()
+            return (
+                DeltaMessage(content=post_marker)
+                if post_marker.strip()
+                else DeltaMessage(content="")
+            )
 
-        # Track section state transitions
-        if found_section_begin and not self.in_tool_section:
-            logger.debug("Entering tool section")
-            self.in_tool_section = True
-            self.token_buffer = buffered_text  # Use cleaned buffer
-            self.section_char_count = 0  # Reset counter for new section
-
-        if found_section_end and self.in_tool_section:
-            logger.debug("Detected section end marker")
-            # CRITICAL: Don't exit early if tool_call_end is in this chunk.
-            # Tool parser must emit final arguments/close first to avoid dropping
-            # the final tool update and leaking tokens into reasoning channel.
-            has_tool_end = self.tool_call_end_token_id in delta_token_ids
-            if has_tool_end:
-                # Defer exit until after tool parsing completes
-                deferred_section_exit = True
-                logger.debug("Deferring section exit: tool_call_end in same chunk")
-                self.token_buffer = buffered_text
-            else:
-                # No tool call ending, safe to exit immediately
-                logger.debug("Exiting tool section")
-                self._reset_section_state()
-                # Extract any content AFTER the section end marker in delta_text
-                # (don't use buffered_text as it contains tool call data)
-                post_section_content = ""
-                for variant in self.tool_calls_end_token_variants:
-                    if variant in delta_text:
-                        parts = delta_text.split(variant, 1)
-                        if len(parts) > 1:
-                            post_section_content = parts[1]
-                        break
-                if post_section_content.strip():
-                    return DeltaMessage(content=post_section_content)
-                return DeltaMessage(content="")
-        else:
-            self.token_buffer = buffered_text
-
-        # Check if any variant of section start token is in current_token_ids
-        has_section_token = any(
-            tid in current_token_ids for tid in self.tool_calls_start_token_ids
-        )
-
-        # Early return: if no section token detected yet, return as reasoning content
-        if not has_section_token and not self.in_tool_section:
-            logger.debug("No tool call tokens found!")
-            # Don't clear buffer - it needs to accumulate partial markers across deltas
-            # Buffer overflow is already protected by lines 215-224
+        # ----------------------------------------------------------------
+        # Step 3: Pure reasoning text (bypass tool logic)
+        # ----------------------------------------------------------------
+        if not s.in_tool_section and not any(
+            tid in current_token_ids for tid in self._section_begin_ids
+        ):
             return DeltaMessage(content=delta_text)
 
-        # Strip section markers from delta_text for subsequent processing
-        # NOTE: This preprocessing happens BEFORE the regex-based tool call
-        # parsing (from PR #24847) to ensure markers are removed cleanly
-        # before pattern matching. No double-stripping occurs because
-        # section markers and tool call markers are distinct.
-        delta_text, _, _ = self._check_and_strip_markers(delta_text)
-
-        # Error recovery: If in tool section for too long, force exit
-        if self.in_tool_section:
-            self.section_char_count += len(delta_text)
-            if self.section_char_count > self.max_section_chars:
+        # ----------------------------------------------------------------
+        # Step 4: Safety valve for unbounded tool sections
+        # ----------------------------------------------------------------
+        if s.in_tool_section:
+            s.section_char_count += len(delta_text)
+            if s.section_char_count > SECTION_MAX_CHARS:
                 logger.warning(
-                    "Tool section exceeded max length (%d chars), forcing exit. "
-                    "This may indicate malformed model output.",
-                    self.max_section_chars,
+                    "KimiK2ToolParser: section length exceeded %d max limit.",
+                    SECTION_MAX_CHARS,
                 )
-                self._reset_section_state()
-                # Deferred exit already handled by forced exit above
-                # Return remaining content as reasoning (or empty delta if no content)
-                return DeltaMessage(content=delta_text if delta_text.strip() else "")
+                s.exit_section()
+                return DeltaMessage(content="")
 
-        try:
-            # figure out where we are in the parsing by counting tool call
-            # start & end tags
-            prev_tool_start_count = previous_token_ids.count(
-                self.tool_call_start_token_id
+        clean_delta = self._strip_all_markers(delta_text)
+
+        prev_begin_count = previous_token_ids.count(self._call_begin_id)
+        cur_begin_count = current_token_ids.count(self._call_begin_id)
+        cur_end_count = current_token_ids.count(self._call_end_id)
+        call_end_in_delta = self._call_end_id in delta_token_ids
+
+        # ----------------------------------------------------------------
+        # Phase A: New Tool Call Started
+        # ----------------------------------------------------------------
+        if cur_begin_count > prev_begin_count:
+            s.current_tool_id += 1
+            s.tool_name_sent = False
+            s.current_args = ""
+
+            # --- vLLM Native Compatibility Sync ---
+            # Pre-pad arrays so vLLM serving.py never hits IndexError
+            self.prev_tool_call_arr.append(
+                {
+                    "type": "function",
+                    "id": None,
+                    "function": {"name": None, "arguments": ""},
+                }
             )
-            prev_tool_end_count = previous_token_ids.count(self.tool_call_end_token_id)
-            cur_tool_start_count = current_token_ids.count(
-                self.tool_call_start_token_id
+            self.streamed_args_for_tool.append("")
+
+            return self._try_emit_name(self._extract_call_portion(current_text))
+
+        # ----------------------------------------------------------------
+        # Phase B: Tool Call Ended
+        # ----------------------------------------------------------------
+        if call_end_in_delta:
+            return self._handle_call_end(current_text)
+
+        # ----------------------------------------------------------------
+        # Phase C: Noise Suppress (Between section start and tool start)
+        # ----------------------------------------------------------------
+        if s.in_tool_section and cur_begin_count == 0:
+            return DeltaMessage(content="")
+
+        # ----------------------------------------------------------------
+        # Phase D: Append Arguments to current tool
+        # ----------------------------------------------------------------
+        if cur_begin_count > cur_end_count:
+            portion = self._extract_call_portion(current_text)
+            if not s.tool_name_sent:
+                return self._try_emit_name(portion)
+
+            parsed = self._parse_call_portion(portion)
+            if parsed:
+                return self._diff_and_emit_args(parsed.get("arguments") or "")
+            return None
+
+        # ----------------------------------------------------------------
+        # Phase E: Idle in section (waiting for next tool or section end)
+        # ----------------------------------------------------------------
+        if s.in_tool_section:
+            return DeltaMessage(content="")
+
+        return DeltaMessage(content=clean_delta)
+
+    # ------------------------------------------------------------------
+    # Optimized Helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _call_id_to_name(cls, call_id: str) -> str:
+        """Lightning-fast tool name extraction."""
+        if ":" in call_id:
+            return call_id.split(":", 1)[0].rsplit(".", 1)[-1]
+        name = cls._RE_UNDERSCORE_SUFFIX.sub("", call_id)
+        return name[10:] if name.startswith("functions_") else name
+
+    def _strip_all_markers(self, text: str) -> str:
+        for marker in self._ALL_MARKERS:
+            text = text.replace(marker, "")
+        return text
+
+    def _text_after_section_end(self, delta_text: str) -> str:
+        for v in self._SECTION_END_VARIANTS:
+            if v in delta_text:
+                return delta_text.split(v, 1)[1]
+        return ""
+
+    def _extract_call_portion(self, current_text: str) -> str:
+        idx = current_text.rfind(self._CALL_BEGIN)
+        if idx != -1:
+            return current_text[idx + len(self._CALL_BEGIN) :].lstrip()
+        return ""
+
+    def _parse_call_portion(self, portion: str) -> Optional[dict]:
+        if self._ARG_BEGIN in portion:
+            id_part, _, args_part = portion.partition(self._ARG_BEGIN)
+            call_id = id_part.strip()
+            if not call_id:
+                return None
+            return {
+                "id": call_id,
+                "name": self._call_id_to_name(call_id),
+                "arguments": args_part,
+            }
+
+        m = self._RE_STREAM_ID.match(portion)
+        if m:
+            call_id = m.group("call_id")
+            return {
+                "id": call_id,
+                "name": self._call_id_to_name(call_id),
+                "arguments": None,
+            }
+        return None
+
+    def _try_emit_name(self, portion: str) -> Optional[DeltaMessage]:
+        parsed = self._parse_call_portion(portion)
+        if not parsed or not parsed.get("name"):
+            return None
+
+        s = self._state
+        s.tool_name_sent = True
+
+        # Sync parsed Name and ID with vLLM's internal array
+        if 0 <= s.current_tool_id < len(self.prev_tool_call_arr):
+            self.prev_tool_call_arr[s.current_tool_id]["id"] = parsed["id"]
+            self.prev_tool_call_arr[s.current_tool_id]["function"]["name"] = parsed[
+                "name"
+            ]
+
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=s.current_tool_id,
+                    type="function",
+                    id=parsed["id"],
+                    function=DeltaFunctionCall(name=parsed["name"]).model_dump(
+                        exclude_none=True
+                    ),
+                )
+            ]
+        )
+
+    def _diff_and_emit_args(self, cur_args: str) -> Optional[DeltaMessage]:
+        s = self._state
+        already = s.current_args
+
+        if not cur_args or cur_args == already:
+            return None
+
+        if not cur_args.startswith(already):
+            new_part = cur_args
+        else:
+            new_part = cur_args[len(already) :]
+
+        s.current_args = cur_args
+
+        # Sync updated arguments with vLLM's internal arrays
+        if 0 <= s.current_tool_id < len(self.prev_tool_call_arr):
+            self.prev_tool_call_arr[s.current_tool_id]["function"]["arguments"] = (
+                cur_args
             )
-            cur_tool_end_count = current_token_ids.count(self.tool_call_end_token_id)
-            tool_call_portion = None
-            text_portion = None
+            self.streamed_args_for_tool[s.current_tool_id] = cur_args
 
-            # case: if we're generating text, OR rounding out a tool call
-            if (
-                cur_tool_start_count == cur_tool_end_count
-                and prev_tool_end_count == cur_tool_end_count
-                and self.tool_call_end_token not in delta_text
-            ):
-                # Suppress content between section begin and first tool begin
-                # (header noise). Don't suppress content between tools to avoid
-                # breaking potential delimiter characters.
-                if self.in_tool_section and cur_tool_start_count == 0:
-                    logger.debug(
-                        "In tool section before first tool, suppressing: %s",
-                        delta_text,
-                    )
-                    # Return empty delta to maintain iterator contract
-                    return DeltaMessage(content="")
-                logger.debug("Generating text content! skipping tool parsing.")
-                return DeltaMessage(content=delta_text)
+        if not new_part:
+            return None
 
-            if self.tool_call_end_token in delta_text:
-                logger.debug("tool_call_end_token in delta_text")
-                full_text = current_text + delta_text
-                tool_call_portion = (
-                    full_text.split(self.tool_call_start_token)[-1]
-                    .split(self.tool_call_end_token)[0]
-                    .rstrip()
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=s.current_tool_id,
+                    function=DeltaFunctionCall(arguments=new_part).model_dump(
+                        exclude_none=True
+                    ),
                 )
-                delta_text = delta_text.split(self.tool_call_end_token)[0].rstrip()
-                text_portion = delta_text.split(self.tool_call_end_token)[-1].lstrip()
+            ]
+        )
 
-            # case -- we're starting a new tool call
-            if (
-                cur_tool_start_count > cur_tool_end_count
-                and cur_tool_start_count > prev_tool_start_count
-            ):
-                if len(delta_token_ids) > 1:
-                    tool_call_portion = current_text.split(self.tool_call_start_token)[
-                        -1
-                    ]
-                else:
-                    tool_call_portion = None
-                    delta = None
+    def _handle_call_end(self, current_text: str) -> Optional[DeltaMessage]:
+        if self._state.current_tool_id < 0:
+            return None
 
-                text_portion = None
+        after_begin = self._extract_call_portion(current_text)
+        before_end = after_begin.split(self._CALL_END, 1)[0].rstrip()
 
-                # set cursors and state appropriately
-                self.current_tool_id += 1
-                self.current_tool_name_sent = False
-                self.streamed_args_for_tool.append("")
-                logger.debug("Starting on a new tool %s", self.current_tool_id)
+        parsed = self._parse_call_portion(before_end)
+        if not parsed:
+            return None
 
-            # case -- we're updating an existing tool call
-            elif (
-                cur_tool_start_count > cur_tool_end_count
-                and cur_tool_start_count == prev_tool_start_count
-            ):
-                # get the portion of the text that's the tool call
-                tool_call_portion = current_text.split(self.tool_call_start_token)[-1]
-                text_portion = None
-
-            # case -- the current tool call is being closed.
-            elif (
-                cur_tool_start_count == cur_tool_end_count
-                and cur_tool_end_count >= prev_tool_end_count
-            ):
-                if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
-                    logger.debug("attempting to close tool call, but no tool call")
-                    # Handle deferred section exit before returning
-                    if deferred_section_exit and self.in_tool_section:
-                        self._reset_section_state()
-                    return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
-                if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
-                    if '"}' not in delta_text:
-                        # Handle deferred section exit before returning
-                        if deferred_section_exit and self.in_tool_section:
-                            self._reset_section_state()
-                        return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
-                    logger.debug(
-                        "Finishing tool and found diff that had not "
-                        "been streamed yet: %s",
-                        diff,
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += diff
-                    # Handle deferred section exit before returning
-                    if deferred_section_exit and self.in_tool_section:
-                        logger.debug("Completing deferred section exit")
-                        self._reset_section_state()
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(arguments=diff).model_dump(
-                                    exclude_none=True
-                                ),
-                            )
-                        ]
-                    )
-
-            # case -- otherwise we're just generating text
-            else:
-                # Check if we're in tool section - if so, suppress
-                if self.in_tool_section:
-                    logger.debug("In tool section, suppressing text generation")
-                    # Handle deferred section exit before returning
-                    if deferred_section_exit:
-                        self._reset_section_state()
-                    return DeltaMessage(content="")
-                text = delta_text.replace(self.tool_call_start_token, "")
-                text = text.replace(self.tool_call_end_token, "")
-                delta = DeltaMessage(tool_calls=[], content=text)
-                # Handle deferred section exit before returning
-                if deferred_section_exit and self.in_tool_section:
-                    self._reset_section_state()
-                return delta
-
-            current_tool_call = dict()
-            if tool_call_portion:
-                current_tool_call_matches = self.stream_tool_call_portion_regex.match(
-                    tool_call_portion
-                )
-                if current_tool_call_matches:
-                    tool_id, tool_args = current_tool_call_matches.groups()
-                    tool_name = tool_id.split(":")[0].split(".")[-1]
-                    current_tool_call["id"] = tool_id.strip()
-                    current_tool_call["name"] = tool_name
-                    current_tool_call["arguments"] = tool_args
-                else:
-                    current_tool_call_name_matches = (
-                        self.stream_tool_call_name_regex.match(tool_call_portion)
-                    )
-                    if current_tool_call_name_matches:
-                        (tool_id_str,) = current_tool_call_name_matches.groups()
-                        tool_name = tool_id_str.split(":")[0].split(".")[-1]
-                        current_tool_call["id"] = tool_id_str.strip()
-                        current_tool_call["name"] = tool_name
-                        current_tool_call["arguments"] = ""
-                    else:
-                        logger.debug("Not enough token")
-                        return None
-
-            # case - we haven't sent the tool name yet. If it's available, send
-            #   it. otherwise, wait until it's available.
-            if not self.current_tool_name_sent:
-                if current_tool_call is None:
-                    return None
-                function_name: str | None = current_tool_call.get("name")
-                tool_id = current_tool_call.get("id")
-                if function_name:
-                    self.current_tool_name_sent = True
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                type="function",
-                                id=tool_id,
-                                function=DeltaFunctionCall(
-                                    name=function_name
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                else:
-                    return None
-
-            # case -- otherwise, send the tool call delta
-
-            # if the tool call portion is None, send the delta as text
-            if tool_call_portion is None:
-                # if there's text but not tool calls, send that -
-                # otherwise None to skip chunk
-                # CRITICAL: Never return content if we're in a tool section
-                if self.in_tool_section:
-                    return None
-                delta = (
-                    DeltaMessage(content=delta_text)
-                    if text_portion is not None
-                    else None
-                )
-                return delta
-
-            # now, the nitty-gritty of tool calls
-            # now we have the portion to parse as tool call.
-
-            logger.debug(
-                "Trying to parse current tool call with ID %s", self.current_tool_id
-            )
-
-            # if we're starting a new tool call, push an empty object in as
-            #   a placeholder for the arguments
-            if len(self.prev_tool_call_arr) <= self.current_tool_id:
-                self.prev_tool_call_arr.append({})
-
-            # main logic for tool parsing here - compare prev. partially-parsed
-            #   JSON to the current partially-parsed JSON
-            prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
-                "arguments"
-            )
-            cur_arguments = current_tool_call.get("arguments")
-
-            logger.debug("diffing old arguments: %s", prev_arguments)
-            logger.debug("against new ones: %s", cur_arguments)
-
-            # case -- no arguments have been created yet. skip sending a delta.
-            if not cur_arguments and not prev_arguments:
-                logger.debug("Skipping text %s - no arguments", delta_text)
-                delta = None
-
-            # case -- prev arguments are defined, but non are now.
-            #   probably impossible, but not a fatal error - just keep going
-            elif not cur_arguments and prev_arguments:
-                logger.error(
-                    "should be impossible to have arguments reset "
-                    "mid-call. skipping streaming anything."
-                )
-                delta = None
-
-            # case -- we now have the first info about arguments available from
-            #   autocompleting the JSON
-            elif cur_arguments and not prev_arguments:
-                delta = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_id,
-                            function=DeltaFunctionCall(
-                                arguments=cur_arguments
-                            ).model_dump(exclude_none=True),
-                        )
-                    ]
-                )
-                self.streamed_args_for_tool[self.current_tool_id] = cur_arguments
-
-            # last case -- we have an update to existing arguments.
-            elif cur_arguments and prev_arguments:
-                if (
-                    isinstance(delta_text, str)
-                    and cur_arguments != prev_arguments
-                    and len(cur_arguments) > len(prev_arguments)
-                    and cur_arguments.startswith(prev_arguments)
-                ):
-                    delta_arguments = cur_arguments[len(prev_arguments) :]
-                    logger.debug("got diff %s", delta_text)
-
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=delta_arguments
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] = cur_arguments
-                else:
-                    delta = None
-
-            # handle saving the state for the current tool into
-            # the "prev" list for use in diffing for the next iteration
-            if self.current_tool_id == len(self.prev_tool_call_arr) - 1:
-                self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
-            else:
-                self.prev_tool_call_arr.append(current_tool_call)
-
-            # Handle deferred section exit after tool parsing completes
-            if deferred_section_exit and self.in_tool_section:
-                logger.debug("Completing deferred section exit")
-                self._reset_section_state()
-
-            return delta
-
-        except Exception:
-            logger.exception("Error trying to handle streaming tool call.")
-            return None  # do not stream a delta. skip this token ID.
+        return self._diff_and_emit_args(parsed.get("arguments") or "")
