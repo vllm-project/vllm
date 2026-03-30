@@ -21,6 +21,11 @@ model: meta-llama/Llama-3.1-8B-Instruct
 host: "127.0.0.1"
 port: 6379
 uvicorn-log-level: "info"
+# Optional: log request metadata at INFO (see docs/usage/troubleshooting.md)
+# enable-log-requests: true
+# Optional: truncated prompt snippets at INFO; requires enable-log-requests.
+# Off by default for security (see docs/usage/security.md).
+# enable-log-request-prompts: true
 ```
 
 To use the above config file:
