@@ -1,9 +1,15 @@
 #pragma once
 
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/shim_utils.h>
 
 #include <cuda_runtime.h>
+
+// Stable ABI equivalent of TORCH_CHECK_NOT_IMPLEMENTED.
+#define STD_TORCH_CHECK_NOT_IMPLEMENTED(cond, ...) \
+  STD_TORCH_CHECK(cond, "NotImplementedError: ", __VA_ARGS__)
 
 // Utility to get the current CUDA stream for a given device using stable APIs.
 // Returns a cudaStream_t for use in kernel launches.
