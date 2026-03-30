@@ -12,6 +12,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn,
     selective_state_update,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
@@ -433,6 +434,13 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="Stochastic rounding in triton is only supported"
+    " on compute capability 10.0 CUDA devices.",
+)
 def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_rounds):
     device = "cuda"
     rtol, atol = 5e-3, 1e-1
