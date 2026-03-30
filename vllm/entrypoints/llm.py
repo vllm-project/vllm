@@ -1453,22 +1453,25 @@ class LLM:
         scoring_data = io_processor.valid_inputs(data_1, data_2)
         offset = len(scoring_data.data_1)
 
-        processor_inputs = io_processor.pre_process_offline(
-            ctx=OfflineInputsContext(
-                prompts=scoring_data,
-                tokenization_kwargs=tokenization_kwargs,
-                chat_template=chat_template,
-                offset=offset,
-            )
+        ctx = OfflineInputsContext(
+            prompts=scoring_data,
+            pooling_params=pooling_params,
+            tokenization_kwargs=tokenization_kwargs,
+            chat_template=chat_template,
+            offset=offset,
         )
 
-        if pooling_params is None:
-            pooling_params = PoolingParams()
+        processor_inputs = io_processor.pre_process_offline(ctx)
+
+        print(processor_inputs)
+
+        if ctx.pooling_params is None:
+            ctx.pooling_params = PoolingParams()
 
         seq_lora_requests = self._lora_request_to_seq(
             lora_request, len(processor_inputs)
         )
-        params_seq = self._params_to_seq(pooling_params, len(processor_inputs))
+        params_seq = self._params_to_seq(ctx.pooling_params, len(processor_inputs))
         seq_priority = self._priority_to_seq(None, len(processor_inputs))
 
         for param in params_seq:

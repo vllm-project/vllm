@@ -8,7 +8,7 @@ from typing import Any, Generic, TypeAlias, TypeVar
 from fastapi import Request
 from pydantic import ConfigDict
 
-from vllm import PoolingRequestOutput, PromptType
+from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -88,6 +88,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 @dataclass
 class OfflineInputsContext:
     prompts: PromptType | Sequence[PromptType] | ScoringData
+    pooling_params: PoolingParams | list[PoolingParams] | None = None
     tokenization_kwargs: dict[str, Any] | None = None
     chat_template: str | None = None
 
