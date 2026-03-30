@@ -37,6 +37,7 @@ from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensProm
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -263,10 +264,23 @@ class Qwen3ASRMultiModalProcessor(
 class Qwen3ASRForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
     SupportsTranscription,
 ):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     hf_to_vllm_mapper = WeightsMapper(
