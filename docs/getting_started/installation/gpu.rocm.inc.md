@@ -70,18 +70,16 @@ uv pip install vllm==0.18.0 --extra-index-url https://wheels.vllm.ai/rocm/0.18.0
 
 #### Install the latest code
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since commit `171775f306a333a9cf105bfd533bf3e113d401d9` on <https://wheels.vllm.ai/rocm/nightly/>. The indices can be used is
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since commit `171775f306a333a9cf105bfd533bf3e113d401d9` on <https://wheels.vllm.ai/rocm/nightly/>. The custom index to be used is `https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT}`
 
-- `https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT}`
-
-The first ROCm Variant that supports nightly wheel is ROCm 7.2.1
+**NOTE:** The first ROCm Variant that supports nightly wheel is ROCm 7.2.1
 
 To install from latest nightly index, run:
 
 ```bash
 # automatically extract the available rocm variant
 export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | \
-grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+    grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
 
 # inspect if the ROCm version is compatible with your environment
 echo $VLLM_ROCM_VARIANT
@@ -99,11 +97,11 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 export VLLM_COMMIT=5b8c30d62b754b575e043ce2fc0dcbf8a64f6306
 
 export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT} | \
-grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+    grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
 
 # Extract the version from the wheel URL
 export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT}/${VLLM_ROCM_VARIANT}/vllm/ | \
-grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
+    grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
 
 # inspect the version if it is compatible with the ROCm version of your environment
 echo $VLLM_ROCM_VARIANT
@@ -124,11 +122,11 @@ uv pip install vllm==${VLLM_VERSION} \
     export VLLM_COMMIT=5b8c30d62b754b575e043ce2fc0dcbf8a64f6306
 
     export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT} | \
-    grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+        grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
 
     # Extract the version from the wheel URL
     export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT}/${VLLM_ROCM_VARIANT}/vllm/ | \
-    grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
+        grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
 
     # inspect the version if it is compatible with the ROCm version of your environment
     echo $VLLM_ROCM_VARIANT
