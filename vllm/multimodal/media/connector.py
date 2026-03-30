@@ -165,7 +165,7 @@ class MediaConnector:
         if age > self._media_cache_ttl_secs:
             cache_path.unlink(missing_ok=True)
             return None
-        # Touch atime for LRU ordering
+        # Touch mtime for LRU ordering
         try:
             cache_path.touch()
             return cache_path.read_bytes()
@@ -220,7 +220,7 @@ class MediaConnector:
 
         # Evict items according to LRU policy
         entries.sort(key=lambda e: e[0], reverse=True)
-        while total_size > self._media_cache_max_bytes:
+        while total_size > self._media_cache_max_bytes and entries:
             mtime, size, f = entries.pop()
             expired.append(f)
             total_size -= size
