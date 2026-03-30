@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8KVCacheMethod,
     Fp8OnlineLinearMethod,
     Fp8OnlineMoEMethod,
-    _copy_missing_attrs,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
@@ -43,10 +42,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    initialize_single_dummy_weight,
-)
-from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -182,16 +177,6 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
-
-        weight = ModelWeightParameter(
-            data=torch.empty_like(layer.weight),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=layer.weight.weight_loader,
-        )
-        _copy_missing_attrs(layer.weight, weight)
-        layer.register_parameter("weight", weight)
-        initialize_single_dummy_weight(layer.weight)
 
         weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
 
