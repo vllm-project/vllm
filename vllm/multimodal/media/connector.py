@@ -157,16 +157,20 @@ class MediaConnector:
         if not self._media_cache_dir:
             return None
         cache_path = self._media_cache_path(url)
-        if not cache_path.exists():
-            return None
         # Check TTL
-        age = time.time() - cache_path.stat().st_mtime
+        try:
+            age = time.time() - cache_path.stat().st_mtime
+        except OSError:
+            return None
         if age > self._media_cache_ttl_secs:
             cache_path.unlink(missing_ok=True)
             return None
         # Touch atime for LRU ordering
-        cache_path.touch()
-        return cache_path.read_bytes()
+        try:
+            cache_path.touch()
+            return cache_path.read_bytes()
+        except OSError:
+            return None
 
     def _put_cached_bytes(self, url: str, data: bytes) -> None:
         """Store downloaded bytes and evict if over budget."""
@@ -174,6 +178,7 @@ class MediaConnector:
             return
         cache_path = self._media_cache_path(url)
         # Atomic write via temp file + rename
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="wb", dir=self._media_cache_dir, delete=False
@@ -182,9 +187,10 @@ class MediaConnector:
                 tmp_path = tmp_file.name
             os.rename(tmp_path, str(cache_path))
         except OSError:
-            # Another process beat us or disk issue — skip silently
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path)
+            # Another process beat us or disk issue
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
             return
         self._maybe_evict()
 
