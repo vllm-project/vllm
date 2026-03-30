@@ -94,8 +94,8 @@ class TestGenerativeScoringAPI:
                 "items": ["item1", "item2"],
             },
         )
-        # Pydantic validation error for missing required field
-        assert response.status_code == 422
+        # Missing required field returns 400 (manual JSON parsing)
+        assert response.status_code == 400
 
     @pytest.mark.asyncio
     async def test_validation_empty_items(self, server: RemoteOpenAIServer):
