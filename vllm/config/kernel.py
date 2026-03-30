@@ -32,14 +32,14 @@ class KernelConfig:
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
-    - "auto": Automatically select the best backend based on model and hardware\n
-    - "triton": Use Triton-based fused MoE kernels\n
-    - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)\n
-    - "cutlass": Use vLLM CUTLASS kernels\n
-    - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels\n
-    - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels\n
-    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)\n
-    - "marlin": Use Marlin kernels (weight-only quantization)\n
+    - "auto": Automatically select the best backend based on model and hardware
+    - "triton": Use Triton-based fused MoE kernels
+    - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
+    - "cutlass": Use vLLM CUTLASS kernels
+    - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
+    - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
+    - "marlin": Use Marlin kernels (weight-only quantization)
     - "aiter": Use AMD AITer kernels (ROCm only)"""
 
     @field_validator("moe_backend", mode="before")
