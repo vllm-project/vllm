@@ -12,6 +12,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
@@ -333,12 +334,11 @@ def rocm_fp8_paged_mqa_logits(
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
         batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
-            float("-inf"),
-            device="cuda",
-            dtype=torch.float32,
+        actual_batch = batch_size * next_n
+        (out_qk,) = current_workspace_manager().get_simultaneous(
+            ((heads, actual_batch, max_model_len), torch.float32),
         )
+        out_qk.fill_(float("-inf"))
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -473,15 +473,6 @@ def rocm_aiter_sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
-    # profile run
-    # NOTE(Chen): create the max possible flattened_kv. So that
-    # profile_run can get correct memory usage.
-    _flattened_kv = torch.empty(
-        [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
-    )
-    fp8_dtype = current_platform.fp8_dtype()
-    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
-    _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
 
@@ -508,6 +499,20 @@ def rocm_aiter_sparse_attn_indexer(
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # Reserve workspace during profiling run (real tensors, not
+        # FakeTensor mode). Must NOT be in the fake impl — torch.compile
+        # calls the fake impl under FakeTensor mode where workspace
+        # manager operations on the locked real workspace would corrupt
+        # PyTorch's dispatch state.
+        workspace_manager = current_workspace_manager()
+        workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
+        heads = q_fp8.shape[1]
+        workspace_manager.get_simultaneous(
+            ((heads, hidden_states.shape[0], max_model_len), torch.float32),
+        )
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -544,17 +549,15 @@ def rocm_aiter_sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
+
+        workspace_manager = current_workspace_manager()
+        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
         for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=k.device,
-                dtype=fp8_dtype,
-            )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=k.device,
-                dtype=torch.uint8,
-            )
+            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
+            k_scale = k_scale_full[: chunk.total_seq_lens]
 
             ops.cp_gather_indexer_k_quant_cache(
                 kv_cache,
