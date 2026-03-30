@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
@@ -26,20 +26,20 @@ MoEBackend = Literal[
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
 
-    enable_flashinfer_autotune: bool | None = Field(default=None)
+    enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
-    - "auto": Automatically select the best backend based on model and hardware\n
-    - "triton": Use Triton-based fused MoE kernels\n
-    - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)\n
-    - "cutlass": Use vLLM CUTLASS kernels\n
-    - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels\n
-    - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels\n
-    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)\n
-    - "marlin": Use Marlin kernels (weight-only quantization)\n
+    - "auto": Automatically select the best backend based on model and hardware
+    - "triton": Use Triton-based fused MoE kernels
+    - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
+    - "cutlass": Use vLLM CUTLASS kernels
+    - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
+    - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
+    - "marlin": Use Marlin kernels (weight-only quantization)
     - "aiter": Use AMD AITer kernels (ROCm only)"""
 
     @field_validator("moe_backend", mode="before")

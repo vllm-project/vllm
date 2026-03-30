@@ -791,6 +791,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
+        revision="refs/pr/17",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
@@ -810,7 +811,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
-        "ibm-granite/granite-speech-3.3-2b"
+        "ibm-granite/granite-speech-3.3-2b",
+        extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
@@ -1092,6 +1094,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
     ),
+    "Qwen3ASRForcedAlignerForTokenClassification": _HfExamplesInfo(
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B", trust_remote_code=True
@@ -1127,8 +1135,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": _HfExamplesInfo(
-        "/host/engines/vllm/audio/2b-release",
+    "CohereAsrForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/cohere-transcribe-03-2026",
         trust_remote_code=True,
         is_available_online=False,  # TODO (ekagra): revert after asr release
     ),
