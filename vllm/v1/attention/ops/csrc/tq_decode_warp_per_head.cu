@@ -59,7 +59,8 @@ tq_decode_wph_kernel(
     int num_kv_splits, int block_size,
     int mse_bytes, int qjl_bytes, int kps, int val_data_bytes,
     int value_fp8,
-    float correction, float attn_scale)
+    float correction, float attn_scale,
+    float sparse_v_threshold)
 {
     constexpr int DIMS_PER_THREAD = D / 32;
 
@@ -85,13 +86,14 @@ tq_decode_wph_kernel(
     if (split_start >= split_end) return;
 
     const int q_base = bid * stride_qb + q_hid * stride_qh;
+    const bool use_qjl = (correction != 0.0f);
     float q_r[DIMS_PER_THREAD];
     float q_p[DIMS_PER_THREAD];
     #pragma unroll
     for (int i = 0; i < DIMS_PER_THREAD; i++) {
         const int d = lane_id * DIMS_PER_THREAD + i;
         q_r[i] = q_rot[q_base + d];
-        q_p[i] = q_proj[q_base + d];
+        if (use_qjl) q_p[i] = q_proj[q_base + d];
     }
 
     float m_prev = -INFINITY;
@@ -126,27 +128,43 @@ tq_decode_wph_kernel(
             float c_val = (mse_idx == 0) ? c0 : (mse_idx == 1) ? c1 : (mse_idx == 2) ? c2 : c3;
             partial_t1 += q_r[i] * c_val;
 
-            const uint8_t qjl_b = slot[mse_bytes + (d >> 3)];
-            const float sign = ((qjl_b >> (d & 7)) & 1) ? 1.0f : -1.0f;
-            partial_t2 += q_p[i] * sign;
+            if (use_qjl) {
+                const uint8_t qjl_b = slot[mse_bytes + (d >> 3)];
+                const float sign = ((qjl_b >> (d & 7)) & 1) ? 1.0f : -1.0f;
+                partial_t2 += q_p[i] * sign;
+            }
         }
 
         float sum_t1 = warp_reduce_sum(partial_t1);
-        float sum_t2 = warp_reduce_sum(partial_t2);
 
         float score;
-        if (lane_id == 0) {
-            uint16_t n_u16 = (uint16_t)slot[norm_off]
-                           | ((uint16_t)slot[norm_off + 1] << 8);
-            float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
+        if (use_qjl) {
+            float sum_t2 = warp_reduce_sum(partial_t2);
+            if (lane_id == 0) {
+                uint16_t n_u16 = (uint16_t)slot[norm_off]
+                               | ((uint16_t)slot[norm_off + 1] << 8);
+                float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
 
-            uint16_t g_u16 = (uint16_t)slot[norm_off + 2]
-                           | ((uint16_t)slot[norm_off + 3] << 8);
-            float res_norm = __half2float(*reinterpret_cast<const __half*>(&g_u16));
-
-            score = vec_norm * (sum_t1 + correction * res_norm * sum_t2) * attn_scale;
+                uint16_t g_u16 = (uint16_t)slot[norm_off + 2]
+                               | ((uint16_t)slot[norm_off + 3] << 8);
+                float res_norm = __half2float(*reinterpret_cast<const __half*>(&g_u16));
+                score = vec_norm * (sum_t1 + correction * res_norm * sum_t2) * attn_scale;
+            }
+        } else {
+            if (lane_id == 0) {
+                uint16_t n_u16 = (uint16_t)slot[norm_off]
+                               | ((uint16_t)slot[norm_off + 1] << 8);
+                float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
+                score = vec_norm * sum_t1 * attn_scale;
+            }
         }
         score = __shfl_sync(FULL_MASK, score, 0);
+
+        // Sparse V: skip V dequant if attention weight is negligible.
+        // When score < m_prev: m_new=m_prev, alpha=1.0, so no state update needed.
+        if (sparse_v_threshold > 0.0f && score < m_prev) {
+            if (__expf(score - m_prev) < sparse_v_threshold) continue;
+        }
 
         const float m_new = fmaxf(score, m_prev);
         const float alpha = __expf(m_prev - m_new);
@@ -222,7 +240,8 @@ tq_decode_wph_smem_multi_kernel(
     int mse_bytes, int qjl_bytes, int kps, int val_data_bytes,
     int slot_bytes,
     int value_fp8,
-    float correction, float attn_scale)
+    float correction, float attn_scale,
+    float sparse_v_threshold)
 {
     constexpr int DIMS_PER_THREAD = D / 32;
 
@@ -247,13 +266,14 @@ tq_decode_wph_smem_multi_kernel(
     if (split_start >= split_end) return;
 
     const int q_base = bid * stride_qb + q_hid * stride_qh;
+    const bool use_qjl = (correction != 0.0f);
     float q_r[DIMS_PER_THREAD];
     float q_p[DIMS_PER_THREAD];
     #pragma unroll
     for (int i = 0; i < DIMS_PER_THREAD; i++) {
         const int d = lane_id * DIMS_PER_THREAD + i;
         q_r[i] = q_rot[q_base + d];
-        q_p[i] = q_proj[q_base + d];
+        if (use_qjl) q_p[i] = q_proj[q_base + d];
     }
 
     float m_prev = -INFINITY;
@@ -308,7 +328,8 @@ tq_decode_wph_smem_multi_kernel(
             const uint8_t mse_b1 = slot[mse_base + 1];
 
             // Pre-load QJL byte (1 byte for 8 dims at 1 bit/dim)
-            const uint8_t qjl_b = slot[mse_bytes + lane_id];
+            uint8_t qjl_b;
+            if (use_qjl) qjl_b = slot[mse_bytes + lane_id];
 
             float partial_t1 = 0.0f;
             float partial_t2 = 0.0f;
@@ -320,26 +341,40 @@ tq_decode_wph_smem_multi_kernel(
                 const int mse_idx = (mse_byte >> ((d & 3) << 1)) & 0x3;
                 partial_t1 += q_r[i] * c[mse_idx];
 
-                const float sign = ((qjl_b >> (d & 7)) & 1) ? 1.0f : -1.0f;
-                partial_t2 += q_p[i] * sign;
+                if (use_qjl) {
+                    const float sign = ((qjl_b >> (d & 7)) & 1) ? 1.0f : -1.0f;
+                    partial_t2 += q_p[i] * sign;
+                }
             }
 
             float sum_t1 = warp_reduce_sum(partial_t1);
-            float sum_t2 = warp_reduce_sum(partial_t2);
-
-            // All threads read norms from smem (broadcast read, no shuffle needed)
-            uint16_t n_u16 = (uint16_t)slot[norm_off]
-                           | ((uint16_t)slot[norm_off + 1] << 8);
-            float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
-            uint16_t g_u16 = (uint16_t)slot[norm_off + 2]
-                           | ((uint16_t)slot[norm_off + 3] << 8);
-            float res_norm = __half2float(*reinterpret_cast<const __half*>(&g_u16));
 
             float score;
-            if (lane_id == 0) {
-                score = vec_norm * (sum_t1 + correction * res_norm * sum_t2) * attn_scale;
+            if (use_qjl) {
+                float sum_t2 = warp_reduce_sum(partial_t2);
+                uint16_t n_u16 = (uint16_t)slot[norm_off]
+                               | ((uint16_t)slot[norm_off + 1] << 8);
+                float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
+                uint16_t g_u16 = (uint16_t)slot[norm_off + 2]
+                               | ((uint16_t)slot[norm_off + 3] << 8);
+                float res_norm = __half2float(*reinterpret_cast<const __half*>(&g_u16));
+                if (lane_id == 0) {
+                    score = vec_norm * (sum_t1 + correction * res_norm * sum_t2) * attn_scale;
+                }
+            } else {
+                uint16_t n_u16 = (uint16_t)slot[norm_off]
+                               | ((uint16_t)slot[norm_off + 1] << 8);
+                float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
+                if (lane_id == 0) {
+                    score = vec_norm * sum_t1 * attn_scale;
+                }
             }
             score = __shfl_sync(FULL_MASK, score, 0);
+
+            // Sparse V: skip V dequant if attention weight is negligible.
+            if (sparse_v_threshold > 0.0f && score < m_prev) {
+                if (__expf(score - m_prev) < sparse_v_threshold) continue;
+            }
 
             const float m_new = fmaxf(score, m_prev);
             const float alpha = __expf(m_prev - m_new);
@@ -423,7 +458,8 @@ void tq_decode_wph_launch(
     int64_t mse_bytes, int64_t qjl_bytes,
     int64_t kps, int64_t val_data_bytes,
     int64_t value_fp8,
-    double correction, double attn_scale)
+    double correction, double attn_scale,
+    double sparse_v_threshold)
 {
     const int B = q_rot.size(0);
     const int Hk = num_kv_heads;
@@ -446,7 +482,8 @@ void tq_decode_wph_launch(
             (int)num_kv_splits, (int)block_size, \
             (int)mse_bytes, (int)qjl_bytes, (int)kps, (int)val_data_bytes, \
             (int)value_fp8, \
-            (float)correction, (float)attn_scale)
+            (float)correction, (float)attn_scale, \
+            (float)sparse_v_threshold)
 
 #if defined(TQ_HEAD_DIM) && defined(TQ_KV_GROUP_SIZE)
     // Minimal instantiation: only the configured combo
@@ -493,7 +530,8 @@ void tq_decode_wph_smem_launch(
     int64_t kps, int64_t val_data_bytes,
     int64_t slot_bytes,
     int64_t value_fp8,
-    double correction, double attn_scale)
+    double correction, double attn_scale,
+    double sparse_v_threshold)
 {
     const int B = q_rot.size(0);
     const int Hk = num_kv_heads;
@@ -521,7 +559,8 @@ void tq_decode_wph_smem_launch(
             (int)mse_bytes, (int)qjl_bytes, (int)kps, (int)val_data_bytes, \
             (int)slot_bytes, \
             (int)value_fp8, \
-            (float)correction, (float)attn_scale)
+            (float)correction, (float)attn_scale, \
+            (float)sparse_v_threshold)
 
 #if defined(TQ_HEAD_DIM) && defined(TQ_KV_GROUP_SIZE)
     TORCH_CHECK(head_dim == TQ_HEAD_DIM && kv_group_size == TQ_KV_GROUP_SIZE,

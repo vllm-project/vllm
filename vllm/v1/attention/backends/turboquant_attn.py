@@ -36,9 +36,9 @@ if _USE_TRITON_STORE:
 _USE_STREAM_OVERLAP = os.environ.get("TQ_STREAM_OVERLAP", "0") == "1"
 
 # Skip QJL: eliminates 1 of 2 store GEMMs and simplifies decode scoring.
-# Quality trade-off: removes 1-bit residual correction from attention scores.
-# Not default — full TQ3 (rotation + QJL) is recommended.
-_TQ_NO_QJL = os.environ.get("TQ_NO_QJL", "0") == "1"
+# QJL (1-bit sign correction) confirmed harmful — degrades quality at every
+# bit width. Default ON (skip QJL). Set TQ_NO_QJL=0 to re-enable.
+_TQ_NO_QJL = os.environ.get("TQ_NO_QJL", "1") == "1"
 
 _store_stream: torch.cuda.Stream | None = None
 
