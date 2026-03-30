@@ -103,29 +103,28 @@ class SimpleCPUOffloadWorker:
         # The physical layout varies across attention backends:
         #   FlashAttn/ROCm:  (2, num_blocks, ...) -> K/V outermost, 2 segments
         #   FlashInfer/MLA:  (num_blocks, ...)    -> blocks outermost, 1 segment
-        # We detect this from the tensor's strides, mirroring KVBlockZeroer.
+        # We derive page_size_bytes = storage.nbytes() // num_blocks, then
+        # classify dims: any dim whose byte-stride exceeds page_size_bytes
+        # must be an outer segment dim (e.g. the K/V dim of size 2). A less
+        # hacky way is to update the interface with the layout.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         for name, tensor in seen_ptrs.values():
             storage = tensor.untyped_storage()
             raw = torch.empty(0, dtype=torch.int8, device=self.device).set_(
                 storage, 0, (storage.nbytes(),)
             )
-            # Find the num_blocks dimension
-            block_dim = next(
-                d for d in range(tensor.ndim) if tensor.shape[d] == num_blocks
-            )
             el = tensor.element_size()
-            b_stride_bytes = tensor.stride(block_dim) * el
-            # Dims before block_dim with larger stride are "outer" (e.g. K/V).
+            page_size_bytes = storage.nbytes() // num_blocks
             outer_dims = [
-                d for d in range(block_dim) if tensor.stride(d) * el > b_stride_bytes
+                d for d in range(tensor.ndim) if tensor.stride(d) * el > page_size_bytes
             ]
-            if not outer_dims:  # no outer dimensions, so all blocks are contiguous
+            if not outer_dims:
                 unique_gpu_caches[name] = raw.view(num_blocks, -1)
-            else:  # outer dimensions exist, so blocks are segmented
+            else:
+                seg_stride = tensor.stride(outer_dims[0]) * el
                 for idx in range(tensor.shape[outer_dims[0]]):
-                    offset = idx * tensor.stride(outer_dims[0]) * el
-                    chunk = raw[offset : offset + num_blocks * b_stride_bytes]
+                    offset = idx * seg_stride
+                    chunk = raw[offset : offset + seg_stride]
                     unique_gpu_caches[f"{name}.{idx}"] = chunk.view(num_blocks, -1)
 
         # Compute per-tensor bytes_per_block. Tensors may have different
