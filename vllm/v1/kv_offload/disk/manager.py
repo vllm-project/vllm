@@ -152,11 +152,13 @@ class TieredOffloadingManager(OffloadingManager):
                     for _, eblock in evicted:
                         self._cpu._free_block(eblock)
 
-            # Allocate CPU slot and queue disk→CPU read
+            # Allocate CPU slot and queue disk→CPU read.
+            # BlockStatus initializes ref_cnt=-1 (not ready), so we
+            # set it to 1 (ready + locked for this load).
             new_blocks = self._cpu._allocate_blocks([bh])
             assert len(new_blocks) == 1
             cpu_block = new_blocks[0]
-            cpu_block.ref_cnt += 1
+            cpu_block.ref_cnt = 1
             self._cpu._policy.insert(bh, cpu_block)
 
             self._pending_reads.append((bh, cpu_block.block_id, disk_bid))
