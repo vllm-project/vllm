@@ -52,7 +52,10 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     information existed, a new entry is constructed
     """
     if layer not in LAYERWISE_INFO:
-        LAYERWISE_INFO[layer] = LayerReloadingInfo()
+        LAYERWISE_INFO[layer] = LayerReloadingInfo(
+            restore_metadata=({}, {}),
+            restore_device=torch.get_default_device(),
+        )
 
     return LAYERWISE_INFO[layer]
 
@@ -67,6 +70,7 @@ def record_metadata_for_reloading(model: torch.nn.Module):
     for layer in model.modules():
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
+        info.restore_device = torch.get_default_device()
 
 
 @torch.no_grad()
@@ -102,10 +106,18 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
 
+        # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
 
 
 def initialize_online_processing(layer: torch.nn.Module):
+    """
+    Wrap a layer's weight loaders with online processing loaders.
+    Called by either `initialize_layerwise_reload` or an online quantization scheme,
+    prevents double wrapping in the case of online quantization + reloading
+
+    :param layer: layer whose parameter weight loaders will be wrapped
+    """
     info = get_layerwise_info(layer)
 
     # Track loading progress to determine when to process/copy
@@ -248,7 +260,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     4. Copies processed values back to original tensor storage
     """
     # Materialize layer tensors onto device
-    materialize_layer(layer)
+    materialize_layer(layer, info)
 
     # If no weights were loaded (e.g. dummy loading), initialize with
     # small random values to avoid NaN from zero/garbage data
