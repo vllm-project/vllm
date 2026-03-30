@@ -823,15 +823,19 @@ class SpecDecodeBaseProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Compute backup token indices from committed tokens only.
-        # num_tokens_no_spec - 1 gives the last committed token index.
-        # In async mode, seq_lens would be inflated by draft placeholders
-        # and cause get_token_id() to return -1. See #38098.
+        """
+        This function is used to prepare the inputs for speculative decoding.
+        It calculates the next token ids and the number of valid sampled tokens
+        for each request, considering the "discarded" requests whose next token
+        is not sampled and comes from `request.get_token_id()` instead. This is denoted
+        the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
+        """
+        # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
+        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens[i])
+                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
                 for i in range(num_reqs)
             ],
             dtype=np.int32,

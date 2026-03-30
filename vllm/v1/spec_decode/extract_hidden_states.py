@@ -291,17 +291,21 @@ class ExtractHiddenStatesProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Prepare next token IDs for speculative decoding.
+
+        Since num_speculative_tokens == 1, sampled_token_ids has shape
+        (batch_size, 1). For each request we either use the sampled token
+        (if valid and not discarded) or a backup token from the request state.
+        """
         num_reqs = gpu_input_batch.num_reqs
         device = sampled_token_ids.device
 
-        # Compute backup token indices from committed tokens only.
-        # num_tokens_no_spec - 1 gives the last committed token index.
-        # In async mode, seq_lens would be inflated by draft placeholders
-        # and cause get_token_id() to return -1. See #38098.
-        seq_lens = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
+        # Compute backup tokens for discarded / invalid requests
+        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
         backup_tokens_gpu = torch.tensor(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens[i])
+                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
                 for i in range(num_reqs)
             ],
             dtype=torch.int32,
@@ -310,6 +314,7 @@ class ExtractHiddenStatesProposer:
 
         assert discard_request_mask.dtype == torch.bool
 
+        # With num_speculative_tokens == 1, there is exactly one token
         sampled = sampled_token_ids[:, 0]
         is_valid = (sampled >= 0) & (sampled < gpu_input_batch.vocab_size)
         valid_sampled_tokens_count = is_valid.to(torch.int32)
