@@ -72,7 +72,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-
+    pooling_params: PoolingParams | list[PoolingParams] | None = None
     engine_inputs: Sequence[EngineInput] | None = None
     prompt_request_ids: list[str] | None = None
     intermediates: Any | None = None

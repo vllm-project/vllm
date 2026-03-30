@@ -225,21 +225,65 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.use_sep_token = self.model_config.use_sep_token
         self.tokenizer = self.renderer.get_tokenizer()
 
+    #######################################
+    # online APIs
+
+    def pre_process_online(self, ctx: ScoringServeContext):
+        request = ctx.request
+
+        if isinstance(request, ScoreRequest):
+            data_1 = request.data_1
+            data_2 = request.data_2
+        elif isinstance(request, RerankRequest):
+            data_1 = request.query
+            data_2 = request.documents
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        scoring_data = self.valid_inputs(data_1, data_2)
+        tok_params = request.build_tok_params(self.model_config)
+        pooling_params = self.create_pooling_params(request)
+        engine_inputs, pooling_params_list = self._pre_process(
+            scoring_data, tok_params, pooling_params, chat_template=self.chat_template
+        )
+
+        ctx.engine_inputs = engine_inputs
+        ctx.pooling_params = pooling_params_list
+
+    #######################################
+    # offline APIs
+
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         assert isinstance(ctx.prompts, ScoringData)
+        assert not isinstance(ctx.pooling_params, list)
 
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
-        data_1 = ctx.prompts.data_1
-        data_2 = ctx.prompts.data_2
+        engine_inputs, pooling_params_list = self._pre_process(
+            ctx.prompts, tok_params, ctx.pooling_params, ctx.chat_template
+        )
+        ctx.pooling_params = pooling_params_list
+        return engine_inputs
+
+    #######################################
+    # helpers
+
+    def _pre_process(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        pooling_params: PoolingParams | None,
+        chat_template: str | None = None,
+    ) -> (Sequence[EngineInput], list[PoolingParams]):
+        data_1 = scoring_data.data_1
+        data_2 = scoring_data.data_2
 
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        if ctx.pooling_params is None:
-            ctx.pooling_params = PoolingParams(task="classify")
-        assert isinstance(ctx.pooling_params, PoolingParams)
+        if pooling_params is None:
+            pooling_params = PoolingParams(task="classify")
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
@@ -250,21 +294,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 data_1=q,
                 data_2=d,
                 encode_kwargs=tok_params.get_encode_kwargs(),
-                chat_template=ctx.chat_template,
+                chat_template=chat_template,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
-                params = ctx.pooling_params.clone()
+                params = pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
                 params.extra_kwargs = {"compressed_token_type_ids": compressed}
                 pooling_params_list.append(params)
             else:
-                pooling_params_list.append(ctx.pooling_params)
+                pooling_params_list.append(pooling_params)
 
             engine_inputs.append(self.renderer.process_for_engine(engine_prompt))
-
-        ctx.pooling_params = pooling_params_list
-        return engine_inputs
+        return engine_inputs, pooling_params_list
 
     def get_score_prompt(
         self,

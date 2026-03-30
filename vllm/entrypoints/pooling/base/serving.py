@@ -117,8 +117,16 @@ class PoolingServing:
             else await self._get_trace_headers(ctx.raw_request.headers)
         )
 
-        pooling_params = self.io_processor.create_pooling_params(ctx.request)
-        pooling_params.verify(self.model_config)
+        if ctx.pooling_params is None:
+            pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        else:
+            pooling_params = ctx.pooling_params
+
+        if isinstance(pooling_params, list):
+            for params in pooling_params:
+                params.verify(self.model_config)
+        else:
+            pooling_params.verify(self.model_config)
 
         for i, engine_input in enumerate(ctx.engine_inputs):
             prompt_request_id = (

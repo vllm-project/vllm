@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TypeAlias
 
 from fastapi.responses import JSONResponse
 
@@ -9,12 +8,11 @@ from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.base.serving import PoolingServing
-from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.renderers import BaseRenderer
 
-from .io_processor import ScoringIOProcessors
+from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
     RerankDocument,
     RerankRequest,
@@ -28,8 +26,6 @@ from .protocol import (
 from .typing import ScoreInputs
 
 logger = init_logger(__name__)
-
-ScoreServeContext: TypeAlias = PoolingServeContext[ScoreRequest | RerankRequest]
 
 
 class ServingScores(PoolingServing):
@@ -52,7 +48,7 @@ class ServingScores(PoolingServing):
 
     async def _build_response(
         self,
-        ctx: ScoreServeContext,
+        ctx: ScoringServeContext,
     ) -> JSONResponse:
         final_res_batch = ctx.final_res_batch
         request_id = ctx.request_id
