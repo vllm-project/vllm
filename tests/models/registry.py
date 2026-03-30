@@ -1159,8 +1159,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     # ),
     # [DFlash]
     "DFlashDraftModel": _HfExamplesInfo(
-        "Qwen/Qwen3.5-9B",
-        speculative_model="z-lab/Qwen3.5-9B-DFlash",
+        "Qwen/Qwen3.5-4B",
+        speculative_model="z-lab/Qwen3.5-4B-DFlash",
         use_original_num_layers=True,
     ),
     # [Eagle]
