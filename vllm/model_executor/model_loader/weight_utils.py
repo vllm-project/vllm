@@ -729,6 +729,61 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
+def _checkpoints_fit_in_ram(files: list[str], threshold: float = 0.9) -> bool:
+    """Return True if total size of *files* fits within *threshold* of available RAM."""
+    if not files:
+        return True
+    import psutil
+
+    total_size = sum(os.path.getsize(f) for f in files)
+    available_ram = psutil.virtual_memory().available
+    fits = total_size <= threshold * available_ram
+    if not fits:
+        logger.warning(
+            "NFS detected but checkpoint total size (%.2f GiB) exceeds "
+            "%.0f%% of available RAM (%.2f GiB). Skipping prefetching checkpoints.",
+            total_size / (1024**3),
+            threshold * 100,
+            available_ram / (1024**3),
+        )
+    return fits
+
+
+def _is_nfs_path(files: list[str]) -> bool:
+    """Check whether the first file in *files* resides on an NFS
+    filesystem (Linux only)."""
+    if not files:
+        return False
+    try:
+        # Only the first file is checked — all checkpoint shards reside
+        # in the same directory and therefore on the same filesystem.
+        resolved = os.path.realpath(files[0])
+        best_mount = ""
+        best_fstype = ""
+        # /proc/mounts may contain nested mount points (e.g. "/" -> ext4,
+        # "/data" -> nfs4, "/data/local" -> ext4).  We pick the entry with
+        # the longest matching mount_point — the same "longest prefix match"
+        # rule the kernel uses to decide which filesystem serves a path.
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point, fstype = parts[1], parts[2]
+                if (
+                    resolved == mount_point
+                    or resolved.startswith(os.path.join(mount_point, ""))
+                ) and len(mount_point) > len(best_mount):
+                    best_mount = mount_point
+                    best_fstype = fstype
+        return best_fstype in ("nfs", "nfs4")
+    except Exception:
+        # /proc/mounts is Linux-specific; on other OSes (or if the read
+        # fails for any reason) we fall back to "not NFS" rather than
+        # crashing model loading.
+        return False
+
+
 def _prefetch_checkpoint(file_path: str) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
@@ -797,7 +852,7 @@ def _prefetch_all_checkpoints(sorted_files: list[str]) -> None:
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-    safetensors_load_strategy: str = "lazy",
+    safetensors_load_strategy: str | None = None,
     local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
@@ -812,7 +867,12 @@ def safetensors_weights_iterator(
 
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
-    if safetensors_load_strategy == "prefetch":
+    should_prefetch = safetensors_load_strategy == "prefetch" or (
+        safetensors_load_strategy is None
+        and _is_nfs_path(sorted_files)
+        and _checkpoints_fit_in_ram(sorted_files)
+    )
+    if should_prefetch:
         _prefetch_all_checkpoints(sorted_files)
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
@@ -1162,6 +1222,49 @@ def gguf_quant_weights_iterator(
             yield name, param
 
 
+def gguf_quant_weights_iterator_multi(
+    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str]
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """
+    Iterate over the quant weights across multiple GGUF shard files
+    and convert them to torch tensors.
+
+    Like gguf_quant_weights_iterator, we yield all weight types first
+    before yielding any weights data to avoid issues with packed layers
+    that have different quant types.
+    """
+    readers = [gguf.GGUFReader(f) for f in gguf_files]
+
+    # First pass: yield all weight types across all shards
+    for reader in readers:
+        for tensor in reader.tensors:
+            if tensor.name in gguf_to_hf_name_map:
+                weight_type = tensor.tensor_type
+                name = gguf_to_hf_name_map[tensor.name]
+                if weight_type.name not in ("F32", "BF16", "F16"):
+                    weight_type_name = name.replace("weight", "qweight_type")
+                    weight_type = torch.tensor(weight_type)
+                    yield weight_type_name, weight_type
+
+    # Second pass: yield all weight data across all shards
+    for reader in readers:
+        for tensor in reader.tensors:
+            if tensor.name in gguf_to_hf_name_map:
+                weight = tensor.data
+                weight_type = tensor.tensor_type
+                name = gguf_to_hf_name_map[tensor.name]
+                if weight_type.name not in ("F32", "BF16", "F16"):
+                    name = name.replace("weight", "qweight")
+                if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
+                    weight = weight.view(np.uint16)
+                    if reader.byte_order == "S":
+                        weight = weight.byteswap()
+                    param = torch.tensor(weight).view(torch.bfloat16)
+                else:
+                    param = torch.tensor(weight)
+                yield name, param
+
+
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     """convert PySafeSlice object from safetensors to torch.Tensor
 
@@ -1263,65 +1366,58 @@ def initialize_dummy_weights(
     is fixed, the random values generated by this function only depends on
     the parameter's number of elements and its data type.
     """
-
-    # Check if any module uses online quantization with meta device weights.
-    # If so, we'll skip initializing params on meta device since they'll be
-    # handled in `process_weights_after_loading`.
-    def uses_meta_device(module: torch.nn.Module) -> bool:
-        quant_method = getattr(module, "quant_method", None)
-        return getattr(quant_method, "uses_meta_device", False)
-
-    has_online_quant = any(uses_meta_device(m) for m in model.modules())
-
     for param in model.state_dict().values():
-        if has_online_quant and param.device == torch.device("meta"):
-            # For online quantization, weights are created on meta device and
-            # dummy weight init will happen in `process_weights_after_loading`.
-            continue
-
         initialize_single_dummy_weight(param, low, high, seed)
 
 
+@torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
     low: float = -1e-3,
     high: float = 1e-3,
     seed: int = 1234,
 ) -> None:
-    if torch.is_floating_point(param):
-        if current_platform.is_tpu():
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(seed)
-            # Note: The param.uniform_ function cannot be used in this
-            # context because it demands more TPU HBM than directly copying
-            # from a CPU tensor.
-            # Note: We avoid using torch.rank_like as it doesn't currently
-            # support the generator argument.
-            param.copy_(
-                (high - low)
-                * torch.rand(
-                    param.shape,
-                    generator=generator,
-                    dtype=param.dtype,
-                    layout=param.layout,
-                    requires_grad=param.requires_grad,
-                    device="cpu",
-                )
-                + low
-            )
-            torch._sync(param)
-            return
+    if not torch.is_floating_point(param):
+        if current_platform.is_rocm():
+            # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
+            # as torch.empty() by default, giving non-deterministic values
+            # across processes. Zero them for reproducibility.
+            param.zero_()
+        return
 
-        generator = torch.Generator(device=param.data.device)
+    if current_platform.is_tpu():
+        generator = torch.Generator(device="cpu")
         generator.manual_seed(seed)
-        if torch.finfo(param.data.dtype).bits < 16:
-            # uniform_ doesn't support < 16-bit datatypes (FP8)
-            dtype = param.data.dtype
-            tmp_param = param.data.to(torch.float16)
-            tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-            param.data.copy_(tmp_param)
-        else:
-            param.uniform_(low, high, generator=generator)
+        # Note: The param.uniform_ function cannot be used in this
+        # context because it demands more TPU HBM than directly copying
+        # from a CPU tensor.
+        # Note: We avoid using torch.rank_like as it doesn't currently
+        # support the generator argument.
+        param.copy_(
+            (high - low)
+            * torch.rand(
+                param.shape,
+                generator=generator,
+                dtype=param.dtype,
+                layout=param.layout,
+                requires_grad=param.requires_grad,
+                device="cpu",
+            )
+            + low
+        )
+        torch._sync(param)
+        return
+
+    generator = torch.Generator(device=param.data.device)
+    generator.manual_seed(seed)
+    if torch.finfo(param.data.dtype).bits < 16:
+        # uniform_ doesn't support < 16-bit datatypes (FP8)
+        dtype = param.data.dtype
+        tmp_param = param.data.to(torch.float16)
+        tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
+        param.data.copy_(tmp_param)
+    else:
+        param.uniform_(low, high, generator=generator)
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:

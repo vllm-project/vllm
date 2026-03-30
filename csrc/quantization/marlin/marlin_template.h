@@ -251,8 +251,8 @@ __global__ void Marlin(
     const float* __restrict__ a_scales_ptr,
     // fp16 quantization scales. shape (k/groupsize, n)
     const int4* __restrict__ scales_ptr,
-    // fp16 global scale (for nvfp4// only)
-    const uint16_t* __restrict__ global_scale_ptr,
+    // float global scale (for nvfp4// only)
+    const float* __restrict__ global_scale_ptr,
     // 4bit packed zero-points of shape
     // (k/groupsize, n/pack_factor)
     const int4* __restrict__ zp_ptr,
@@ -292,7 +292,13 @@ __global__ void Marlin(
   #endif
 
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
-  constexpr bool use_fp16_accum = a_type_id == vllm::kFloat16.id();
+  constexpr auto num_bits = vllm::ScalarType::from_id(b_type_id).size_bits();
+  // Disable use_fp16_accum for NVFP4 and cases when group_size == -1 &&
+  // num_bits == 4
+  constexpr bool use_fp16_accum =
+      a_type_id == vllm::kFloat16.id() &&
+      (!(b_type_id == vllm::kFE2M1f.id() && s_type_id == vllm::kFE4M3fn.id()) &&
+       !(group_blocks == -1 && num_bits == 4));
   #else
   constexpr bool use_fp16_accum = false;
   #endif
@@ -346,11 +352,10 @@ __global__ void Marlin(
       has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
       has_zp && !is_zp_float && !(b_type == vllm::kU8);
 
-  c_scalar_t2 global_scale;
+  float global_scale_f32 = 1.0f;
 
   if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-    uint16_t val = global_scale_ptr[0];
-    global_scale = Cdtype::num2num2(*reinterpret_cast<c_scalar_t*>(&val));
+    global_scale_f32 = global_scale_ptr[0];
   }
 
   constexpr bool has_act_order = group_blocks == 0;
@@ -1647,6 +1652,10 @@ __global__ void Marlin(
     // We first reorder in shared memory to guarantee the most efficient final
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
+      if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
+        c0 *= global_scale_f32;
+        c1 *= global_scale_f32;
+      }
       c_scalar_t2 res =
           Cdtype::nums2num2(Cdtype::float2num(c0), Cdtype::float2num(c1));
 
@@ -1661,10 +1670,6 @@ __global__ void Marlin(
               reinterpret_cast<scalar_t*>(&s[0])[(threadIdx.x % 8) / 4]);
         }
         res = __hmul2(res, tmp_scale);
-      }
-
-      if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-        res = __hmul2(res, global_scale);
       }
       if (has_bias && last) {
         c_scalar_t2 tmp_bias = b_bias[0];
