@@ -119,6 +119,9 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
         )
 
 
+ScoringRequest: TypeAlias = ScoreRequest | RerankRequest
+
+
 class RerankDocument(BaseModel):
     text: str | None = None
     multi_modal: list[ScoreContentPartParam] | None = None

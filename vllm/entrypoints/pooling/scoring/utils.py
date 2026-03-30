@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import cast
+from typing import Any, cast
 
 import torch
 
-from vllm import PromptType, TextPrompt
+from vllm import PromptType, TextPrompt, TokensPrompt
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
+    ChatTemplateResolutionError,
     ConversationMessage,
     MultiModalItemTracker,
     _parse_chat_message_content_parts,
 )
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.tokenizers import TokenizerLike
 
 from .typing import (
     ScoreContentPartParam,
@@ -186,3 +188,142 @@ def parse_score_data_single(
     prompt = _ensure_str(content)
     mm_items, mm_uuids = mm_tracker.resolve_items()
     return prompt, mm_items, mm_uuids
+
+
+def parse_score_data(
+    data_1: ScoreData,
+    data_2: ScoreData,
+    model_config: ModelConfig,
+) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
+    """Parse a query-document pair into text prompts and shared multi-modal
+    data.
+
+    Uses a **single** :class:`MultiModalItemTracker` so that multi-modal
+    items from both inputs are merged into one ``mm_data`` dict.  This is
+    the correct behaviour for cross-encoder scoring, where query and
+    document are concatenated into a single model prompt.
+    """
+    mm_tracker = MultiModalItemTracker(model_config)
+
+    content_1 = _parse_score_content("query", data_1, mm_tracker)
+    content_2 = _parse_score_content("document", data_2, mm_tracker)
+
+    prompt_1 = _ensure_str(content_1)
+    prompt_2 = _ensure_str(content_2)
+    mm_items, mm_uuids = mm_tracker.resolve_items()
+
+    return prompt_1, prompt_2, mm_items, mm_uuids
+
+
+from vllm.model_executor.models.interfaces import supports_score_template
+from vllm.renderers.hf import safe_apply_chat_template
+
+
+def _apply_model_score_template(
+    model_config: ModelConfig, prompt_1: str, prompt_2: str
+) -> str:
+    # NOTE(Simon): lazy import to avoid bring in all dependencies (e.g. gguf)
+    from vllm.model_executor.model_loader import get_model_cls
+
+    model = get_model_cls(model_config)
+    if supports_score_template(model):
+        full_prompt = model.get_score_template(prompt_1, prompt_2)
+        if full_prompt is None:
+            raise ValueError("Get empty score template from model")
+        return full_prompt
+
+    raise ValueError(f"Unsupported model architecture: {model_config.architecture}")
+
+
+def post_process_tokens(
+    model_config: ModelConfig,
+    prompt: TokensPrompt,
+) -> None:
+    """
+    Perform architecture-specific manipulations on the input tokens.
+
+    Note:
+        This is an in-place operation.
+    """
+    # NOTE(Simon): lazy import to avoid bring in all dependencies (e.g. gguf)
+    from vllm.model_executor.model_loader import get_model_cls
+
+    model = get_model_cls(model_config)
+    if supports_score_template(model):
+        model.post_process_tokens(prompt)
+
+
+def get_score_prompt(
+    model_config: ModelConfig,
+    tokenizer: TokenizerLike,
+    tokenization_kwargs: dict[str, Any],
+    data_1: ScoreData,
+    data_2: ScoreData,
+    score_template: str | None = None,
+) -> tuple[str, TokensPrompt]:
+    prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
+        data_1,
+        data_2,
+        model_config,
+    )
+    from vllm.model_executor.model_loader import get_model_cls
+    from vllm.model_executor.models.interfaces import supports_score_template
+
+    model = get_model_cls(model_config)
+
+    def default_tokenizer_encode():
+        if supports_score_template(model):
+            full_prompt = _apply_model_score_template(model_config, prompt_1, prompt_2)
+            prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+        else:
+            if model_config.use_sep_token:
+                # cross_encoder models defaults to using separating token.
+                prompt_inputs = tokenizer(
+                    text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
+                )
+                full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
+            else:
+                # `llm as reranker` defaults to not using separating token.
+                full_prompt = prompt_1 + prompt_2
+                prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
+        return full_prompt, prompt_inputs
+
+    # FIXME: For now, we only apply a template when one is explicitly provided.
+    # We cannot rely on the tokenizer's chat template because many models
+    # inherit junk templates from their base LLM, which breaks both the models
+    # and the tests that use them.
+    if score_template is None:
+        full_prompt, prompt_inputs = default_tokenizer_encode()
+    else:
+        # FIXME: Try applying a score template from the CLI arg or tokenizer_config.json
+        # If that fails because there is no such template,
+        # fall back to the default implementation.
+        try:
+            full_prompt = safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [
+                    {"role": "query", "content": prompt_1},
+                    {"role": "document", "content": prompt_2},
+                ],
+                chat_template=score_template,
+                tools=None,
+                tokenize=False,
+            )
+            prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+        except ChatTemplateResolutionError:
+            full_prompt, prompt_inputs = default_tokenizer_encode()
+
+    engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
+
+    if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
+        engine_prompt["token_type_ids"] = token_type_ids
+
+    post_process_tokens(model_config, engine_prompt)
+
+    if mm_data is not None:
+        engine_prompt["multi_modal_data"] = mm_data
+    if mm_uuids is not None:
+        engine_prompt["multi_modal_uuids"] = mm_uuids
+
+    return full_prompt, engine_prompt

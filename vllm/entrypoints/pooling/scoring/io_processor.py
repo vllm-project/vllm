@@ -17,7 +17,7 @@ from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask, ScoreType
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from .protocol import RerankRequest, ScoreRequest, ScoreResponse
+from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreInputs, ScoringData
 from .utils import (
     compute_maxsim_score,
@@ -25,12 +25,12 @@ from .utils import (
     validate_score_input,
 )
 
-ScoringServeContext: TypeAlias = PoolingServeContext[ScoreResponse]
+ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
 
-class BiEncoderIOProcessor(PoolingIOProcessor):
-    name = "bi-encoder"
-    pooling_task: PoolingTask = "embed"
+class ScoringIOProcessor(PoolingIOProcessor):
+    name: ScoreType
+    pooling_task: PoolingTask
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -45,6 +45,20 @@ class BiEncoderIOProcessor(PoolingIOProcessor):
 
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
+
+    def valid_inputs(self, data_1: ScoreInputs, data_2: ScoreInputs) -> ScoringData:
+        scoring_data = validate_score_input(
+            data_1,
+            data_2,
+            is_multimodal_model=self.is_multimodal_model,
+            architecture=self.architecture,
+        )
+        return scoring_data
+
+
+class BiEncoderIOProcessor(ScoringIOProcessor):
+    name: ScoreType = "bi-encoder"
+    pooling_task: PoolingTask = "embed"
 
     #######################################
     # online APIs
@@ -61,7 +75,7 @@ class BiEncoderIOProcessor(PoolingIOProcessor):
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
-        scoring_data = self.validate_score_inputs(data_1, data_2)
+        scoring_data = self.valid_inputs(data_1, data_2)
         tok_params = request.build_tok_params(self.model_config)
         engine_inputs = self._pre_process(scoring_data, tok_params)
 
@@ -107,21 +121,11 @@ class BiEncoderIOProcessor(PoolingIOProcessor):
         self,
         ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        return self._post_process(outputs=ctx.outputs, offset=ctx.intermediates)
+        assert ctx.offset is not None
+        return self._post_process(outputs=ctx.outputs, offset=ctx.offset)
 
     #######################################
     # helpers
-
-    def validate_score_inputs(
-        self, data_1: ScoreInputs, data_2: ScoreInputs
-    ) -> ScoringData:
-        scoring_data = validate_score_input(
-            data_1,
-            data_2,
-            is_multimodal_model=self.is_multimodal_model,
-            architecture=self.architecture,
-        )
-        return scoring_data
 
     def _pre_process(
         self,
@@ -169,7 +173,7 @@ class BiEncoderIOProcessor(PoolingIOProcessor):
 
 
 class LateInteractionIOProcessor(BiEncoderIOProcessor):
-    name = "late-interaction"
+    name: ScoreType = "late-interaction"
     pooling_task: PoolingTask = "token_embed"
 
     def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
@@ -211,7 +215,7 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
         return final_res_batch
 
 
-ScoringIOProcessors: dict[ScoreType, type[PoolingIOProcessor]] = {
+ScoringIOProcessors: dict[ScoreType, type[ScoringIOProcessor]] = {
     "bi-encoder": BiEncoderIOProcessor,
     "late-interaction": LateInteractionIOProcessor,
     # "cross_encoder": CrossEncoderIOProcessor,

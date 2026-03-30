@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import cloudpickle
 import torch.nn as nn
@@ -46,7 +46,9 @@ from vllm.entrypoints.chat_utils import (
     load_chat_template,
 )
 from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
-from vllm.entrypoints.pooling.scoring.io_processor import BiEncoderIOProcessor
+from vllm.entrypoints.pooling.scoring.io_processor import (
+    ScoringIOProcessor,
+)
 from vllm.entrypoints.pooling.scoring.typing import ScoreInputs
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
 from vllm.entrypoints.utils import log_non_default_args
@@ -1434,6 +1436,8 @@ class LLM:
             )
 
         score_type = self.model_config.score_type
+        if score_type is None:
+            raise ValueError("")
 
         if (
             score_type == "cross-encoder"
@@ -1443,26 +1447,22 @@ class LLM:
 
         assert score_type in self.pooling_io_processors
         io_processor = self.pooling_io_processors[score_type]
-        io_processor = cast(BiEncoderIOProcessor, io_processor)
+        assert isinstance(io_processor, ScoringIOProcessor)
+
         pooling_task = io_processor.pooling_task
-
-        scoring_data = io_processor.validate_score_inputs(
-            data_1,
-            data_2,
-        )
-
+        scoring_data = io_processor.valid_inputs(data_1, data_2)
         offset = len(scoring_data.data_1)
 
         processor_inputs = io_processor.pre_process_offline(
             ctx=OfflineInputsContext(
                 prompts=scoring_data,
                 tokenization_kwargs=tokenization_kwargs,
-                intermediates=offset,
+                chat_template=chat_template,
+                offset=offset,
             )
         )
 
         if pooling_params is None:
-            # Use default pooling params.
             pooling_params = PoolingParams()
 
         seq_lora_requests = self._lora_request_to_seq(
@@ -1487,7 +1487,7 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs, intermediates=offset),
+            ctx=OfflineOutputsContext(outputs=outputs, offset=offset),
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]

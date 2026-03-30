@@ -28,9 +28,8 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponse,
 )
 from vllm.entrypoints.pooling.scoring.protocol import (
-    RerankRequest,
-    ScoreRequest,
     ScoreResponse,
+    ScoringRequest,
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.inputs import EngineInput
@@ -50,8 +49,7 @@ AnyPoolingRequest: TypeAlias = (
     PoolingCompletionLikeRequest
     | PoolingChatLikeRequest
     | IOProcessorRequest
-    | RerankRequest
-    | ScoreRequest
+    | ScoringRequest
     | CohereEmbedRequest
 )
 
@@ -91,10 +89,15 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 class OfflineInputsContext:
     prompts: PromptType | Sequence[PromptType] | ScoringData
     tokenization_kwargs: dict[str, Any] | None = None
-    intermediates: Any | None = None
+    chat_template: str | None = None
+
+    ## for bi-encoder & late-interaction
+    offset: int | None = None
 
 
 @dataclass
 class OfflineOutputsContext:
     outputs: list[PoolingRequestOutput]
-    intermediates: Any | None = None
+
+    ## for bi-encoder & late-interaction
+    offset: int | None = None

@@ -13,6 +13,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
+from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.typing import (
     OfflineInputsContext,
     OfflineOutputsContext,
@@ -99,6 +100,7 @@ class PoolingIOProcessor:
     # offline APIs
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        assert not isinstance(ctx.prompts, ScoringData)
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
