@@ -406,6 +406,8 @@ def chunked_prefill_paged_decode(
         # (e.g. hybrid Mamba models inflate block_size to 2048).
         # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
         # via the l_block_idx/internal_offsets addressing logic.
+        # TODO: Remove after upgrading from Triton 3.6 on ROCm
+        # See: https://github.com/triton-lang/triton/pull/9541
         MAX_TRITON_BLOCK_SIZE = 128
         TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
         if is_block_table_ptr:
