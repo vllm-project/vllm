@@ -5,7 +5,7 @@ import os
 import time
 from collections import defaultdict, deque
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import vllm.platforms
 from vllm.config import ParallelConfig
@@ -50,13 +50,12 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
-            self._execute_model_outputs = deque[
-                "ModelRunnerOutput"
-                | "AsyncModelRunnerOutput"
-                | tuple[
-                    "SchedulerOutput", "GrammarOutput", "IntermediateTensors" | None
-                ]
-            ]()
+            self._execute_model_outputs = deque[Any]()
+            self._pp_execute_model_outputs: dict[int, Any] = {}
+            # Set to True after a step where the last PP rank broadcast sampled
+            # tokens.  At the start of the NEXT step, non-last ranks will call
+            # _pp_receive_prev_sampled_token_ids_to_input_batch() to receive them.
+            self._pp_need_prev_token_sync: bool = False
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
             """
@@ -114,27 +113,73 @@ try:
         def execute_model_ray(
             self,
             execute_model_input: tuple["SchedulerOutput", "GrammarOutput"]
-            | tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"],
+            | tuple["SchedulerOutput", "GrammarOutput", int]
+            | tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"]
+            | tuple["SchedulerOutput", "GrammarOutput", int, "IntermediateTensors"],
         ) -> Union[
             "ModelRunnerOutput",
-            tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors" | None],
+            tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors | None"],
+            tuple["SchedulerOutput", "GrammarOutput", int, "IntermediateTensors | None"],
+            tuple[int, int],
             None,
         ]:
             # This method is used by Ray Compiled Graph to execute the model,
             # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"
-            if len(execute_model_input) == 3:
-                scheduler_output, grammar_output, intermediate_tensors = (
+            step_id: int | None = None
+            if len(execute_model_input) == 4:
+                scheduler_output, grammar_output, step_id, intermediate_tensors = (
                     execute_model_input
                 )
+            elif len(execute_model_input) == 3:
+                scheduler_output, grammar_output, third = execute_model_input
+                if isinstance(third, int):
+                    step_id = third
+                    intermediate_tensors = None
+                else:
+                    intermediate_tensors = third
             else:
                 scheduler_output, grammar_output = execute_model_input
                 intermediate_tensors = None
             assert self.worker.model_runner is not None
+            pp_rank = get_pp_group().rank
+            rpc_rank = getattr(self, "rpc_rank", None)
+            pp_world_size = get_pp_group().world_size
+            use_async_pp = (
+                self.vllm_config is not None
+                and self.vllm_config.scheduler_config.async_scheduling
+                and pp_world_size > 1
+            )
+            is_last_rank = get_pp_group().is_last_rank
+            start_ns = time.monotonic_ns()
+            # --- PP async: receive prev sampled token ids from last rank ---
+            # In the Ray compiled DAG, each PP stage runs independently.
+            # The last rank posts non-blocking isend()s right after sampling.
+            # Non-last ranks must post matching recv()s at the start of the
+            # NEXT step (before execute_model updates the input batch) so that
+            # _prepare_input_ids can use prev_sampled_token_ids instead of the
+            # placeholder -1 values that async scheduling puts in input_ids_cpu.
+            if use_async_pp and not is_last_rank and self._pp_need_prev_token_sync:
+                self.worker.model_runner \
+                    ._pp_receive_prev_sampled_token_ids_to_input_batch()
+                self._pp_need_prev_token_sync = False
+
+            # Best-effort debug context for model-runner level PP logs.
+            # This helps correlate broadcast/receive logs with Ray DAG step ids.
+            setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+
+            # After this step's execute_model completes, schedule a receive for
+            # the NEXT step: the last rank will isend() sampled tokens after its
+            # sample_tokens() call, and we need to recv() them before the next
+            # execute_model() updates the batch.
+            if use_async_pp and not is_last_rank \
+                    and scheduler_output.total_num_scheduled_tokens > 0:
+                self._pp_need_prev_token_sync = True
+
             if self._is_intermediate_tensors(output):
                 if (
                     self.worker.model_runner.supports_mm_inputs
@@ -148,38 +193,62 @@ try:
                     # so accessing it directly will raise AttributeError if missing.
                     for req in scheduler_output.scheduled_new_reqs:
                         req.mm_features = []
-                return scheduler_output, grammar_output, output
+                if step_id is None:
+                    return scheduler_output, grammar_output, output
+                return scheduler_output, grammar_output, step_id, output
 
-            if isinstance(output, AsyncModelRunnerOutput):
-                output = output.get_output()
             if not self._is_last_rank():
                 # Case where there are no scheduled requests
                 # but may still be finished requests.
                 assert not output or not output.req_ids
-                output = scheduler_output, grammar_output, None
+                if step_id is None:
+                    output = scheduler_output, grammar_output, None
+                else:
+                    output = scheduler_output, grammar_output, step_id, None
             elif output is None:
+                setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
+                sample_start_ns = time.monotonic_ns()
                 output = self.worker.model_runner.sample_tokens(grammar_output)
-
             assert self.vllm_config is not None
-            if self.vllm_config.scheduler_config.async_scheduling:
+            if (
+                self.vllm_config.scheduler_config.async_scheduling
+                and self._is_last_rank()
+            ):
+                # For PP async scheduling, buffer by step_id and return a
+                # lightweight marker (step_id, output_rank) in-band via DAG.
+                # The executor then fetches from the exact producing actor.
+                if get_pp_group().world_size > 1:
+                    assert step_id is not None, "PP async scheduling requires step_id"
+                    self._pp_execute_model_outputs[step_id] = output
+                    return step_id, get_pp_group().rank
                 self._execute_model_outputs.append(output)
                 return None
 
-            assert not isinstance(output, AsyncModelRunnerOutput)
             return output
 
         def get_execute_model_output(
             self,
+            step_id: int | None = None,
         ) -> Union[
             "ModelRunnerOutput",
-            tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors" | None],
+            tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors | None"],
+            tuple["SchedulerOutput", "GrammarOutput", int, "IntermediateTensors | None"],
         ]:
             assert (
                 self.vllm_config and self.vllm_config.scheduler_config.async_scheduling
             )
-            assert self._execute_model_outputs, "No execute_model output available"
-            output = self._execute_model_outputs.popleft()
-
+            if step_id is None:
+                logger.info(
+                    "get_execute_model_output step=None deque_len=%s",
+                    len(self._execute_model_outputs),
+                )
+                assert self._execute_model_outputs, "No execute_model output available"
+                output = self._execute_model_outputs.popleft()
+            else:
+                assert step_id in self._pp_execute_model_outputs, (
+                    f"No execute_model output available for step {step_id}"
+                )
+                output = self._pp_execute_model_outputs.pop(step_id)
             if isinstance(output, AsyncModelRunnerOutput):
                 # Ensure outputs crossing Ray compiled DAG are serializable.
                 # AsyncModelRunnerOutput holds CUDA events and cannot be
@@ -196,6 +265,32 @@ try:
 
         def _is_last_rank(self) -> bool:
             return get_pp_group().is_last_rank
+
+        def _summarize_stage_output(self, output: Any) -> dict[str, Any]:
+            summary: dict[str, Any] = {"type": type(output).__name__}
+            if isinstance(output, IntermediateTensors):
+                summary["tensor_keys"] = sorted(output.tensors.keys())
+                summary["num_tensors"] = len(output.tensors)
+                return summary
+            if isinstance(output, tuple):
+                summary["tuple_len"] = len(output)
+                if output and isinstance(output[-1], IntermediateTensors):
+                    summary["tail_type"] = "IntermediateTensors"
+                return summary
+
+            req_ids = getattr(output, "req_ids", None)
+            if isinstance(req_ids, list):
+                summary["num_reqs"] = len(req_ids)
+            sampled_token_ids = getattr(output, "sampled_token_ids", None)
+            if sampled_token_ids is not None:
+                if hasattr(sampled_token_ids, "shape"):
+                    try:
+                        summary["sampled_shape"] = list(sampled_token_ids.shape)
+                    except Exception:
+                        pass
+                elif isinstance(sampled_token_ids, list):
+                    summary["sampled_batch"] = len(sampled_token_ids)
+            return summary
 
     ray_import_err = None
 

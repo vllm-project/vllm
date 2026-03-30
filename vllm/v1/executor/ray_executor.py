@@ -79,6 +79,7 @@ class RayDistributedExecutor(Executor):
 
     def _init_executor(self) -> None:
         self.forward_dag: ray.dag.CompiledDAG | None = None
+        self._pp_async_step_id = 0
 
         # For TPU or XPU, avoid compiling NVIDIA's NCCL
         if current_platform.is_tpu() or current_platform.is_xpu():
@@ -461,7 +462,15 @@ class RayDistributedExecutor(Executor):
     @staticmethod
     def _get_async_refs(refs, worker, timeout=None):
         ray.get(refs, timeout=timeout)
+        logger.info(f"get_async_refs worker: {worker}")
         return worker.execute_method.remote("get_execute_model_output")
+
+    @staticmethod
+    def _get_async_refs_with_rank(refs, workers, timeout=None):
+        step_id, output_rank = ray.get(refs, timeout=timeout)
+        return workers[output_rank].execute_method.remote(
+            "get_execute_model_output", step_id
+        )
 
     def _execute_dag(
         self,
@@ -469,24 +478,43 @@ class RayDistributedExecutor(Executor):
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        use_async_pp = (
+            self.scheduler_config.async_scheduling
+            and self.parallel_config.pipeline_parallel_size > 1
+        )
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
+        if use_async_pp:
+            self._pp_async_step_id += 1
+            refs = self.forward_dag.execute(  # type: ignore
+                (scheduler_output, grammar_output, self._pp_async_step_id)
+            )
+        else:
+            refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
 
         if self.scheduler_config.async_scheduling:
             assert non_block
-            assert self.parallel_config.pipeline_parallel_size == 1, (
-                "Async scheduling is not supported with pipeline parallelism."
-            )
 
-            # Delay getting the model runner output until next step execute_model
-            # returns.
-            refs = [
-                partial(RayDistributedExecutor._get_async_refs, ref, worker)
-                for ref, worker in zip(refs, self.workers)
-            ]
+            if use_async_pp:
+                refs = [
+                    partial(
+                        RayDistributedExecutor._get_async_refs_with_rank, ref, self.workers
+                    )
+                    for ref in refs
+                ]
+            else:
+                # Delay getting the model runner output until next step
+                # execute_model returns.
+                output_workers = self.workers
+                assert len(refs) == len(output_workers), (
+                    "Ray compiled DAG outputs must match the output worker group."
+                )
+                refs = [
+                    partial(RayDistributedExecutor._get_async_refs, ref, worker)
+                    for ref, worker in zip(refs, output_workers)
+                ]
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
