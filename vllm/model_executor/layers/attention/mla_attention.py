@@ -616,9 +616,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
-            _fwd_ctx = get_forward_context()
-            _u_slots = _fwd_ctx.slot_mapping.get(self.layer_name) if isinstance(_fwd_ctx.slot_mapping, dict) else _fwd_ctx.slot_mapping
-            _nan_mark_kv_write(self.kv_cache, _u_slots, self._nan_layer_idx)
             _nan_mark_mla(
                 kv_c_normed, 6, self._nan_layer_idx
             )  # after kv_cache_update (input unchanged)
