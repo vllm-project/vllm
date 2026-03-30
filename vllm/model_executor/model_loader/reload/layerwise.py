@@ -226,7 +226,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
                 materialize_layer(layer, info)
 
             # reloading: place kernel tensors back as a fallback
-            elif info.load_numel_total > 0:
+            elif info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
                 _place_kernel_tensors(layer, info)
 
