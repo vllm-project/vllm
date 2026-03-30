@@ -1108,10 +1108,10 @@ async def benchmark(
         profile_input = RequestFuncInput(
             model=req_model_id,
             model_name=req_model_name,
-            prompt=prompt,
+            prompt=test_prompt,
             api_url=base_url + "/stop_profile",
-            prompt_len=prompt_len,
-            output_len=output_len,
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
             logprobs=logprobs,
             multi_modal_content=mm_content,
             ignore_eos=ignore_eos,
