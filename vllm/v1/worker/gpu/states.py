@@ -17,7 +17,6 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        is_mamba_hybrid: bool = False,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -25,7 +24,6 @@ class RequestState:
         self.num_speculative_steps = num_speculative_steps
         self.vocab_size = vocab_size
         self.device = device
-        self.is_mamba_hybrid = is_mamba_hybrid
 
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
@@ -78,12 +76,6 @@ class RequestState:
         self.next_prefill_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
-
-        # Mamba hybrid model (attention + mamba/GDN) state.
-        if self.is_mamba_hybrid:
-            self.num_accepted_tokens_gpu = torch.ones(
-                max_num_reqs, dtype=torch.int32, device=device
-            )
 
     @property
     def num_reqs(self) -> int:

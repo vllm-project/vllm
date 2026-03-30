@@ -10,10 +10,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import (
-    build_attn_metadata,
-    prepare_mamba_hybrid_metadata,
-)
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
@@ -43,7 +40,6 @@ class DefaultModelState(ModelState):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
         self.dtype = self.model_config.dtype
-        self.is_mamba_hybrid = self.model_config.is_hybrid
 
         if self.supports_mm_inputs:
             assert encoder_cache is not None
@@ -180,24 +176,6 @@ class DefaultModelState(ModelState):
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
 
-        num_accepted_tokens = None
-        num_decode_draft_tokens_cpu = None
-        if (
-            self.is_mamba_hybrid
-            and scheduled_spec_decode_tokens
-            and req_states is not None
-        ):
-            num_accepted_tokens, num_decode_draft_tokens_cpu = (
-                prepare_mamba_hybrid_metadata(
-                    req_states,
-                    input_batch.idx_mapping,
-                    input_batch.num_reqs,
-                    num_reqs,
-                    input_batch.req_ids,
-                    scheduled_spec_decode_tokens,
-                )
-            )
-
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -211,8 +189,6 @@ class DefaultModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-            num_accepted_tokens=num_accepted_tokens,
-            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
             for_cudagraph_capture=for_capture,
         )
         return attn_metadata

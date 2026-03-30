@@ -179,8 +179,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        # Mamba hybrid models.
-        self.is_mamba_hybrid = self.model_config.is_hybrid
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
@@ -193,7 +191,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            is_mamba_hybrid=self.is_mamba_hybrid,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -916,11 +913,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
 
-        # Update accepted token counts on GPU for next step's GDN metadata.
-        if self.is_mamba_hybrid:
-            self.req_states.num_accepted_tokens_gpu[input_batch.idx_mapping] = (
-                num_sampled
-            )
+        self.model_state.postprocess_state(input_batch, num_sampled)
 
     @torch.inference_mode()
     def execute_model(
