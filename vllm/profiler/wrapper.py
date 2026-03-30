@@ -240,6 +240,28 @@ class TorchProfilerWrapper(WorkerProfiler):
             0,
         )
 
+    def _build_profiler_table(
+        self,
+        sort_key: str,
+        row_limit: int | None = None,
+    ) -> str:
+        if row_limit is None:
+            return self.profiler.key_averages().table(sort_by=sort_key)
+        return self.profiler.key_averages().table(
+            sort_by=sort_key,
+            row_limit=row_limit,
+        )
+
+    def _write_profiler_table(self, rank: int, table: str) -> None:
+        profiler_dir = self.profiler_config.torch_profiler_dir
+
+        # Skip file write for URI paths (gs://, s3://, etc.)
+        # as standard file I/O doesn't work with URI schemes
+        if not _is_uri_path(profiler_dir):
+            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            with open(profiler_out_file, "w") as f:
+                print(table, file=f)
+
     @override
     def _start(self) -> None:
         self.profiler.start()
@@ -250,25 +272,16 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         profiler_config = self.profiler_config
         rank = self.local_rank
-        if rank != 0:
-            # Only rank 0 dumps profiler tables to avoid file contention and redundant data
-            return
-        profiler_dir = profiler_config.torch_profiler_dir
-        if self.dump_cpu_time_total:
-            sort_key = "self_cpu_time_total"
-            table = self.profiler.key_averages().table(sort_by=sort_key, row_limit=50)
-        elif profiler_config.torch_profiler_dump_cuda_time_total:
-            sort_key = "self_cuda_time_total"
-            table = self.profiler.key_averages().table(sort_by=sort_key)
-        else:
-            return
+        if profiler_config.torch_profiler_dump_cuda_time_total and rank == 0:
+            table = self._build_profiler_table(sort_key="self_cuda_time_total")
+            self._write_profiler_table(rank, table)
+            print(table)
 
-            # Skip file write for URI paths (gs://, s3://, etc.)
-            # as standard file I/O doesn't work with URI schemes
-        if not _is_uri_path(profiler_dir):
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-            with open(profiler_out_file, "w") as f:
-                print(table, file=f)
+        if self.dump_cpu_time_total and rank == 0:
+            table = self._build_profiler_table(sort_key="self_cpu_time_total")
+            self._write_profiler_table(rank, table)
+            logger.info("%s", table)
+
 
 
     @override
