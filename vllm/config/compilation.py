@@ -132,18 +132,25 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    enable_qk_norm_rope_fusion: bool = Field(default=None)
+    """Enable fused Q/K RMSNorm + RoPE pass.
+    Auto-enabled at O1+ for models with QK-norm layers (e.g. Qwen3)."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = Field(default=None)
     """Fuse the custom RMSNorm + padding ops."""
     fuse_rope_kvcache: bool = Field(default=None)
     """Fuse the QK rope + KV cache ops."""
+    enable_fuse_qk_norm_rope_kvcache: bool = Field(default=None)
+    """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
+    kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
+    for layers that support it. Auto-enabled at O1+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
+    Also applies to the fused QK-Norm+RoPE+KVCache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -220,6 +227,7 @@ class PassConfig:
         "fuse_allreduce_rms",
         "fuse_act_padding",
         "fuse_rope_kvcache",
+        "enable_qk_norm_rope_fusion",
         mode="wrap",
     )
     @classmethod
@@ -279,11 +287,15 @@ class PassConfig:
         after all defaults are finalized.
         TODO also log the compile ranges for which this is enabled.
         """
-        enabled_fusions = [
-            f.name[len("fuse_") :]
-            for f in fields(self)
-            if getattr(self, f.name) and f.name.startswith("fuse_")
-        ]
+        fusion_prefixes = ("fuse_", "enable_")
+        enabled_fusions = []
+        for f in fields(self):
+            if not getattr(self, f.name):
+                continue
+            for prefix in fusion_prefixes:
+                if f.name.startswith(prefix):
+                    enabled_fusions.append(f.name[len(prefix) :])
+                    break
 
         if enabled_fusions:
             logger.info_once(

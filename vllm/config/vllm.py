@@ -158,6 +158,65 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+# Architectures where QK-norm is hardcoded (not a config option).
+# The fused_qk_norm_rope kernel matches the pattern:
+#   split(QKV) → view → RMSNorm(Q) → view → RMSNorm(K) → view → RoPE
+# Add model_type values here when new architectures hardcode QK-norm
+# with vllm's standard RMSNorm.
+_QK_NORM_MODEL_TYPES = frozenset({
+    "qwen3",
+    "qwen3_moe",
+})
+
+
+def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
+    """Enable fused QK-norm + RoPE + KV cache update for models with
+    QK-norm on ROCm with AITER. Requires rotary embedding custom op
+    and inductor graph partition to be active."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    if not rocm_aiter_ops.is_enabled():
+        return False
+    if cfg.model_config is None:
+        return False
+    hf_config = cfg.model_config.hf_text_config
+    has_qk_norm = getattr(hf_config, "qk_norm", False)
+    model_type = getattr(hf_config, "model_type", "")
+    if not has_qk_norm and model_type not in _QK_NORM_MODEL_TYPES:
+        return False
+    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+
+
+def enable_qk_norm_rope(cfg: "VllmConfig") -> bool:
+    """Enable QK-norm + RoPE fusion for models with QK-norm layers.
+
+    Detection uses two strategies:
+    1. Explicit config: checks ``hf_config.qk_norm`` for models that
+       expose QK-norm as a config option (e.g. BAGEL uses the Qwen2
+       architecture with ``qk_norm=True`` injected at load time).
+    2. Architecture: checks ``hf_config.model_type`` against
+       ``_QK_NORM_MODEL_TYPES`` for models that hardcode QK-norm
+       in their architecture without a config.json field
+       (e.g. Qwen3 and Qwen3-MoE always use QK-norm).
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda_alike():
+        return False
+    if cfg.model_config is None:
+        return False
+    hf_config = cfg.model_config.hf_text_config
+    # Some models inject qk_norm at load time (e.g. BAGEL on Qwen2 arch)
+    if getattr(hf_config, "qk_norm", False):
+        return True
+    # Qwen3/Qwen3-MoE hardcode QK-norm — no config.json field exists
+    model_type = getattr(hf_config, "model_type", "")
+    return model_type in _QK_NORM_MODEL_TYPES
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -169,6 +228,8 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_rope_kvcache": False,
+            "enable_fuse_qk_norm_rope_kvcache": False,
+            "enable_qk_norm_rope_fusion": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -188,6 +249,8 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "enable_fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -207,6 +270,8 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "enable_fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -226,6 +291,8 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "enable_fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -839,6 +906,16 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+
+        # QK-norm+RoPE fusion requires the rotary_embedding custom op.
+        # This must run after optimization level defaults are applied, since
+        # the fusion may be auto-enabled by enable_qk_norm_rope().
+        pass_config = self.compilation_config.pass_config
+        if (
+            pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.compilation_config.custom_ops
+        ):
+            self.compilation_config.custom_ops.append("+rotary_embedding")
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
