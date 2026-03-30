@@ -2426,7 +2426,7 @@ class SonnetDataset(BenchmarkDataset):
 
         prefix_lines = self.data[:num_prefix_lines]
 
-        _MAX_SAMPLE_ATTEMPTS = num_requests * 10
+        _MAX_SAMPLE_ATTEMPTS = num_requests * 100
         samples = []
         ind = 0
         attempts = 0
