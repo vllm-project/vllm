@@ -907,9 +907,13 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             and self._mm_processor_kwargs
             and self._mm_processor_kwargs.get("use_audio_in_video", False)
         ):
-            audio = self._connector.fetch_audio(video_url) if video_url else None
-            audio_placeholder = self._tracker.add("audio", (audio, uuid))
-            self._add_placeholder("audio", audio_placeholder)
+            try:
+                audio = self._connector.fetch_audio(video_url)
+            except ValueError:
+                audio = None
+            if audio is not None:
+                audio_placeholder = self._tracker.add("audio", (audio, uuid))
+                self._add_placeholder("audio", audio_placeholder)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -1063,15 +1067,26 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("video", coro)
         self._add_placeholder("video", placeholder)
 
-        # Extract audio from video if use_audio_in_video is True
+        # Extract audio from video if use_audio_in_video is True.
+        # Use sync fetch here so we can skip the placeholder entirely when
+        # the video has no audio stream (avoids prompt/data mismatch).
         if (
             video_url
             and self._mm_processor_kwargs
             and self._mm_processor_kwargs.get("use_audio_in_video", False)
         ):
-            audio_coro = self._audio_with_uuid_async(video_url, uuid)
-            audio_placeholder = self._tracker.add("audio", audio_coro)
-            self._add_placeholder("audio", audio_placeholder)
+            try:
+                audio = self._connector.fetch_audio(video_url)
+            except ValueError:
+                audio = None
+            if audio is not None:
+                _audio = audio
+
+                async def _pre_fetched_audio(a=_audio, u=uuid):
+                    return a, u
+
+                audio_placeholder = self._tracker.add("audio", _pre_fetched_audio())
+                self._add_placeholder("audio", audio_placeholder)
 
 
 @dataclass
