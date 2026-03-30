@@ -7,7 +7,7 @@ Architecture: Siglip2 vision tower + MLP projector + Phi3 language model.
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
@@ -36,6 +36,7 @@ from vllm.multimodal.processing.processor import (
     BaseProcessingInfo,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .lfm2_siglip2 import Siglip2Model
@@ -221,6 +222,25 @@ class Phi4VisionRMultiModalProcessor(
 
 
 # ---------------------------------------------------------------------------
+# Input schemas
+# ---------------------------------------------------------------------------
+
+
+class Phi4VisionRImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - d: Max number of patches (padded across images in the batch)
+        - fd: Features per patch (patch_size * patch_size * channels)
+    """
+
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bn", "d", "fd")]
+    pixel_attention_mask: Annotated[torch.Tensor, TensorShape("bn", "d")]
+    spatial_shapes: Annotated[torch.Tensor, TensorShape("bn", 2)]
+
+
+# ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
@@ -326,16 +346,28 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             max_seqlen,
         )
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> Phi4VisionRImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
+        pixel_attention_mask = kwargs.pop("pixel_attention_mask", None)
+        spatial_shapes = kwargs.pop("spatial_shapes", None)
         if pixel_values is None:
-            return []
+            return None
 
-        assert isinstance(pixel_values, torch.Tensor)
-        pixel_attention_mask = kwargs.pop("pixel_attention_mask")
-        spatial_shapes = kwargs.pop("spatial_shapes")
-        assert isinstance(pixel_attention_mask, torch.Tensor)
-        assert isinstance(spatial_shapes, torch.Tensor)
+        return Phi4VisionRImagePixelInputs(
+            type="pixel_values",
+            pixel_values=pixel_values,
+            pixel_attention_mask=pixel_attention_mask,
+            spatial_shapes=spatial_shapes,
+        )
+
+    def _process_image_input(
+        self, image_input: Phi4VisionRImagePixelInputs
+    ) -> tuple[torch.Tensor, ...]:
+        pixel_values = image_input["pixel_values"]
+        pixel_attention_mask = image_input["pixel_attention_mask"]
+        spatial_shapes = image_input["spatial_shapes"]
 
         (
             pixel_values_packed,
@@ -352,15 +384,20 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             select_layers=[-2],
         )
 
-        # Siglip2Model returns (1, total_tokens, hidden) — squeeze batch dim
         if vision_features.dim() == 3:
             vision_features = vision_features.squeeze(0)
 
         image_features = self.multi_modal_projector(vision_features)
 
         valid_counts = pixel_attention_mask.sum(dim=1).tolist()
-        per_image = torch.split(image_features, [int(c) for c in valid_counts])
-        return per_image  # type: ignore[return-value]
+        return torch.split(image_features, [int(c) for c in valid_counts])
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return []
+
+        return self._process_image_input(image_input)  # type: ignore[return-value]
 
     def forward(
         self,
