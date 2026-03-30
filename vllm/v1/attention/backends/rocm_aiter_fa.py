@@ -59,6 +59,12 @@ if current_platform.is_rocm():
         head_size,
         x,
         max_block_num,
+        k_cache_stride0,
+        k_cache_stride1,
+        k_cache_stride2,
+        v_cache_stride0,
+        v_cache_stride1,
+        v_cache_stride2,
         DEQUANT: tl.constexpr,
         PAGE_SIZE: tl.constexpr,
         CACHE_FORMAT: tl.constexpr,
@@ -90,15 +96,15 @@ if current_platform.is_rocm():
             # V: [num_blocks, page_size, num_head, head_dim]
             key_cache_ptr_offset = (
                 key_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
-                + slot_id * num_heads * head_size
-                + head_id * head_size
+                + block_id * k_cache_stride0
+                + slot_id * k_cache_stride1
+                + head_id * k_cache_stride2
             )
             value_cache_ptr_offset = (
                 value_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
-                + slot_id * num_heads * head_size
-                + head_id * head_size
+                + block_id * v_cache_stride0
+                + slot_id * v_cache_stride1
+                + head_id * v_cache_stride2
             )
             k_reg = tl.load(key_cache_ptr_offset + col_offsets)
             v_reg = tl.load(value_cache_ptr_offset + col_offsets)
@@ -157,19 +163,24 @@ if current_platform.is_rocm():
         total_tokens: int,
     ):
         assert kv_cache_layout in ["NHD", "SHUFFLE"], (
-            "kv_cache_layout only support NHD, SHUFFLE"
+            "kv_cache_layout only supports NHD, SHUFFLE"
         )
         head_dim = key.shape[2]
         x = 16 // key_cache.element_size()
         # assert dequant is True, "Currently, we only support "\
         # "gather cache with dequant"
-        # For k cache layout: [num_blocks, num_heads, page_size, head_dim]
+        # For k cache layout: [num_blocks, page_size, num_heads, head_dim]
         assert head_dim == key_cache.shape[3], (
             "We assume your kv cache layout is [num_blocks, "
             "page_size, num_heads, head_dim], but got otherwise"
         )
         page_size = key_cache.shape[1]
         num_heads = key_cache.shape[2]
+
+        # Pass actual tensor strides so the kernel works correctly
+        # even when the cache is non-contiguous (e.g, for hybrid model)
+        k_strides = key_cache.stride()
+        v_strides = value_cache.stride()
 
         grid = lambda meta: (total_tokens, num_heads)
         cp_mha_gather_cache_kernel[grid](
@@ -187,6 +198,12 @@ if current_platform.is_rocm():
             head_dim,
             x,
             block_tables.size(1),
+            k_strides[0],
+            k_strides[1],
+            k_strides[2],
+            v_strides[0],
+            v_strides[1],
+            v_strides[2],
             DEQUANT=dequant,
             PAGE_SIZE=page_size,
             CACHE_FORMAT=kv_cache_layout,
@@ -481,13 +498,9 @@ class AiterFlashAttentionMetadataBuilder(
         ):
             layers = get_layers_from_vllm_config(self.vllm_config, Attention)
             first_layer_name = [k for k in layers][0]
-            kv_cache_shape = (
-                self.vllm_config.compilation_config.static_forward_context[
-                    first_layer_name
-                ]
-                .kv_cache[0]
-                .shape
-            )
+            kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
+                first_layer_name
+            ].kv_cache.shape
             num_blocks = kv_cache_shape[1]
             self.scale = torch.ones(
                 [num_blocks, self.num_heads_kv, self.block_size],
@@ -745,11 +758,12 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """ROCM AITER FA supports decoder and encoder-decoder (cross) attention."""
-        return attn_type in (
-            AttentionType.DECODER,
-            AttentionType.ENCODER_DECODER,
-        )
+        """ENCODER_DECODER is not supported because the prefill path uses
+        flash_attn_varlen_func with cu_seqlens_k set to decoder
+        query_start_loc (not encoder seq lens) and causal=True, both of
+        which are incorrect for cross-attention layers.
+        """
+        return attn_type in (AttentionType.DECODER,)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -832,7 +846,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention is not implemented for FlashAttentionImpl"
+                "Encoder self-attention is not implemented for AiterFlashAttentionImpl"
             )
 
     def extend_for_sliding_window(
@@ -1047,7 +1061,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for FlashAttentionImpl"
+                "fused output quantization is not yet supported "
+                "for AiterFlashAttentionImpl"
             )
 
         if attn_metadata is None:
@@ -1340,6 +1355,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             assert k_scale is not None and v_scale is not None, (
                 "k_scale and v_scale are required for shuffled update"
             )
+            # TODO: Add correct KV cache handling for hybrid model. KV cache
+            # may not be contiguous if mamba state exists.
             reshape_and_cache_shuffle_triton(
                 key,
                 value,
