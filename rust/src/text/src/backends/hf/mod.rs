@@ -8,7 +8,7 @@ use std::sync::Arc;
 use fastokens::Tokenizer as FastokensTokenizer;
 use thiserror_ext::AsReport;
 use tokenizers::Tokenizer as HfTokenizer;
-use tracing::info;
+use tracing::{info, warn};
 
 use self::config::{
     GenerationConfig, ModelConfig, load_generation_config, load_model_config, load_tokenizer_config,
@@ -18,35 +18,27 @@ use self::model_files::resolve_model_files;
 use crate::backend::{SamplingHints, TextBackend};
 use crate::error::{Error, Result};
 
-/// Set this environment variable to `1` to disable `fastokens` and fall back to the HuggingFace
-/// `tokenizers` crate.
-const DISABLE_FASTOKENS_ENV: &str = "VLLM_RS_DISABLE_FASTOKENS";
-
 // Tokenizer implementation that can be either HuggingFace `tokenizers` or `fastokens`.
 enum TokenizerImpl {
     Hf(Box<HfTokenizer>),
     Fastokens(Box<FastokensTokenizer>),
 }
 
-/// Returns `true` when the user has opted out of `fastokens` via [`DISABLE_FASTOKENS_ENV`].
-fn fastokens_disabled() -> bool {
-    std::env::var(DISABLE_FASTOKENS_ENV).is_ok_and(|v| v == "1")
-}
-
 impl TokenizerImpl {
     fn from_file(path: &std::path::Path) -> Result<Self> {
-        if fastokens_disabled() {
-            info!("loading tokenizer with HuggingFace tokenizers");
-            let t = HfTokenizer::from_file(path).map_err(|error| {
-                Error::Tokenizer(format!("failed to load tokenizer: {}", error.as_report()))
-            })?;
-            Ok(Self::Hf(Box::new(t)))
-        } else {
-            info!("loading tokenizer with fastokens");
-            let t = FastokensTokenizer::from_file(path).map_err(|error| {
-                Error::Tokenizer(format!("failed to load tokenizer: {}", error.as_report()))
-            })?;
-            Ok(Self::Fastokens(Box::new(t)))
+        info!("loading tokenizer with fastokens");
+        match FastokensTokenizer::from_file(path) {
+            Ok(t) => Ok(Self::Fastokens(Box::new(t))),
+            Err(error) => {
+                warn!(
+                    error = %error.as_report(),
+                    "failed to load tokenizer with fastokens; falling back to HuggingFace tokenizers"
+                );
+                let t = HfTokenizer::from_file(path).map_err(|error| {
+                    Error::Tokenizer(format!("failed to load tokenizer: {}", error.as_report()))
+                })?;
+                Ok(Self::Hf(Box::new(t)))
+            }
         }
     }
 

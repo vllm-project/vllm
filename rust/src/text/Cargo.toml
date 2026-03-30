@@ -23,6 +23,7 @@ vllm-llm.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 
 [lints]

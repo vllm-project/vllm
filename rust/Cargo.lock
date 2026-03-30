@@ -4393,6 +4393,7 @@ dependencies = [
  "serde",
  "serde_default",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "thiserror-ext",
  "tokenizers",
