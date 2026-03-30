@@ -75,8 +75,14 @@ class TorchCompileWithNoGuardsWrapper:
             return ctx.result
         return callable_fn(*args, **kwargs)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        compile_prefix: str = "",
+        is_encoder: bool = False,
+    ) -> None:
         self.compiled = False
+        self._compile_prefix = compile_prefix
+        self._is_encoder = is_encoder
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
@@ -87,7 +93,9 @@ class TorchCompileWithNoGuardsWrapper:
         if mode is None:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
-        backend = vllm_config.compilation_config.init_backend(vllm_config)
+        backend = vllm_config.compilation_config.init_backend(
+            vllm_config, prefix=compile_prefix, is_encoder=is_encoder
+        )
         options = {}
 
         if isinstance(backend, str) and backend == "inductor":
@@ -112,7 +120,12 @@ class TorchCompileWithNoGuardsWrapper:
                     entry.guard_type == "SHAPE_ENV" for entry in x
                 ]
             else:
-                options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+                if hasattr(torch.compiler, "skip_all_guards_unsafe"):
+                    # Torch 2.10+ provides skip_all_guards_unsafe
+                    options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+                else:
+                    # Equivalent fallback for older PyTorch: skip all guards
+                    options["guard_filter_fn"] = lambda x: [False for _ in x]
 
         compiled_ptr: Any = self.forward
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
@@ -327,4 +340,8 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
     compilation_config.local_cache_dir = ""
 
     model.__class__.forward.__code__ = model.original_code_object()
-    TorchCompileWithNoGuardsWrapper.__init__(model)
+    TorchCompileWithNoGuardsWrapper.__init__(
+        model,
+        compile_prefix=model._compile_prefix,
+        is_encoder=model._is_encoder,
+    )

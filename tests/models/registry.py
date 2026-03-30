@@ -628,6 +628,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["ColBERTJinaRobertaModel"]},
     ),
+    "ColBERTLfm2Model": _HfExamplesInfo(
+        "LiquidAI/LFM2-ColBERT-350M",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["ColBERTLfm2Model"]},
+    ),
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
@@ -638,6 +643,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     ),
     "OpsColQwen3Model": _HfExamplesInfo(
         "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
+    ),
+    "ColQwen3_5": _HfExamplesInfo(
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        trust_remote_code=True,
+        max_model_len=4096,
     ),
     "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
         "nvidia/nemotron-colembed-vl-4b-v2",
@@ -742,7 +752,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.0.0.dev"
+        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
@@ -774,12 +784,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
     "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/Eagle2.5-8B", trust_remote_code=True, is_available_online=False
+        "nvidia/Eagle2.5-8B",
+        trust_remote_code=True,
     ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
+        revision="refs/pr/17",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
@@ -799,7 +811,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
-        "ibm-granite/granite-speech-3.3-2b"
+        "ibm-granite/granite-speech-3.3-2b",
+        extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
@@ -1081,6 +1094,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
     ),
+    "Qwen3ASRForcedAlignerForTokenClassification": _HfExamplesInfo(
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B", trust_remote_code=True
@@ -1116,6 +1135,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
+    "CohereAsrForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/cohere-transcribe-03-2026",
+        trust_remote_code=True,
+        is_available_online=False,  # TODO (ekagra): revert after asr release
+    ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
     ),
