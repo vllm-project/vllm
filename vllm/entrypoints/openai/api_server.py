@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import uvloop
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.request_stats_headers import (
-    build_request_stats_headers,
+    request_stats_headers_middleware,
 )
 from vllm.entrypoints.openai.server_utils import (
     engine_error_handler,
@@ -277,25 +277,7 @@ def build_app(
         app.add_middleware(XRequestIdMiddleware)
 
     if args.enable_request_stats_headers:
-
-        @app.middleware("http")
-        async def request_stats_headers_middleware(request: Request, call_next):
-            response = await call_next(request)
-            metadata = getattr(request.state, "request_metadata", None)
-            if (
-                metadata is None
-                or metadata.request_stats is None
-                or metadata.final_usage_info is None
-            ):
-                return response
-            headers = build_request_stats_headers(
-                metrics=metadata.request_stats,
-                usage=metadata.final_usage_info,
-                num_cached_tokens=metadata.num_cached_tokens,
-            )
-            for key, value in headers.items():
-                response.headers[key] = value
-            return response
+        app.middleware("http")(request_stats_headers_middleware)
 
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)

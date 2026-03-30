@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.request_stats_headers import (
     build_request_stats_headers,
+    request_stats_headers_middleware,
 )
 from vllm.v1.metrics.stats import RequestStateStats
 
@@ -125,42 +126,12 @@ def test_build_request_stats_headers_zero_decode_time_with_tokens():
 
 
 def _create_test_app(enable_headers: bool) -> FastAPI:
-    """Create a minimal FastAPI app with the stats middleware."""
-    from vllm.entrypoints.openai.request_stats_headers import (
-        build_request_stats_headers,
-    )
-
+    """Create a minimal FastAPI app with the production middleware."""
     app = FastAPI()
 
-    class Args:
-        enable_request_stats_headers = enable_headers
-
-    app.state.args = Args()
-
-    @app.middleware("http")
-    async def request_stats_headers_middleware(request: Request, call_next):
-        response = await call_next(request)
-        if not getattr(
-            request.app.state.args,
-            "enable_request_stats_headers",
-            False,
-        ):
-            return response
-        metadata = getattr(request.state, "request_metadata", None)
-        if (
-            metadata is None
-            or metadata.request_stats is None
-            or metadata.final_usage_info is None
-        ):
-            return response
-        headers = build_request_stats_headers(
-            metrics=metadata.request_stats,
-            usage=metadata.final_usage_info,
-            num_cached_tokens=metadata.num_cached_tokens,
-        )
-        for key, value in headers.items():
-            response.headers[key] = value
-        return response
+    # Mirror production: only register middleware when flag is enabled
+    if enable_headers:
+        app.middleware("http")(request_stats_headers_middleware)
 
     @app.get("/test-with-stats")
     async def test_with_stats(request: Request):
@@ -193,6 +164,16 @@ def _create_test_app(enable_headers: bool) -> FastAPI:
             scheduled_ts=100.05,
         )
         # final_usage_info is None
+        request.state.request_metadata = metadata
+        return JSONResponse(content={"ok": True})
+
+    @app.get("/test-missing-request-stats")
+    async def test_missing_request_stats(request: Request):
+        metadata = RequestResponseMetadata(request_id="test-789")
+        metadata.final_usage_info = UsageInfo(
+            prompt_tokens=10, completion_tokens=5, total_tokens=15
+        )
+        # request_stats is None
         request.state.request_metadata = metadata
         return JSONResponse(content={"ok": True})
 
@@ -256,3 +237,17 @@ async def test_middleware_full_stats():
     assert resp.headers["x-vllm-prompt-tokens"] == "50"
     assert resp.headers["x-vllm-completion-tokens"] == "10"
     assert resp.headers["x-vllm-cached-tokens"] == "5"
+    # 10 tokens / 0.3s decode = 33.33 tok/s
+    assert float(resp.headers["x-vllm-tokens-per-second"]) == round(10 / 0.3, 2)
+
+
+@pytest.mark.asyncio
+async def test_middleware_missing_request_stats():
+    """No headers when request_stats is None but usage is present."""
+    app = _create_test_app(enable_headers=True)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/test-missing-request-stats")
+    assert resp.status_code == 200
+    assert "x-vllm-total-time" not in resp.headers

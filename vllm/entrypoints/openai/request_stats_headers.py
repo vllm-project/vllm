@@ -6,9 +6,14 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
+from starlette.requests import Request
+from starlette.responses import Response
+
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from vllm.v1.metrics.stats import RequestStateStats
 
 
@@ -47,8 +52,35 @@ def build_request_stats_headers(
         "x-vllm-inference-time": f"{inference_time_ms:.2f}",
         "x-vllm-prefill-time": f"{prefill_time_ms:.2f}",
         "x-vllm-decode-time": f"{decode_time_ms:.2f}",
-        "x-vllm-prompt-tokens": str(usage.prompt_tokens),
+        "x-vllm-prompt-tokens": str(usage.prompt_tokens or 0),
         "x-vllm-completion-tokens": str(completion_tokens),
         "x-vllm-cached-tokens": str(num_cached_tokens),
         "x-vllm-tokens-per-second": f"{tokens_per_second:.2f}",
     }
+
+
+async def request_stats_headers_middleware(
+    request: Request,
+    call_next: Callable,
+) -> Response:
+    """Middleware that injects x-vllm-* timing headers into responses.
+
+    Reads request_metadata from request.state (populated by serving layers).
+    Returns response unchanged if metadata or stats are missing.
+    """
+    response = await call_next(request)
+    metadata = getattr(request.state, "request_metadata", None)
+    if (
+        metadata is None
+        or metadata.request_stats is None
+        or metadata.final_usage_info is None
+    ):
+        return response
+    headers = build_request_stats_headers(
+        metrics=metadata.request_stats,
+        usage=metadata.final_usage_info,
+        num_cached_tokens=metadata.num_cached_tokens,
+    )
+    for key, value in headers.items():
+        response.headers[key] = value
+    return response

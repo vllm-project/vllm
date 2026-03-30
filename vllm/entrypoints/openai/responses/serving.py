@@ -862,7 +862,10 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
             ),
         )
-        # Populate request stats for timing headers
+        # Populate request stats for timing headers.
+        # Known limitation: for multi-turn tool-calling flows,
+        # timing breakdown (queue/prefill/decode) reflects only the
+        # final turn. Total wall-clock time is still correct.
         if context.last_output is not None and context.last_output.metrics is not None:
             request_metadata.request_stats = context.last_output.metrics
             request_metadata.num_cached_tokens = num_cached_tokens
