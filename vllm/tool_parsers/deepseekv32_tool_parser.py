@@ -100,7 +100,7 @@ class DeepSeekV32ToolParser(ToolParser):
             param_dict[param_name] = param_val
         return param_dict
 
-    def _convert_param_value(self, value: str, param_type: str) -> Any:
+    def _convert_param_value_checked(self, value: str, param_type: str) -> Any:
         """Convert parameter value to the correct type."""
         if value.lower() == "null":
             return None
@@ -109,29 +109,31 @@ class DeepSeekV32ToolParser(ToolParser):
         if param_type in ["string", "str", "text"]:
             return value
         elif param_type in ["integer", "int"]:
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                return value
+            return int(value)
         elif param_type in ["number", "float"]:
-            try:
-                val = float(value)
-                return val if val != int(val) else int(val)
-            except (ValueError, TypeError):
-                return value
+            val = float(value)
+            return val if val != int(val) else int(val)
         elif param_type in ["boolean", "bool"]:
+            value = value.strip()
+            if value.lower() not in ["false", "0", "true", "1"]:
+                raise ValueError("Invalid boolean value")
             return value.lower() in ["true", "1"]
         elif param_type in ["object", "array"]:
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
+            return json.loads(value)
         else:
-            # Try JSON parse first, fallback to string
+            return json.loads(value)
+
+    def _convert_param_value(self, value: str, param_type: str | list[str]) -> Any:
+        """Convert parameter value to the correct type."""
+        if not isinstance(param_type, list):
+            param_type = [param_type]
+        for current_type in param_type:
             try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
+                return self._convert_param_value_checked(value, current_type)
+            except Exception:
+                continue
+        # return value as fallback
+        return value
 
     def _convert_params_with_schema(
         self,
