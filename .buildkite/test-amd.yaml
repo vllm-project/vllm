@@ -1801,6 +1801,19 @@ steps:
   - tests/v1/e2e
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
+  
+
+- label: V1 e2e (4xH100-4xMI325) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_4
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/attention/backends/utils.py
+    - vllm/v1/worker/gpu_model_runner.py
+    - tests/v1/e2e/test_hybrid_chunked_prefill.py
+  commands:
+    - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
 
 
 - label: V1 Spec Decode # TBD
