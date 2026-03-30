@@ -192,9 +192,9 @@ class MediaConnector:
                 with contextlib.suppress(OSError):
                     os.remove(tmp_path)
             return
-        self._maybe_evict()
+        self._maybe_evict(exclude=cache_path)
 
-    def _maybe_evict(self) -> None:
+    def _maybe_evict(self, exclude: Path | None = None) -> None:
         """Evict expired entries first, then LRU until under size limit."""
         cache_dir = Path(self._media_cache_dir)  # type: ignore[arg-type]
         entries = []
@@ -211,8 +211,11 @@ class MediaConnector:
             if age > self._media_cache_ttl_secs:
                 f.unlink(missing_ok=True)
                 continue
-            entries.append((stat.st_mtime, stat.st_size, f))
             total_size += stat.st_size
+            # Never evict the file we just wrote
+            if exclude is not None and f.name == exclude.name:
+                continue
+            entries.append((stat.st_mtime, stat.st_size, f))
 
         if total_size <= self._media_cache_max_bytes:
             return
