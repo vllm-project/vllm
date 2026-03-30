@@ -556,6 +556,26 @@ class OpenAIServingChat(OpenAIServing):
         else:
             all_previous_token_ids = None
 
+        try:
+            if self.reasoning_parser_cls:
+                if tokenizer is None:
+                    raise ValueError(
+                        "Tokenizer not available when `skip_tokenizer_init=True`"
+                    )
+
+                reasoning_parsers = [
+                    self.reasoning_parser_cls(
+                        tokenizer,
+                        chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
+                    )
+                    for _ in range(num_choices)
+                ]
+        except Exception as e:
+            logger.exception("Error in reasoning parser creation.")
+            data = self.create_streaming_error_response(str(e))
+            yield f"data: {data}\n\n"
+            yield "data: [DONE]\n\n"
+            return
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
@@ -566,7 +586,8 @@ class OpenAIServingChat(OpenAIServing):
 
                 tool_parsers: list[ToolParser | None] = [
                     self.tool_parser(tokenizer, request.tools)
-                ] * num_choices
+                    for _ in range(num_choices)
+                ]
             else:
                 tool_parsers = [None] * num_choices
         except Exception as e:
@@ -675,6 +696,8 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     tool_parser = tool_parsers[i]
+                    if self.reasoning_parser_cls:
+                        reasoning_parser = reasoning_parsers[i]
 
                     if (
                         reasoning_parser
