@@ -60,7 +60,7 @@ def should_enable_swap_ab(
     BLOCK_SIZE_M: int,
     BLOCK_SIZE_N: int,
 ) -> bool:
-    if not current_platform.is_cuda() or vllm_is_batch_invariant():
+    if not current_platform.is_cuda() or envs.VLLM_BATCH_INVARIANT:
         return False
 
     return (
