@@ -597,10 +597,17 @@ class EngineArgs:
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+    kv_cache_dtype_skip_layers: list[str] = get_field(
+        CacheConfig, "kv_cache_dtype_skip_layers"
+    )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    enable_mamba_cache_stochastic_rounding: bool = (
+        CacheConfig.enable_mamba_cache_stochastic_rounding
+    )
+    mamba_cache_philox_rounds: int = CacheConfig.mamba_cache_philox_rounds
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -1004,6 +1011,9 @@ class EngineArgs:
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
         cache_group.add_argument(
+            "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
+        )
+        cache_group.add_argument(
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
         )
         cache_group.add_argument(
@@ -1017,6 +1027,13 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+        )
+        cache_group.add_argument(
+            "--enable-mamba-cache-stochastic-rounding",
+            **cache_kwargs["enable_mamba_cache_stochastic_rounding"],
+        )
+        cache_group.add_argument(
+            "--mamba-cache-philox-rounds", **cache_kwargs["mamba_cache_philox_rounds"]
         )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
@@ -1295,7 +1312,7 @@ class EngineArgs:
         # delay the Pydantic validation that comes with SpeculativeConfig.
         vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
-            "--speculative-config", **vllm_kwargs["speculative_config"]
+            "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
@@ -1578,11 +1595,14 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
+            enable_mamba_cache_stochastic_rounding=self.enable_mamba_cache_stochastic_rounding,
+            mamba_cache_philox_rounds=self.mamba_cache_philox_rounds,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
