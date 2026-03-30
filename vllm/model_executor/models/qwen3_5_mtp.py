@@ -28,7 +28,6 @@ from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 from .interfaces import (
     MultiModalEmbeddings,
-    SupportsMambaPrefixCaching,
     SupportsMultiModal,
     _require_is_multimodal,
 )
@@ -333,7 +332,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         "hidden_states": 0,
     }
 )
-class Qwen3_5MTP(nn.Module, SupportsMambaPrefixCaching, SupportsMultiModal):
+class Qwen3_5MTP(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
