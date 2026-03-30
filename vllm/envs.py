@@ -64,6 +64,9 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_CACHE: str = ""
+    VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
+    VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
@@ -86,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
+    VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -775,6 +779,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT": lambda: int(
         os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")
     ),
+    # Directory for caching media downloads (images, video, audio fetched
+    # from URLs during inference). Empty string disables caching.
+    "VLLM_MEDIA_CACHE": lambda: os.getenv("VLLM_MEDIA_CACHE", ""),
+    # Maximum cache size in MB. When exceeded, least-recently-used entries
+    # are evicted. Default is 5120 (5 GB).
+    "VLLM_MEDIA_CACHE_MAX_SIZE_MB": lambda: int(
+        os.getenv("VLLM_MEDIA_CACHE_MAX_SIZE_MB", "5120")
+    ),
+    # Time-to-live in hours for cached media files. Entries older than this
+    # are evicted regardless of cache size. Default is 24 hours.
+    "VLLM_MEDIA_CACHE_TTL_HOURS": lambda: float(
+        os.getenv("VLLM_MEDIA_CACHE_TTL_HOURS", "24")
+    ),
     # Maximum number of retries for fetching media (images, audio, video)
     # from URLs. Each retry quadruples the timeout. Default is 3.
     "VLLM_MEDIA_FETCH_MAX_RETRIES": lambda: int(
@@ -869,6 +886,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
+    ),
+    # Maximum allowed value for the `n` sampling parameter (number of output
+    # sequences per request). Limits resource consumption to prevent
+    # denial-of-service via excessively large fan-out. Default: 16384.
+    "VLLM_MAX_N_SEQUENCES": lambda: int(
+        os.environ.get("VLLM_MAX_N_SEQUENCES", "16384")
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
@@ -1770,6 +1793,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
         "VLLM_AUDIO_FETCH_TIMEOUT",
+        "VLLM_MEDIA_CACHE",
+        "VLLM_MEDIA_CACHE_MAX_SIZE_MB",
+        "VLLM_MEDIA_CACHE_TTL_HOURS",
         "VLLM_MEDIA_FETCH_MAX_RETRIES",
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
