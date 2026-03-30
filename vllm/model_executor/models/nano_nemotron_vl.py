@@ -307,6 +307,20 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
 class NanoNemotronVLMultiModalProcessor(
     BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """
+        Bypass `call_hf_processor_mm_only` by no-op overriding`_call_hf_processor`,
+        so it chooses this path:
+        `type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor`
+        """
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
         if self.info.is_dynamic_tiler:
             pixel_values_flat = MultiModalFieldConfig.batched("image")
