@@ -9,7 +9,7 @@
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
-/vllm/model_executor/layers/mamba/gdn_linear_attn.py @ZJY0516
+/vllm/model_executor/layers/mamba/gdn_linear_attn.py @tdoublep @ZJY0516
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/layers/batch_invariant.py @yewentao256 
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
