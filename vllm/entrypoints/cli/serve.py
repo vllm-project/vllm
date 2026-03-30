@@ -133,13 +133,6 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
-        serve_parser.add_argument(
-            "--grpc",
-            action="store_true",
-            default=False,
-            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
-            "server. Requires: pip install vllm[grpc].",
-        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
