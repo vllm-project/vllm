@@ -56,7 +56,11 @@ TOLERANCES = {
 }
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_cpu()
+        or current_platform.is_xpu()
+    ),
     reason="Backend not supported",
 )
 
