@@ -9,10 +9,7 @@ import torch
 
 from vllm import envs
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
-from vllm.model_executor.layers.fused_moe.activation import (
-    MoEActivation,
-    apply_moe_activation,
-)
+from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEConfig,
@@ -392,13 +389,14 @@ class HummingLinearMethod(LinearMethodBase):
             if is_unquantized and self.is_online_quant:
                 assert isinstance(self.weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
+                has_global_scale = "TENSOR" in str(self.weight_schema.weight_scale_type)
                 tensor_list = quantize_weight(
                     weight=loaded_weight,
                     dtype=self.weight_schema.b_dtype,
                     scale_dtype=self.weight_schema.bs_dtype or f16_dtype,
                     group_size=self.weight_schema.weight_scale_group_size,
                     has_zero_point=self.weight_schema.has_zero_point,
-                    has_global_scale=self.weight_schema.has_global_scale,
+                    has_global_scale=has_global_scale,
                     is_fp_zero_point=self.weight_schema.is_fp_zero_point,
                     pack=True,
                 )
@@ -573,7 +571,7 @@ class HummingLinearMethod(LinearMethodBase):
         HummingMethod.prepare_default_kernel_configs(
             layer,
             use_stream_k=not vllm_is_batch_invariant(),
-            use_f16_accum=False,
+            use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
         )
 
     def apply(
@@ -612,13 +610,14 @@ class HummingMoEMethod(FusedMoEMethodBase):
             if is_unquantized:
                 assert isinstance(self.weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
+                has_global_scale = "TENSOR" in str(self.weight_schema.weight_scale_type)
                 tensor_list = quantize_weight(
                     weight=loaded_weight,
                     dtype=self.weight_schema.b_dtype,
                     scale_dtype=self.weight_schema.bs_dtype or f16_dtype,
                     group_size=self.weight_schema.weight_scale_group_size,
                     has_zero_point=self.weight_schema.has_zero_point,
-                    has_global_scale=self.weight_schema.has_global_scale,
+                    has_global_scale=has_global_scale,
                     is_fp_zero_point=self.weight_schema.is_fp_zero_point,
                     pack=True,
                 )
@@ -721,28 +720,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         return
 
-    def prepare_activation_kwargs(self, layer: torch.nn.Module) -> dict[str, str]:
-        if layer.activation == MoEActivation.SILU:
-            return {"activation_type": "silu_glu"}
-        elif layer.activation == MoEActivation.SWIGLUOAI:
-            activation_func_impl = """
-            const float g = fminf(a.x, 7);
-            const float u = fmaxf(fminf(a.y, 7), -7);
-            return (u + 1.0f) * __fdividef(g, 1.0f + __expf(-g * 1.702));
-            """
-            return {
-                "activation_type": "custom_glu",
-                "custom_activation_func_impl": activation_func_impl,
-            }
-
-        return {}
-
-    def may_apply_activation(
+    def apply_activation(
         self, layer: torch.nn.Module, inputs: torch.Tensor
     ) -> torch.Tensor:
-        if self.prepare_activation_kwargs(layer):
-            return inputs
-
         inputs_flat = inputs.view(-1, inputs.size(-1))
         if layer.activation.is_gated:
             outputs_flat = torch.empty(
@@ -845,24 +825,16 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 sublayer_name=sublayer_name,
             )
 
-            should_prepare_for_glu = sublayer_name == "w13" and layer.activation in [
-                MoEActivation.SILU
-            ]
             HummingMethod.transform_humming_layer(
                 layer=layer,
                 sublayer_name=sublayer_name,
-                should_prepare_for_glu=should_prepare_for_glu,
                 already_padded=True,
             )
-            activation_kwargs = {}
-            if sublayer_name == "w13":
-                activation_kwargs = self.prepare_activation_kwargs(layer)
             HummingMethod.prepare_default_kernel_configs(
                 layer,
-                use_stream_k=not vllm_is_batch_invariant(),
-                use_f16_accum=False,
+                use_batch_invariance=vllm_is_batch_invariant(),
+                use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
                 sublayer_name=sublayer_name,
-                **activation_kwargs,
             )
 
     def apply(
@@ -891,7 +863,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             sublayer_name="w13",
         )
 
-        input2 = self.may_apply_activation(layer, output1)
+        input2 = self.apply_activation(layer, output1)
 
         output2 = HummingMethod.forward_layer(
             layer=layer,
