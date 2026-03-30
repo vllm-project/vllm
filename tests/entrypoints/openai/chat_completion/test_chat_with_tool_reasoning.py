@@ -9,7 +9,7 @@ from tests.utils import RemoteOpenAIServer
 
 # a reasoning and tool calling model
 MODEL_NAME = "Qwen/QwQ-32B"
-MODEL_NAME = "/mnt/data4/models/Qwen/Qwen3-8B"
+
 
 @pytest.fixture(scope="module")
 def server():
