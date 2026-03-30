@@ -36,7 +36,6 @@ class ScoreMultiModalParam(TypedDict, total=False):
 
 # Raw input data with content key in ScoreMultiModalParam.
 ScoreInput = str | ScoreMultiModalParam
-ScoreInputs = ScoreInput | list[ScoreInput]
 # Score data without content key.
 ScoreData = str | list[ScoreContentPartParam]
 

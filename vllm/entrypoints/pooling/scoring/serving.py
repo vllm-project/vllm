@@ -23,7 +23,7 @@ from .protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from .typing import ScoreInputs
+from .typing import ScoreInput
 
 logger = init_logger(__name__)
 
@@ -115,7 +115,7 @@ class ServingScores(PoolingServing):
         final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         model_name: str,
-        documents: ScoreInputs,
+        documents: ScoreInput | list[ScoreInput],
         top_n: int,
     ) -> JSONResponse:
         if not isinstance(documents, list):

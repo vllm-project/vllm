@@ -49,7 +49,7 @@ from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_proc
 from vllm.entrypoints.pooling.scoring.io_processor import (
     ScoringIOProcessor,
 )
-from vllm.entrypoints.pooling.scoring.typing import ScoreInputs
+from vllm.entrypoints.pooling.scoring.typing import ScoreInput
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
 from vllm.entrypoints.utils import log_non_default_args
 from vllm.inputs import (
@@ -1378,8 +1378,8 @@ class LLM:
 
     def score(
         self,
-        data_1: ScoreInputs,
-        data_2: ScoreInputs,
+        data_1: ScoreInput | list[ScoreInput],
+        data_2: ScoreInput | list[ScoreInput],
         /,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,

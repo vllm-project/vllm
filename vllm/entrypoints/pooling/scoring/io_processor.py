@@ -21,7 +21,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
-from .typing import ScoreData, ScoreInputs, ScoringData
+from .typing import ScoreData, ScoreInput, ScoringData
 from .utils import (
     compress_token_type_ids,
     compute_maxsim_score,
@@ -48,7 +48,11 @@ class ScoringIOProcessor(PoolingIOProcessor):
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
 
-    def valid_inputs(self, data_1: ScoreInputs, data_2: ScoreInputs) -> ScoringData:
+    def valid_inputs(
+        self,
+        data_1: ScoreInput | list[ScoreInput],
+        data_2: ScoreInput | list[ScoreInput],
+    ) -> ScoringData:
         scoring_data = validate_score_input(
             data_1,
             data_2,

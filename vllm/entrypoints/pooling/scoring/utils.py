@@ -21,7 +21,6 @@ from .typing import (
     ScoreContentPartParam,
     ScoreData,
     ScoreInput,
-    ScoreInputs,
     ScoringData,
 )
 
@@ -76,8 +75,8 @@ def _validate_score_input_lens(
 
 
 def validate_score_input(
-    data_1: ScoreInputs,
-    data_2: ScoreInputs,
+    data_1: ScoreInput | list[ScoreInput],
+    data_2: ScoreInput | list[ScoreInput],
     is_multimodal_model: bool,
     architecture: str,
 ) -> ScoringData:

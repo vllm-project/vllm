@@ -745,14 +745,14 @@ async def build_endpoint_registry(
         "score": {
             "url_matcher": lambda url: url.endswith("/score"),
             "handler_getter": lambda: (
-                serving_scores.create_score if serving_scores is not None else None
+                serving_scores if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
         "rerank": {
             "url_matcher": lambda url: url.endswith("/rerank"),
             "handler_getter": lambda: (
-                serving_scores.do_rerank if serving_scores is not None else None
+                serving_scores if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
