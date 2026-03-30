@@ -1309,7 +1309,7 @@ class ModelConfig:
                 )
             raise AssertionError(f"Unsupported block type: {block_type}")
 
-    def get_mamba_chunk_size(self) -> int | None:
+    def get_mamba_chunk_size(self) -> int:
         """
         Returns the mamba chunk size if it exists
         """
