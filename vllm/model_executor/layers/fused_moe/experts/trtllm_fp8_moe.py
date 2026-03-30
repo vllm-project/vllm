@@ -406,6 +406,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
 
+        # Currently FI requires bfloat16 routing bias.
+        # https://github.com/flashinfer-ai/flashinfer/issues/2909
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
+
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
