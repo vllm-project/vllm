@@ -120,6 +120,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
@@ -161,7 +162,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
-from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.eagle import EagleProposer, SpecDecodeBaseProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -2228,7 +2229,12 @@ class GPUModelRunner(
 
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
-                builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
+                builder,
+                (
+                    Mamba1AttentionMetadataBuilder,
+                    Mamba2AttentionMetadataBuilder,
+                    GDNAttentionMetadataBuilder,
+                ),
             ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
@@ -2289,7 +2295,7 @@ class GPUModelRunner(
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
+                if isinstance(self.drafter, SpecDecodeBaseProposer):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
