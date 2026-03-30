@@ -156,11 +156,10 @@ class GritLMMeanPool(SequencePoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolingMethodOutput:
         prompt_lens = pooling_metadata.prompt_lens
-        prompt_token_ids = pooling_metadata.get_prompt_token_ids_cpu()
         instr_lens = torch.tensor(
             [
-                self._get_instruction_len(token_ids.numpy())
-                for token_ids in prompt_token_ids
+                self._get_instruction_len(token_ids.cpu().numpy())
+                for token_ids in pooling_metadata.get_prompt_token_ids()
             ],
             device="cpu",
         )
