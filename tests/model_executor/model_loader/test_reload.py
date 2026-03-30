@@ -205,8 +205,8 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
 def test_online_quantize_reload(
     base_model, mul_model, add_model, quantization, tp_size, vllm_runner
 ):
-    if cuda_device_count_stateless() < tp_size:
-        pytest.skip(reason="Not enough CUDA devices")
+    if current_platform.device_count() < tp_size:
+        pytest.skip(reason="Not enough GPU devices")
 
     if quantization == "fp8" and not current_platform.supports_fp8():
         pytest.skip(reason="Requires FP8 support")
