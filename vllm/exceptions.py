@@ -13,6 +13,11 @@ class VLLMValidationError(ValueError):
         message: The error message describing the validation failure.
         parameter: Optional parameter name that failed validation.
         value: Optional value that was rejected during validation.
+        error_code: Optional string error code for the response body
+            (e.g. ``"context_length_exceeded"``).  When set, the code
+            field in the JSON error response will use this string
+            instead of the numeric HTTP status code, matching the
+            OpenAI API convention.
     """
 
     def __init__(
@@ -21,10 +26,12 @@ class VLLMValidationError(ValueError):
         *,
         parameter: str | None = None,
         value: Any = None,
+        error_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.parameter = parameter
         self.value = value
+        self.error_code = error_code
 
     def __str__(self):
         base = super().__str__()

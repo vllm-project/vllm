@@ -306,6 +306,7 @@ def create_error_response(
     param: str | None = None,
 ) -> ErrorResponse:
     exc: Exception | None = None
+    error_code: str | None = None
 
     if isinstance(message, Exception):
         exc = message
@@ -319,6 +320,7 @@ def create_error_response(
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
             param = exc.parameter
+            error_code = exc.error_code
         elif isinstance(exc, VLLMNotFoundError):
             err_type = "NotFoundError"
             status_code = HTTPStatus.NOT_FOUND
@@ -352,7 +354,7 @@ def create_error_response(
         error=ErrorInfo(
             message=sanitize_message(message),
             type=err_type,
-            code=status_code.value,
+            code=error_code if error_code is not None else status_code.value,
             param=param,
         )
     )

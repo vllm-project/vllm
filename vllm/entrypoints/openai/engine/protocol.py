@@ -59,7 +59,7 @@ class ErrorInfo(OpenAIBaseModel):
     message: str
     type: str
     param: str | None = None
-    code: int
+    code: int | str
 
 
 class ErrorResponse(OpenAIBaseModel):

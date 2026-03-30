@@ -727,6 +727,7 @@ class OpenAIServing:
                     f"Please reduce the length of the input prompt.",
                     parameter="input_tokens",
                     value=token_num,
+                    error_code="context_length_exceeded",
                 )
             return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
@@ -755,6 +756,7 @@ class OpenAIServing:
                 "the input messages.",
                 parameter="input_tokens",
                 value=token_num,
+                error_code="context_length_exceeded",
             )
 
         if max_tokens is not None and token_num + max_tokens > max_model_len:
@@ -770,6 +772,7 @@ class OpenAIServing:
                 f"number of requested output tokens.",
                 parameter="max_tokens",
                 value=max_tokens,
+                error_code="context_length_exceeded",
             )
 
         return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
