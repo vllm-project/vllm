@@ -16,7 +16,6 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_open_port,
@@ -26,6 +25,7 @@ from vllm.v1.executor.multiproc_executor import (
     MultiprocExecutor,
     WorkerProc,
 )
+from vllm.v1.executor.ray_env_utils import get_driver_env_vars
 from vllm.v1.executor.ray_utils import (
     WORKER_SPECIFIC_ENV_VARS,
     build_actor_name,
@@ -131,12 +131,21 @@ class RayWorkerProc(WorkerProc):
         gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
         return node_id, [int(x) for x in gpu_ids]
 
-    def initialize_worker(self, local_rank: int, env_vars: dict[str, str]) -> None:
+    def initialize_worker(
+        self,
+        local_rank: int,
+        env_vars: dict[str, str],
+        driver_env_vars: dict[str, str] | None = None,
+    ) -> None:
         """Complete initialization after GPU assignment is known.
 
-        Sets CUDA_VISIBLE_DEVICES and initializes the underlying WorkerProc
-        with the correct local_rank.
+        *driver_env_vars* are applied with ``setdefault`` — they fill
+        in missing vars but never overwrite node-local values.
+        *env_vars* (e.g. CUDA_VISIBLE_DEVICES) always overwrite.
         """
+        if driver_env_vars:
+            for key, value in driver_env_vars.items():
+                os.environ.setdefault(key, value)
         for key, value in env_vars.items():
             os.environ[key] = value
 
@@ -209,15 +218,13 @@ class RayExecutorV2(MultiprocExecutor):
     def _build_runtime_env(self) -> dict:
         """Build a runtime_env dict for RayWorkerProc actors.
 
-        Merges parallel_config.ray_runtime_env, driver env vars from
-        get_env_vars_to_copy, noset-device flags, and optional Nsight
-        profiling config.
+        Driver env vars are applied separately via initialize_worker
+        with setdefault semantics.
         """
         base = self.parallel_config.ray_runtime_env
         runtime_env: dict = copy.deepcopy(dict(base)) if base else {}
 
         env_vars = runtime_env.setdefault("env_vars", {})
-        env_vars.update(self._worker_env_vars)
         env_vars.update({v: "1" for v in current_platform.ray_noset_device_env_vars})
         if self.parallel_config.ray_workers_use_nsight:
             runtime_env["nsight"] = {
@@ -304,16 +311,10 @@ class RayExecutorV2(MultiprocExecutor):
         self.ray_worker_handles: list[RayWorkerHandle] = []
         instance_id = self.vllm_config.instance_id
 
-        # Collect env vars to propagate from driver to workers (NCCL,
-        # HF, vLLM flags, etc.).
-        env_vars_to_copy = get_env_vars_to_copy(
-            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(current_platform.additional_env_vars),
-            destination="RayWorkerProc actors",
+        # Collect driver env vars and apply but don't overwrite node-local values.
+        self.driver_env_vars = get_driver_env_vars(
+            worker_specific_vars=WORKER_SPECIFIC_ENV_VARS,
         )
-        self._worker_env_vars = {
-            name: os.environ[name] for name in env_vars_to_copy if name in os.environ
-        }
 
         for bundle_idx in range(self.world_size):
             bundle = bundle_assignments[bundle_idx]
@@ -387,7 +388,7 @@ class RayExecutorV2(MultiprocExecutor):
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(
-                    local_rank, worker_env_vars
+                    local_rank, worker_env_vars, self.driver_env_vars
                 )
             )
         ray.get(init_worker_refs)
