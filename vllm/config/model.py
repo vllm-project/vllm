@@ -125,26 +125,28 @@ class ModelConfig:
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
-    """Tokenizer mode:\n
+    """Tokenizer mode:
+
     - "auto" will use the tokenizer from `mistral_common` for Mistral models
-    if available, otherwise it will use the "hf" tokenizer.\n
-    - "hf" will use the fast tokenizer if available.\n
-    - "slow" will always use the slow tokenizer.\n
-    - "mistral" will always use the tokenizer from `mistral_common`.\n
-    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
-    - "qwen_vl" will always use the tokenizer from `qwen_vl`.\n
+      if available, otherwise it will use the "hf" tokenizer.
+    - "hf" will use the fast tokenizer if available.
+    - "slow" will always use the slow tokenizer.
+    - "mistral" will always use the tokenizer from `mistral_common`.
+    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
+    - "qwen_vl" will always use the tokenizer from `qwen_vl`.
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
     dtype: ModelDType | torch.dtype = "auto"
-    """Data type for model weights and activations:\n
+    """Data type for model weights and activations:
+
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
-    precision for BF16 models.\n
-    - "half" for FP16. Recommended for AWQ quantization.\n
-    - "float16" is the same as "half".\n
-    - "bfloat16" for a balance between precision and range.\n
-    - "float" is shorthand for FP32 precision.\n
+      precision for BF16 models.
+    - "half" for FP16. Recommended for AWQ quantization.
+    - "float16" is the same as "half".
+    - "bfloat16" for a balance between precision and range.
+    - "float" is shorthand for FP32 precision.
     - "float32" for FP32 precision."""
     seed: int = 0
     """Random seed for reproducibility.
@@ -182,13 +184,14 @@ class ModelConfig:
     automatically derived from the model config.
 
     When passing via `--max-model-len`, supports k/m/g/K/M/G in human-readable
-    format. Examples:\n
-    - 1k -> 1000\n
-    - 1K -> 1024\n
-    - 25.6k -> 25,600\n
+    format. Examples:
+
+    - 1k -> 1000
+    - 1K -> 1024
+    - 25.6k -> 25,600
     - -1 or 'auto' -> Automatically choose the maximum model length that fits in
-    GPU memory. This will use the model's maximum context length if it fits,
-    otherwise it will find the largest length that can be accommodated."""
+      GPU memory. This will use the model's maximum context length if it fits,
+      otherwise it will find the largest length that can be accommodated."""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: QuantizationMethods | str | None = None
@@ -248,10 +251,11 @@ class ModelConfig:
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
     config_format: str | ConfigFormat = "auto"
-    """The format of the model config to load:\n
+    """The format of the model config to load:
+
     - "auto" will try to load the config in hf format if available after trying
-    to load in mistral format.\n
-    - "hf" will load the config in hf format.\n
+      to load in mistral format.
+    - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
     hf_token: bool | str | None = None
     """The token to use as HTTP bearer authorization for remote files . If
@@ -276,12 +280,12 @@ class ModelConfig:
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
     model_impl: str | ModelImpl = "auto"
-    """Which implementation of the model to use:\n
-    - "auto" will try to use the vLLM implementation, if it exists, and fall
-    back to the Transformers implementation if no vLLM implementation is
-    available.\n
-    - "vllm" will use the vLLM model implementation.\n
-    - "transformers" will use the Transformers model implementation.\n
+    """Which implementation of the model to use:
+
+    - "auto" will try to use the vLLM implementation, if it exists, and fall back to the
+      Transformers implementation if no vLLM implementation is available.
+    - "vllm" will use the vLLM model implementation.
+    - "transformers" will use the Transformers model implementation.
     - "terratorch" will use the TerraTorch model implementation.
     """
     override_attention_dtype: str | None = None
@@ -291,6 +295,10 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
+    renderer_num_workers: int = 1
+    """Number of worker threads in the renderer thread pool. This pool
+    handles async tokenization, chat template rendering, and multimodal
+    preprocessing."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -542,7 +550,9 @@ class ModelConfig:
 
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
-            if arch == "Grok1ForCausalLM":
+            if self.model_impl == "terratorch":
+                self.tokenizer_mode = "terratorch"
+            elif arch == "Grok1ForCausalLM":
                 self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
@@ -586,6 +596,14 @@ class ModelConfig:
             config_format=self.config_format,
         )
 
+        # Some checkpoints set sliding_window to 0 to indicate that sliding window is
+        # disabled, but vLLM uses None for that. Convert 0 to None to avoid errors.
+        # Set before get_and_verify_max_len to ensure that max_model_len does not get
+        # capped to 0.
+        if self.get_sliding_window() == 0:
+            self.disable_sliding_window = True
+            self.hf_text_config.sliding_window = None
+
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
 
@@ -628,6 +646,19 @@ class ModelConfig:
             }
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
+
+            if (
+                self.renderer_num_workers > 1
+                and self.multimodal_config.mm_processor_cache_gb > 0
+            ):
+                raise ValueError(
+                    "Cannot use --renderer-num-workers > 1 with the "
+                    "multimodal processor cache enabled. The cache is "
+                    "not thread-safe and does not support concurrent "
+                    "renderer workers. Please set "
+                    "--renderer-num-workers 1 (the default), or "
+                    "disable the cache with --mm-processor-cache-gb 0."
+                )
 
         # Multimodal GGUF models must use original repo for mm processing
         if is_gguf(self.tokenizer) and self.is_multimodal_model:
@@ -917,6 +948,7 @@ class ModelConfig:
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "cpu_awq",
+                "gguf",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -1498,10 +1530,11 @@ class ModelConfig:
     @property
     def score_type(self) -> ScoreType:
         """
-        Scoring API handles score/rerank for:\n
-        - "classify" task (score_type: cross-encoder models)\n
-        - "embed" task (score_type: bi-encoder models)\n
-        - "token_embed" task (score_type: late interaction models)\n
+        Scoring API handles score/rerank for:
+
+        - "classify" task (score_type: cross-encoder models)
+        - "embed" task (score_type: bi-encoder models)
+        - "token_embed" task (score_type: late interaction models)
         """
         # fixme: self._model_info.score_type is the score type before
         #  as_seq_cls_model, which is "bi-encoder", rather than the
@@ -1579,9 +1612,10 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        `head_dtype` currently only supports pooling models.\n
-        - The pooling model defaults to using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
+        `head_dtype` currently only supports pooling models.
+
+        - The pooling model defaults to using fp32 head, you can use
+          --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
 
         head_dtype = _get_head_dtype(
