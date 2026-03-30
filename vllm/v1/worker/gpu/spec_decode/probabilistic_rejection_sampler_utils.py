@@ -24,11 +24,11 @@ def _compute_global_lse(
     local_sumexp_ptr,
     local_sumexp_stride,
     logit_idx,
-    num_blocks,
-    PADDED_NUM_BLOCKS: tl.constexpr,
+    vocab_num_blocks,
+    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
-    blocks = tl.arange(0, PADDED_NUM_BLOCKS)
-    blocks_mask = blocks < num_blocks
+    blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
+    blocks_mask = blocks < vocab_num_blocks
     maxes = tl.load(
         local_max_ptr + logit_idx * local_max_stride + blocks,
         mask=blocks_mask,
@@ -273,7 +273,7 @@ def _probabilistic_rejection_kernel(
 
 
 @triton.jit
-def _gumbel_resample_kernel(
+def _resample_kernel(
     # [num_reqs, num_blocks]
     resampled_local_argmax_ptr,
     resampled_local_argmax_stride,
@@ -410,6 +410,44 @@ def _gumbel_resample_kernel(
     )
 
 
+@triton.jit
+def _insert_resampled_kernel(
+    # [num_reqs, num_speculative_steps + 1]
+    sampled_ptr,
+    sampled_stride,
+    # [num_reqs]
+    num_sampled_ptr,
+    # [num_reqs, num_blocks]
+    resampled_local_argmax_ptr,
+    resampled_local_argmax_stride,
+    # [num_reqs, num_blocks]
+    resampled_local_max_ptr,
+    resampled_local_max_stride,
+    resample_num_blocks,
+    PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    resample_idx = tl.load(num_sampled_ptr + req_idx)
+    block_offsets = tl.arange(0, PADDED_RESAMPLE_NUM_BLOCKS)
+    block_mask = block_offsets < resample_num_blocks
+    resampled_local_max = tl.load(
+        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_offsets,
+        mask=block_mask,
+        other=float("-inf"),
+    )
+    resampled_max_block_idx = tl.argmax(resampled_local_max, axis=0)
+    resampled = tl.load(
+        resampled_local_argmax_ptr
+        + req_idx * resampled_local_argmax_stride
+        + resampled_max_block_idx,
+    )
+    tl.store(
+        sampled_ptr + req_idx * sampled_stride + resample_idx,
+        resampled,
+    )
+    tl.store(num_sampled_ptr + req_idx, resample_idx + 1)
+
+
 def probabilistic_rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
@@ -488,11 +526,11 @@ def probabilistic_rejection_sample(
     sampled = draft_sampled.new_empty(
         num_reqs, num_speculative_steps + 1, dtype=torch.int64
     )
-    rejected_steps = sampled.new_empty(num_reqs)
+    num_sampled = sampled.new_empty(num_reqs)
     _probabilistic_rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
-        rejected_steps,
+        num_sampled,
         target_logits,
         target_logits.stride(0),
         target_local_argmax,
@@ -521,13 +559,14 @@ def probabilistic_rejection_sample(
     # Resample the rejected/bonus tokens.
     RESAMPLE_BLOCK_SIZE = 1024
     resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
+    padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
     resampled_local_argmax = target_logits.new_empty(
         num_reqs, resample_num_blocks, dtype=torch.int64
     )
     resampled_local_max = target_logits.new_empty(
         num_reqs, resample_num_blocks, dtype=torch.float64
     )
-    _gumbel_resample_kernel[(num_reqs, resample_num_blocks)](
+    _resample_kernel[(num_reqs, resample_num_blocks)](
         resampled_local_argmax,
         resampled_local_argmax.stride(0),
         resampled_local_max,
@@ -544,7 +583,7 @@ def probabilistic_rejection_sample(
         draft_local_max.stride(0),
         draft_local_sumexp,
         draft_local_sumexp.stride(0),
-        rejected_steps,
+        num_sampled,
         cu_num_logits,
         idx_mapping,
         temperature,
@@ -555,7 +594,17 @@ def probabilistic_rejection_sample(
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
     )
-    max_block_idx = resampled_local_max.argmax(dim=-1, keepdim=True)
-    resampled = resampled_local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
-    sampled.scatter_(1, rejected_steps.unsqueeze(1), resampled.unsqueeze(1))
-    return sampled, rejected_steps + 1
+
+    # Insert the resampled tokens into the output sampled.
+    _insert_resampled_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        resampled_local_argmax,
+        resampled_local_argmax.stride(0),
+        resampled_local_max,
+        resampled_local_max.stride(0),
+        resample_num_blocks,
+        PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+    )
+    return sampled, num_sampled
