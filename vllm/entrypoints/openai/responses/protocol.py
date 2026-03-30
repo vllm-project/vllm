@@ -27,6 +27,7 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
+    ResponseTextConfig,
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
@@ -38,20 +39,13 @@ from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreated
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
-from openai.types.responses.tool import Tool
-from openai_harmony import Message as OpenAIHarmonyMessage
-
-# Backward compatibility for OpenAI client versions
-try:  # For older openai versions (< 1.100.0)
-    from openai.types.responses import ResponseTextConfig
-except ImportError:  # For newer openai versions (>= 1.100.0)
-    from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
-
 from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
     ValidationError,
@@ -111,8 +105,8 @@ def serialize_message(msg):
     elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
-        # fallback to pyandic dump
-        return msg.model_dump_json()
+        # fallback to pydantic dump
+        return msg.model_dump_json(by_alias=True)
 
 
 def serialize_messages(msgs):
@@ -258,6 +252,10 @@ class ResponsesRequest(OpenAIBaseModel):
             "numeric values, used by custom extensions."
         ),
     )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
     # --8<-- [end:responses-extra-params]
 
     def build_chat_params(
@@ -357,6 +355,10 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(stop, str):
             stop = [stop]
 
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
@@ -373,7 +375,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
-            extra_args=self.vllm_xargs or {},
+            extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -494,6 +496,11 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
     # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
     # NOTE: custom serialization is needed
@@ -537,6 +544,7 @@ class ResponsesResponse(OpenAIBaseModel):
         usage: ResponseUsage | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -572,6 +580,7 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            kv_transfer_params=kv_transfer_params,
         )
 
 

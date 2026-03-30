@@ -102,7 +102,7 @@ def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
     g: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
@@ -116,7 +116,7 @@ def chunk_scaled_dot_kkt_fwd(
             The beta tensor of shape `[B, T, H]`.
         g (torch.Tensor):
             The cumulative sum of the gate tensor of shape `[B, T, H]`. Default: `None`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.Tensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
         chunk_size (int):

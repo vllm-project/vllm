@@ -15,8 +15,6 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        model_dtype: torch.dtype,
-        cache_draft_logits: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -72,18 +70,6 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
-        # Draft token logits.
-        # NOTE: This tensor maintains the "processed" logits after applying temperature,
-        # top-p, etc.
-        self.draft_logits: torch.Tensor | None = None
-        if cache_draft_logits:
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=model_dtype,
-                device=device,
-            )
 
         self.next_prefill_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
@@ -123,13 +109,14 @@ class RequestState:
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
-    def remove_request(self, req_id: str) -> None:
+    def remove_request(self, req_id: str) -> bool:
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is None:
             # Request not found.
-            return
+            return False
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
+        return True
 
     def any_prefills(self, idx_mapping_np: np.ndarray) -> bool:
         return np.any(
