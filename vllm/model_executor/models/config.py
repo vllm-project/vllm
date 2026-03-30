@@ -230,6 +230,19 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "to ensure that attention page size is >= mamba page size.",
                 attn_block_size,
             )
+        scheduler_config = vllm_config.scheduler_config
+        if (
+            cache_config.mamba_cache_mode == "align"
+            and cache_config.block_size > scheduler_config.max_num_batched_tokens
+        ):
+            old_max_tokens = scheduler_config.max_num_batched_tokens
+            scheduler_config.max_num_batched_tokens = cache_config.block_size
+            logger.warning(
+                "Automatically increased max_num_batched_tokens from %d"
+                " to %d to accommodate Mamba align mode block_size",
+                old_max_tokens,
+                cache_config.block_size,
+            )
 
         # By default, mamba block size will be set to max_model_len.
         # When enabling prefix caching and using align mamba cache
