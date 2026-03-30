@@ -423,15 +423,14 @@ See [CI Failures](failures.md) for a detailed guide on:
 ### Quick Checklist
 
 1. **Look at the `main` branch builds**: [Buildkite main](https://buildkite.com/vllm/ci/builds?branch=main) — does the failure also appear there?
-2. **Reproduce locally**: Pull the CI Docker image for the exact commit and run the failing test.
-   The commit SHA is visible in the Buildkite build page. For pre-merge builds use
-   `vllm-ci-test-repo`; for post-merge (main) builds use `vllm-ci-postmerge-repo`:
+2. **Reproduce locally**: Run the failing test in the correct CI Docker image.
+   For PRs, use `vllm-ci-test-repo:<commit_hash>`.
     ```bash
-    COMMIT=<commit-sha-from-buildkite>
-    docker pull public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$COMMIT
+    # Example for a PR failure. Get commit hash from PR page.
+    COMMIT_HASH="<your_commit_hash>"
     docker run --gpus all --rm \
       -v $HOME/.cache/huggingface:/root/.cache/huggingface \
-      public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$COMMIT \
+      public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${COMMIT_HASH} \
       pytest tests/failing/test_foo.py::test_name -v
     ```
 3. **Check for flakiness** using `.buildkite/scripts/rerun-test.sh`:

@@ -43,11 +43,7 @@ nav:
       - contributing/model/tests.md
       - contributing/model/multimodal.md
       - contributing/model/transcription.md
-    - CI:
-      - contributing/ci/overview.md
-      - contributing/ci/failures.md
-      - contributing/ci/nightly_builds.md
-      - contributing/ci/update_pytorch_version.md
+    - CI: contributing/ci
     - Design Documents:
       - Plugins:
         - design/*plugin*.md
