@@ -369,8 +369,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
 
-        # the overhead of the aot schedule is not worth it for spec-decode
-        aot_schedule = self.aot_schedule and not fast_build
+        # Disable AOT schedule for spec-decode proposer (not worth the overhead)
+        # and for batch invariance (schedule varies with max_seqlen_q/k).
+        aot_schedule = (
+            self.aot_schedule and not fast_build and not envs.VLLM_BATCH_INVARIANT
+        )
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
