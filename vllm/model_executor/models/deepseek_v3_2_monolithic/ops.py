@@ -609,6 +609,19 @@ def _fused_q_kernel(
     index_q_cos_sin_ptr,
     index_q_cos_sin_stride,
     INDEX_Q_HALF_ROT_DIM: tl.constexpr,
+    # Index Q Quantize
+    index_q_fp8_ptr,
+    index_q_fp8_eps,
+    FP8_MIN: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    INDEX_Q_HEAD_DIM: tl.constexpr,
+    # Index weights
+    index_weights_ptr,
+    index_weights_stride,
+    index_weights_softmax_scale,
+    index_weights_head_scale,
+    index_weights_out_ptr,
+    index_weights_out_stride,
 ):
     tok_idx = tl.program_id(1)
     pos = tl.load(pos_ptr + tok_idx)
@@ -658,6 +671,42 @@ def _fused_q_kernel(
             False,
         )
 
+        # Index Q Quantize
+        index_q_block = tl.arange(0, INDEX_Q_HEAD_DIM)
+        index_q = tl.load(
+            index_q_ptr
+            + tok_idx * index_q_stride0
+            + head_idx * index_q_stride1
+            + index_q_block
+        )
+        index_q = index_q.to(tl.float32)
+
+        index_q_abs_max = tl.maximum(tl.max(tl.abs(index_q)), index_q_fp8_eps)
+        s = index_q_abs_max * (1.0 / FP8_MAX)
+        index_q_scale = tl.exp2(tl.ceil(tl.log2(s)))
+
+        index_q_fp8 = tl.clamp(index_q / index_q_scale, FP8_MIN, FP8_MAX)
+        tl.store(
+            index_q_fp8_ptr
+            + tok_idx * index_q_stride0
+            + head_idx * index_q_stride1
+            + index_q_block,
+            index_q_fp8,
+        )
+
+        # Index weights update
+        index_weights = tl.load(
+            index_weights_ptr + tok_idx * index_weights_stride + head_idx
+        )
+        index_weights = index_weights.to(tl.float32)
+        index_weights *= index_q_scale
+        index_weights *= index_weights_softmax_scale
+        index_weights *= index_weights_head_scale
+        tl.store(
+            index_weights_out_ptr + tok_idx * index_weights_out_stride + head_idx,
+            index_weights,
+        )
+
 
 def fused_q(
     positions: torch.Tensor,
@@ -666,7 +715,13 @@ def fused_q(
     q_start_offset: int,
     index_q: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
-) -> None:
+    # Index Q Quantize
+    quant_eps: float,
+    # Index weights
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert positions.ndim == 1
     assert q.ndim == 3
     assert q_cos_sin_cache.ndim == 2
@@ -676,7 +731,12 @@ def fused_q(
     num_tokens = positions.shape[0]
     num_q_heads = q.shape[1]
     num_index_q_heads = index_q.shape[1]
+    index_q_head_dim = index_q.shape[2]
 
+    FP8_DTYPE = torch.float8_e4m3fn
+    FP8_FINFO = torch.finfo(FP8_DTYPE)
+    index_q_fp8 = torch.empty_like(index_q, dtype=FP8_DTYPE)
+    index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
     _fused_q_kernel[(2, num_tokens, num_index_q_heads)](
         positions,
         q,
@@ -694,4 +754,17 @@ def fused_q(
         index_q_cos_sin_cache,
         index_q_cos_sin_cache.stride(0),
         index_q_cos_sin_cache.shape[-1] // 2,
+        index_q_fp8,
+        quant_eps,
+        FP8_FINFO.min,
+        FP8_FINFO.max,
+        index_q_head_dim,
+        index_weights,
+        index_weights.stride(0),
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_weights_out,
+        index_weights_out.stride(0),
+        num_warps=1,  # TODO: Tune this
     )
+    return index_q_fp8, index_weights_out

@@ -11,9 +11,6 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 
 from .attention import MonolithicMLAAttention
 from .ops import (
@@ -186,7 +183,7 @@ class MonolithicDecoderLayer(nn.Module):
         index_q = index_q.view(-1, self.attn.index_n_heads, self.attn.index_head_dim)
 
         # Step 4. Q RoPE + Index Q RoPE + Quantize + Index weights
-        fused_q(
+        index_q_fp8, index_weights = fused_q(
             positions,
             # Q RoPE
             q,
@@ -195,29 +192,18 @@ class MonolithicDecoderLayer(nn.Module):
             # Index Q RoPE
             index_q,
             self.attn.indexer_rope_emb.cos_sin_cache,
+            # Index Q Quantize
+            1e-10,  # quant_eps
+            # Index weights
+            index_weights,
+            self.attn.indexer_softmax_scale,
+            self.attn.index_n_heads**-0.5,
         )
 
-        index_q_fp8, index_q_scale = per_token_group_quant_fp8(
-            index_q.view(-1, self.attn.index_head_dim),
-            self.attn.indexer_quant_block_size,
-            column_major_scales=False,
-            use_ue8m0=True,
-        )
-        index_q_fp8 = index_q_fp8.view(
-            -1, self.attn.index_n_heads, self.attn.index_head_dim
-        )
-        index_q_scale = index_q_scale.view(-1, self.attn.index_n_heads, 1)
-
-        index_weights = (
-            index_weights.unsqueeze(-1)
-            * index_q_scale
-            * self.attn.indexer_softmax_scale
-            * self.attn.index_n_heads**-0.5
-        ).squeeze(-1)
-
+        # Step 5. Sparse indexer.
         self.attn.indexer_op(hidden_states, index_q_fp8, index_k, index_weights)
 
-        # 4-7. KV cache update + W_UK_T absorption + sparse attn + W_UV
+        # Step 6. MLA attention.
         attn_out = self.attn.mla_attn(
             q,
             kv_c,
@@ -228,7 +214,7 @@ class MonolithicDecoderLayer(nn.Module):
             ),
         )
 
-        # 8. Output projection (TP all-reduce)
+        # Step 7. Output projection.
         hidden_states, _ = self.attn.o_proj(attn_out)
 
         # Post-attn norm + residual
