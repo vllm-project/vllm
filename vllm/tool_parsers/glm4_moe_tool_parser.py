@@ -22,7 +22,6 @@ from openai.types.responses import FunctionTool
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -35,6 +34,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -49,8 +49,8 @@ class Glm4MoeModelToolParser(ToolParser):
     rather than waiting for the complete </arg_value> tag.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         # Stateful streaming fields
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict[str, Any]] = []
@@ -123,7 +123,7 @@ class Glm4MoeModelToolParser(ToolParser):
     def _is_string_type(
         tool_name: str,
         arg_name: str,
-        tools: list[ChatCompletionToolsParam | FunctionTool] | None,
+        tools: list[Tool] | None,
     ) -> bool:
         if tools is None:
             return False
