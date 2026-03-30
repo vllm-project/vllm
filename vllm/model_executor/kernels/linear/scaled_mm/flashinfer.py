@@ -78,8 +78,6 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
-    IS_SUPPORTED: bool = is_flashinfer_fp8_blockscale_gemm_supported()
-
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
@@ -112,7 +110,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             )
 
         if not should_use_flashinfer_for_blockscale_fp8_gemm(
-            cls.IS_SUPPORTED,
+            is_flashinfer_fp8_blockscale_gemm_supported(),
             config.out_dtype,
             config.input_dtype,
             config.weight_quant_key.dtype,
@@ -130,7 +128,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not current_platform.is_cuda():
             return False, "only cuda devices are supported."
 
-        if not cls.IS_SUPPORTED:
+        if not is_flashinfer_fp8_blockscale_gemm_supported():
             return False, "FlashInfer block-scale FP8 GEMM is not available."
 
         return True, None
