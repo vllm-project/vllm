@@ -158,7 +158,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
             # TODO: Remove log counting in unit tests
             # once all matchers implement VllmFusionPatternMatcherPass
-            if match_name == "attn_quant_fusion_pass":
+            if match_name == "attn_quant_fusion":
                 actual_match = VllmPatternMatcherPass.match_table[match_name]
                 n_expected = tp_size * num_ranges_activated
                 assert actual_match == n_expected, (
