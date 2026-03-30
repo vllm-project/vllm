@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -43,6 +44,26 @@ logger = init_logger(__name__)
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
     extra_async_saves: dict[str, int] | None = None
+
+
+@dataclass
+class MultiKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+    metadata: tuple[KVConnectorWorkerMetadata | None, ...]
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
+        assert isinstance(other, MultiKVConnectorWorkerMetadata)
+
+        assert len(self.metadata) == len(other.metadata)
+        metadata_list = []
+        for metadata1, metadata2 in zip(self.metadata, other.metadata):
+            if metadata1 is None:
+                metadata_list.append(metadata2)
+            elif metadata2 is None:
+                metadata_list.append(metadata1)
+            else:
+                metadata_list.append(metadata1.aggregate(metadata2))
+
+        return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
 
 
 @dataclass
@@ -111,6 +132,21 @@ class MultiConnector(KVConnectorBase_V1):
       get_num_new_matched_tokens(), based on the order in the config.
     - Save to all connectors.
     """
+
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        MultiConnector requires PIECEWISE CUDA graph mode if any of its
+        child connectors require it.
+        """
+        connectors_config = extra_config.get("connectors", [])
+        for conn_config in connectors_config:
+            temp_ktc = KVTransferConfig(**conn_config)
+            connector_cls = KVConnectorFactory.get_connector_class(temp_ktc)
+            child_extra_config = conn_config.get("kv_connector_extra_config", {})
+            if connector_cls.requires_piecewise_for_cudagraph(child_extra_config):
+                return True
+        return False
 
     def __init__(
         self,
@@ -279,15 +315,28 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.set_host_xfer_buffer_ops(copy_operation)
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         """Handle preempted requests for all sub-connectors."""
-        for c in self._connectors:
-            c.handle_preemptions(preempted_req_ids)
+        assert isinstance(kv_connector_metadata, MultiKVConnectorMetadata)
+        for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
+            c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)
         # Currently no connectors return non-None
         return None
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        metadata_list: list[KVConnectorWorkerMetadata | None] | None = None
+        for i, c in enumerate(self._connectors):
+            kv_connector_worker_meta = c.build_connector_worker_meta()
+            if metadata_list is None and kv_connector_worker_meta is not None:
+                metadata_list = [None] * i
+            if metadata_list is not None:
+                metadata_list.append(kv_connector_worker_meta)
+        if metadata_list is None:
+            return None
+        return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
 
     # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events'
     # method for the MultiConnector. It should be able to get events from
@@ -346,8 +395,25 @@ class MultiConnector(KVConnectorBase_V1):
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        for c in self._connectors:
-            c.update_connector_output(connector_output)
+        multi_connector_worker_meta: MultiKVConnectorWorkerMetadata | None = None
+        if connector_output.kv_connector_worker_meta is not None:
+            assert isinstance(
+                connector_output.kv_connector_worker_meta,
+                MultiKVConnectorWorkerMetadata,
+            )
+            multi_connector_worker_meta = connector_output.kv_connector_worker_meta
+
+        try:
+            for i, c in enumerate(self._connectors):
+                if multi_connector_worker_meta is not None:
+                    # set the connector-specific worker metadata
+                    connector_output.kv_connector_worker_meta = (
+                        multi_connector_worker_meta.metadata[i]
+                    )
+                c.update_connector_output(connector_output)
+        finally:
+            # restore kv_connector_worker_meta
+            connector_output.kv_connector_worker_meta = multi_connector_worker_meta
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """

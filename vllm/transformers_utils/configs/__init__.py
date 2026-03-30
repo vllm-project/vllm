@@ -16,9 +16,11 @@ import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "AfmoeConfig": "vllm.transformers_utils.configs.afmoe",
+    "AXK1Config": "vllm.transformers_utils.configs.AXK1",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
     "ColModernVBertConfig": "vllm.transformers_utils.configs.colmodernvbert",
+    "ColPaliConfig": "vllm.transformers_utils.configs.colpali",
     "ColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "OpsColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "Qwen3VLNemotronEmbedConfig": "vllm.transformers_utils.configs.colqwen3",
@@ -31,6 +33,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLTextConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
+    "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
@@ -47,11 +50,11 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiK25Config": "vllm.transformers_utils.configs.kimi_k25",
     "NemotronConfig": "vllm.transformers_utils.configs.nemotron",
     "NemotronHConfig": "vllm.transformers_utils.configs.nemotron_h",
-    "Olmo3Config": "vllm.transformers_utils.configs.olmo3",
+    "OlmoHybridConfig": "vllm.transformers_utils.configs.olmo_hybrid",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
     "RadioConfig": "vllm.transformers_utils.configs.radio",
-    "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators.base",
+    "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators",
     "UltravoxConfig": "vllm.transformers_utils.configs.ultravox",
     "Step3VLConfig": "vllm.transformers_utils.configs.step3_vl",
     "Step3VisionEncoderConfig": "vllm.transformers_utils.configs.step3_vl",
@@ -70,9 +73,11 @@ _CLASS_TO_MODULE: dict[str, str] = {
 
 __all__ = [
     "AfmoeConfig",
+    "AXK1Config",
     "BagelConfig",
     "ChatGLMConfig",
     "ColModernVBertConfig",
+    "ColPaliConfig",
     "ColQwen3Config",
     "OpsColQwen3Config",
     "Qwen3VLNemotronEmbedConfig",
@@ -86,6 +91,7 @@ __all__ = [
     "HunYuanVLConfig",
     "HunYuanVLTextConfig",
     "HunYuanVLVisionConfig",
+    "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
     "JAISConfig",
@@ -99,7 +105,7 @@ __all__ = [
     "KimiK25Config",
     "NemotronConfig",
     "NemotronHConfig",
-    "Olmo3Config",
+    "OlmoHybridConfig",
     "OvisConfig",
     "PixelShuffleSiglip2VisionConfig",
     "RadioConfig",

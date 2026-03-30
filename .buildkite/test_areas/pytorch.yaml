@@ -17,6 +17,16 @@ steps:
   # (using -0 for proper path handling)
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
+- label: PyTorch Compilation Unit Tests (H100)
+  timeout_in_minutes: 30
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+    - vllm/
+    - tests/compile/h100/
+  commands:
+  - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+
 - label: PyTorch Compilation Passes Unit Tests
   timeout_in_minutes: 20
   source_file_dependencies:
@@ -35,7 +45,7 @@ steps:
   # as it is a heavy test that is covered in other steps.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\;"
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph
   timeout_in_minutes: 30

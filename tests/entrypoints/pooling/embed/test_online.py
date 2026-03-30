@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import json
 
 import numpy as np
 import openai
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import requests
@@ -288,7 +288,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         assert "error" in response.object
         assert (
             "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please, select a smaller truncation size." in response.message
+            "Please request a smaller truncation size." in response.message
         )
 
 
@@ -683,13 +683,13 @@ async def test_params_not_supported(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_normalize(server: RemoteOpenAIServer, model_name: str):
-    async def get_outputs(normalize):
+async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
+    async def get_outputs(use_activation):
         request_args = {
             "model": MODEL_NAME,
             "input": input_text,
             "encoding_format": "float",
-            "normalize": normalize,
+            "use_activation": use_activation,
         }
 
         response = requests.post(server.url_for("v1/embeddings"), json=request_args)
@@ -697,9 +697,9 @@ async def test_normalize(server: RemoteOpenAIServer, model_name: str):
 
         return torch.tensor([x["embedding"] for x in outputs["data"]])
 
-    default = await get_outputs(normalize=None)
-    w_normal = await get_outputs(normalize=True)
-    wo_normal = await get_outputs(normalize=False)
+    default = await get_outputs(use_activation=None)
+    w_normal = await get_outputs(use_activation=True)
+    wo_normal = await get_outputs(use_activation=False)
 
     assert torch.allclose(default, w_normal, atol=1e-2), "Default should use normal."
     assert not torch.allclose(w_normal, wo_normal, atol=1e-2), (

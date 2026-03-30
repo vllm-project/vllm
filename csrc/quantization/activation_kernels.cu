@@ -189,10 +189,7 @@ __device__ __forceinline__ void cp_async_wait<0>() {
 }
 
 __device__ __forceinline__ float clip(float v, float mmin, float mmax) {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   return fminf(mmax, fmaxf(v, mmin));
-#else
-#endif
 }
 
 __device__ __forceinline__ __nv_bfloat16 clip(__nv_bfloat16 v,
@@ -542,7 +539,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       if (!lane_id) {
         // Store scales.
         if constexpr (std::is_same<scale_t, uint8_t>::value) {
-          // Packed UE8MO format. Remove Mantissa.
+          // Packed UE8M0 format. Remove Mantissa.
           *y_s_ptr = reinterpret_cast<int16_t&>(y_s) >> 7;
 
           bool const jump_pack = (current_group_id + 1) % 4 == 0;

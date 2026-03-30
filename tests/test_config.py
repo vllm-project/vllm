@@ -853,7 +853,7 @@ def test_vllm_config_defaults_are_none():
 
 
 @pytest.mark.parametrize(
-    ("model_id", "compiliation_config", "optimization_level"),
+    ("model_id", "compilation_config", "optimization_level"),
     [
         (
             None,
@@ -895,7 +895,7 @@ def test_vllm_config_defaults_are_none():
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
-def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
+def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
 
     model_config = None
@@ -903,12 +903,12 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
             model_config=model_config,
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     else:
         vllm_config = VllmConfig(
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     # Use the global optimization level defaults
@@ -926,12 +926,17 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
     # Verify other compilation_config defaults
     compilation_config_dict = default_config["compilation_config"]
     for k, v in compilation_config_dict.items():
-        if k != "pass_config":
-            actual = getattr(vllm_config.compilation_config, k)
-            expected = v(vllm_config) if callable(v) else v
-            assert actual == expected, (
-                f"compilation_config.{k}: expected {expected}, got {actual}"
-            )
+        if k == "pass_config":
+            continue
+        actual = getattr(vllm_config.compilation_config, k)
+        expected = v(vllm_config) if callable(v) else v
+        # On platforms without static graph support, __post_init__ forces
+        # cudagraph_mode to NONE; expect that instead of the level default.
+        if k == "cudagraph_mode" and not current_platform.support_static_graph_mode():
+            expected = CUDAGraphMode.NONE
+        assert actual == expected, (
+            f"compilation_config.{k}: expected {expected}, got {actual}"
+        )
 
 
 def test_vllm_config_callable_defaults():
@@ -969,6 +974,10 @@ def test_vllm_config_callable_defaults():
     assert enable_if_sequential(config_quantized) is True
 
 
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Explicit overrides may be force-overwritten without static graph support.",
+)
 def test_vllm_config_explicit_overrides():
     """Test that explicit property overrides work correctly with callable defaults.
 
@@ -1120,6 +1129,28 @@ def test_needs_dp_coordination(
     vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
 
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
+
+
+def test_renderer_num_workers_with_mm_cache():
+    """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
+    since neither cache type is thread-safe."""
+    mm_model = "Qwen/Qwen2-VL-2B-Instruct"
+
+    # Should raise: multi-worker + cache enabled (default cache_gb=4)
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=4)
+
+    # Should raise: multi-worker + explicit cache size
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=2, mm_processor_cache_gb=1.0)
+
+    # Should pass: multi-worker + cache disabled
+    config = ModelConfig(mm_model, renderer_num_workers=4, mm_processor_cache_gb=0)
+    assert config.renderer_num_workers == 4
+
+    # Should pass: single worker + cache enabled (default)
+    config = ModelConfig(mm_model, renderer_num_workers=1)
+    assert config.renderer_num_workers == 1
 
 
 def test_eagle_draft_model_config():

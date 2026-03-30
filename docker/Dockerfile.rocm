@@ -29,8 +29,11 @@ RUN if [ "$USE_SCCACHE" != "1" ]; then \
         rm -f "$(which sccache)" || true; \
     fi
 
-# Install UV
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
+# Install UV — download first, then run, so a curl failure is not masked by the pipe
+RUN curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh \
+    && env UV_INSTALL_DIR="/usr/local/bin" sh /tmp/uv-install.sh \
+    && rm -f /tmp/uv-install.sh \
+    && uv --version
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -184,6 +187,34 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
         --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
 
+# DeepEP build stage
+FROM base AS build_deep
+ARG ROCSHMEM_BRANCH="ba0bf0f3"
+ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
+ARG DEEPEP_BRANCH="e84464ec"
+ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
+ARG DEEPEP_NIC="cx7"
+ENV ROCSHMEM_DIR=/opt/rocshmem
+
+RUN git clone ${ROCSHMEM_REPO} \
+ && cd rocm-systems \
+ && git checkout ${ROCSHMEM_BRANCH} \
+ && mkdir -p projects/rocshmem/build \
+ && cd projects/rocshmem/build \
+ && cmake .. \
+    -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
+    -DROCM_PATH=/opt/rocm \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    -DUSE_EXTERNAL_MPI=OFF \
+ && make -j \
+ && make install
+
+# Build DeepEP wheel.
+# DeepEP looks for rocshmem at ROCSHMEM_DIR.
+RUN git clone ${DEEPEP_REPO} \
+ && cd DeepEP \
+ && git checkout ${DEEPEP_BRANCH} \
+ && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
@@ -301,9 +332,27 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
+# Verify that PyTorch is the ROCm build, not CUDA
+RUN python3 -c "import torch; assert torch.version.hip is not None, \
+    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
+    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
+
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     uv pip install --system /rixl_install/*.whl
+
+# Install DeepEP wheel
+RUN --mount=type=bind,from=build_deep,src=/app/deep_install,target=/deep_install \
+    uv pip install --system /deep_install/*.whl
+COPY --from=build_deep /opt/rocshmem /opt/rocshmem
+
+# RIXL/MoRIIO runtime dependencies (RDMA userspace libraries)
+RUN apt-get update -q -y && apt-get install -q -y \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /vllm-workspace
 ARG COMMON_WORKDIR
@@ -330,10 +379,18 @@ RUN bash /tmp/install_torchcodec.sh \
 # Copy in the v1 package (for python-only install test group)
 COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
+# Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel
+# See: https://github.com/pytorch/pytorch/issues/169857
+ENV MIOPEN_DEBUG_CONV_DIRECT=0
+ENV MIOPEN_DEBUG_CONV_GEMM=0
+
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src && mv vllm src/vllm
+
+# This is a workaround to ensure pytest exits with the correct status code in CI tests.
+RUN echo "import os\n\ndef pytest_sessionfinish(session, exitstatus):\n    os._exit(int(exitstatus))" > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image
