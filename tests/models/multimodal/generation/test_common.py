@@ -363,6 +363,23 @@ VLM_TEST_SETTINGS = {
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
         image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
+    "deepseek_ocr_v2": VLMTestInfo(
+        models=["deepseek-ai/DeepSeek-OCR-2"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>\nWhat's the content in the center of the image?",
+                "cherry_blossom": "<image>\nDescribe this image briefly.",
+            }
+        ),
+        patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
+        hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
+        stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
+        image_size_factors=[(1.0,), (0.25, 0.5, 1.0)],
+    ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
         test_type=VLMTestType.IMAGE,

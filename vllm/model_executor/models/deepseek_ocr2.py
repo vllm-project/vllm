@@ -327,7 +327,12 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         if pixel_values is None or torch.sum(pixel_values).item() == 0:
             return None
 
-        base_size = self.vision_config.image_size
+        # Use actual tensor spatial dims instead of config values for
+        # robustness across model variants (matching deepseek_ocr v1).
+        base_size = pixel_values.shape[-1]
+        image_size = (
+            images_crop.shape[-1] if images_crop is not None else base_size
+        )
         return DeepseekOCRImagePixelInputs(
             type="pixel_values",
             data=pixel_values,
@@ -335,6 +340,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
             images_spatial_crop=images_spatial_crop,
             resolve_bindings={
                 "base_size": base_size,
+                "image_size": image_size,
             },
         )
 
