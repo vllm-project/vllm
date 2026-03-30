@@ -11,7 +11,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    SupportsHMA,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -41,7 +44,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 
-class OffloadingConnector(KVConnectorBase_V1):
+class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
@@ -138,6 +141,16 @@ class OffloadingConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+
+        # TODO: Fix the arg type
+        return self.connector_scheduler.request_finished(request, block_ids)  # type: ignore[arg-type]
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
