@@ -25,7 +25,7 @@ from .rms_quant_fusion import QUANT_OPS
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
-FP4_DTYPE = torch.uint8
+
 
 ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
 RESHAPE_OP = torch.ops.aten.reshape.default
@@ -195,7 +195,7 @@ class AttnNvfp4QuantPattern(
         ) -> tuple[torch.Tensor, torch.Tensor]:
             output_attn = torch.empty(
                 [q.shape[0], self._num_heads, self._head_size // 2],
-                dtype=FP4_DTYPE,
+                dtype=self._dtype,
                 device=q.device,
             )
             output_scale_view = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
@@ -224,7 +224,9 @@ class AttnNvfp4QuantPattern(
             self.empty_bf16(5, num_heads, head_size),  # k
             self.empty_bf16(5, num_heads, head_size),  # v
             self.empty_bf16(5, num_heads, head_size),  # output_attn
-            self.empty(5, num_heads * head_size // 2, dtype=FP4_DTYPE),  # output_quant
+            self.empty(
+                5, num_heads * head_size // 2, dtype=self._dtype
+            ),  # output_quant
             self.empty_i32(
                 128, round_up(num_heads * head_size // 16, 4)
             ),  # output_scale
