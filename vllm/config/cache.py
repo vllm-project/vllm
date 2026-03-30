@@ -153,10 +153,11 @@ class CacheConfig:
     KV offloading is only activated when kv_offloading_size is set."""
 
     kv_offloading_disk_path: str | None = None
-    """Path to a directory (ideally on NVMe) for disk-backed KV cache
-    offloading. When set, CPU offload tensors are mmap-backed by files
-    in this directory, allowing the OS to transparently page cold blocks
-    to disk. This effectively gives a GPU -> CPU RAM -> Disk tiered cache.
+    """Path to a directory (ideally on NVMe) for tiered KV cache
+    offloading (GPU -> CPU pinned RAM -> NVMe disk). When set, blocks
+    stored to CPU are also written to disk in the background
+    (write-through). Disk-cached blocks survive CPU eviction and can
+    be promoted back to CPU on cache hit.
     Only used with the 'native' offloading backend."""
 
     def compute_hash(self) -> str:
