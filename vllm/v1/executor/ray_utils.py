@@ -339,6 +339,26 @@ def get_bundles_sorted_by_node(
     sorted driver-first.
 
     This utility has to be invoked from the driver node.
+
+    Example: 3-node cluster, driver on node-A, PG bundles spread
+    across nodes:
+
+      Input: [
+          (0, node-C),
+          (1, node-A),
+          (2, node-B),
+          (3, node-C),
+          (4, node-A),
+          (5, node-B),
+      ]
+      Output: [
+          (1, node-A),
+          (4, node-A),
+          (2, node-B),
+          (5, node-B),
+          (0, node-C),
+          (3, node-C),
+      ]
     """
     pg_data = placement_group_table(placement_group)
     bundle_to_node = pg_data["bundles_to_node_id"]
@@ -356,10 +376,10 @@ def get_bundles_sorted_by_node(
     bundle_specs = placement_group.bundle_specs
     assert bundle_specs is not None
     bundle_to_node_id: list[tuple[int, str, str]] = []
-    for i, bundle in enumerate(bundle_specs):
+    for bundle_idx, bundle in enumerate(bundle_specs):
         if bundle.get(ray_device_key):
-            node_id = bundle_to_node.get(i)
-            bundle_to_node_id.append((i, node_id, node_id_to_ip[node_id]))
+            node_id = bundle_to_node.get(bundle_idx)
+            bundle_to_node_id.append((bundle_idx, node_id, node_id_to_ip[node_id]))
 
     driver_node = ray.get_runtime_context().get_node_id()
 

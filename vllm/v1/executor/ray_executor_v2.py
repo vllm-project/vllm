@@ -67,6 +67,10 @@ class RayWorkerHandle:
     run_ref: ObjectRef = None
     """run() ObjectRef used as a sentinel for health monitoring"""
 
+    def run(self):
+        """Start the worker's busy loop"""
+        self.run_ref = self.actor.run.remote()
+
 
 class RayWorkerProc(WorkerProc):
     """Worker process that runs inside a Ray actor.
@@ -104,8 +108,7 @@ class RayWorkerProc(WorkerProc):
         device_key = current_platform.ray_device_key
         if not device_key:
             raise RuntimeError(
-                "current platform %s does not support ray.",
-                current_platform.device_name,
+                f"current platform {current_platform.device_name} does not support ray."
             )
         gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
         return node_id, [int(x) for x in gpu_ids]
@@ -165,6 +168,9 @@ class RayWorkerProc(WorkerProc):
             self.worker_response_mq.wait_until_ready()
 
             self.worker_busy_loop()
+        except Exception as e:
+            logger.exception("RayWorkerProc failed: %s", e)
+            raise
         finally:
             self.shutdown()
 
@@ -180,7 +186,7 @@ class RayExecutorV2(MultiprocExecutor):
     supports_pp: bool = True
 
     def __init__(self, vllm_config: VllmConfig):
-        super(MultiprocExecutor, self).__init__(vllm_config)
+        super().__init__(vllm_config)
 
     def _build_runtime_env(self) -> dict:
         """Build a runtime_env dict for RayWorkerProc actors.
@@ -221,7 +227,7 @@ class RayExecutorV2(MultiprocExecutor):
 
         # Step 1: Initialize Ray cluster and retrieve placement group
         if ray is None:
-            raise ImportError("Ray is required for RayExecutorV2")
+            raise ImportError("Using Ray backend requires installation of ray.")
         initialize_ray_cluster(self.parallel_config, require_gpu_on_driver=False)
         placement_group = self.parallel_config.placement_group
 
@@ -281,7 +287,7 @@ class RayExecutorV2(MultiprocExecutor):
         instance_id = self.vllm_config.instance_id
 
         # Collect env vars to propagate from driver to workers (NCCL,
-        # HF, vLLM flags, etc.) — same mechanism as RayDistributedExecutor.
+        # HF, vLLM flags, etc.).
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=WORKER_SPECIFIC_ENV_VARS,
             additional_vars=set(current_platform.additional_env_vars),
@@ -369,8 +375,9 @@ class RayExecutorV2(MultiprocExecutor):
         ray.get(init_worker_refs)
 
         # Step 8: Collect response MQ handles
-        init_refs = [h.actor.wait_for_init.remote() for h in self.ray_worker_handles]
-        init_results = ray.get(init_refs)
+        init_results = ray.get(
+            [h.actor.wait_for_init.remote() for h in self.ray_worker_handles]
+        )
 
         self.response_mqs: list[MessageQueue] = []
         for i, result in enumerate(init_results):
@@ -383,7 +390,7 @@ class RayExecutorV2(MultiprocExecutor):
         # Step 9: Start run() before wait_until_ready() to avoid
         # deadlock — workers send subscriptions inside run().
         for handle in self.ray_worker_handles:
-            handle.run_ref = handle.actor.run.remote()
+            handle.run()
 
         # Step 10: wait_until_ready() barrier
         self.rpc_broadcast_mq.wait_until_ready()
@@ -419,6 +426,9 @@ class RayExecutorV2(MultiprocExecutor):
                 try:
                     done, _ = ray.wait(run_refs, num_returns=1, timeout=5.0)
                 except Exception:
+                    logger.exception(
+                        "RayWorkerMonitor: unexpected error, exiting monitor thread"
+                    )
                     return
                 if not done or _should_stop():
                     continue
@@ -474,6 +484,7 @@ class RayExecutorV2(MultiprocExecutor):
         for handle in getattr(self, "ray_worker_handles", []):
             try:
                 ray.kill(handle.actor)
+                logger.debug("Killed actor rank=%d", handle.rank)
             except Exception:
                 logger.exception("Failed to kill actor rank=%d", handle.rank)
 
