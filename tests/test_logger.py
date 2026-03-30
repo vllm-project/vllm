@@ -472,6 +472,7 @@ def test_request_logger_log_outputs_integration():
 
         assert "Received request %s" in input_call[0]
         assert input_call[1] == "test-integration"
+        assert "Test prompt" in input_call[4]
 
         assert "Generated response %s%s" in output_call[0]
         assert output_call[1] == "test-integration"

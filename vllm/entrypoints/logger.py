@@ -13,6 +13,12 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 
 logger = init_logger(__name__)
 
+# When `--max-log-len` is unset, INFO logs still include a bounded prompt preview
+# (full inputs remain at DEBUG). Avoids huge log lines and restores visibility
+# regression vs older releases (github.com/vllm-project/vllm/issues/38537).
+_DEFAULT_INFO_PROMPT_STR_LEN = 4096
+_DEFAULT_INFO_PROMPT_TOKEN_IDS = 512
+
 
 class RequestLogger:
     def __init__(self, *, max_log_len: int | None) -> None:
@@ -28,9 +34,38 @@ class RequestLogger:
             logger.info_once(
                 "`--enable-log-requests` is set but "
                 "the minimum log level is higher than DEBUG. "
-                "Only limited information will be logged to minimize overhead. "
-                "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
+                "Prompt text at INFO is truncated when long; "
+                "set `VLLM_LOGGING_LEVEL=DEBUG` for full details."
             )
+
+    def _prompt_summary_for_info(
+        self,
+        prompt: str | None,
+        prompt_token_ids: list[int] | None,
+        prompt_embeds: torch.Tensor | None,
+    ) -> str:
+        if not logger.isEnabledFor(logging.INFO):
+            return ""
+
+        max_chars = (
+            self.max_log_len
+            if self.max_log_len is not None
+            else _DEFAULT_INFO_PROMPT_STR_LEN
+        )
+        max_ids = (
+            self.max_log_len
+            if self.max_log_len is not None
+            else _DEFAULT_INFO_PROMPT_TOKEN_IDS
+        )
+        if prompt is not None:
+            preview = prompt[:max_chars]
+            return f", prompt: {preview!r}"
+        if prompt_token_ids is not None:
+            preview_ids = prompt_token_ids[:max_ids]
+            return f", prompt_token_ids: {preview_ids}"
+        if prompt_embeds is not None:
+            return f", prompt_embeds: shape={tuple(prompt_embeds.shape)}"
+        return ""
 
     def log_inputs(
         self,
@@ -60,11 +95,15 @@ class RequestLogger:
                 prompt_embeds.shape if prompt_embeds is not None else None,
             )
 
+        prompt_summary = self._prompt_summary_for_info(
+            prompt, prompt_token_ids, prompt_embeds
+        )
         logger.info(
-            "Received request %s: params: %s, lora_request: %s.",
+            "Received request %s: params: %s, lora_request: %s%s.",
             request_id,
             params,
             lora_request,
+            prompt_summary,
         )
 
     def log_outputs(
