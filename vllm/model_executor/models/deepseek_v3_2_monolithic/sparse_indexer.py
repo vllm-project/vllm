@@ -14,14 +14,10 @@ logger = init_logger(__name__)
 
 
 def sparse_attn_indexer(
-    hidden_states: torch.Tensor,
     k_cache_prefix: str,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
-    k: torch.Tensor,
     weights: torch.Tensor,
-    quant_block_size: int,
-    scale_fmt: str | None,
     topk_tokens: int,
     head_dim: int,
     max_model_len: int,
@@ -43,24 +39,9 @@ def sparse_attn_indexer(
 
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
-    slot_mapping = attn_metadata.slot_mapping
     has_decode = attn_metadata.num_decodes > 0
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
-
-    # During speculative decoding, k may be padded to the CUDA graph batch
-    # size while slot_mapping only covers actual tokens. Truncate k to avoid
-    # out-of-bounds reads in the kernel.
-    num_tokens = slot_mapping.shape[0]
-    k = k[:num_tokens]
-
-    ops.indexer_k_quant_and_cache(
-        k,
-        kv_cache,
-        slot_mapping,
-        quant_block_size,
-        scale_fmt,
-    )
 
     if has_prefill:
         prefill_metadata = attn_metadata.prefill

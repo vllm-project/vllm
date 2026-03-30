@@ -165,8 +165,22 @@ class MonolithicDecoderLayer(nn.Module):
         index_k, _ = self.attn.indexer_wk(hidden_states)
         index_weights, _ = self.attn.indexer_weights_proj(hidden_states)
 
-        # Step 2. Q RMS norm + KV RMS norm + KV RoPE + Index K layer norm + RoPE
+        # Step 2. Q RMS norm
+        #         + KV RMS norm + KV RoPE
+        #         + Index K layer norm + RoPE + FP8 quant + cache write
         #         + Init topk indices
+        #
+        # Fetch slot_mapping early so fused_norm_rope can write FP8 data
+        # directly into the indexer KV cache (saves a separate kernel).
+        from vllm.forward_context import get_forward_context
+
+        attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            idx_meta = attn_metadata[self.attn.indexer_k_cache.prefix]
+            slot_mapping = idx_meta.slot_mapping
+        else:
+            slot_mapping = None
+
         q_c, kv_c = fused_norm_rope(
             positions,
             # Q RMS norm
@@ -188,6 +202,11 @@ class MonolithicDecoderLayer(nn.Module):
             self.attn.indexer_rope_emb.cos_sin_cache,
             # Top k indices
             self.attn.topk_indices_buffer,
+            # Fused FP8 quant + cache write
+            slot_mapping=slot_mapping,
+            indexer_k_cache=self.attn.indexer_k_cache.kv_cache
+            if slot_mapping is not None
+            else None,
         )
 
         # Step 3. q_c -> q
@@ -208,8 +227,6 @@ class MonolithicDecoderLayer(nn.Module):
             # Index Q RoPE
             index_q,
             self.attn.indexer_rope_emb.cos_sin_cache,
-            # Index Q Quantize
-            1e-10,  # quant_eps
             # Index weights
             index_weights,
             self.attn.indexer_softmax_scale,
@@ -217,15 +234,13 @@ class MonolithicDecoderLayer(nn.Module):
         )
 
         # Step 5. Sparse indexer.
+        # The FP8 quant + cache write for index_k is already done in
+        # fused_norm_rope (step 2) when slot_mapping is available.
         sparse_attn_indexer(
-            hidden_states,
             self.attn.indexer_k_cache.prefix,
             self.attn.indexer_k_cache.kv_cache,
             index_q_fp8,
-            index_k,
             index_weights,
-            self.attn.indexer_quant_block_size,  # 128
-            "ue8m0",  # scale_fmt
             self.attn.topk_tokens,
             self.attn.index_head_dim,
             self.max_model_len,

@@ -392,6 +392,47 @@ def qk_rope(
 
 
 @triton.jit
+def _fp8_ue8m0_quantize(vals):
+    """Quantize float32 values to FP8 E4M3 with a ue8m0 (power-of-2) scale.
+
+    Returns (fp8_vals, scale) so the caller can store them or reuse the scale.
+    """
+    vals = vals.to(tl.float32)
+    amax = tl.max(tl.abs(vals))
+    scale = tl.div_rn(tl.maximum(amax, 1e-4), 448.0)
+    scale = tl.math.exp2(tl.math.ceil(tl.math.log2(scale)))
+    fp8_vals = tl.div_rn(vals, scale).to(tl.float8e4nv)
+    return fp8_vals, scale
+
+
+@triton.jit
+def _fp8_quant_and_cache_write(
+    vals,
+    mask,
+    slot_idx,
+    kv_cache_ptr,
+    kv_cache_scale_ptr,
+    cache_block_size,
+    cache_stride,
+    offsets,
+    HEAD_DIM: tl.constexpr,
+):
+    k_fp8, scale = _fp8_ue8m0_quantize(vals)
+
+    block_idx = slot_idx // cache_block_size
+    block_offset = slot_idx % cache_block_size
+    block_start = block_idx * cache_block_size * cache_stride
+
+    tl.store(
+        kv_cache_ptr + block_start + block_offset * HEAD_DIM + offsets,
+        k_fp8,
+        mask=mask,
+    )
+    scale_byte_off = block_start + cache_block_size * HEAD_DIM + block_offset * 4
+    tl.store(kv_cache_scale_ptr + scale_byte_off // 4, scale)
+
+
+@triton.jit
 def _fused_norm_rope_kernel(
     pos_ptr,
     # Q RMS norm
@@ -429,14 +470,43 @@ def _fused_norm_rope_kernel(
     index_k_rope_cos_sin_cache_ptr,
     index_k_rope_cos_sin_cache_stride,
     INDEX_K_HALF_ROT_DIM: tl.constexpr,
+    # Index K fp32 scratch buffer for layernorm → RoPE handoff
+    index_k_normed_ptr,
+    # Index K FP8 quant + cache write
+    slot_mapping_ptr,
+    kv_cache_ptr,
+    kv_cache_scale_ptr,
+    cache_block_size,
+    cache_stride,
     # Top k indices
     topk_indices_ptr,
     topk_indices_stride,
     TOPK: tl.constexpr,
     TOPK_BLOCK_SIZE: tl.constexpr,
 ):
+    pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
-    if tl.program_id(0) == 0:
+    if pid == 4:
+        # Fill top k indices buffer with -1
+        for i in range(0, TOPK, TOPK_BLOCK_SIZE):
+            offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
+            mask = offset < TOPK
+            tl.store(
+                topk_indices_ptr + tok_idx * topk_indices_stride + offset,
+                -1,
+                mask=mask,
+            )
+        return
+
+    if slot_mapping_ptr is None:
+        # Memory profiling run.
+        return
+    slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+    if slot_idx < 0:
+        # Padding
+        return
+
+    if pid == 1:
         # Q RMS norm
         q_block = tl.arange(0, Q_BLOCK_SIZE)
         q_mask = q_block < Q_DIM
@@ -444,16 +514,14 @@ def _fused_norm_rope_kernel(
         q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
         q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
         tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
-        return
-    elif tl.program_id(0) == 1:
+    elif pid == 3:
         # KV RMS Norm
         kv_block = tl.arange(0, KV_DIM)
         kv_c = tl.load(kv_ptr + tok_idx * kv_stride + kv_block)
         kv_c_rms_w = tl.load(kv_rms_norm_w_ptr + kv_block)
         kv_c = _rms_norm(kv_c, kv_c_rms_w, kv_rms_eps, KV_DIM)
         tl.store(kv_c_out_ptr + tok_idx * kv_c_out_stride + kv_block, kv_c)
-        return
-    elif tl.program_id(0) == 2:
+    elif pid == 2:
         # KV RoPE
         pos = tl.load(pos_ptr + tok_idx)
         cos, sin = _cos_sin_cache_kernel(
@@ -472,13 +540,13 @@ def _fused_norm_rope_kernel(
             0,
             True,
         )
-        return
-    elif tl.program_id(0) == 3:
-        # Index K layer norm + RoPE
+    elif pid == 0:
+        # Fused: Index K LayerNorm + RoPE + FP8 quant + cache write.
+        # Eliminates the separate indexer_k_quant_and_cache kernel launch.
+
+        # 1. LayerNorm → fp32 temp buffer
         index_k_block = tl.arange(0, INDEX_K_BLOCK_SIZE)
         index_k_mask = index_k_block < INDEX_K_DIM
-
-        # Layer Norm
         index_k = tl.load(
             index_k_ptr + tok_idx * index_k_stride + index_k_block,
             mask=index_k_mask,
@@ -488,7 +556,7 @@ def _fused_norm_rope_kernel(
         index_k_b = tl.load(
             index_k_layer_norm_bias_ptr + index_k_block, mask=index_k_mask
         )
-        index_k = _layer_norm(
+        normed = _layer_norm(
             index_k,
             index_k_w,
             index_k_b,
@@ -496,44 +564,59 @@ def _fused_norm_rope_kernel(
             index_k_mask,
             INDEX_K_DIM,
         )
+        # Write to a fp32 scratch buffer so RoPE can read the two
+        # halves without Triton pointer-aliasing issues.
+        scratch = index_k_normed_ptr + tok_idx * INDEX_K_DIM
+        tl.store(scratch + index_k_block, normed, mask=index_k_mask)
 
-        # Save to the original buffer
-        tl.store(
-            index_k_ptr + tok_idx * index_k_stride + index_k_block,
-            index_k,
-            mask=index_k_mask,
-        )
-
-        # RoPE
+        # 2. RoPE (neox / non-interleaved) on the full vector.
         pos = tl.load(pos_ptr + tok_idx)
-        cos, sin = _cos_sin_cache_kernel(
-            index_k_rope_cos_sin_cache_ptr,
-            index_k_rope_cos_sin_cache_stride,
-            pos,
-            INDEX_K_HALF_ROT_DIM,
+        cos_full = tl.load(
+            index_k_rope_cos_sin_cache_ptr
+            + pos * index_k_rope_cos_sin_cache_stride
+            + index_k_block % INDEX_K_HALF_ROT_DIM,
+            mask=index_k_block < 2 * INDEX_K_HALF_ROT_DIM,
+            other=1.0,
+        ).to(tl.float32)
+        sin_full = tl.load(
+            index_k_rope_cos_sin_cache_ptr
+            + pos * index_k_rope_cos_sin_cache_stride
+            + INDEX_K_HALF_ROT_DIM
+            + index_k_block % INDEX_K_HALF_ROT_DIM,
+            mask=index_k_block < 2 * INDEX_K_HALF_ROT_DIM,
+            other=0.0,
+        ).to(tl.float32)
+        # XOR with HALF swaps the first/second half of the rotation
+        # region to get each element's partner.
+        partner_offs = tl.where(
+            index_k_block < 2 * INDEX_K_HALF_ROT_DIM,
+            index_k_block ^ INDEX_K_HALF_ROT_DIM,
+            index_k_block,
         )
-        _rope_kernel(
-            index_k_ptr + tok_idx * index_k_stride,
-            0,
-            cos,
-            sin,
-            1,
-            INDEX_K_HALF_ROT_DIM,
-            0,
-            False,
+        full = tl.load(scratch + index_k_block, mask=index_k_mask)
+        # Atomic read for the partner: tl.atomic_add(ptr, 0) returns the
+        # current value with guaranteed store visibility, avoiding the
+        # Triton compiler's aliasing issue with different offset expressions.
+        zeros = tl.zeros([INDEX_K_BLOCK_SIZE], dtype=tl.float32)
+        partner = tl.atomic_add(scratch + partner_offs, zeros, mask=index_k_mask)
+        sign = tl.where(index_k_block < INDEX_K_HALF_ROT_DIM, -1.0, 1.0)
+        roped = full * cos_full + sign * partner * sin_full
+        result = tl.where(index_k_block < 2 * INDEX_K_HALF_ROT_DIM, roped, full)
+
+        # 3. FP8 quantize + cache write from registers.
+        #    No need to write back to index_k_ptr — the only consumer
+        #    (sparse_attn_indexer) reads from the cache, not index_k.
+        _fp8_quant_and_cache_write(
+            result,
+            index_k_mask,
+            slot_idx,
+            kv_cache_ptr,
+            kv_cache_scale_ptr,
+            cache_block_size,
+            cache_stride,
+            index_k_block,
+            INDEX_K_DIM,
         )
-        return
-    elif tl.program_id(0) == 4:
-        # Fill top k indices buffer with -1
-        for i in range(0, TOPK, TOPK_BLOCK_SIZE):
-            offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
-            mask = offset < TOPK
-            tl.store(
-                topk_indices_ptr + tok_idx * topk_indices_stride + offset,
-                -1,
-                mask=mask,
-            )
-        return
 
 
 def fused_norm_rope(
@@ -552,6 +635,9 @@ def fused_norm_rope(
     index_k_layer_norm_eps: float,
     index_k_rope_cos_sin_cache: torch.Tensor,
     topk_indices_buffer: torch.Tensor,
+    # Cache params for fused index-k FP8 quant + write
+    slot_mapping: torch.Tensor | None = None,
+    indexer_k_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -565,6 +651,33 @@ def fused_norm_rope(
     kv_dim = kv_c.shape[-1]
     index_k_dim = index_k.shape[-1]
     topk = topk_indices_buffer.shape[-1]
+
+    # When indexer_k_cache is provided, program 0 writes FP8 data + scale
+    # directly into the cache, eliminating a separate
+    # indexer_k_quant_and_cache call.
+    if indexer_k_cache is not None:
+        assert slot_mapping is not None
+        cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
+        cache_block_size = indexer_k_cache.shape[1]
+        cache_stride = indexer_k_cache.shape[2]
+        # Ensure the pointer is fp8-typed so tl.store accepts fp8 values.
+        if indexer_k_cache.dtype == torch.uint8:
+            indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
+    else:
+        # Dummy values — program 0 will still do LayerNorm + RoPE but
+        # skip the FP8 cache write (slot_idx will be < 0 for all tokens).
+        cache_scale_view = torch.empty(0, dtype=torch.float32, device=positions.device)
+        indexer_k_cache = torch.empty(
+            0, dtype=torch.float8_e4m3fn, device=positions.device
+        )
+        slot_mapping = torch.full(
+            (num_tokens,), -1, dtype=torch.int64, device=positions.device
+        )
+        cache_block_size = 1
+        cache_stride = 1
+
+    # fp32 scratch buffer for layernorm output → RoPE handoff.
+    index_k_normed = torch.empty_like(index_k, dtype=torch.float32)
 
     q_c_out = torch.empty_like(q_c)
     kv_c_out = torch.empty_like(kv_c)
@@ -593,7 +706,7 @@ def fused_norm_rope(
         k_rope_cos_sin_cache,
         k_rope_cos_sin_cache.stride(0),
         k_rope_cos_sin_cache.shape[-1] // 2,
-        # Index K layer norm + RoPE
+        # Index K layer norm + RoPE + FP8 quant
         index_k,
         index_k.stride(0),
         index_k_layer_norm_w,
@@ -604,6 +717,13 @@ def fused_norm_rope(
         index_k_rope_cos_sin_cache,
         index_k_rope_cos_sin_cache.stride(0),
         index_k_rope_cos_sin_cache.shape[-1] // 2,
+        index_k_normed,
+        # FP8 cache write
+        slot_mapping,
+        indexer_k_cache,
+        cache_scale_view,
+        cache_block_size,
+        cache_stride,
         # Top k indices buffer
         topk_indices_buffer,
         topk_indices_buffer.stride(0),
@@ -635,9 +755,6 @@ def _fused_q_kernel(
     INDEX_Q_HALF_ROT_DIM: tl.constexpr,
     # Index Q Quantize
     index_q_fp8_ptr,
-    index_q_fp8_eps,
-    FP8_MIN: tl.constexpr,
-    FP8_MAX: tl.constexpr,
     INDEX_Q_HEAD_DIM: tl.constexpr,
     # Index weights
     index_weights_ptr,
@@ -705,13 +822,8 @@ def _fused_q_kernel(
             + head_idx * index_q_stride1
             + index_q_block
         )
-        index_q = index_q.to(tl.float32)
 
-        index_q_abs_max = tl.maximum(tl.max(tl.abs(index_q)), index_q_fp8_eps)
-        s = index_q_abs_max * (1.0 / FP8_MAX)
-        index_q_scale = tl.exp2(tl.ceil(tl.log2(s)))
-
-        index_q_fp8 = tl.clamp(index_q / index_q_scale, FP8_MIN, FP8_MAX)
+        index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(index_q)
         tl.store(
             index_q_fp8_ptr
             + tok_idx * index_q_stride0
@@ -741,8 +853,6 @@ def fused_q(
     q_start_offset: int,
     index_q: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
-    # Index Q Quantize
-    quant_eps: float,
     # Index weights
     index_weights: torch.Tensor,
     index_weights_softmax_scale: float,
@@ -759,9 +869,7 @@ def fused_q(
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
 
-    FP8_DTYPE = torch.float8_e4m3fn
-    FP8_FINFO = torch.finfo(FP8_DTYPE)
-    index_q_fp8 = torch.empty_like(index_q, dtype=FP8_DTYPE)
+    index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
     _fused_q_kernel[(2, num_tokens, num_index_q_heads)](
         positions,
@@ -781,9 +889,6 @@ def fused_q(
         index_q_cos_sin_cache.stride(0),
         index_q_cos_sin_cache.shape[-1] // 2,
         index_q_fp8,
-        quant_eps,
-        FP8_FINFO.min,
-        FP8_FINFO.max,
         index_q_head_dim,
         index_weights,
         index_weights.stride(0),
