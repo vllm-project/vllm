@@ -242,7 +242,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
         num_tokens = x.size(0) if x.ndim == 2 else x.size(1)
         output_size = sum(self.output_slices)
-        lora_output = torch.empty(
+        # Must be zeros, not empty: _lora_expand_kernel exits early (without
+        # writing) when lora_id == -1 (no active LoRA). If uninitialized,
+        # output.add_(lora_result) below would corrupt the base output.
+        lora_output = torch.zeros(
             (num_tokens, output_size),
             device=self.device,
             dtype=x.dtype,

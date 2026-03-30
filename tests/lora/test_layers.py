@@ -517,8 +517,10 @@ def test_linear_replicated(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-    def create_random_linear_replicated_layer():
-        linear = ReplicatedLinear(4096, 4096, bias=False, params_dtype=torch.float16)
+    def create_random_linear_replicated_layer(idx: int = 0):
+        linear = ReplicatedLinear(
+            4096, 4096, bias=False, params_dtype=torch.float16, prefix=f"layer_{idx}"
+        )
         linear.weight.data = torch.rand_like(linear.weight.data)
         lora_linear = ReplicatedLinearWithLoRA(linear)
 
@@ -535,7 +537,7 @@ def test_linear_replicated(
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, lora_linear = create_random_linear_replicated_layer()
+        linear, lora_linear = create_random_linear_replicated_layer(i)
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
@@ -625,10 +627,14 @@ def test_linear_parallel(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-    def create_random_linear_parallel_layer():
+    def create_random_linear_parallel_layer(idx: int = 0):
         if orientation == "row":
             linear = RowParallelLinear(
-                4096, 4096, bias=False, params_dtype=torch.float16
+                4096,
+                4096,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -638,7 +644,11 @@ def test_linear_parallel(
             )
         else:
             linear = ColumnParallelLinear(
-                4096, 4096, bias=False, params_dtype=torch.float16
+                4096,
+                4096,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -660,7 +670,7 @@ def test_linear_parallel(
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, lora_linear = create_random_linear_parallel_layer()
+        linear, lora_linear = create_random_linear_parallel_layer(i)
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
@@ -750,10 +760,14 @@ def test_column_parallel_packed(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-    def create_column_parallel_packed_layer():
+    def create_column_parallel_packed_layer(idx: int = 0):
         if repeats == 2:
             linear = MergedColumnParallelLinear(
-                4096, [4096] * repeats, bias=False, params_dtype=torch.float16
+                4096,
+                [4096] * repeats,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -763,7 +777,12 @@ def test_column_parallel_packed(
             )
         elif repeats == 3:
             linear = QKVParallelLinear(
-                4096, 64, 32, bias=False, params_dtype=torch.float16
+                4096,
+                64,
+                32,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -773,7 +792,12 @@ def test_column_parallel_packed(
             )
         else:
             linear = QKVParallelLinear(
-                4096, 64, 32, bias=False, params_dtype=torch.float16
+                4096,
+                64,
+                32,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -806,7 +830,7 @@ def test_column_parallel_packed(
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
 
-        linear, lora_linear = create_column_parallel_packed_layer()
+        linear, lora_linear = create_column_parallel_packed_layer(i)
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, sublora_dict = populate_loras(
@@ -898,10 +922,14 @@ def test_merged_column_parallel_variable_slice(
     output_sizes = [1024 + i * 256 for i in range(num_slices)]
     total_output = sum(output_sizes)
 
-    def create_layer():
+    def create_layer(idx: int = 0):
         # Create linear layer
         linear = MergedColumnParallelLinear(
-            4096, output_sizes, bias=False, params_dtype=torch.float16
+            4096,
+            output_sizes,
+            bias=False,
+            params_dtype=torch.float16,
+            prefix=f"layer_{idx}",
         )
         linear.weight.data = torch.rand_like(linear.weight.data)
 
@@ -913,7 +941,7 @@ def test_merged_column_parallel_variable_slice(
     for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, lora_linear = create_layer()
+        linear, lora_linear = create_layer(i)
         lora_linear.set_mapping(punica_wrapper)
 
         # Populate LoRA weights
