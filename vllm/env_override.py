@@ -490,3 +490,52 @@ if is_torch_equal("2.9.0"):
 
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
     GraphLowering._update_scheduler = _update_scheduler_patched
+
+# ===================================================
+# torch 2.10 FxGraphCachePickler.dumps ValueError fix
+# ===================================================
+# PyTorch 2.10's FxGraphCachePickler.dumps() doesn't catch ValueError,
+# causing torch.compile cache failures when tensors with non-standard
+# layouts (e.g. blocked-layout prepacked weights) are serialized.
+# PyTorch mainline fixed this in pytorch/pytorch#176557 (merged 2026-03-04).
+# This is a thin backport for 2.10 users; remove once 2.10 is dropped.
+
+
+def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
+    """Wrap pickler_cls.dumps to convert ValueError into bypass_cls.
+
+    Idempotent: sets `_vllm_fxgraph_dumps_patched` on the class after the
+    first apply to prevent re-application. The wrapper function is also
+    marked with `_vllm_patched` as an additional safeguard.
+    """
+    if getattr(pickler_cls, "_vllm_fxgraph_dumps_patched", False):
+        return
+
+    original_dumps = pickler_cls.dumps
+    if hasattr(original_dumps, "_vllm_patched"):
+        return
+
+    def patched_dumps(self, obj):
+        try:
+            return original_dumps(self, obj)
+        except ValueError as e:
+            raise bypass_cls("Failed to pickle cache key") from e
+
+    patched_dumps._vllm_patched = True  # type: ignore[attr-defined]
+    pickler_cls.dumps = patched_dumps
+    pickler_cls._vllm_fxgraph_dumps_patched = True  # type: ignore[attr-defined]
+
+
+def _patch_fxgraphcache_pickle_if_needed():
+    """Apply FxGraphCachePickler.dumps ValueError backport when on torch 2.10.x."""
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
+        return
+
+    from torch._inductor.codecache import BypassFxGraphCache, FxGraphCachePickler
+
+    _apply_fxgraphcache_pickle_patch(FxGraphCachePickler, BypassFxGraphCache)
+
+
+_patch_fxgraphcache_pickle_if_needed()
