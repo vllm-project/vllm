@@ -471,6 +471,8 @@ class INCXPULinearMethod(LinearMethodBase):
     GPTQ format: qweight [in_packed, out] with sequential nibble order.
 
     Note: Asymmetric quantization (sym=false) is not for now.
+
+    FIXME(yiliu30): Refine the implementation to reuse XPUwNa16LinearKernel.
     """
 
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
