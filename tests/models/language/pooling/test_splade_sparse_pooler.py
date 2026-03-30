@@ -39,11 +39,8 @@ def test_splade_pooler_matches_reference_formula(B, T, H, V):
         dtype=torch.long,
     )
     meta = types.SimpleNamespace(
-        prompt_lens=prompt_lens_tenser, prompt_token_ids_cpu=token_ids
+        prompt_lens=prompt_lens_tenser, prompt_token_ids=token_ids
     )
-    meta.get_prompt_token_ids_cpu = lambda: [
-        meta.prompt_token_ids_cpu[i, :num] for i, num in enumerate(meta.prompt_lens)
-    ]
 
     # MLM head (prefer BertMLMHead, fallback to Linear if unavailable)
     try:
