@@ -234,10 +234,7 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
 
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
-    def verify_and_update_config(
-        cls,
-        vllm_config: "VllmConfig",
-    ) -> None:
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Enable FULL_AND_PIECEWISE cuda graph mode by default (required
         to get good performance for mamba layers in V1).
