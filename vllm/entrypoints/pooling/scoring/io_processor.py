@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Sequence
 from typing import Any, TypeAlias, cast
 
@@ -273,6 +274,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         pooling_params: PoolingParams | None,
         chat_template: str | None = None,
     ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
+        arrival_time = time.time()
+
         data_1 = scoring_data.data_1
         data_2 = scoring_data.data_2
 
@@ -282,11 +285,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if pooling_params is None:
             pooling_params = PoolingParams(task="classify")
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
-
         pooling_params_list = list[PoolingParams]()
         engine_inputs = list[EngineInput]()
-        for q, d in input_pairs:
+        for q, d in zip(data_1, data_2):
             _, engine_prompt = self.get_score_prompt(
                 data_1=q,
                 data_2=d,
@@ -303,7 +304,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 pooling_params_list.append(pooling_params)
 
             tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
-            engine_inputs.append(self.renderer.process_for_engine(engine_prompt))
+            engine_inputs.append(
+                self.renderer.process_for_engine(engine_prompt, arrival_time)
+            )
         return engine_inputs, pooling_params_list
 
     def get_score_prompt(
