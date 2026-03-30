@@ -67,40 +67,50 @@ def tl_rand64(seed, offset, includes_zero: tl.constexpr):
 @triton.jit
 def gumbel_block_argmax(
     logits,
+    block,
     mask,
-    block_idx,
-    req_state_idx,
     token_idx,
+    expanded_idx_mapping_ptr,
     temp_ptr,
     seeds_ptr,
     pos_ptr,
     processed_logits_ptr,
     processed_logits_stride,
-    BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
 ):
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
+        # Apply temperature.
+        # NOTE(woosuk): Match the behavior of _temperature_kernel.
+        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
         logits = logits / temp
+
     if processed_logits_ptr is not None:
-        block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        # Store the temperature-applied logits.
         tl.store(
             processed_logits_ptr + req_state_idx * processed_logits_stride + block,
             logits,
             mask=mask,
         )
+
     logits = logits.to(tl.float64)
     if temp != 0.0:
+        # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
         pos = tl.load(pos_ptr + token_idx)
         gumbel_seed = tl.randint(seed, pos)
-        block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+
+        # tl.rand returns fp32, so build a true fp64 uniform from 64 random
+        # bits before applying the double-log transform.
         u = tl_rand64(gumbel_seed, block, includes_zero=False)
         gumbel_noise = -tl.log(-tl.log(u))
+
+        # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+
     value, idx = tl.max(logits, axis=0, return_indices=True)
-    token_id = block_idx * BLOCK_SIZE + idx
-    return value, token_id
+    return value, idx
 
 
 @triton.jit
@@ -122,8 +132,6 @@ def _gumbel_sample_kernel(
     APPLY_TEMPERATURE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
@@ -134,20 +142,20 @@ def _gumbel_sample_kernel(
     )
     logits = logits.to(tl.float32)
 
-    value, token_id = gumbel_block_argmax(
+    value, idx = gumbel_block_argmax(
         logits,
+        block,
         mask,
-        block_idx,
-        req_state_idx,
         token_idx,
+        expanded_idx_mapping_ptr,
         temp_ptr,
         seeds_ptr,
         pos_ptr,
         processed_logits_ptr,
         processed_logits_stride,
-        BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
     )
+    token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
