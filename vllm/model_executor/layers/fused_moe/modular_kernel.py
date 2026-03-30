@@ -998,6 +998,14 @@ class FusedMoEKernelModularImpl:
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+        # for EPLB
+        self.local_to_global_physical_experts = None
+        self.expert_map = None
+
+        # prefer an explicit FusedMoEParallelConfig when available (from
+        # FusedMoE layers / tests).
+        # if not provided, assume this kernel is
+        # running in a non-DP+EP context
         self.moe_parallel_config = moe_parallel_config
         self.inplace = inplace
         self.is_dp_ep = (
@@ -1077,6 +1085,7 @@ class FusedMoEKernelModularImpl:
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        expert_load_view: torch.Tensor | None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -1148,6 +1157,26 @@ class FusedMoEKernelModularImpl:
                 _expert_topk_ids,
                 _expert_topk_weights,
             ) = receiver()
+
+        # In EPLB, update expert load from expert_num_tokens.
+        if (
+            expert_tokens_meta is not None
+            and expert_load_view is not None
+            and expert_tokens_meta.expert_num_tokens is not None
+            and expert_map is not None
+        ):
+            # Initialize the mapping of the local physical experts
+            # to global physical experts, after which it will not change.
+            # expert_load_view: (num_physical_experts,)
+            # expert_num_tokens: (local_num_physical_experts,)
+            local_num_experts = expert_tokens_meta.expert_num_tokens.shape[0]
+            if self.expert_map is None or not torch.equal(self.expert_map, expert_map):
+                self.expert_map = expert_map.clone()
+
+            start_idx = self.moe_parallel_config.ep_rank * local_num_experts
+            expert_load_view[start_idx : start_idx + local_num_experts] += (
+                expert_tokens_meta.expert_num_tokens
+            )
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -1313,6 +1342,7 @@ class FusedMoEKernelModularImpl:
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        expert_load_view: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -1335,6 +1365,10 @@ class FusedMoEKernelModularImpl:
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
+        - expert_load_view (Optional[torch.Tensor]): Optional tensor for
+          tracking expert load statistics. If provided, the kernel will
+          update it using ExpertTokensMetadata.expert_num_tokens for
+          better performance.
         - shared_experts_input (Optional[torch.Tensor]): Optional separate
           input for shared experts. For latent MoE, this is the original
           hidden_states before latent projection.
@@ -1360,6 +1394,7 @@ class FusedMoEKernelModularImpl:
             global_num_experts,
             expert_map,
             apply_router_weight_on_input,
+            expert_load_view=expert_load_view,
         )
 
         fused_out = self._fused_experts(
