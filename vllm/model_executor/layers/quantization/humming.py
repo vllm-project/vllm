@@ -570,7 +570,7 @@ class HummingLinearMethod(LinearMethodBase):
         HummingMethod.transform_humming_layer(layer, already_padded=True)
         HummingMethod.prepare_default_kernel_configs(
             layer,
-            use_stream_k=not vllm_is_batch_invariant(),
+            use_batch_invariance=envs.VLLM_BATCH_INVARIANT,
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
         )
 
@@ -832,7 +832,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             )
             HummingMethod.prepare_default_kernel_configs(
                 layer,
-                use_batch_invariance=vllm_is_batch_invariant(),
+                use_batch_invariance=envs.VLLM_BATCH_INVARIANT,
                 use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
                 sublayer_name=sublayer_name,
             )
