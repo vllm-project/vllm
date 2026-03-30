@@ -204,13 +204,6 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    def has_work(self) -> bool:
-        """Returns True if the engine core still has work that requires
-        stepping (e.g. pending connector transfers after all user requests
-        have finished).  Defaults to False for out-of-process engines
-        which drive their own busy loop."""
-        return False
-
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
@@ -290,9 +283,6 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
-
-    def has_work(self) -> bool:
-        return self.engine_core.has_work()
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()

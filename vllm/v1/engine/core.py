@@ -418,10 +418,6 @@ class EngineCore:
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
-    def has_work(self) -> bool:
-        """Returns True if the engine should be stepped."""
-        return self.scheduler.has_requests()
-
     def step_with_batch_queue(
         self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
@@ -1127,7 +1123,11 @@ class EngineCoreProc(EngineCore):
 
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
-        return self.engines_running or bool(self.batch_queue) or super().has_work()
+        return (
+            self.engines_running
+            or self.scheduler.has_requests()
+            or bool(self.batch_queue)
+        )
 
     def is_running(self) -> bool:
         """Returns true if shutdown has not been requested."""
@@ -1255,9 +1255,8 @@ class EngineCoreProc(EngineCore):
                 return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (
-                (method := getattr(self, method_name))
-                and method(*self._convert_msgspec_args(method, args))
+            get_result = lambda: (method := getattr(self, method_name)) and method(
+                *self._convert_msgspec_args(method, args)
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))

@@ -1860,17 +1860,6 @@ class Scheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
 
-    def has_requests(self) -> bool:
-        if super().has_requests():
-            return True
-        # NOTE(yifan): Only used by SimpleCPUOffloadConnector for now. Keep the engine
-        # stepping while the connector has in-flight transfers (e.g. async block stores)
-        if self.connector is not None and hasattr(
-            self.connector, "has_pending_transfers"
-        ):
-            return self.connector.has_pending_transfers()
-        return False
-
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
