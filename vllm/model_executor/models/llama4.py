@@ -36,11 +36,10 @@ from vllm.model_executor.layers.attention import (
     Attention,
     ChunkedLocalAttention,
 )
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import GateLinear, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -94,11 +93,10 @@ class Llama4MoE(nn.Module):
         self.ep_size = self.ep_group.size()
 
         intermediate_size_moe = config.intermediate_size
-        self.router = ReplicatedLinear(
+        self.router = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
-            quant_config=None,
             prefix=f"{prefix}.router",
         )
 

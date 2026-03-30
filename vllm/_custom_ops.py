@@ -2283,6 +2283,19 @@ def gpt_oss_router_gemm(
     return output
 
 
+def llama4_router_gemm(
+    hidden_states: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        weight.shape[0],
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    torch.ops._moe_C.llama4_router_gemm(output, hidden_states, weight)
+    return output
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,

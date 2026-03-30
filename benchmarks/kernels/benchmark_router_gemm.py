@@ -18,6 +18,10 @@ DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
 GPT_OSS_SUPPORTED_NUM_EXPERTS = [32, 128]
 GPT_OSS_SUPPORTED_HIDDEN_SIZES = [2880]
 
+# Dimensions supported by the Llama4 specialized kernel
+LLAMA4_SUPPORTED_NUM_EXPERTS = [128]
+LLAMA4_SUPPORTED_HIDDEN_SIZES = [5120]
+
 
 def get_batch_size_range(max_batch_size):
     return [2**x for x in range(14) if 2**x <= max_batch_size]
@@ -32,6 +36,10 @@ def get_model_params(config):
         num_experts = config.n_routed_experts
         hidden_size = config.hidden_size
     elif config.architectures[0] in ("GptOssForCausalLM",):
+        num_experts = config.num_local_experts
+        hidden_size = config.hidden_size
+    elif config.architectures[0] in ("Llama4ForConditionalGeneration",):
+        config = config.get_text_config()
         num_experts = config.num_local_experts
         hidden_size = config.hidden_size
     else:
@@ -84,6 +92,11 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
             and num_experts in GPT_OSS_SUPPORTED_NUM_EXPERTS
             and hidden_size in GPT_OSS_SUPPORTED_HIDDEN_SIZES
         )
+        allow_llama4_router_gemm = (
+            is_hopper_or_blackwell
+            and num_experts in LLAMA4_SUPPORTED_NUM_EXPERTS
+            and hidden_size in LLAMA4_SUPPORTED_HIDDEN_SIZES
+        )
 
         has_bias = False
         if allow_gpt_oss_router_gemm:
@@ -105,6 +118,8 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
                     ops.dsv3_router_gemm(mat_a, mat_b, torch.bfloat16)
                 elif allow_gpt_oss_router_gemm:
                     ops.gpt_oss_router_gemm(mat_a, mat_b, bias)
+                elif allow_llama4_router_gemm:
+                    ops.llama4_router_gemm(mat_a, mat_b)
                 else:
                     raise ValueError("Unsupported router gemm")
 

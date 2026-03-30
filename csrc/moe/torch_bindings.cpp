@@ -138,6 +138,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "gpt_oss_router_gemm(Tensor! output, Tensor input, Tensor weights, "
       "Tensor bias) -> ()");
   m.impl("gpt_oss_router_gemm", torch::kCUDA, &gpt_oss_router_gemm);
+
+  // Llama 4 optimized router GEMM kernel for SM90+
+  m.def(
+      "llama4_router_gemm(Tensor! output, Tensor input, Tensor weight) -> ()");
+  m.impl("llama4_router_gemm", torch::kCUDA, &llama4_router_gemm);
 #endif
 }
 

@@ -35,3 +35,26 @@ def test_gpt_oss_router_gemm(batch_size, input_dim, output_dim):
     output = ops.gpt_oss_router_gemm(x, weight, bias)
     output_ref = torch.nn.functional.linear(x, weight, bias)
     torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(100)
+        )
+    ),
+    reason="This test only runs on Hopper or Blackwell GPUs.",
+)
+@pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("input_dim", [5120])
+@pytest.mark.parametrize("output_dim", [128])
+def test_llama4_router_gemm(batch_size, input_dim, output_dim):
+    set_random_seed(0)
+    x = torch.randn(batch_size, input_dim, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(output_dim, input_dim, device="cuda", dtype=torch.bfloat16)
+
+    output = ops.llama4_router_gemm(x, weight)
+    output_ref = torch.nn.functional.linear(x, weight)
+    torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)

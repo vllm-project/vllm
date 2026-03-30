@@ -74,4 +74,8 @@ void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
 // gpt-oss optimized router GEMM kernel for SM90+
 void gpt_oss_router_gemm(torch::Tensor& output, torch::Tensor input,
                          torch::Tensor weight, torch::Tensor bias);
+
+// Llama4 optimized router GEMM kernel for SM90+
+void llama4_router_gemm(torch::Tensor& output, const torch::Tensor& input,
+                        const torch::Tensor& weight);
 #endif

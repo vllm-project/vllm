@@ -1020,6 +1020,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/moe/moe_wna16.cu"
     "csrc/moe/grouped_topk_kernels.cu"
     "csrc/moe/gpt_oss_router_gemm.cu"
+    "csrc/moe/llama4_router_gemm.cu"
     "csrc/moe/router_gemm.cu")
 endif()
 
