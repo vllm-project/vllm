@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
-from math import lcm
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.model_executor.models import ModelRegistry
-from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -104,11 +99,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
-        Ensure that page size of attention layers is greater than or
-        equal to the mamba layers. If not, automatically set the attention
-        block size to ensure that it is. If the attention page size is
-        strictly greater than the mamba page size, we pad the mamba page size
-        to make them equal.
+        Perform early validation and setup for hybrid attention/mamba models.
+
+        Block size alignment with mamba page sizes is handled later by
+        Platform.update_block_size_for_backend(), which runs after model
+        layers are constructed and the attention backend is known.
 
         Args:
             vllm_config: vLLM Config
@@ -118,6 +113,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # Disable calculate_kv_scales for hybrid models: uninitialized
         # recurrent state corrupts scales during the calibration pass.
         # See issue: https://github.com/vllm-project/vllm/issues/37554
+
         if cache_config.calculate_kv_scales:
             logger.warning(
                 "Disabling calculate_kv_scales for hybrid model '%s'. "
@@ -129,8 +125,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             )
             cache_config.calculate_kv_scales = False
 
-        # Save the user input before it gets modified by MambaModelConfig
-        mamba_block_size = cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
