@@ -364,7 +364,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_input(
         self, image_input: Phi4VisionRImagePixelInputs
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> MultiModalEmbeddings:
         pixel_values = image_input["pixel_values"]
         pixel_attention_mask = image_input["pixel_attention_mask"]
         spatial_shapes = image_input["spatial_shapes"]
@@ -397,7 +397,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return []
 
-        return self._process_image_input(image_input)  # type: ignore[return-value]
+        return self._process_image_input(image_input)
 
     def forward(
         self,
