@@ -88,13 +88,9 @@ def _fuse_rmsnorm_quant_impl(
     return q_c_quantized, q_c_scale, kv_c_normed
 
 
-# Apply torch_compile_guard decorator when AITER is available
-if _AITER_AVAILABLE:
-    _fuse_rmsnorm_quant = torch_compile_guard(gen_fake=_fused_rms_fp8_group_quant_fake)(
-        _fuse_rmsnorm_quant_impl
-    )
-else:
-    _fuse_rmsnorm_quant = _fuse_rmsnorm_quant_impl
+# Make fusion transparent to compiler (no @torch_compile_guard)
+# This allows the compiler to trace through and batch operations efficiently
+_fuse_rmsnorm_quant = _fuse_rmsnorm_quant_impl
 
 
 @dataclass
