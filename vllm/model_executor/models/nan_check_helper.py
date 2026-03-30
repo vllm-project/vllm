@@ -51,6 +51,7 @@ _layer_idx_gpu: torch.Tensor | None = None
 def ensure_flags(num_layers: int, device: torch.device) -> None:
     global _nan_counts, _inf_counts, _attn_detail, _inf_attn_detail
     global _fwd_mqa_real_nan, _layer_idx_gpu
+    _ensure_kv_write_counts(num_layers, device)
     if _nan_counts is None or _nan_counts.shape[0] < num_layers:
         _nan_counts = torch.zeros(num_layers, 4, dtype=torch.int64, device=device)
     if _inf_counts is None or _inf_counts.shape[0] < num_layers:
@@ -149,6 +150,44 @@ def mark_fp8_nan(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
     # e4m3fn NaN: 0x7F or 0xFF (S111_1111)
     nan_count = ((raw == 0x7F) | (raw == 0xFF)).sum()
     _attn_detail[layer_idx, stage_col] = nan_count
+
+
+_kv_write_nan_counts: torch.Tensor | None = None
+
+
+def _ensure_kv_write_counts(num_layers: int, device: torch.device) -> None:
+    global _kv_write_nan_counts
+    if _kv_write_nan_counts is None or _kv_write_nan_counts.shape[0] < num_layers:
+        _kv_write_nan_counts = torch.zeros(
+            num_layers, dtype=torch.int64, device=device)
+
+
+def mark_kv_cache_write(
+    kv_cache: torch.Tensor,
+    slots: torch.Tensor | None,
+    layer_idx: int,
+) -> None:
+    """Check freshly-written KV cache slots for NaN after cache update.
+
+    Only checks the slots that were just written (not the full cache).
+    GPU-only ops — no .item(), no sync, no graph break.
+    Counts are read by report_if_nan outside the compiled region.
+    """
+    global _kv_write_nan_counts
+    if not _per_layer_checks_enabled:
+        return
+    if slots is None:
+        return
+    if _kv_write_nan_counts is None:
+        return
+    flat = kv_cache.view(-1, kv_cache.shape[-1])
+    written = flat[slots]
+    if _is_fp8(written.dtype):
+        raw = written.view(torch.uint8)
+        n = ((raw == 0x7F) | (raw == 0xFF)).sum()
+    else:
+        n = torch.isnan(written).sum()
+    _kv_write_nan_counts[layer_idx] += n
 
 
 def mark_kv_stale_fp8_nan(
@@ -337,6 +376,8 @@ def _zero_all():
         _inf_attn_detail.zero_()
     if _fwd_mqa_real_nan is not None:
         _fwd_mqa_real_nan.zero_()
+    if _kv_write_nan_counts is not None:
+        _kv_write_nan_counts.zero_()
 
 
 def _emit_report(
@@ -773,7 +814,13 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         )
     )
 
-    if not (real_has_nan or real_has_inf or kv_poison):
+    # Check if any KV cache writes produced NaN
+    kv_write_nan = (
+        _kv_write_nan_counts is not None
+        and _kv_write_nan_counts.any().item()
+    )
+
+    if not (real_has_nan or real_has_inf or kv_poison or kv_write_nan):
         _zero_all()
         return
 
@@ -782,7 +829,19 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     inf_cpu = _inf_counts.cpu()
     attn_nan_cpu = _attn_detail.cpu() if _attn_detail is not None else None
     attn_inf_cpu = _inf_attn_detail.cpu() if _inf_attn_detail is not None else None
+    kv_write_cpu = _kv_write_nan_counts.cpu() if _kv_write_nan_counts is not None else None
     _zero_all()
+
+    if kv_write_nan:
+        f = _get_log()
+        for layer_idx in range(kv_write_cpu.shape[0]):
+            c = kv_write_cpu[layer_idx].item()
+            if c > 0:
+                msg = (f"[KV_CACHE_WRITE_NAN] layer={layer_idx} "
+                       f"nan_count={c}\n")
+                f.write(msg)
+                f.flush()
+                print(msg, file=sys.stderr, end="", flush=True)
 
     if kv_poison and not _kv_poison_reported:
         _kv_poison_reported = True

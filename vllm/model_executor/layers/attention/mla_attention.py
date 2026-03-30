@@ -252,6 +252,9 @@ from vllm.model_executor.models.nan_check_helper import (
 from vllm.model_executor.models.nan_check_helper import (
     stash_if_nan as _nan_stash_if_nan,
 )
+from vllm.model_executor.models.nan_check_helper import (
+    mark_kv_cache_write as _nan_mark_kv_write,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
@@ -581,14 +584,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            _slots = slot_mapping.get(self.layer_name)
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
                 self_kv_cache,
-                slot_mapping.get(self.layer_name),
+                _slots,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            _nan_mark_kv_write(self_kv_cache, _slots, self._nan_layer_idx)
             _nan_mark_mla(
                 kv_c_normed, 6, self._nan_layer_idx
             )  # after kv_cache_update (input unchanged)
@@ -611,6 +616,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            _fwd_ctx = get_forward_context()
+            _u_slots = _fwd_ctx.slot_mapping.get(self.layer_name) if isinstance(_fwd_ctx.slot_mapping, dict) else _fwd_ctx.slot_mapping
+            _nan_mark_kv_write(self.kv_cache, _u_slots, self._nan_layer_idx)
             _nan_mark_mla(
                 kv_c_normed, 6, self._nan_layer_idx
             )  # after kv_cache_update (input unchanged)
