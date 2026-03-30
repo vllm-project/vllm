@@ -1713,6 +1713,12 @@ class GPUModelRunner(
                 prev_common_req_indices_tensor, 0
             ],
         )
+        if self.enable_prompt_embeds:
+            self.is_token_ids.gpu.scatter_(
+                dim=0,
+                index=sampled_tokens_index_tensor,
+                src=torch.ones_like(sampled_tokens_index_tensor, dtype=torch.bool),
+            )
 
         # Scatter the draft tokens after the sampled tokens are scattered.
         if self._draft_token_ids is None or not spec_flattened_indices:
@@ -1735,6 +1741,12 @@ class GPUModelRunner(
             index=draft_tokens_index_tensor,
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
+        if self.enable_prompt_embeds:
+            self.is_token_ids.gpu.scatter_(
+                dim=0,
+                index=draft_tokens_index_tensor,
+                src=torch.ones_like(draft_tokens_index_tensor, dtype=torch.bool),
+            )
 
     def _get_encoder_seq_lens(
         self,
@@ -4629,6 +4641,7 @@ class GPUModelRunner(
                 )
 
             num_rejected_tokens_gpu = None
+            target_inputs_embeds = None
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
@@ -4641,6 +4654,8 @@ class GPUModelRunner(
                     )
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
+                if self.enable_prompt_embeds:
+                    target_inputs_embeds = self.inputs_embeds.gpu[:num_scheduled_tokens]
             else:
                 if spec_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None
@@ -4658,6 +4673,8 @@ class GPUModelRunner(
                         )
                     else:
                         target_hidden_states = hidden_states[token_indices]
+                    if self.enable_prompt_embeds:
+                        target_inputs_embeds = self.inputs_embeds.gpu[token_indices]
                 else:
                     (
                         common_attn_metadata,
@@ -4679,6 +4696,8 @@ class GPUModelRunner(
                         )
                     else:
                         target_hidden_states = hidden_states[:total_num_tokens]
+                    if self.enable_prompt_embeds:
+                        target_inputs_embeds = self.inputs_embeds.gpu[:total_num_tokens]
 
             if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
                 mm_embed_inputs = self._gather_mm_embeddings(
@@ -4699,6 +4718,7 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
+                target_inputs_embeds=target_inputs_embeds,
             )
 
         return draft_token_ids

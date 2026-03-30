@@ -111,6 +111,8 @@ class SpecDecodeBaseProposer:
             vllm_config.model_config
         )
 
+        self.supports_prompt_embeds = vllm_config.model_config.enable_prompt_embeds
+
         self.draft_attn_groups: list[AttentionGroup] = []
         self.kv_cache_gid: int = -1
         self.eagle3_use_aux_hidden_state: bool = (
@@ -176,6 +178,7 @@ class SpecDecodeBaseProposer:
         if self.needs_extra_input_slots:
             self._raise_if_padded_drafter_batch_disabled()
             self._raise_if_multimodal()
+            self._raise_if_prompt_embeds()
             self._raise_if_mrope()
 
         self.is_rejected_token_mask: torch.Tensor | None = None
@@ -292,6 +295,13 @@ class SpecDecodeBaseProposer:
                 "does not support multimodal models yet"
             )
 
+    def _raise_if_prompt_embeds(self):
+        if self.supports_prompt_embeds:
+            raise NotImplementedError(
+                "Speculative Decoding with draft models or parallel drafting "
+                "does not support prompt embeds yet"
+            )
+
     def _raise_if_mrope(self):
         if self.draft_model_config.uses_mrope:
             raise NotImplementedError(
@@ -399,6 +409,7 @@ class SpecDecodeBaseProposer:
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
+        target_inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -420,6 +431,7 @@ class SpecDecodeBaseProposer:
                 token_indices_to_sample=token_indices_to_sample,
                 cad=common_attn_metadata,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                target_inputs_embeds=target_inputs_embeds,
             )
         )
 
@@ -445,6 +457,11 @@ class SpecDecodeBaseProposer:
             )
 
             input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+        elif self.supports_prompt_embeds:
+            # inputs_embeds prepared in set_inputs_first_pass.
+            # Keep input_ids for models that require it (e.g. DeepSeekMTP).
+            input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
             input_ids = self.input_ids[:num_input_tokens]
@@ -609,6 +626,12 @@ class SpecDecodeBaseProposer:
 
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
+            elif self.supports_prompt_embeds:
+                # Keep input_ids for models that require it (e.g. DeepSeekMTP).
+                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
+
+                input_ids = self.input_ids[:input_batch_size]
+                inputs_embeds = self.inputs_embeds[:input_batch_size]
             else:
                 input_ids = self.input_ids[:input_batch_size]
                 inputs_embeds = None
@@ -654,6 +677,7 @@ class SpecDecodeBaseProposer:
         token_indices_to_sample: torch.Tensor | None,
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
+        target_inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
@@ -669,6 +693,13 @@ class SpecDecodeBaseProposer:
             # Replace the last token with the next token.
             # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
             self.input_ids[token_indices_to_sample] = next_token_ids
+
+            # Apply the same shift to inputs_embeds using the target
+            # model's embeddings rather than re-embedding from token ids.
+            if self.supports_prompt_embeds and target_inputs_embeds is not None:
+                self.inputs_embeds[: num_tokens - 1] = target_inputs_embeds[1:]
+                next_token_embeds = self.model.embed_input_ids(next_token_ids)
+                self.inputs_embeds[token_indices_to_sample] = next_token_embeds
 
             # copy inputs to buffer for cudagraph
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
@@ -1523,6 +1554,9 @@ class SpecDecodeBaseProposer:
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                elif self.supports_prompt_embeds:
+                    input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
                     input_ids = self.input_ids[:num_input_tokens]
