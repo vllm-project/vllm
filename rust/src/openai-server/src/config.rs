@@ -15,8 +15,6 @@ pub struct Config {
     pub port: u16,
     /// Host/IP advertised by the frontend to engines for shared input/output sockets.
     pub advertised_host: String,
-    /// Enable the in-process wave coordinator for single-frontend deployments.
-    pub enable_inproc_coordinator: bool,
     /// Maximum time to wait for the engine to become ready.
     pub ready_timeout: Duration,
     /// Explicit tool call parser name, or `None` for model-based auto-detection.

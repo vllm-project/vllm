@@ -162,6 +162,11 @@ impl HfTextBackend {
     pub fn resolved_model_files(&self) -> &ResolvedModelFiles {
         &self.inner.files
     }
+
+    /// Return whether the loaded model config indicates a mixture-of-experts model.
+    pub fn is_moe(&self) -> bool {
+        self.inner.model_config.is_moe()
+    }
 }
 
 impl TextBackend for HfTextBackend {
@@ -187,7 +192,7 @@ impl TextBackend for HfTextBackend {
             default_min_p: self.inner.generation_config.min_p,
             default_repetition_penalty: self.inner.generation_config.repetition_penalty,
             default_max_tokens: self.inner.generation_config.max_new_tokens,
-            max_model_len: self.inner.model_config.max_position_embeddings,
+            max_model_len: self.inner.model_config.effective_max_position_embeddings(),
         })
     }
 }

@@ -48,7 +48,6 @@ async fn main() -> Result<()> {
         host: "127.0.0.1".to_string(),
         port,
         advertised_host: args.host,
-        enable_inproc_coordinator: false,
         ready_timeout: Duration::from_secs(args.ready_timeout_secs),
         tool_call_parser: None,
         reasoning_parser: None,
