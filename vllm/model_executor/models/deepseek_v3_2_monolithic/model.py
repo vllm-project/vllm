@@ -16,14 +16,21 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
 
+from .allreduce_rms import (
+    AllReduceRMSParams,
+    allreduce_add_rms_norm,
+    should_use_allreduce_rms,
+)
 from .decoder_layer import MonolithicDecoderLayer
-from .ops import fused_add_rms_norm
+
+logger = init_logger(__name__)
 
 
 @support_torch_compile
@@ -38,6 +45,13 @@ class MonolithicDeepseekV32Model(nn.Module):
         quant_config = vllm_config.quant_config
         self.config = config
         self.device = current_platform.device_type
+        self.fi_params: AllReduceRMSParams | None = None
+        if should_use_allreduce_rms():
+            self.fi_params = AllReduceRMSParams(vllm_config, config.hidden_size)
+            logger.info(
+                "Enabling fused AllReduce + RMSNorm in monolithic "
+                "DeepSeek V3.2 decoder layers."
+            )
 
         topk_tokens = config.index_topk
         self.topk_indices_buffer = torch.empty(
@@ -62,6 +76,7 @@ class MonolithicDeepseekV32Model(nn.Module):
                     layer_idx=i,
                     topk_indices_buffer=self.topk_indices_buffer,
                     prefix=f"{prefix}.layers.{i}",
+                    fi_params=self.fi_params,
                 )
                 for i in range(config.num_hidden_layers)
             ]
@@ -81,8 +96,14 @@ class MonolithicDeepseekV32Model(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
-        hidden_states, _ = fused_add_rms_norm(
-            hidden_states, residual, self.norm_weight, self.rms_norm_eps
+        # After the last layer, hidden_states is unreduced when fused.
+        # AllReduce before the final norm.
+        hidden_states, _ = allreduce_add_rms_norm(
+            hidden_states,
+            residual,
+            self.norm_weight,
+            self.rms_norm_eps,
+            self.fi_params,
         )
         return hidden_states
 

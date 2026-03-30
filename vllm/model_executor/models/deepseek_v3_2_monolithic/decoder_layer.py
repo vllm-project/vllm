@@ -6,15 +6,17 @@ Direct kernel calls, no module wrappers for norms.
 Gate weight inlined, FusedMoE kept for quantized expert kernels.
 """
 
+from __future__ import annotations
+
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 
+from .allreduce_rms import AllReduceRMSParams, allreduce_add_rms_norm
 from .attention import MonolithicMLAAttention
 from .ops import (
-    fused_add_rms_norm,
     fused_norm_rope,
     fused_q,
     rms_norm,
@@ -35,6 +37,7 @@ class MonolithicDecoderLayer(nn.Module):
         layer_idx: int,
         topk_indices_buffer: torch.Tensor,
         prefix: str = "",
+        fi_params: AllReduceRMSParams | None = None,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -44,6 +47,7 @@ class MonolithicDecoderLayer(nn.Module):
         self.kv_lora_rank = config.kv_lora_rank
         self.qk_rope_head_dim = config.qk_rope_head_dim
         self.tp_size = get_tensor_model_parallel_world_size()
+        self._fi_params = fi_params
 
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -72,7 +76,7 @@ class MonolithicDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn.fused_qkv_a_proj",
         )
 
-        # MLA Attention
+        # MLA Attention — disable AllReduce in o_proj when using fused path
         self.attn = MonolithicMLAAttention(
             vllm_config=vllm_config,
             config=config,
@@ -89,6 +93,7 @@ class MonolithicDecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             prefix=f"{prefix}.self_attn",
         )
+        self.attn.o_proj.reduce_results = False
 
         # MoE or Dense MLP
         moe_layer_freq = getattr(config, "moe_layer_freq", 1)
@@ -111,12 +116,14 @@ class MonolithicDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            self.mlp.skip_final_allreduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                reduce_results=False,
                 prefix=f"{prefix}.mlp",
             )
 
@@ -127,17 +134,23 @@ class MonolithicDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Input norm + residual
+        # When fused_allreduce_rms is enabled, hidden_states arriving from
+        # the previous layer is the *unreduced* MLP/MoE output. We fuse
+        # AllReduce + residual-add + RMSNorm into a single kernel.
         if residual is None:
+            # First layer: hidden_states is from embed_tokens (already
+            # fully materialised), no allreduce needed.
             residual = hidden_states
             hidden_states = rms_norm(
                 hidden_states, self.input_layernorm_weight, self.rms_norm_eps
             )
         else:
-            hidden_states, residual = fused_add_rms_norm(
+            hidden_states, residual = allreduce_add_rms_norm(
                 hidden_states,
                 residual,
                 self.input_layernorm_weight,
                 self.rms_norm_eps,
+                self._fi_params,
             )
 
         # Step 1. hidden_states -> q_c, kv_c, k_pe
@@ -214,18 +227,22 @@ class MonolithicDecoderLayer(nn.Module):
             ),
         )
 
-        # Step 7. Output projection.
+        # Step 7. Output projection (AllReduce disabled when fused).
         hidden_states, _ = self.attn.o_proj(attn_out)
 
         # Post-attn norm + residual
-        hidden_states, residual = fused_add_rms_norm(
+        # Fuse the o_proj AllReduce with post-attention RMSNorm.
+        hidden_states, residual = allreduce_add_rms_norm(
             hidden_states,
             residual,
             self.post_attention_layernorm_weight,
             self.rms_norm_eps,
+            self._fi_params,
         )
 
         # MLP / MoE
+        # When fused_allreduce_rms is enabled, the MLP/MoE AllReduce is
+        # deferred — it will be fused with the next layer's input norm.
         hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
