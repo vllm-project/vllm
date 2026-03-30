@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
-from dataclasses import replace
 from importlib.util import find_spec
 from typing import cast
 
@@ -13,6 +12,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
+    replace,
 )
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
@@ -71,7 +71,6 @@ class SpecDecodeBaseProposer:
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
 
-        self.runner = runner
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -427,8 +426,6 @@ class SpecDecodeBaseProposer:
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
         )
-
-        assert self.runner is not None
 
         per_layer_attn_metadata: dict[str, object] = {}
         draft_attn_metadata_per_group: list[object] = []
@@ -827,7 +824,7 @@ class SpecDecodeBaseProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -842,11 +839,10 @@ class SpecDecodeBaseProposer:
         """
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
+        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    common_attn_metadata.seq_lens_cpu[i].item()
-                )
+                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
                 for i in range(num_reqs)
             ],
             dtype=np.int32,
@@ -931,7 +927,7 @@ class SpecDecodeBaseProposer:
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
-            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
+            max_seq_len=common_attn_metadata.max_seq_len,
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
@@ -1223,6 +1219,21 @@ class SpecDecodeBaseProposer:
             model = model.module
         return model.__class__.__name__
 
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Return a VllmConfig with kernel-level overrides for the proposer.
+        Subclasses may override to apply additional config changes.
+        """
+        spec_cfg = self.speculative_config
+        if spec_cfg.moe_backend is not None:
+            return replace(
+                self.vllm_config,
+                kernel_config=replace(
+                    self.vllm_config.kernel_config,
+                    moe_backend=spec_cfg.moe_backend,
+                ),
+            )
+        return self.vllm_config
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -1230,9 +1241,10 @@ class SpecDecodeBaseProposer:
         """
         from vllm.compilation.backends import set_model_tag
 
+        draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("eagle_head"):
             model = get_model(
-                vllm_config=self.vllm_config,
+                vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
                 load_config=self.speculative_config.draft_load_config,
             )
@@ -1400,6 +1412,8 @@ class SpecDecodeBaseProposer:
                 )
             elif (
                 hasattr(target_language_model, "lm_head")
+                and hasattr(target_language_model.lm_head, "weight")
+                and hasattr(self.model.lm_head, "weight")
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
                 # TODO: Offload to CPU for comparison to avoid extra GPU memory
