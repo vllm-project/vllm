@@ -574,6 +574,16 @@ def _build_serving_render(
     )
 
 
+def _make_serving_chat() -> OpenAIServingChat:
+    engine = MagicMock(spec=AsyncLLM)
+    engine.errored = False
+    engine.model_config = MockModelConfig()
+    engine.input_processor = MagicMock()
+    engine.io_processor = MagicMock()
+    engine.renderer = _build_renderer(engine.model_config)
+    return _build_serving_chat(engine)
+
+
 def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
@@ -1929,3 +1939,135 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+
+class TestNChoicesParserIsolation:
+    """Regression tests for the shared-reference bug when n >= 2.
+
+    Each streaming choice must receive its own parser instance so that
+    accumulated state in one choice does not bleed into another.
+    """
+
+    @pytest.fixture
+    def serving_chat(self):
+        return _make_serving_chat()
+
+    @pytest.fixture
+    def dummy_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+    async def _run_stream(self, serving_chat, req):
+        async def empty_result_generator():
+            if False:
+                yield  # async generator that yields nothing
+
+        tokenizer = get_tokenizer(MODEL_NAME)
+        reasoning_parser = None
+        if getattr(serving_chat, "reasoning_parser_cls", None):
+            reasoning_parser = serving_chat.reasoning_parser_cls(tokenizer)
+
+        async for _ in serving_chat.chat_completion_stream_generator(
+            request=req,
+            result_generator=empty_result_generator(),
+            request_id=req.request_id,
+            model_name=req.model,
+            conversation=[],
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(
+                request_id=req.request_id, model_name=req.model
+            ),
+            reasoning_parser=reasoning_parser,
+        ):
+            pass
+
+    @pytest.mark.asyncio
+    async def test_tool_parser_state_is_independent_per_choice(
+        self, serving_chat, dummy_tools
+    ):
+        """Each choice gets its own tool-parser; state from choice 0 must not affect choice 1."""
+        from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+
+        instances: list[Hermes2ProToolParser] = []
+
+        def tracking_factory(tok, tools=None):
+            inst = Hermes2ProToolParser(get_tokenizer(MODEL_NAME))
+            instances.append(inst)
+            return inst
+
+        serving_chat.tool_parser = tracking_factory
+        serving_chat.enable_auto_tools = True
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hi"}],
+            n=2,
+            tools=dummy_tools,
+        )
+        await self._run_stream(serving_chat, req)
+
+        first, last = instances[0], instances[-1]
+
+        # Simulate choice 0 mid-stream.
+        first.current_tool_id = 2
+        first.prev_tool_call_arr = [{"name": "f"}, {"name": "g"}, {"name": "h"}]
+        first.streamed_args_for_tool = ['{"a": 1}', '{"b": 2}', '{"x":']
+
+        # With the bug first IS last, so these fail (state is shared).
+        # With the fix last is independent and retains its initial values.
+        assert last.current_tool_id == -1
+        assert last.prev_tool_call_arr == []
+        assert last.streamed_args_for_tool == []
+
+    @pytest.mark.asyncio
+    async def test_reasoning_parser_state_is_independent_per_choice(self, serving_chat):
+        """Each choice gets its own reasoning-parser; state from choice 0 must not affect choice 1."""
+        from vllm.reasoning.olmo3_reasoning_parser import (
+            Olmo3ReasoningParser,
+            Olmo3ReasoningState,
+        )
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.get_vocab.return_value = {}
+
+        instances: list[Olmo3ReasoningParser] = []
+
+        def tracking_factory(tok, *, chat_template_kwargs=None):
+            inst = Olmo3ReasoningParser(mock_tokenizer)
+            instances.append(inst)
+            return inst
+
+        serving_chat.reasoning_parser_cls = tracking_factory
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hi"}],
+            n=2,
+        )
+        await self._run_stream(serving_chat, req)
+
+        first, last = instances[0], instances[-1]
+
+        # choice 0 completes its reasoning block: state transitions REASONING → CONTENT.
+        first.extract_reasoning_streaming(
+            "", "<think>thought</think>", "<think>thought</think>", [], [1], [1]
+        )
+        assert first.buffer.state == Olmo3ReasoningState.CONTENT
+
+        # With the bug first IS last, so last.buffer.state is also CONTENT → fail.
+        # With the fix last is independent and still in the initial REASONING state.
+        assert last.buffer.state == Olmo3ReasoningState.REASONING
+        delta = last.extract_reasoning_streaming(
+            "", "deep thought", "deep thought", [], [2], [2]
+        )
+        assert delta is not None
+        assert delta.reasoning == "deep thought"
+        assert delta.content is None
