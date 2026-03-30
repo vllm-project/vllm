@@ -18,7 +18,6 @@ from flashinfer import (
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
-from typing_extensions import override
 
 from vllm import envs
 from vllm.config import (
@@ -69,6 +68,7 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.workspace import current_workspace_manager
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -652,7 +652,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             with_numpy=True,
         )
 
-    @override  # type: ignore[misc]
     @classmethod
     def get_cudagraph_support(
         cls: type["FlashInferMetadataBuilder"],
@@ -1245,21 +1244,6 @@ class FlashInferImpl(AttentionImpl):
             if vllm_config is not None
             else 1
         )
-        speculative_config = (
-            vllm_config.speculative_config if vllm_config is not None else None
-        )
-        num_spec_tokens = (
-            speculative_config.num_speculative_tokens
-            if speculative_config is not None
-            else 0
-        )
-        max_num_reqs = (
-            vllm_config.scheduler_config.max_num_seqs if vllm_config is not None else 0
-        )
-        self._dcp_decode_max_tokens = (1 + num_spec_tokens) * max_num_reqs
-        self._dcp_decode_query_buffers: dict[torch.dtype, torch.Tensor] = {}
-        self._dcp_decode_output_buffers: dict[torch.dtype, torch.Tensor] = {}
-        self._dcp_decode_lse_buffer: torch.Tensor | None = None
 
         dcp_a2a = (
             vllm_config is not None
@@ -1289,43 +1273,21 @@ class FlashInferImpl(AttentionImpl):
         num_decode_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert self.dcp_world_size > 1
-        assert self._dcp_decode_max_tokens > 0
         total_num_heads = self.num_heads * self.dcp_world_size
         buffer_shape = (
-            self._dcp_decode_max_tokens,
+            num_decode_tokens,
             total_num_heads,
             self.head_size,
         )
-        query_buffer = self._dcp_decode_query_buffers.get(query.dtype)
-        if query_buffer is None:
-            query_buffer = torch.empty(
-                buffer_shape,
-                dtype=query.dtype,
-                device=query.device,
+        lse_shape = (num_decode_tokens, total_num_heads)
+        query_buffer, output_buffer, lse_buffer = (
+            current_workspace_manager().get_simultaneous(
+                (buffer_shape, query.dtype),
+                (buffer_shape, query.dtype),
+                (lse_shape, torch.float32),
             )
-            self._dcp_decode_query_buffers[query.dtype] = query_buffer
-
-        output_buffer = self._dcp_decode_output_buffers.get(query.dtype)
-        if output_buffer is None:
-            output_buffer = torch.empty(
-                buffer_shape,
-                dtype=query.dtype,
-                device=query.device,
-            )
-            self._dcp_decode_output_buffers[query.dtype] = output_buffer
-
-        if self._dcp_decode_lse_buffer is None:
-            self._dcp_decode_lse_buffer = torch.empty(
-                (self._dcp_decode_max_tokens, total_num_heads),
-                dtype=torch.float32,
-                device=query.device,
-            )
-
-        return (
-            query_buffer[:num_decode_tokens],
-            output_buffer[:num_decode_tokens],
-            self._dcp_decode_lse_buffer[:num_decode_tokens],
         )
+        return query_buffer, output_buffer, lse_buffer
 
     def forward(
         self,
