@@ -1435,16 +1435,15 @@ class LLM:
             )
 
         score_type = self.model_config.score_type
-        if score_type is None:
-            raise ValueError("This model does not support the Scoring API.")
-
         if (
             score_type == "cross-encoder"
             and getattr(self.model_config.hf_config, "num_labels", 0) != 1
         ):
             raise ValueError("Scoring API is only enabled for num_labels == 1.")
 
-        assert score_type in self.pooling_io_processors
+        if score_type is None or score_type not in self.pooling_io_processors:
+            raise ValueError("This model does not support the Scoring API.")
+
         io_processor = self.pooling_io_processors[score_type]
         assert isinstance(io_processor, ScoringIOProcessor)
 
