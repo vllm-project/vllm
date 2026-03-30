@@ -106,7 +106,7 @@ class GateLinear(ReplicatedLinear):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
 
     def forward(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, x_scale: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         # Tier 1: DSV3 specialized kernel
         if self.allow_dsv3_router_gemm and x.shape[0] <= 16:

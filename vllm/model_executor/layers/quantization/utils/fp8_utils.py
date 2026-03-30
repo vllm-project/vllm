@@ -400,7 +400,6 @@ class W8A8BlockFp8LinearOp:
         input_scale: torch.Tensor | None = None,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert input_scale is None
         # View input as 2D matrix for fp8 methods
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[0]]
@@ -411,20 +410,29 @@ class W8A8BlockFp8LinearOp:
         ) and should_use_deepgemm_for_fp8_linear(
             output_dtype, weight, self.is_deep_gemm_supported
         ):
+            # FlashInfer: does not support pre-quantized input
+            assert input_scale is None, (
+                "FlashInfer FP8 blockscale GEMM does not support pre-quantized input"
+            )
             output = self._run_flashinfer(input_2d, weight, weight_scale)
 
         elif should_use_deepgemm_for_fp8_linear(
             output_dtype, weight, self.is_deep_gemm_supported
         ):
+            # DeepGEMM: does not support pre-quantized input
+            assert input_scale is None, (
+                "DeepGEMM FP8 linear does not support pre-quantized input"
+            )
             output = self._run_deepgemm(input_2d, weight, weight_scale)
         else:
+            # AITER/Triton/Cutlass: supports pre-quantized input
             output = self.w8a8_blockscale_op(
                 input_2d, weight, weight_scale, input_scale
             )
 
         if bias is not None:
             output = output + bias
-        return output.to(dtype=input.dtype).view(*output_shape)
+        return output.view(*output_shape)
 
     def _run_deepgemm(
         self,
@@ -451,9 +459,15 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert input_scale is None
-        assert self.input_quant_op is not None
-        q_input, input_scale = self.input_quant_op(input_2d)
+        if input_scale is None:
+            # Quantize input if not already quantized
+            assert self.input_quant_op is not None
+            q_input, input_scale = self.input_quant_op(input_2d)
+            output_dtype = input_2d.dtype
+        else:
+            # Use pre-quantized FP8 input directly
+            q_input = input_2d
+            output_dtype = torch.bfloat16
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
                 q_input,
@@ -461,7 +475,7 @@ class W8A8BlockFp8LinearOp:
                 input_scale,
                 weight_scale,
                 list(self.weight_group_shape),
-                input_2d.dtype,
+                output_dtype,
             )
         else:
             return cutlass_scaled_mm(
@@ -470,7 +484,7 @@ class W8A8BlockFp8LinearOp:
                 input_scale,
                 weight_scale,
                 list(self.weight_group_shape),
-                input_2d.dtype,
+                output_dtype,
             )
 
     def _run_aiter(
@@ -495,9 +509,13 @@ class W8A8BlockFp8LinearOp:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
 
         if input_scale is not None:
+            # Use pre-quantized FP8 input directly
             q_input = input_2d
+            output_dtype = torch.bfloat16
         else:
+            # Quantize input if not already quantized
             q_input, input_scale = self.input_quant_op(input_2d, use_triton=use_triton)
+            output_dtype = input_2d.dtype
 
         return gemm_a8w8_blockscale_op(
             q_input,
@@ -505,7 +523,7 @@ class W8A8BlockFp8LinearOp:
             input_scale,
             weight_scale,
             list(self.weight_group_shape),
-            output_dtype=input_2d.dtype,
+            output_dtype=output_dtype,
         )
 
     def _run_triton(
@@ -515,16 +533,22 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert input_scale is None
-        assert self.input_quant_op is not None
-        q_input, input_scale = self.input_quant_op(input_2d)
+        if input_scale is None:
+            # Quantize input if not already quantized
+            assert self.input_quant_op is not None
+            q_input, input_scale = self.input_quant_op(input_2d)
+            output_dtype = input_2d.dtype
+        else:
+            # Use pre-quantized FP8 input directly
+            q_input = input_2d
+            output_dtype = torch.bfloat16
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
             weight,
             input_scale,
             weight_scale,
             list(self.weight_group_shape),
-            input_2d.dtype,
+            output_dtype,
         )
 
     def _run_flashinfer(
