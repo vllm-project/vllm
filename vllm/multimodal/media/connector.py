@@ -218,19 +218,15 @@ class MediaConnector:
                 continue
             entries.append((stat.st_mtime, stat.st_size, f))
 
+        # Evict items according to LRU policy
+        entries.sort(key=lambda e: e[0], reverse=True)
+        while total_size > self._media_cache_max_bytes:
+            mtime, size, f = entries.pop()
+            expired.append(f)
+            total_size -= size
+
         for f in expired:
             f.unlink(missing_ok=True)
-
-        if total_size <= self._media_cache_max_bytes:
-            return
-
-        # Sort oldest-accessed first (LRU)
-        entries.sort(key=lambda e: e[0])
-        for mtime, size, f in entries:
-            if total_size <= self._media_cache_max_bytes:
-                break
-            f.unlink(missing_ok=True)
-            total_size -= size
 
     def _media_cache_path(self, url: str) -> Path:
         url_hash = hashlib.sha256(url.encode()).hexdigest()[:20]
