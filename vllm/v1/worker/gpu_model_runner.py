@@ -3340,7 +3340,7 @@ class GPUModelRunner(
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
-        dict[str, int],
+        np.ndarray | None,
         LogprobsLists | None,
         list[list[int]],
         dict[str, LogprobsTensors | None],
@@ -3348,7 +3348,7 @@ class GPUModelRunner(
         dict[str, int],
         list[int],
     ]:
-        num_nans_in_logits = {}
+        num_nans_in_logits: np.ndarray | None = None
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
@@ -5086,23 +5086,22 @@ class GPUModelRunner(
     def _get_nans_in_logits(
         self,
         logits: torch.Tensor | None,
-    ) -> dict[str, int]:
+    ) -> np.ndarray:
         try:
             if logits is None:
-                return {req_id: 0 for req_id in self.input_batch.req_ids}
+                return np.zeros(len(self.input_batch.req_ids), dtype=np.int64)
 
-            num_nans_in_logits = {}
             num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
-            for req_id in self.input_batch.req_ids:
+            num_nans_in_logits = np.zeros(
+                len(self.input_batch.req_ids), dtype=num_nans_for_index.dtype
+            )
+            for i, req_id in enumerate(self.input_batch.req_ids):
                 req_index = self.input_batch.req_id_to_index[req_id]
-                num_nans_in_logits[req_id] = (
-                    int(num_nans_for_index[req_index])
-                    if num_nans_for_index is not None and req_index < logits.shape[0]
-                    else 0
-                )
+                if req_index < logits.shape[0]:
+                    num_nans_in_logits[i] = num_nans_for_index[req_index]
             return num_nans_in_logits
         except IndexError:
-            return {}
+            return np.empty(0, dtype=np.int64)
 
     @contextmanager
     def maybe_randomize_inputs(

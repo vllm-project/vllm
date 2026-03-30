@@ -60,9 +60,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
         if self.num_nans is not None:
-            self.model_runner_output.num_nans_in_logits = dict(
-                zip(self.model_runner_output.req_ids, self.num_nans.tolist())
-            )
+            self.model_runner_output.num_nans_in_logits = self.num_nans
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
