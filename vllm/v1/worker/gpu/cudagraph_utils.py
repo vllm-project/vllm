@@ -94,6 +94,7 @@ class CudaGraphManager:
         self.decode_query_len = decode_query_len
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
 
@@ -103,6 +104,10 @@ class CudaGraphManager:
         self._graphs_captured = False
         self._candidates: list[list[BatchExecutionDescriptor]] = []
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
+        # adjust the cudagraph sizes to be a multiple of the uniform decode query length
+        self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+            self.decode_query_len, self.tp_size
+        )
         self._init_candidates()
 
     def _init_candidates(self) -> None:
@@ -324,6 +329,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
+                skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
             )
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
@@ -403,7 +409,8 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    skip_attn: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
@@ -423,13 +430,15 @@ def prepare_inputs_to_capture(
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
-    attn_metadata = model_state.prepare_attn(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=True,
-    )
+    attn_metadata = None
+    if not skip_attn:
+        attn_metadata = model_state.prepare_attn(
+            input_batch,
+            CUDAGraphMode.NONE,
+            input_block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=True,
+        )
     return attn_metadata, slot_mappings_by_layer

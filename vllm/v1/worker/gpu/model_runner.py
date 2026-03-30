@@ -40,10 +40,11 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
@@ -178,6 +179,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
+        # Mamba hybrid models.
+        self.is_mamba_hybrid = self.model_config.is_hybrid
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
@@ -190,6 +193,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            is_mamba_hybrid=self.is_mamba_hybrid,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -337,10 +341,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        ]
+        block_sizes = []
+        max_num_blocks_per_group = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            spec = kv_cache_group.kv_cache_spec
+            block_sizes.append(spec.block_size)
+            max_num_blocks = cdiv(self.max_model_len, spec.block_size * self.dcp_size)
+            if isinstance(spec, MambaSpec):
+                max_num_blocks = (
+                    max_num_blocks if self.cache_config.enable_prefix_caching else 1
+                ) + spec.num_speculative_blocks
+            max_num_blocks_per_group.append(max_num_blocks)
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -360,6 +371,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            max_num_blocks_per_group=max_num_blocks_per_group,
         )
 
         self.attn_backends, self.attn_groups = init_attn_backend(
@@ -904,6 +916,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
 
+        # Update accepted token counts on GPU for next step's GDN metadata.
+        if self.is_mamba_hybrid:
+            self.req_states.num_accepted_tokens_gpu[input_batch.idx_mapping] = (
+                num_sampled
+            )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1007,6 +1025,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
+                self.req_states,
+                scheduler_output.scheduled_spec_decode_tokens,
             )
 
         inputs_embeds = None

@@ -66,6 +66,8 @@ class ModelState(ABC):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        req_states: RequestState | None = None,
+        scheduled_spec_decode_tokens: dict[str, list[int]] | None = None,
         for_capture: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError
