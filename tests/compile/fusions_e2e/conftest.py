@@ -6,6 +6,7 @@ import pytest
 import regex as re
 
 from vllm import LLM, SamplingParams
+from vllm.compilation.passes.vllm_inductor_pass import VllmPatternMatcherPass
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
@@ -215,6 +216,15 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"{tp_size * (num_ranges_activated - 1)} large-range "
                     f"entries (SP took precedence), found: {log_matches}"
                 )
+            elif match_name == "attn_quant_fusion_pass":
+                # TODO: Remove log counting in unit tests
+                # once all matchers implement VllmFusionPatternMatcherPass
+                expected_matches_list = [expected_matches] * n_expected
+                assert (
+                    expected_matches_list
+                    == VllmPatternMatcherPass.match_table[match_name]
+                )
+
             else:
                 expected_matches_list = [expected_matches] * n_expected
                 assert sorted(log_matches) == expected_matches_list, (
