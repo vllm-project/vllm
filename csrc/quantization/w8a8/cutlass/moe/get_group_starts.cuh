@@ -21,11 +21,19 @@ __global__ void get_group_gemm_starts(
 
   int64_t expert_offset = expert_offsets[expert_id];
 
-  a_offsets[expert_id] = a_base_as_int + expert_offset * k;
+  // expert_offsets is a view of expert_first_token_offset[:-1], so
+  // expert_offsets[num_experts] (one past the view) is total_tokens.
+  // For zero-token experts at the end, expert_offset == total_tokens which
+  // produces  one-past-the-end pointers. Use offset 0 instead so TMA
+  // descriptors always reference valid memory.
+  int64_t num_tokens = expert_offsets[blockDim.x];
+  int64_t safe_offset = (expert_offset >= num_tokens) ? 0 : expert_offset;
+
+  a_offsets[expert_id] = a_base_as_int + safe_offset * k;
   b_offsets[expert_id] = b_base_as_int + expert_id * k * n;
-  out_offsets[expert_id] = out_base_as_int + expert_offset * n;
+  out_offsets[expert_id] = out_base_as_int + safe_offset * n;
   a_scales_offsets[expert_id] =
-      a_scales_base_as_int + (per_act_token ? expert_offset : 0);
+      a_scales_base_as_int + (per_act_token ? safe_offset : 0);
   b_scales_offsets[expert_id] =
       b_scales_base_as_int + (per_out_ch ? n * expert_id : expert_id);
 }
