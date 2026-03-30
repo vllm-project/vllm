@@ -126,6 +126,20 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Retention priority (0=evict first, 100=evict last, None=use LRU).
+    # Set by the orchestrator via retention directives.
+    priority: int | None = None
+    # Timestamp after which priority expires (reverts to None).
+    # None means priority persists until explicit release.
+    priority_expiry: float | None = None
+    # Opaque scope identifier for the directive owner. Only the scope
+    # that set the priority can downgrade or clear it; other scopes
+    # can only escalate (set a higher priority).
+    priority_scope: str | None = None
+    # Timestamp when the block was last freed (for tie-breaking in the
+    # priority eviction queue).
+    last_freed_time: float = 0.0
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
@@ -140,6 +154,9 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
+        self.priority = None
+        self.priority_expiry = None
+        self.priority_scope = None
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
