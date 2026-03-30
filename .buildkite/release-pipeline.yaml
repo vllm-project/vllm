@@ -200,6 +200,7 @@ steps:
         depends_on:
           - block-cpu-release-image-build
           - input-release-version
+        id: build-release-image-x86-cpu
         agents:
           queue: cpu_queue_release
         commands:
@@ -215,9 +216,10 @@ steps:
         depends_on: ~
 
       - label: "Build release image - arm64 - CPU"
-        depends_on: 
+        depends_on:
           - block-arm64-cpu-release-image-build
           - input-release-version
+        id: build-release-image-arm64-cpu
         agents:
           queue: arm64_cpu_queue_release
         commands:
@@ -287,6 +289,31 @@ steps:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu130-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu130-ubuntu2404 --amend"
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu130-ubuntu2404"
+
+      - block: "Confirm publishing release images to DockerHub"
+        key: block-publish-release-images-dockerhub
+        depends_on:
+          - create-multi-arch-manifest
+          - create-multi-arch-manifest-cuda-13-0
+          - build-release-image-x86-cpu
+          - build-release-image-arm64-cpu
+          - build-rocm-release-image
+
+      - label: "Publish release images to DockerHub"
+        key: publish-release-images-dockerhub
+        depends_on:
+          - block-publish-release-images-dockerhub
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/push-release-builds.sh"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
 
       - label: "Publish nightly multi-arch image to DockerHub"
         depends_on:
