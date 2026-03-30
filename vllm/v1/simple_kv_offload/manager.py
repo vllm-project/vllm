@@ -24,7 +24,10 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+    SimpleCPUOffloadWorkerMetadata,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -144,6 +147,11 @@ class SimpleCPUOffloadScheduler:
         # Event counters
         self._load_event_counter: int = 0
         self._store_event_counter: int = 0
+
+        # For TP/PP: track partial store completions across steps.
+        # Events must be reported by all world_size workers before considered complete.
+        self._expected_worker_count = vllm_config.parallel_config.world_size
+        self._store_event_pending_counts: dict[int, int] = {}
 
     @staticmethod
     def _derive_cpu_config(
@@ -570,55 +578,46 @@ class SimpleCPUOffloadScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Handle async transfer completions from worker.
 
-        The worker treats load and store differently:
-        - For load which blocks are tightly coupled with requests,
-                the worker reports finished_recving with the request ID.
-        - For store which blocks are not tightly coupled with requests,
-                the worker reports finished_sending with the event index,
-                and the scheduler should update request metadata accordingly.
-
-        The connector emits event-index sentinels (__load_done_N, __store_done_N).
-        We translate those back to req_ids using our inverse maps, process completions,
-        and mutate finished_recving with real req_ids for the scheduler.
+        Load completions arrive via finished_recving (real req_ids).
+        Store completions arrive via kv_connector_worker_meta as
+        per-event worker counts. We accumulate across steps and process
+        a store event only when all workers have reported completion.
         """
-        if (
-            not connector_output.finished_recving
-            and not connector_output.finished_sending
-        ):
-            return
-
         # --- Load completions ---
-        # Unlike stores, a request has at most one load event, so completion means done
         for req_id in list(connector_output.finished_recving or []):
             self._cleanup_load_request(req_id)
 
         # --- Store completions ---
-        for sentinel in connector_output.finished_sending or []:
-            event_idx = int(sentinel[len("__store_done_") :])
+        meta = connector_output.kv_connector_worker_meta
+        if not isinstance(meta, SimpleCPUOffloadWorkerMetadata):
+            return
+        for event_idx, count in meta.completed_store_events.items():
+            total = self._store_event_pending_counts.get(event_idx, 0) + count
+            if total >= self._expected_worker_count:
+                self._store_event_pending_counts.pop(event_idx, None)
+                self._process_store_event(event_idx)
+            else:
+                self._store_event_pending_counts[event_idx] = total
 
-            # Both lazy and eager: process event-level blocks
-            transfer = self._store_event_to_blocks.pop(event_idx)
-            self._process_store_completion(
-                transfer.gpu_block_ids, transfer.cpu_block_ids
-            )
-            logger.debug(
-                "Store event %d completed: cached %d blocks to CPU",
-                event_idx,
-                len(transfer.cpu_block_ids),
-            )
+    def _process_store_event(self, event_idx: int) -> None:
+        """Process a fully-completed store event."""
+        transfer = self._store_event_to_blocks.pop(event_idx)
+        self._process_store_completion(transfer.gpu_block_ids, transfer.cpu_block_ids)
+        logger.debug(
+            "Store event %d completed: cached %d blocks to CPU",
+            event_idx,
+            len(transfer.cpu_block_ids),
+        )
 
-            # Eager only: update per-req state
-            if not self._lazy_mode:
-                for req_id in self._store_event_to_reqs.pop(event_idx, []):
-                    state = self._reqs_to_store.get(req_id)
-                    if state is None:
-                        continue
-                    state.store_events.discard(event_idx)
-                    if state.finished and not state.store_events:
-                        self._cleanup_store_request(req_id)
-
-        # Scheduler doesn't need finished_sending since we protect blocks with ref_cnt.
-        connector_output.finished_sending = None
+        # Eager only: update per-req state
+        if not self._lazy_mode:
+            for req_id in self._store_event_to_reqs.pop(event_idx, []):
+                state = self._reqs_to_store.get(req_id)
+                if state is None:
+                    continue
+                state.store_events.discard(event_idx)
+                if state.finished and not state.store_events:
+                    self._cleanup_store_request(req_id)
 
     def _process_store_completion(
         self, gpu_block_ids: list[int], cpu_block_ids: list[int]

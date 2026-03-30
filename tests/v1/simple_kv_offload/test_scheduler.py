@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
+from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -267,8 +268,10 @@ def simulate_store_completion(
 ) -> None:
     """Simulate worker reporting a store event completion."""
     output = KVConnectorOutput(
-        finished_sending={f"__store_done_{event_idx}"},
         finished_recving=set(),
+        kv_connector_worker_meta=SimpleCPUOffloadWorkerMetadata(
+            completed_store_events={event_idx: scheduler._expected_worker_count},
+        ),
     )
     scheduler.update_connector_output(output)
 

@@ -158,6 +158,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.worker_handler.get_finished(finished_req_ids)
         return None, None
 
+    def build_connector_worker_meta(self):
+        if self.worker_handler is not None:
+            return self.worker_handler.build_connector_worker_meta()
+        return None
+
     # --- Scheduler-side methods ---
 
     # NOTE: New API only for SimpleCPUOffloadConnector.

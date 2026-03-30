@@ -11,7 +11,10 @@ from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
-from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+    SimpleCPUOffloadWorkerMetadata,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -57,6 +60,8 @@ class SimpleCPUOffloadWorker:
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
+        # Completed store events to report via build_connector_worker_meta
+        self._completed_store_events: dict[int, int] = {}
 
     def register_kv_caches(
         self,
@@ -207,8 +212,7 @@ class SimpleCPUOffloadWorker:
 
         Returns:
             tuple of (finished_sending, finished_recving).
-            - finished_sending: ``__store_done_<idx>`` sentinels for
-                completed store events.
+            - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
         """
         # (1) Submit transfers
@@ -235,7 +239,6 @@ class SimpleCPUOffloadWorker:
 
         # (2) Track completed transfer events
         finished_recving: set[str] = set()
-        finished_sending: set[str] = set()
 
         if self._pending_load_event_indices:
             load_wm = self._poll_stream_events(is_store=False)
@@ -251,9 +254,19 @@ class SimpleCPUOffloadWorker:
             store_wm = self._poll_stream_events(is_store=True)
             for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
                 self._pending_store_event_indices.discard(j)
-                finished_sending.add(f"__store_done_{j}")
+                self._completed_store_events[j] = 1
 
-        return finished_sending, finished_recving
+        return None, finished_recving or None
+
+    def build_connector_worker_meta(self) -> SimpleCPUOffloadWorkerMetadata | None:
+        """Return completed store events since the last call."""
+        if not self._completed_store_events:
+            return None
+        meta = SimpleCPUOffloadWorkerMetadata(
+            completed_store_events=self._completed_store_events,
+        )
+        self._completed_store_events = {}
+        return meta
 
     def handle_preemptions(
         self, kv_connector_metadata: SimpleCPUOffloadMetadata

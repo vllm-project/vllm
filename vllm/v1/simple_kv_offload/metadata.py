@@ -4,7 +4,10 @@
 
 from dataclasses import dataclass, field
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
+)
 
 INVALID_JOB_ID = -1
 
@@ -33,3 +36,25 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
 
     # Whether any requests were preempted this step and need flush pending transfers.
     need_flush: bool = False
+
+
+@dataclass
+class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
+    """Worker -> Scheduler metadata for completed store events.
+
+    Each worker reports {event_idx: 1} for newly completed stores.
+    ``aggregate()`` sums counts across workers within a step.
+    The scheduler-side manager accumulates across steps and processes
+    a store completion only when count reaches ``world_size``.
+    """
+
+    completed_store_events: dict[int, int]
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        assert isinstance(other, SimpleCPUOffloadWorkerMetadata)
+        merged = dict(self.completed_store_events)
+        for k, v in other.completed_store_events.items():
+            merged[k] = merged.get(k, 0) + v
+        return SimpleCPUOffloadWorkerMetadata(completed_store_events=merged)
