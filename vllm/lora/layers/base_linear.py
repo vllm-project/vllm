@@ -48,9 +48,16 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        num_tokens = x.size(0) if x.ndim == 2 else x.size(1)
+        # The real function reshapes output back to the original 3D shape
+        # when the input has an extra batch dimension (transformers backend).
+        if x.ndim == 3:
+            return torch.empty(
+                (x.size(0), x.size(1), output_size),
+                device=x.device,
+                dtype=x.dtype,
+            )
         return torch.empty(
-            (num_tokens, output_size),
+            (x.size(0), output_size),
             device=x.device,
             dtype=x.dtype,
         )
@@ -66,7 +73,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: LinearBase):
         super().__init__()
 
-        self._enable_srteam = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        self._enable_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
         # Ensure tp_size and tp_rank consistency with the base_layer.
@@ -79,7 +86,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.n_slices: int
 
     def _init_lora_stream_context(self) -> None:
-        if not self._enable_srteam:
+        if not self._enable_stream:
             return
         vllm_config = get_current_vllm_config()
         self._lora_stream = _get_lora_aux_stream()
@@ -183,7 +190,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        if self._enable_srteam:
+        if self._enable_stream:
             output_size = sum(self.output_slices)
             return torch.ops.vllm.lora_linear_async(
                 self.layer_name, output_size, x, bias
@@ -240,9 +247,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             return self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         def lora_fn() -> torch.Tensor:
+            # Flatten the batch dimension for the transformers backend
+            # (which uses shape (1, seq_len, hidden)), matching _apply_sync.
+            x_2d = x.flatten(0, 1) if x.ndim == 3 else x
             self.punica_wrapper.add_lora_linear(
                 lora_output,
-                x,
+                x_2d,
                 self.lora_a_stacked,
                 self.lora_b_stacked,
                 1.0,

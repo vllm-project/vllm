@@ -111,7 +111,7 @@ class LoRAConfig:
             raise ValueError("Dual CUDA streams are only supported on CUDA platforms.")
         if envs.VLLM_LORA_ENABLE_DUAL_STREAM and self.fully_sharded_loras:
             logger.warning_once(
-                "fully_sharded_loras isn't camptabile with "
+                "fully_sharded_loras isn't compatible with "
                 "VLLM_LORA_ENABLE_DUAL_STREAM, set VLLM_LORA_ENABLE_DUAL_STREAM=False"
             )
             envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
