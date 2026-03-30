@@ -54,16 +54,19 @@ void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
     torch::Tensor const& output_scale_offset_by_experts);
 #endif
 
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
 static bool nvfp4_quant_sm_supported() {
   const int32_t sm = get_sm_version_num();
-#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  #if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
   if (sm >= 100 && sm < 120) return true;
-#endif
-#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
+  #endif
+  #if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
   if (sm >= 120 && sm < 130) return true;
-#endif
+  #endif
   return false;
 }
+#endif
 
 void scaled_fp4_quant_out(torch::Tensor const& input,
                           torch::Tensor const& input_sf,
