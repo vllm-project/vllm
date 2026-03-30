@@ -371,7 +371,10 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
-    if getattr(args, "enable_log_request_prompts", False) and not args.enable_log_requests:
+    if (
+        getattr(args, "enable_log_request_prompts", False)
+        and not args.enable_log_requests
+    ):
         raise TypeError(
             "Error: --enable-log-request-prompts requires --enable-log-requests"
         )
