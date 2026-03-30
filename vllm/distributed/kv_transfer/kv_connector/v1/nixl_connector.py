@@ -3123,7 +3123,7 @@ class NixlConnectorWorker:
             local_ratio - 1]).  Mamba groups are passed through unchanged.
         """
         local_ratio = self._physical_blocks_per_logical_kv_block
-        if local_ratio == 1:
+        if remote_ratio == 1:
             return block_ids
         local_arange = np.arange(local_ratio).reshape(1, -1)
         group_specs = self.kv_cache_config.kv_cache_groups
