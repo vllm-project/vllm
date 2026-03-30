@@ -402,7 +402,12 @@ def chunked_prefill_paged_decode(
         real_block_size = value_cache.shape[3]
         # The standard model directly uses the original block_size.
         # Non-standard 544 uses 32 to accommodate integer division logic.
-        TRITON_BLOCK_SIZE = block_size if is_pow2 else 32
+        # Cap at 128 to avoid exceeding GPU shared memory limits
+        # (e.g. hybrid Mamba models inflate block_size to 2048).
+        # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
+        # via the l_block_idx/internal_offsets addressing logic.
+        MAX_TRITON_BLOCK_SIZE = 128
+        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
         if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()
