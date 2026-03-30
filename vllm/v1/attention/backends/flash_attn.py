@@ -45,6 +45,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -90,6 +91,12 @@ class FlashAttentionBackend(AttentionBackend):
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        if current_platform.is_xpu():
+            return max(default_block_size, 64)
+        return super().get_preferred_block_size(default_block_size)
 
     @staticmethod
     def get_name() -> str:
