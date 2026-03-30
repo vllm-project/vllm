@@ -1,4 +1,5 @@
 mod cli;
+mod logging;
 mod managed_engine;
 
 use std::process::ExitStatus;
@@ -8,20 +9,9 @@ use clap::Parser;
 use futures::FutureExt as _;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
 use crate::managed_engine::{ManagedEngineHandle, allocate_handshake_port};
-
-/// Install one process-wide tracing subscriber for the CLI binary.
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-    let _ = tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
-        .with_env_filter(filter)
-        .try_init();
-}
 
 /// Reason that caused a managed `serve` session to stop.
 #[derive(Debug)]
@@ -41,9 +31,10 @@ async fn ctrl_c() {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    init_tracing();
+    let cli = Cli::parse();
+    logging::init_tracing();
 
-    match Cli::parse().command {
+    match cli.command {
         Command::Frontend(args) => vllm_openai_server::serve(args.into_config(), ctrl_c()).await,
         Command::Serve(args) => {
             let handshake_port = match args.handshake_port {
