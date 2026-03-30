@@ -47,7 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -184,7 +184,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
             return
 
         weight = ModelWeightParameter(
-            data=torch.empty_like(layer.weight, device=layer._load_device),
+            data=torch.empty_like(layer.weight),
             input_dim=1,
             output_dim=0,
             weight_loader=layer.weight.weight_loader,
@@ -264,28 +264,6 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
             **extra_weight_attrs,
         )
 
-        w13_weight_scale = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size // MXFP8_BLOCK_SIZE,
-                dtype=torch.uint8,
-            ),
-            requires_grad=False,
-        )
-        w2_weight_scale = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition // MXFP8_BLOCK_SIZE,
-                dtype=torch.uint8,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         layer.weight_block_size = [1, MXFP8_BLOCK_SIZE]
 
     def _quantize_mxfp8_moe_weight(
@@ -308,29 +286,9 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        w13_weight = torch.nn.Parameter(
-            torch.empty_like(layer.w13_weight, device=layer._load_device),
-            requires_grad=False,
-        )
-        set_weight_attrs(w13_weight, {"weight_loader": layer.w13_weight.weight_loader})
-        _copy_missing_attrs(layer.w13_weight, w13_weight)
-        layer.register_parameter("w13_weight", w13_weight)
-        initialize_single_dummy_weight(layer.w13_weight)
-
-        w2_weight = torch.nn.Parameter(
-            torch.empty_like(layer.w2_weight, device=layer._load_device),
-            requires_grad=False,
-        )
-        set_weight_attrs(w2_weight, {"weight_loader": layer.w2_weight.weight_loader})
-        _copy_missing_attrs(layer.w2_weight, w2_weight)
-        layer.register_parameter("w2_weight", w2_weight)
-        initialize_single_dummy_weight(layer.w2_weight)
-
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
