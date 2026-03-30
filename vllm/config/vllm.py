@@ -661,6 +661,7 @@ class VllmConfig:
             extra: dict = {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             if self.cache_config.kv_offloading_disk_path is not None:
                 extra["disk_path"] = self.cache_config.kv_offloading_disk_path
+                extra["spec_name"] = "TieredOffloadingSpec"
             self.kv_transfer_config.kv_connector_extra_config.update(extra)
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
