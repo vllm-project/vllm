@@ -13,7 +13,7 @@ from vllm.v1.spec_decode.utils import (
 
 # Skip if no CUDA - Triton kernel requires GPU
 pytest.importorskip("triton")
-if not current_platform.is_cuda() and not current_platform.is_xpu():
+if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
     pytest.skip("CUDA/XPU required for EAGLE kernel tests", allow_module_level=True)
 
 
