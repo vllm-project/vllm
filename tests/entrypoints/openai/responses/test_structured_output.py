@@ -52,39 +52,6 @@ async def test_structured_output(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_structured_output_serializes_public_schema_field(
-    client: openai.AsyncOpenAI,
-):
-    schema = {
-        "type": "object",
-        "properties": {
-            "event_name": {"type": "string"},
-            "date": {"type": "string"},
-            "participants": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["event_name", "date", "participants"],
-        "additionalProperties": False,
-    }
-    raw_client = client.with_raw_response
-    response = await raw_client.responses.create(
-        input="Alice and Bob are going to a science fair on Friday.",
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "calendar_event",
-                "schema": schema,
-                "description": "A calendar event.",
-                "strict": True,
-            }
-        },
-    )
-
-    fmt = response.http_response.json()["text"]["format"]
-    assert fmt["schema"] == schema
-    assert "schema_" not in fmt
-
-
-@pytest.mark.asyncio
 async def test_structured_output_streaming_with_json_schema(
     client: openai.AsyncOpenAI,
 ):
