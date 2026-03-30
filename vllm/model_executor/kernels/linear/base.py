@@ -485,9 +485,15 @@ class DynamicMMLinearKernel(
         # won't be able to be captured by torch
         # compile
 
+        def true_fn(x: torch.Tensor) -> torch.Tensor:
+            return self.base.apply_weights(layer, x, bias, **kwargs)
+
+        def false_fn(x: torch.Tensor) -> torch.Tensor:
+            return self.fallback.apply_weights(layer, x, bias, **kwargs)
+
         return torch.cond(
             self.predicate(layer, x, bias),
-            self.base.apply_weights,
-            self.fallback.apply_weights,
-            (layer, x, bias),
+            true_fn,
+            false_fn,
+            (x,),
         )
