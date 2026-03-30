@@ -3,7 +3,7 @@
 
 vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 7.0 and ROCm 7.2.1.
 
-#### Release Wheels
+Prebuilt Wheels
 
 | ROCm Variant | Python Version | ROCm Version | glibc Requirement | Supported Versions |
 | ------------ | -------------- | ------------ | ----------------- | ------------------ |
