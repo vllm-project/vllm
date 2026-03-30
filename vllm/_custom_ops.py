@@ -56,6 +56,11 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
+        # Use torch.zeros (not torch.empty) so padding scales are 0.
+        # The TRT-LLM mm_fp4 kernel with use_8x4_sf_layout reads padding
+        # rows' scales and mixes them into real rows' output. Zero scales
+        # neutralize this: 0 * data = 0.
+        # See: https://github.com/flashinfer-ai/flashinfer/issues/2861
         return torch.zeros(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
@@ -1796,6 +1801,7 @@ def scaled_fp4_experts_quant(
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
+    # See create_fp4_scale_tensor for why we use torch.zeros here.
     output_scales = torch.zeros(
         MAX_TOKENS_PER_EXPERT * topk,
         padded_k,
@@ -1861,6 +1867,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
+    # See create_fp4_scale_tensor for why we use torch.zeros here.
     output_scales = torch.zeros(
         MAX_TOKENS_PER_EXPERT * topk,
         padded_k,
