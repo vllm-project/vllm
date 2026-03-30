@@ -68,7 +68,7 @@ async def test_online_audio_in_video(
         chat_completion = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            max_tokens=16,
+            max_tokens=8,
             temperature=0.0,
             extra_body={
                 "mm_processor_kwargs": {
@@ -122,7 +122,7 @@ async def test_online_audio_in_video_multi_videos(
         chat_completion = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            max_tokens=16,
+            max_tokens=8,
             temperature=0.0,
             extra_body={
                 "mm_processor_kwargs": {
