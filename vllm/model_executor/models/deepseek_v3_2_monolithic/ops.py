@@ -624,11 +624,17 @@ def _fused_q_kernel(
     index_weights_out_stride,
 ):
     tok_idx = tl.program_id(1)
-    pos = tl.load(pos_ptr + tok_idx)
     head_idx = tl.program_id(2)
 
     if tl.program_id(0) == 0:
+        # Each program processes two Q heads.
+        # Since grid[2] == NUM_INDEX_Q_HEADS == 2 * TOTAL_NUM_Q_HEADS, this ensures
+        # that all local Q heads are handled, even TP=1.
+        if 2 * head_idx >= NUM_Q_HEADS:
+            return
+
         # Q RoPE
+        pos = tl.load(pos_ptr + tok_idx)
         cos, sin = _cos_sin_cache_kernel(
             q_cos_sin_ptr,
             q_cos_sin_stride,
@@ -636,11 +642,6 @@ def _fused_q_kernel(
             Q_HALF_ROT_DIM,
         )
 
-        # Each program processes two Q heads.
-        # Since grid[2] == NUM_INDEX_Q_HEADS == 2 * TOTAL_NUM_Q_HEADS, this ensures
-        # that all local Q heads are handled, even TP=1.
-        if 2 * head_idx >= NUM_Q_HEADS:
-            return
         _rope_kernel(
             q_ptr + tok_idx * q_stride0 + head_idx * 2 * q_stride1,
             q_stride1,
@@ -654,6 +655,7 @@ def _fused_q_kernel(
         return
     elif tl.program_id(0) == 1:
         # Index Q RoPE
+        pos = tl.load(pos_ptr + tok_idx)
         cos, sin = _cos_sin_cache_kernel(
             index_q_cos_sin_ptr,
             index_q_cos_sin_stride,
