@@ -160,6 +160,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
@@ -515,6 +516,7 @@ class GPUModelRunner(
                 | NgramProposerGPU
                 | SuffixDecodingProposer
                 | EagleProposer
+                | DFlashProposer
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
@@ -546,6 +548,9 @@ class GPUModelRunner(
                 self._ngram_pinned_val_buf = torch.zeros(
                     self.max_num_reqs, dtype=torch.int32, pin_memory=True
                 )
+            elif self.speculative_config.use_dflash():
+                self.drafter = DFlashProposer(self.vllm_config, self.device, self)
+                self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
@@ -2289,7 +2294,7 @@ class GPUModelRunner(
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
+                if isinstance(self.drafter, (EagleProposer, DFlashProposer)):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -4202,7 +4207,10 @@ class GPUModelRunner(
                 # as inputs, and does not need to wait for bookkeeping to finish.
                 assert isinstance(
                     self.drafter,
-                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                    EagleProposer
+                    | DFlashProposer
+                    | DraftModelProposer
+                    | ExtractHiddenStatesProposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -4589,8 +4597,14 @@ class GPUModelRunner(
                 next_token_ids, valid_sampled_tokens_count
             )
 
-        elif spec_config.use_eagle() or spec_config.uses_draft_model():
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+        elif (
+            spec_config.use_eagle()
+            or spec_config.use_dflash()
+            or spec_config.uses_draft_model()
+        ):
+            assert isinstance(
+                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+            )
 
             if spec_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -4889,10 +4903,13 @@ class GPUModelRunner(
             return None
 
         hf_config = self.speculative_config.draft_model_config.hf_config
-        if not hasattr(hf_config, "eagle_aux_hidden_state_layer_ids"):
-            return None
 
-        layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
+        layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
+        if not layer_ids:
+            dflash_config = getattr(hf_config, "dflash_config", None)
+            if dflash_config and isinstance(dflash_config, dict):
+                layer_ids = dflash_config.get("target_layer_ids")
+
         if layer_ids and isinstance(layer_ids, (list, tuple)):
             return tuple(layer_ids)
 
@@ -5479,7 +5496,10 @@ class GPUModelRunner(
             ):
                 assert isinstance(
                     self.drafter,
-                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                    EagleProposer
+                    | DFlashProposer
+                    | DraftModelProposer
+                    | ExtractHiddenStatesProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -6236,7 +6256,9 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(
+                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+            )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
     def _check_and_update_cudagraph_mode(
@@ -6420,7 +6442,10 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer)
+            assert isinstance(
+                self.drafter,
+                EagleProposer | DFlashProposer | ExtractHiddenStatesProposer,
+            )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -6653,12 +6678,12 @@ class GPUModelRunner(
                     raise NotImplementedError
 
         if has_attn and has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
+            self._update_hybrid_attention_mamba_layout(kv_caches, kernel_block_sizes)
 
         return kv_caches
 
     def _update_hybrid_attention_mamba_layout(
-        self, kv_caches: dict[str, torch.Tensor]
+        self, kv_caches: dict[str, torch.Tensor], kernel_block_sizes: list[int]
     ) -> None:
         """
         Update the layout of attention layers from (2, num_blocks, ...) to
@@ -6666,23 +6691,30 @@ class GPUModelRunner(
 
         Args:
             kv_caches: The KV cache buffer of each layer.
+            kernel_block_sizes: The kernel block sizes for each KV cache group.
         """
 
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                continue
+            block_dim = group.backend.get_kv_cache_block_dim(
+                kernel_block_sizes[group.kv_cache_group_id],
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=self.cache_config.cache_dtype,
+            )
+            # block_dim: 0 means (num_blocks, 2, ...); 1 means (2, num_blocks, ...).
+            if block_dim == 0:
+                continue
+            assert block_dim == 1
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
-                if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
-                    assert kv_cache.shape[1] != 2, (
-                        "Fail to determine whether the layout is "
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                        f"a tensor of shape {kv_cache.shape}"
-                    )
-                    hidden_size = kv_cache.shape[2:].numel()
-                    kv_cache.as_strided_(
-                        size=kv_cache.shape,
-                        stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                    )
+                hidden_size = kv_cache.shape[2:].numel()
+                kv_cache.as_strided_(
+                    size=kv_cache.shape,
+                    stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
+                )
 
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
