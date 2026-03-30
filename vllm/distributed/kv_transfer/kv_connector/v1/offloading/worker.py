@@ -68,19 +68,6 @@ class OffloadingConnectorWorker:
         for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
             self.worker.register_handler(src_cls, dst_cls, handler)
 
-        # Initialize disk I/O worker if tiered offloading is enabled
-        self._disk_io: "DiskIOWorker | None" = None
-        from vllm.v1.kv_offload.disk.spec import TieredOffloadingSpec
-        if isinstance(self.spec, TieredOffloadingSpec):
-            from vllm.v1.kv_offload.worker.cpu_disk import DiskIOWorker
-            disk_cfg = self.spec.get_disk_worker_config()
-            cpu_tensors = self.spec._get_cpu_tensors()
-            if cpu_tensors:
-                self._disk_io = DiskIOWorker(
-                    cpu_tensors=cpu_tensors,
-                    **disk_cfg,
-                )
-
     def register_kv_caches(
         self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
     ):
@@ -321,11 +308,6 @@ class OffloadingConnectorWorker:
                 self.worker.wait(job_ids)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
-        # Execute any pending disk→CPU prefetches BEFORE GPU transfers.
-        # This ensures blocks promoted from disk are in CPU RAM
-        # before swap_blocks tries to load them to GPU.
-        self._execute_disk_reads()
-
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
@@ -338,10 +320,6 @@ class OffloadingConnectorWorker:
             self._load_job[req_id] = job_id
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
-
-        # Queue disk writes for blocks that were just stored to CPU.
-        # These are fire-and-forget (write-through).
-        self._execute_disk_writes()
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
@@ -405,38 +383,6 @@ class OffloadingConnectorWorker:
                 del self._store_jobs[req_id]
 
         return finished_sending, finished_recving
-
-    def _execute_disk_reads(self) -> None:
-        """Execute pending Disk→CPU reads (blocking — GPU needs the data)."""
-        if self._disk_io is None:
-            return
-        from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
-        mgr = self.spec.get_manager()
-        if not isinstance(mgr, TieredOffloadingManager):
-            return
-        reads = mgr.take_pending_disk_reads()
-        if not reads:
-            return
-        cpu_bids = [r[1] for r in reads]
-        disk_bids = [r[2] for r in reads]
-        self._disk_io.submit_reads(cpu_bids, disk_bids)
-
-    def _execute_disk_writes(self) -> None:
-        """Queue background CPU→Disk writes (fire-and-forget)."""
-        if self._disk_io is None:
-            return
-        from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
-        mgr = self.spec.get_manager()
-        if not isinstance(mgr, TieredOffloadingManager):
-            return
-        writes = mgr.take_pending_disk_writes()
-        if not writes:
-            return
-        cpu_bids = [w[1] for w in writes]
-        disk_bids = [w[2] for w in writes]
-        self._disk_io.submit_writes(cpu_bids, disk_bids)
-        # Also drain any completed writes to free futures
-        self._disk_io.drain_completed_writes()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """

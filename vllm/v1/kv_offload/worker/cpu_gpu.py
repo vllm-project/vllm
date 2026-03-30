@@ -29,6 +29,8 @@ class Transfer:
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
+    # Destination block IDs for write-through to disk (GPU→CPU only)
+    dst_block_ids: np.ndarray | None = None
 
 
 def expand_block_ids(
@@ -150,6 +152,11 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
+        # Callback for write-through: called with CPU block IDs after
+        # GPU→CPU transfer completes. Set by CpuGpuOffloadingHandlers.
+        self._on_write_complete: (
+            "Callable[[np.ndarray], None] | None"
+        ) = None
 
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
@@ -213,6 +220,10 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
+        # Track CPU destination block IDs for write-through to disk
+        cpu_dst_ids = (
+            src_to_dst[:, 1].copy() if self.gpu_to_cpu else None
+        )
         self._transfers.append(
             Transfer(
                 job_id=job_id,
@@ -220,6 +231,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 start_event=start_event,
                 end_event=end_event,
                 num_bytes=dst_sub_block_count * self.group_block_size_in_bytes[0],
+                dst_block_ids=cpu_dst_ids,
             )
         )
 
@@ -240,6 +252,13 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 transfer_time=transfer_time,
                 transfer_type=self.transfer_type,
             )
+
+            # Write-through: after GPU→CPU completes, fire disk write
+            if (
+                transfer.dst_block_ids is not None
+                and self._on_write_complete is not None
+            ):
+                self._on_write_complete(transfer.dst_block_ids)
 
             results.append(result)
             self._stream_pool.append(transfer.stream)
@@ -328,3 +347,30 @@ class CpuGpuOffloadingHandlers:
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
         )
+
+        # Disk write-through: if disk_path is set and NOT using mmap
+        # (mmap already goes to disk via OS), create a DiskIOWorker
+        # for explicit background writes after GPU→CPU completes.
+        self._disk_io: "DiskIOWorker | None" = None
+        if disk_path and not use_mmap:
+            from vllm.v1.kv_offload.worker.cpu_disk import DiskIOWorker
+            num_disk_blocks = num_cpu_blocks * 3  # default 3x CPU
+            self._disk_io = DiskIOWorker(
+                cpu_tensors=cpu_tensors,
+                disk_path=disk_path,
+                num_disk_blocks=num_disk_blocks,
+            )
+            # Wire callback: after GPU→CPU transfer completes,
+            # write those CPU blocks to disk in background
+            self.gpu_to_cpu_handler._on_write_complete = (
+                self._disk_write_through
+            )
+
+    def _disk_write_through(self, cpu_block_ids: "np.ndarray") -> None:
+        """Background write-through: copy completed CPU blocks to disk."""
+        if self._disk_io is None:
+            return
+        # Use same block IDs for disk (1:1 mapping CPU→disk)
+        block_list = cpu_block_ids.tolist()
+        self._disk_io.submit_writes(block_list, block_list)
+        self._disk_io.drain_completed_writes()

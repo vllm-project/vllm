@@ -126,11 +126,12 @@ class TieredOffloadingSpec(OffloadingSpec):
                     "Tiered offloading requires CUDA-alike GPUs"
                 )
 
-            # GPU↔CPU handlers (pinned memory, fast)
+            # GPU↔CPU handlers (pinned memory, fast) + disk write-through
             self._handlers = CpuGpuOffloadingHandlers(
                 kv_caches=kv_caches,
                 block_size_factor=self.block_size_factor,
                 num_cpu_blocks=self.num_cpu_blocks,
+                disk_path=self.disk_path,
             )
 
             # Stash CPU tensors for the disk worker to access
