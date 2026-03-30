@@ -14,8 +14,6 @@ from typing import Any
 
 import pytest
 import torch
-
-from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
     EncoderCudaGraphManager,
 )
@@ -24,6 +22,8 @@ from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers,
 )
+
+from vllm.platforms import current_platform
 
 # ---------------------------------------------------------------------------
 # Helpers
