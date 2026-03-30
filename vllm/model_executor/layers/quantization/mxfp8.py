@@ -277,17 +277,22 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
         self, weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Batch quantization: bf16/fp16 weights -> MXFP8 (fp8 + uint8 scales)."""
-        num_batches = weight.size(0)
-        w_quant = []
-        w_scales = []
-        for i in range(num_batches):
-            mx_fp8_quant, mx_fp8_scale = mxfp8_e4m3_quantize(
+        E = weight.size(0)
+        first_q, first_s = mxfp8_e4m3_quantize(weight[0], is_sf_swizzled_layout=False)
+        w_quant = torch.empty(
+            (E, *first_q.shape), dtype=first_q.dtype, device=weight.device
+        )
+        w_scales = torch.empty(
+            (E, *first_s.shape), dtype=first_s.dtype, device=weight.device
+        )
+        w_quant[0] = first_q
+        w_scales[0] = first_s
+        for i in range(1, E):
+            w_quant[i], w_scales[i] = mxfp8_e4m3_quantize(
                 weight[i], is_sf_swizzled_layout=False
             )
-            w_quant.append(mx_fp8_quant)
-            w_scales.append(mx_fp8_scale)
 
-        return torch.stack(w_quant), torch.stack(w_scales)
+        return w_quant, w_scales
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

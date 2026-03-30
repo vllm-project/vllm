@@ -449,6 +449,89 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
         replace_parameter(layer, "bias", bias)
 
 
+def prepare_mxfp8_moe_layer_for_marlin(
+    layer: torch.nn.Module,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Repack MXFP8 MoE weights and scales into Marlin kernel format.
+
+    Args:
+        layer: MoE layer (used to read params_dtype and attach workspace).
+        w13: [E, 2*N, K] float8_e4m3fn weights.
+        w2:  [E, K, N] float8_e4m3fn weights.
+        w13_scale: [E, 2*N, K//32] uint8 e8m0 scales.
+        w2_scale:  [E, K, N//32] uint8 e8m0 scales.
+
+    Returns:
+        (w13, w2, w13_scale, w2_scale) in Marlin format.
+    """
+    group_size = 32
+    e = w13.shape[0]
+    w13_n = w13.shape[1]
+    k = w13.shape[2]
+    n = w2.shape[2]
+
+    device = w13.device
+    param_dtype = torch.get_default_dtype()
+    perm = torch.empty(0, dtype=torch.int, device=device)
+
+    layer.workspace = marlin_make_workspace_new(device, 4)
+
+    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
+        if "w13" in name:
+            size_n, size_k = w13_n, k
+        else:
+            size_n, size_k = k, n
+
+        assert weight.shape == (e, size_n, size_k)
+
+        tensor_list = []
+        for i in range(e):
+            qweight = pack_fp8_to_int32(weight[i], size_k_first=False)
+            qweight = qweight.T.contiguous()
+            marlin_qweight = ops.gptq_marlin_repack(
+                b_q_weight=qweight,
+                perm=perm,
+                size_k=size_k,
+                size_n=size_n,
+                num_bits=8,
+            )
+            tensor_list.append(marlin_qweight)
+        return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+
+    w13 = repack_weight(w13, "w13")
+    w2 = repack_weight(w2, "w2")
+
+    def permute_scales(scales: torch.Tensor, name: str) -> torch.Tensor:
+        if "w13" in name:
+            size_n, size_k = w13_n, k
+        else:
+            size_n, size_k = k, n
+
+        tensor_list = []
+        for i in range(e):
+            s = scales[i][:size_n, : size_k // group_size].contiguous()
+            s = s.view(torch.float8_e8m0fnu).to(param_dtype)
+            s = s.T.contiguous()
+            marlin_s = marlin_permute_scales(
+                s=s,
+                size_k=size_k,
+                size_n=size_n,
+                group_size=group_size,
+            )
+            marlin_s = mxfp8_marlin_process_scales(marlin_s)
+            tensor_list.append(marlin_s)
+        return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+
+    w13_scale = permute_scales(w13_scale, "w13")
+    w2_scale = permute_scales(w2_scale, "w2")
+
+    return w13, w2, w13_scale, w2_scale
+
+
 def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     if is_a_8bit:

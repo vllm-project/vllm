@@ -343,6 +343,8 @@ __global__ void Marlin(
   if constexpr (b_type == vllm::kFE2M1f) {
     static_assert(s_type == vllm::kFE4M3fn && group_blocks == 1 ||
                   s_type == vllm::kFE8M0fnu && group_blocks == 2);
+  } else if constexpr (b_type == vllm::kFE4M3fn && s_type == vllm::kFE8M0fnu) {
+    static_assert(group_blocks == 2);
   } else if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
     static_assert(s_type == vllm::kBFloat16);
   } else if constexpr (std::is_same<scalar_t, half>::value) {

@@ -71,17 +71,71 @@ def swizzle_mxfp8_scale(sf: torch.Tensor, M: int, K: int) -> torch.Tensor:
     return sf_swizzled.contiguous().view(-1)
 
 
+def _mxfp8_e4m3_quantize_torch(
+    x: torch.Tensor,
+    is_sf_swizzled_layout: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Naive MXFP8 quantization.
+    For each block of 32 elements along the last dimension, compute a
+    shared e8m0 scale (the biased exponent of the block-wise amax)
+    and quantize each element to float8_e4m3fn.
+
+    Returns (quantized_values [same shape, fp8], scales uint8).
+    Scale shape depends on is_sf_swizzled_layout:
+      False -> [..., K//32]  (row-major 2D)
+      True  -> [flat swizzled 1D]
+    """
+    assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+    orig_shape = x.shape
+    num_blocks = x.shape[-1] // MXFP8_BLOCK_SIZE
+
+    x_fp32 = x.to(torch.float32)
+    x_blocked = x_fp32.view(*orig_shape[:-1], num_blocks, MXFP8_BLOCK_SIZE)
+
+    amax = x_blocked.abs().amax(dim=-1)
+    amax = amax.clamp(min=torch.finfo(torch.float32).tiny)
+    scale_biased = torch.floor(torch.log2(amax)) + 127.0
+    scale_biased = scale_biased.clamp(0, 254)
+    scales_uint8 = scale_biased.to(torch.uint8)
+
+    descale = torch.exp2(scale_biased - 127.0)
+    x_scaled = x_blocked / descale.unsqueeze(-1)
+
+    x_fp8 = x_scaled.view(orig_shape).to(MXFP8_VALUE_DTYPE)
+
+    if x.ndim == 2:
+        M, K = x.shape
+        scales_uint8 = scales_uint8.view(M, -1)
+        if is_sf_swizzled_layout:
+            scales_uint8 = swizzle_mxfp8_scale(scales_uint8, M=M, K=K)
+    elif x.ndim == 3:
+        B, M, K = x.shape
+        scales_uint8 = scales_uint8.view(B, M, -1)
+        if is_sf_swizzled_layout:
+            swizzled = []
+            for i in range(B):
+                swizzled.append(swizzle_mxfp8_scale(scales_uint8[i], M=M, K=K))
+            scales_uint8 = torch.cat(swizzled)
+
+    return x_fp8, scales_uint8
+
+
 def _mxfp8_e4m3_quantize_impl(
     x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize
+    from vllm.platforms import current_platform
 
-    x_q, x_scales = flashinfer_mxfp8_quantize(
-        x, is_sf_swizzled_layout=is_sf_swizzled_layout
-    )
-    if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
-        x_scales = x_scales.view(x.size(0), -1)
-    return x_q, x_scales
+    if current_platform.has_device_capability(100):
+        from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize
+
+        x_q, x_scales = flashinfer_mxfp8_quantize(
+            x, is_sf_swizzled_layout=is_sf_swizzled_layout
+        )
+        if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
+            x_scales = x_scales.view(x.size(0), -1)
+        return x_q, x_scales
+
+    return _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout)
 
 
 def mxfp8_e4m3_quantize(

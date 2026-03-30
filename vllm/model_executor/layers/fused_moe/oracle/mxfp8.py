@@ -15,14 +15,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 logger = init_logger(__name__)
 
-_SUPPORTED_BACKENDS: frozenset[Fp8MoeBackend] = frozenset(
-    {
-        Fp8MoeBackend.FLASHINFER_TRTLLM,
-    }
+_SUPPORTED_BACKENDS = (
+    Fp8MoeBackend.FLASHINFER_TRTLLM,
+    Fp8MoeBackend.MARLIN,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
+    "marlin": Fp8MoeBackend.MARLIN,
 }
 
 
