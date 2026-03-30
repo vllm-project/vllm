@@ -17,7 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     WorkerConnectorInitializationData,
-    WorkerConnectorInitializationResponse,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -138,7 +137,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def initialize_worker_connector(
         self,
         initialization_data: WorkerConnectorInitializationData,
-    ) -> WorkerConnectorInitializationResponse:
+    ) -> None:
         """Pass initialization data to the underlying LMCache engine.
 
         Extracts ``model`` from *initialization_data* and forwards it to
@@ -149,7 +148,6 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             self._lmcache_engine, "register_model"
         ):
             self._lmcache_engine.register_model(initialization_data.model)
-        return WorkerConnectorInitializationResponse()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """

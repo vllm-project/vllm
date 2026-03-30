@@ -42,7 +42,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     WorkerConnectorInitializationData,
-    WorkerConnectorInitializationResponse,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
     ENGINE_NAME,
@@ -799,7 +798,7 @@ class LMCacheConnectorV1Impl:
     def initialize_worker_connector(
         self,
         initialization_data: WorkerConnectorInitializationData,
-    ) -> WorkerConnectorInitializationResponse:
+    ) -> None:
         """Register model with LMCache's VLLMModelTracker for CacheBlend.
 
         CacheBlend's blender needs access to model weights for selective
@@ -824,7 +823,6 @@ class LMCacheConnectorV1Impl:
                     "Failed to register model with VLLMModelTracker",
                     exc_info=True,
                 )
-        return WorkerConnectorInitializationResponse()
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:

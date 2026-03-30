@@ -12,9 +12,6 @@ from vllm.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    WorkerConnectorInitializationData,
-)
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
@@ -50,10 +47,7 @@ class KVConnector:
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_caches_dict: dict[str, torch.Tensor],
-        model: torch.nn.Module | None = None,
+        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
@@ -62,11 +56,6 @@ class ActiveKVConnector(KVConnector):
         # (see https://github.com/vllm-project/vllm/pull/27743)
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
-
-        # Pass initialization data (including optional model) to the connector.
-        self.kv_connector.initialize_worker_connector(
-            WorkerConnectorInitializationData(model=model)
-        )
 
         self._disabled = False
 
@@ -135,12 +124,10 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig,
-    kv_caches_dict: dict[str, torch.Tensor],
-    model: torch.nn.Module | None = None,
+    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict, model=model)
+    return ActiveKVConnector(vllm_config, kv_caches_dict)

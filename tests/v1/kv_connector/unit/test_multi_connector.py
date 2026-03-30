@@ -8,13 +8,17 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    WorkerConnectorInitializationData,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
@@ -920,3 +924,27 @@ def test_multi_connector_worker_metadata(mc):
     mc.update_connector_output(kv_connector_output)
     assert_update_connector_output_called(mc)
     assert kv_connector_output.kv_connector_worker_meta == mc_worker_meta_01a_01b
+
+
+def test_initialize_worker_connector_delegates_to_sub_connectors():
+    """MultiConnector.initialize_worker_connector fans out to all
+    sub-connectors and the base class default is a no-op."""
+    # Verify base class no-op
+    base = KVConnectorBase_V1.__new__(KVConnectorBase_V1)
+    data = WorkerConnectorInitializationData(
+        model=MagicMock(spec=torch.nn.Module),
+    )
+    assert base.initialize_worker_connector(data) is None
+
+    # Verify dataclass defaults
+    empty_data = WorkerConnectorInitializationData()
+    assert empty_data.model is None
+
+    # Verify MultiConnector delegates to each sub-connector
+    sub1 = MagicMock()
+    sub2 = MagicMock()
+    mc = MultiConnector.__new__(MultiConnector)
+    mc._connectors = [sub1, sub2]
+    mc.initialize_worker_connector(data)
+    sub1.initialize_worker_connector.assert_called_once_with(data)
+    sub2.initialize_worker_connector.assert_called_once_with(data)

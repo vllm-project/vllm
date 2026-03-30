@@ -94,15 +94,6 @@ class WorkerConnectorInitializationData:
     model: torch.nn.Module | None = field(default=None)
 
 
-@dataclass
-class WorkerConnectorInitializationResponse:
-    """Response from initialize_worker_connector().
-
-    Currently empty; reserved for future use (e.g. reporting which
-    initialization steps were performed).
-    """
-
-
 class SupportsHMA(ABC):
     """
     The class that indicates the corresponding connector supports hybrid memory
@@ -289,7 +280,7 @@ class KVConnectorBase_V1(ABC):
     def initialize_worker_connector(
         self,
         initialization_data: WorkerConnectorInitializationData,
-    ) -> WorkerConnectorInitializationResponse:
+    ) -> None:
         """
         Initialize per-worker connector state after model loading.
 
@@ -303,12 +294,8 @@ class KVConnectorBase_V1(ABC):
                 as the loaded model (``initialization_data.model``).
                 New fields may be added in future versions without breaking
                 existing connectors.
-
-        Returns:
-            WorkerConnectorInitializationResponse (currently empty, reserved
-            for future use).
         """
-        return WorkerConnectorInitializationResponse()
+        return
 
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]

@@ -19,7 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorWorkerMetadata,
     WorkerConnectorInitializationData,
-    WorkerConnectorInitializationResponse,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -224,10 +223,9 @@ class MultiConnector(KVConnectorBase_V1):
     def initialize_worker_connector(
         self,
         initialization_data: WorkerConnectorInitializationData,
-    ) -> WorkerConnectorInitializationResponse:
+    ) -> None:
         for c in self._connectors:
             c.initialize_worker_connector(initialization_data)
-        return WorkerConnectorInitializationResponse()
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the

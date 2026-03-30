@@ -17,7 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     WorkerConnectorInitializationData,
-    WorkerConnectorInitializationResponse,
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -518,11 +517,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     def initialize_worker_connector(
         self,
         initialization_data: WorkerConnectorInitializationData,
-    ) -> WorkerConnectorInitializationResponse:
+    ) -> None:
         """Delegate initialization data to the worker adapter."""
         if hasattr(self.worker_adapter, "initialize_worker_connector"):
             self.worker_adapter.initialize_worker_connector(initialization_data)
-        return WorkerConnectorInitializationResponse()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
