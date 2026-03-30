@@ -870,6 +870,8 @@ def process_eagle_weight(
         model.has_own_lm_head = True
     if "embed_tokens" in name:
         model.has_own_embed_tokens = True
+    if "shared_head" in name:
+        model.has_own_shared_head = True
 
 
 def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:

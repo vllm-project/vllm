@@ -1262,6 +1262,11 @@ class SupportsEagleBase(Protocol):
     A flag that indicates this model has trained its own input embeddings.
     """
 
+    has_own_shared_head: bool = False
+    """
+    A flag that indicates this MTP model has trained its own shared_head.head.
+    """
+
 
 @overload
 def supports_any_eagle(model: type[object]) -> TypeIs[type[SupportsEagleBase]]: ...

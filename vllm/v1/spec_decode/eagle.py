@@ -1444,19 +1444,28 @@ class SpecDecodeBaseProposer:
             # ParallelLMHead inside each MTP layer), not self.model.lm_head.
             # If the checkpoint omits a copy of the lm_head weights at the
             # MTP layer path, shared_head.head stays uninitialised and
-            # produces NaN logits. Always share it explicitly.
-            inner = getattr(self.model, "model", None)
-            layers = getattr(inner, "layers", None) if inner else None
-            if layers is not None:
-                items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
-                for layer in items:
-                    sh = getattr(layer, "shared_head", None)
-                    if sh is not None and hasattr(sh, "head"):
-                        del sh.head
-                        sh.head = target_language_model.lm_head
-                        logger.info(
-                            "Shared target model lm_head with MTP shared_head.head."
-                        )
+            # produces NaN logits. Share it explicitly unless the model has
+            # its own trained shared_head weights (e.g., Step-3.5-Flash).
+            if not getattr(self.model, "has_own_shared_head", False):
+                inner = getattr(self.model, "model", None)
+                layers = getattr(inner, "layers", None) if inner else None
+                if layers is not None:
+                    items = (
+                        layers.values() if isinstance(layers, nn.ModuleDict) else layers
+                    )
+                    for layer in items:
+                        sh = getattr(layer, "shared_head", None)
+                        if sh is not None and hasattr(sh, "head"):
+                            del sh.head
+                            sh.head = target_language_model.lm_head
+                            logger.info(
+                                "Shared target model lm_head with MTP shared_head.head."
+                            )
+            else:
+                logger.info(
+                    "MTP model has its own shared_head weights. "
+                    "Keeping separate from target model lm_head."
+                )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
