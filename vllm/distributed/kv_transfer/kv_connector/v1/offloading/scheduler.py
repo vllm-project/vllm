@@ -9,6 +9,7 @@ from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    DiskPrefetchSpec,
     OffloadingConnectorMetadata,
     ReqId,
 )
@@ -269,10 +270,21 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # Collect disk prefetch requests if using tiered offloading
+        disk_prefetches: list[DiskPrefetchSpec] = []
+        from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
+        if isinstance(self.manager, TieredOffloadingManager):
+            for req in self.manager.take_prefetch_requests():
+                disk_prefetches.append(DiskPrefetchSpec(
+                    cpu_block_ids=req.cpu_block_ids,
+                    disk_block_ids=req.disk_block_ids,
+                ))
+
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
             reqs_to_flush=scheduler_output.preempted_req_ids,
+            disk_prefetches=disk_prefetches,
         )
         self._reqs_to_load = {}
 

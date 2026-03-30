@@ -43,7 +43,7 @@ class TieredOffloadingSpec(OffloadingSpec):
         self.write_threshold = int(
             self.extra_config.get("write_threshold", 1)
         )
-        self.io_threads = int(self.extra_config.get("io_threads", 4))
+        self.io_threads = int(self.extra_config.get("io_threads", 16))
 
         # Compute block counts using same formula as CPUOffloadingSpec
         assert kv_cache_config is not None
