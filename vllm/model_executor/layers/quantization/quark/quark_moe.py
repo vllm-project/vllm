@@ -58,6 +58,8 @@ __all__ = [
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
+    _monolithic_writes_routing_replay = True
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.has_bias = self.moe.has_bias

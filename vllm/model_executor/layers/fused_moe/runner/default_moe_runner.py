@@ -512,11 +512,29 @@ class DefaultMoERunner(MoERunner):
                     router_logits=staged_router_logits,
                     routing_replay_out=routing_replay_out,
                 )
+                # BF16 monolithic: kernel does not write routing data
+                if (routing_replay_out is not None
+                        and not getattr(self.quant_method,
+                                        '_monolithic_writes_routing_replay',
+                                        False)):
+                    _, topk_ids = self.router.select_experts(
+                        hidden_states=staged_hidden_states,
+                        router_logits=staged_router_logits,
+                    )
+                    routing_replay_out[:topk_ids.shape[0]].copy_(
+                        topk_ids.to(torch.int16))
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=staged_hidden_states,
                     router_logits=staged_router_logits,
                 )
+
+                # Write routing data for non-monolithic path (BF16 Triton)
+                routing_replay_out = getattr(layer, '_routing_replay_out',
+                                             None)
+                if routing_replay_out is not None:
+                    routing_replay_out[:topk_ids.shape[0]].copy_(
+                        topk_ids.to(torch.int16))
 
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,
@@ -684,11 +702,29 @@ class DefaultMoERunner(MoERunner):
                     router_logits=router_logits,
                     routing_replay_out=routing_replay_out,
                 )
+                # BF16 monolithic: kernel does not write routing data
+                if (routing_replay_out is not None
+                        and not getattr(self.quant_method,
+                                        '_monolithic_writes_routing_replay',
+                                        False)):
+                    _, topk_ids = self.router.select_experts(
+                        hidden_states=hidden_states,
+                        router_logits=router_logits,
+                    )
+                    routing_replay_out[:topk_ids.shape[0]].copy_(
+                        topk_ids.to(torch.int16))
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                 )
+
+                # Write routing data for non-monolithic path (BF16 Triton)
+                routing_replay_out = getattr(layer, '_routing_replay_out',
+                                             None)
+                if routing_replay_out is not None:
+                    routing_replay_out[:topk_ids.shape[0]].copy_(
+                        topk_ids.to(torch.int16))
 
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,

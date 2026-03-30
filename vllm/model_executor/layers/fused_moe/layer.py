@@ -506,6 +506,14 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
+        # Map MoEActivation to FlashInfer ActivationType int for trtllm-gen kernels
+        # FlashInfer: Swiglu=3, Relu2=6
+        _act_to_trtllm = {
+            MoEActivation.SILU: 3,       # Swiglu
+            MoEActivation.RELU2_NO_MUL: 6,  # Relu2
+        }
+        self.activation_type: int = _act_to_trtllm.get(self.activation, 3)
+
         self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,

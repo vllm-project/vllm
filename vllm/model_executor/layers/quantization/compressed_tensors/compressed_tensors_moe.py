@@ -114,6 +114,8 @@ __all__ = [
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
+    _monolithic_writes_routing_replay = True
+
     @staticmethod
     def get_moe_method(
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501

@@ -248,6 +248,8 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+    _monolithic_writes_routing_replay = True
+
     """MXFP4 MoE quantization method."""
 
     def __init__(self, moe: FusedMoEConfig):

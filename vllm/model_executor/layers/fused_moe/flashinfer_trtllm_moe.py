@@ -93,6 +93,8 @@ def flashinfer_fused_moe_bf16(
     local_num_experts: int,
     routing_method_type: int,
     tune_max_num_tokens: int = 8192,
+    activation_type: int = 3,
+    routing_replay_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_bf16_moe
 
@@ -111,6 +113,8 @@ def flashinfer_fused_moe_bf16(
         local_num_experts=local_num_experts,
         routing_method_type=routing_method_type,
         tune_max_num_tokens=tune_max_num_tokens,
+        activation_type=activation_type,
+        routing_replay_out=routing_replay_out,
     )
 
 
@@ -129,6 +133,8 @@ def flashinfer_fused_moe_bf16_fake(
     local_num_experts: int,
     routing_method_type: int = RoutingMethodType.Renormalize,
     tune_max_num_tokens: int = 8192,
+    activation_type: int = 3,
+    routing_replay_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 

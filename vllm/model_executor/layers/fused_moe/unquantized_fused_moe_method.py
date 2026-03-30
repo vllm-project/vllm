@@ -75,6 +75,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             current_platform.is_cpu()
             or self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         )
+        # BF16 trtllm-gen kernel now supports routing_replay_out natively
+        self._monolithic_writes_routing_replay = (
+            self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        )
 
         if self.is_monolithic:
             self.apply_monolithic: Callable = self._select_monolithic()
@@ -343,6 +347,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
 
@@ -362,6 +367,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             local_expert_offset=layer.ep_rank * layer.local_num_experts,
             local_num_experts=layer.local_num_experts,
             routing_method_type=layer.routing_method_type,
+            activation_type=layer.activation_type,
+            routing_replay_out=routing_replay_out,
         )
 
     def forward_monolithic_cpu(
@@ -369,6 +376,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.cpu_fused_moe(
             layer,

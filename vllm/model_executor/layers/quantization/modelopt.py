@@ -723,6 +723,8 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
 
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):
+    _monolithic_writes_routing_replay = True
+
     """MoE method for ModelOpt FP8.
     Supports loading FP8 checkpoints with static weight scale and
     activation scale.
@@ -1186,6 +1188,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
+    _monolithic_writes_routing_replay = True
+
     """
     MoE Method for FP4 Quantization.
     Args:
@@ -1708,6 +1712,8 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
 
 
 class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
+    _monolithic_writes_routing_replay = True
+
     """FlashInfer TRTLLM MXFP8 block-scale MoE for ModelOpt checkpoints."""
 
     def __init__(

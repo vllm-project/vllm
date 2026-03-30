@@ -641,6 +641,8 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
+    _monolithic_writes_routing_replay = True
+
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/static activation scale.
