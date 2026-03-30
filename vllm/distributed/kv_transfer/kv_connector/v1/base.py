@@ -295,6 +295,13 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def should_skip_load_store(self, connector_metadata: KVConnectorMetadata) -> bool:
+        """
+        Return True when worker-side load/store hooks can be skipped for this
+        step.
+        """
+        return False
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """

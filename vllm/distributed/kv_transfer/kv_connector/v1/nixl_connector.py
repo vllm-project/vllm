@@ -461,6 +461,18 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
 
+    def should_skip_load_store(self, connector_metadata: KVConnectorMetadata) -> bool:
+        assert self.connector_worker is not None
+        assert isinstance(connector_metadata, NixlConnectorMetadata)
+        return not (
+            connector_metadata.reqs_to_recv
+            or connector_metadata.reqs_to_save
+            or connector_metadata.reqs_to_send
+            or connector_metadata.reqs_in_batch
+            or connector_metadata.reqs_not_processed
+            or self.connector_worker.has_pending_step_work()
+        )
+
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
@@ -1233,6 +1245,9 @@ class NixlConnectorWorker:
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
         )
+
+    def has_pending_step_work(self) -> bool:
+        return not self._ready_requests.empty()
 
     def _sync_block_size_with_kernel(self) -> None:
         backends = get_current_attn_backends(self.vllm_config)

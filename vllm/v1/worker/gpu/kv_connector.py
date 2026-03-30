@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -25,28 +25,6 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-
-
-def _metadata_has_step_work(value: Any) -> bool:
-    if value is None:
-        return False
-
-    if isinstance(value, (bool, str, bytes, bytearray)):
-        return bool(value)
-
-    if isinstance(value, torch.Tensor):
-        return value.numel() > 0
-
-    if isinstance(value, dict):
-        return any(_metadata_has_step_work(item) for item in value.values())
-
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return any(_metadata_has_step_work(item) for item in value)
-
-    if hasattr(value, "__dict__"):
-        return any(_metadata_has_step_work(item) for item in vars(value).values())
-
-    return True
 
 
 class KVConnector:
@@ -88,11 +66,13 @@ class ActiveKVConnector(KVConnector):
 
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
-        self._step_has_pre_forward_work = _metadata_has_step_work(kv_connector_metadata)
+        self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+        self._step_has_pre_forward_work = not self.kv_connector.should_skip_load_store(
+            kv_connector_metadata
+        )
         if not self._step_has_pre_forward_work:
             return
 
-        self.kv_connector.bind_connector_metadata(kv_connector_metadata)
         self.kv_connector.handle_preemptions(kv_connector_metadata)
 
         # TODO: sort out KV Connectors' use of forward_context
