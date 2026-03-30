@@ -42,6 +42,7 @@ KVCacheLayoutType = Literal["NHD", "HND"]
 _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
+NULL_BLOCK_ID = 0
 
 
 def is_valid_kv_cache_layout(value: str) -> bool:
