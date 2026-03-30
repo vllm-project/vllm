@@ -5,7 +5,6 @@ mod managed_engine;
 use std::process::ExitStatus;
 
 use anyhow::{Context, Result, anyhow};
-use clap::Parser;
 use futures::FutureExt as _;
 use tokio::sync::oneshot;
 use tracing::{info, warn};

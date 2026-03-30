@@ -6,7 +6,7 @@ At the moment, the repository contains a minimal end-to-end path up to an OpenAI
 
 ## Architecture
 
-The project is organized as a Cargo workspace with 6 crates, layered bottom-up:
+The project is organized as a Cargo workspace with several crates, layered bottom-up:
 
 ```
 ┌─────────────────────────────────┐
@@ -32,20 +32,41 @@ The project is organized as a Cargo workspace with 6 crates, layered bottom-up:
 
 ## Quick Start
 
+Install the CLI from the repo root first:
+
+```bash
+# from the local checkout
+cargo install --path src/cmd --bin vllm-rs
+
+# or directly from the git repo
+cargo install --git https://github.com/inferact/vllm-frontend-rs --bin vllm-rs
+```
+
 ### Managed Engine
 
 Use `serve` when you want `vllm-rs` to start a headless Python `vllm` engine for you and then launch the Rust OpenAI-compatible frontend. The long-term goal of this path is to become a drop-in replacement for Python `vllm serve`.
 
+### Minimal Startup
+
 ```bash
-cargo run --bin vllm-rs -- serve \
-  Qwen/Qwen3-0.6B \
-  --python ../vllm/.venv/bin/python
-# --more-vllm-args ...
+vllm-rs serve Qwen/Qwen3-0.6B --python xxx/vllm/.venv/bin/python
 ```
 
 This starts the Rust OpenAI-compatible server on `127.0.0.1:8000` by default.
-Additional Python `vllm serve` arguments can be appended directly after the model and managed-engine
-options with an optional `--` separator.
+
+### Additional Frontend and Engine Args
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --python xxx/vllm/.venv/bin/python \
+  --data-parallel-size 2 \
+  --max-model-len 4096 \
+  -- \
+  --tensor-parallel-size 2 \
+  --more-engine-args ...
+```
+
+Note that not all original `vllm serve` args are supported yet. For additional args that are only recognized by the Python engine, you have to place them after `--` to bypass Rust-side parsing and directly forward them to the managed Python engine.
 
 ### External Engine
 
@@ -62,7 +83,7 @@ python3 -m vllm.entrypoints.cli.main serve Qwen/Qwen3-0.6B \
 Then start the Rust frontend against that engine:
 
 ```bash
-cargo run --bin vllm-rs -- frontend \
+vllm-rs frontend \
   --handshake-address tcp://127.0.0.1:62100 \
   Qwen/Qwen3-0.6B
 ```

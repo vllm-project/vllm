@@ -4,9 +4,11 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+use std::ffi::OsString;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use vllm_openai_server::Config;
 
 use crate::managed_engine::ManagedEngineConfig;
@@ -20,6 +22,22 @@ use crate::managed_engine::ManagedEngineConfig;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    pub fn parse() -> Self {
+        Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
+    }
+
+    pub fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        let args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        <Self as Parser>::try_parse_from(args.clone())
+            .map_err(|error| rewrite_serve_unknown_arg_error(&args, error))
+    }
 }
 
 /// Supported top-level CLI commands.
@@ -145,7 +163,10 @@ pub struct ServeArgs {
     )]
     pub engine_count: usize,
     /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main serve ...`.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    ///
+    /// These arguments must be placed after `--` so the Rust frontend can parse its own options
+    /// first and then pass the remaining argv through to Python unchanged.
+    #[arg(last = true, allow_hyphen_values = true)]
     pub python_args: Vec<String>,
 }
 
@@ -178,15 +199,46 @@ impl ServeArgs {
     }
 }
 
+/// Rewrite clap errors about unknown arguments in the `serve` subcommand to clarify the `--`
+/// separator for Python engine flags.
+fn rewrite_serve_unknown_arg_error(args: &[OsString], error: clap::Error) -> clap::Error {
+    if error.kind() != ErrorKind::UnknownArgument {
+        return error;
+    }
+    let subcommand = args
+        .iter()
+        .skip(1)
+        .find(|s| !s.to_string_lossy().starts_with('-'));
+    if subcommand.map(|s| s.as_os_str()) != Some("serve".as_ref()) {
+        return error;
+    }
+    let Some(ContextValue::String(unrecognized_arg)) = error.get(ContextKind::InvalidArg) else {
+        return error;
+    };
+
+    let mut command = Cli::command();
+    let serve_command = command
+        .find_subcommand_mut("serve")
+        .expect("serve subcommand should exist");
+    serve_command.error(
+        ErrorKind::UnknownArgument,
+        format!(
+            "unrecognized serve argument {unrecognized_arg:?}\n\n\
+             This may be a flag the Rust frontend does not support yet, or a Python vLLM engine \
+             flag.\nIf it is a Python engine flag, pass it after `--`, for example:\n    \
+             vllm-rs serve <model> -- {unrecognized_arg}"
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
     use expect_test::expect;
 
     use super::{Cli, Command};
 
     #[test]
-    fn serve_args_forward_python_flags_without_separator() {
+    fn serve_args_forward_python_flags_with_separator() {
         let cli = Cli::try_parse_from([
             "vllm-rs",
             "serve",
@@ -195,6 +247,7 @@ mod tests {
             "../vllm/.venv/bin/python",
             "--max-model-len",
             "512",
+            "--",
             "--dtype",
             "float16",
         ])
@@ -229,6 +282,33 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&cli);
+    }
+
+    #[test]
+    fn serve_args_reject_python_flags_without_separator() {
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--python",
+            "python3",
+            "--dtype",
+            "float16",
+        ])
+        .unwrap_err();
+
+        expect![[r#"
+            error: unrecognized serve argument "--dtype"
+
+            This may be a flag the Rust frontend does not support yet, or a Python vLLM engine flag.
+            If it is a Python engine flag, pass it after `--`, for example:
+                vllm-rs serve <model> -- --dtype
+
+            Usage: serve [OPTIONS] <MODEL> [-- <PYTHON_ARGS>...]
+
+            For more information, try '--help'.
+        "#]]
+        .assert_eq(&error.to_string());
     }
 
     #[test]
@@ -337,6 +417,45 @@ mod tests {
     }
 
     #[test]
+    fn serve_args_accept_known_flags_before_model() {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "--python",
+            "python3",
+            "--data-parallel-size",
+            "2",
+            "Qwen/Qwen3-0.6B",
+        ])
+        .unwrap();
+
+        expect![[r#"
+            Cli {
+                command: Serve(
+                    ServeArgs {
+                        runtime: FrontendRuntimeArgs {
+                            model: "Qwen/Qwen3-0.6B",
+                            host: "127.0.0.1",
+                            port: 8000,
+                            ready_timeout_secs: 300,
+                            tool_call_parser: None,
+                            reasoning_parser: None,
+                            max_model_len: None,
+                        },
+                        headless: false,
+                        python: "python3",
+                        handshake_host: "127.0.0.1",
+                        handshake_port: None,
+                        engine_count: 2,
+                        python_args: [],
+                    },
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&cli);
+    }
+
+    #[test]
     fn serve_args_accept_headless_mode() {
         let cli =
             Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--headless"]).unwrap();
@@ -345,6 +464,53 @@ mod tests {
             panic!("expected serve args");
         };
         assert!(args.headless);
+    }
+
+    #[test]
+    fn serve_args_keep_python_passthrough_flags_after_separator() {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--python",
+            "python3",
+            "--",
+            "--tensor-parallel-size",
+            "2",
+            "--data-parallel-size",
+            "4",
+        ])
+        .unwrap();
+
+        expect![[r#"
+            Cli {
+                command: Serve(
+                    ServeArgs {
+                        runtime: FrontendRuntimeArgs {
+                            model: "Qwen/Qwen3-0.6B",
+                            host: "127.0.0.1",
+                            port: 8000,
+                            ready_timeout_secs: 300,
+                            tool_call_parser: None,
+                            reasoning_parser: None,
+                            max_model_len: None,
+                        },
+                        headless: false,
+                        python: "python3",
+                        handshake_host: "127.0.0.1",
+                        handshake_port: None,
+                        engine_count: 1,
+                        python_args: [
+                            "--tensor-parallel-size",
+                            "2",
+                            "--data-parallel-size",
+                            "4",
+                        ],
+                    },
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&cli);
     }
 
     #[test]

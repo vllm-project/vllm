@@ -11,6 +11,7 @@ cargo run --bin vllm-rs -- serve \
   Qwen/Qwen3-0.6B \
   --python ../vllm/.venv/bin/python \
   --max-model-len 512 \
+  -- \
   --dtype float16
 ```
 
@@ -18,6 +19,9 @@ This launches:
 
 - a managed headless Python `vllm` engine
 - the Rust OpenAI-compatible frontend on `127.0.0.1:8000`
+
+All Python engine arguments must be placed after `--`. Arguments before `--` are parsed by the Rust
+frontend itself.
 
 You can then send OpenAI-style requests to the Rust frontend:
 
