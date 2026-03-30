@@ -3,6 +3,7 @@
 
 from unittest import mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -116,6 +117,9 @@ def test_prepare_next_token_ids():
     mock_input_batch.req_ids = req_ids
     mock_input_batch.num_reqs = num_requests
     mock_input_batch.vocab_size = 100
+    mock_input_batch.num_tokens_no_spec = np.array(
+        [num_speculative_tokens + 1] * num_requests
+    )
 
     mock_num_scheduled_tokens = {req_id: 0 for req_id in req_ids}
     mock_requests = {}
