@@ -20,7 +20,7 @@ def humming_moe_align(
     shape_m = topk_ids.size(0)
 
     for i in range(len(configs) // 3):
-        if shape_m >= configs[i * 3] and shape_m <= configs[i * 3 + 1]:
+        if shape_m > configs[i * 3] and shape_m <= configs[i * 3 + 1]:
             block_size = configs[i * 3 + 2]
             break
     else:

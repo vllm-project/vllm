@@ -8,7 +8,6 @@ import regex as re
 import torch
 
 from vllm import envs
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
