@@ -276,7 +276,9 @@ class TestPromptBuilding:
             label_token_ids=[500, 501],
             item_first=item_first,
         )
-        engine_inputs, _ = await serving._build_prompts(request, MagicMock())
+        engine_inputs, _ = await serving._build_prompts(
+            request, MagicMock(), max_model_len=4096
+        )
 
         for i, exp in enumerate(expected):
             assert engine_inputs[i]["prompt_token_ids"] == exp

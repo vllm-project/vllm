@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.inputs.data import ProcessorInputs, token_inputs
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -185,7 +185,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             ErrorResponse if an error occurred.
         """
         # Check model
-        error_check_ret = await self._check_model(request)
+        error_check_ret = await self._check_model(request)  # type: ignore[arg-type]
         if error_check_ret is not None:
             return error_check_ret
 
@@ -222,12 +222,12 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         # Pydantic at request parsing time, so we don't need to check here.
 
         try:
-            lora_request = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
         except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error preparing request components")
             return self.create_error_response(e)
 
-        base_id = self._base_request_id(raw_request, request.request_id)
+        base_id = self._base_request_id(raw_request, default=request.request_id)
         request_id = f"generative-scoring-{base_id}"
         created_time = int(time.time())
 
@@ -382,11 +382,11 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         request: GenerativeScoringRequest,
         tokenizer,
         max_model_len: int,
-    ) -> tuple[list[ProcessorInputs], list[int]]:
+    ) -> tuple[list[EngineInput], list[int]]:
         """Build prompts by concatenating query and items.
 
         Uses the Renderer's tokenizer to tokenize text inputs, then
-        creates ProcessorInputs via token_inputs() for engine consumption.
+        creates EngineInput via tokens_input() for engine consumption.
 
         Args:
             request: The request containing query, items, and settings.
@@ -394,7 +394,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             max_model_len: Maximum model context length for truncation.
 
         Returns:
-            Tuple of (list of ProcessorInputs, list of prompt token counts).
+            Tuple of (list of EngineInput, list of prompt token counts).
         """
         # Tokenize query if it's a string
         if isinstance(request.query, str):
@@ -405,7 +405,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         else:
             query_token_ids = request.query
 
-        engine_inputs: list[ProcessorInputs] = []
+        engine_inputs: list[EngineInput] = []
         prompt_token_counts: list[int] = []
 
         for item in request.items:
@@ -430,7 +430,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             if len(prompt_token_ids) > max_prompt_len:
                 prompt_token_ids = prompt_token_ids[:max_prompt_len]
 
-            engine_inputs.append(token_inputs(prompt_token_ids))
+            engine_inputs.append(tokens_input(prompt_token_ids))
             prompt_token_counts.append(len(prompt_token_ids))
 
         return engine_inputs, prompt_token_counts
@@ -488,17 +488,3 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             return None
 
         return extract_trace_headers(headers)
-
-    def _base_request_id(
-        self,
-        raw_request: Request | None,
-        request_id: str | None,
-    ) -> str:
-        """Get base request ID from raw request or generate one."""
-        if request_id:
-            return request_id
-        if raw_request:
-            return getattr(raw_request.state, "request_id", None) or str(
-                id(raw_request)
-            )
-        return random_uuid()
