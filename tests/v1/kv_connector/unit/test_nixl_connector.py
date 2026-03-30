@@ -862,6 +862,43 @@ class TestNixlHandshake:
         assert req_id not in conn_p1.connector_worker._reqs_to_process
 
     @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform"
+    )
+    def test_scheduler_tracks_local_num_computed_tokens_for_remote_prefill(
+        self, mock_platform
+    ):
+        mock_platform.device_type = "cpu"
+
+        block_size = 16
+        vllm_config = create_vllm_config(block_size=block_size)
+        vllm_config.parallel_config.decode_context_parallel_size = 2
+        scheduler = NixlConnectorScheduler(
+            vllm_config=vllm_config,
+            engine_id="test-engine",
+            kv_cache_config=make_kv_cache_config(block_size=block_size),
+        )
+
+        request = create_request(
+            num_tokens=128,
+            do_remote_prefill=True,
+            block_size=block_size,
+        )
+        blocks = MagicMock()
+        blocks.get_unhashed_block_ids_all_groups.return_value = [[10, 11, 12]]
+
+        scheduler.update_state_after_alloc(
+            request,
+            blocks,
+            num_external_tokens=48,
+            num_computed_tokens=64,
+        )
+        metadata = scheduler.build_connector_meta(MagicMock())
+
+        req_meta = metadata.reqs_to_recv[request.request_id]
+        assert req_meta.local_num_computed_tokens == 64
+        assert req_meta.local_block_ids == [[10, 11, 12]]
+
+    @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper,
     )

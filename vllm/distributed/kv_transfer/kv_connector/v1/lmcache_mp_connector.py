@@ -741,7 +741,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         return need_to_load, need_to_load > 0
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         """
         Update KVConnector state after block allocation.

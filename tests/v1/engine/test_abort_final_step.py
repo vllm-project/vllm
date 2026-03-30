@@ -92,6 +92,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         request: Request,
         blocks: Any,
         num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         pass
 
