@@ -179,8 +179,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        # Mamba hybrid models.
-        self.is_mamba_hybrid = self.model_config.is_hybrid
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
@@ -193,7 +191,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            is_mamba_hybrid=self.is_mamba_hybrid,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -341,26 +338,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+
+        block_table_max_model_len = self.max_model_len
+        if self.is_encoder_decoder:
+            # Cross-attention block tables need to index encoder tokens
+            # (e.g., Whisper), which can exceed decoder max_model_len.
+            block_table_max_model_len = max(
+                block_table_max_model_len,
+                getattr(self.model_config.hf_config, "max_source_positions", 0),
+            )
+
         block_sizes = []
         max_num_blocks_per_group = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
-            max_num_blocks = cdiv(self.max_model_len, spec.block_size * self.dcp_size)
+            max_num_blocks = cdiv(
+                block_table_max_model_len, spec.block_size * self.dcp_size
+            )
             if isinstance(spec, MambaSpec):
                 max_num_blocks = (
                     max_num_blocks if self.cache_config.enable_prefix_caching else 1
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
-
-        block_table_max_model_len = self.max_model_len
-        if self.is_encoder_decoder:
-            # Cross-attention block tables need to index encoder tokens
-            # (e.g., Whisper ~1500), which can exceed decoder max_model_len.
-            block_table_max_model_len = max(
-                block_table_max_model_len,
-                getattr(self.model_config.hf_config, "max_source_positions", 0),
-            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -916,11 +916,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
 
-        # Update accepted token counts on GPU for next step's GDN metadata.
-        if self.is_mamba_hybrid:
-            self.req_states.num_accepted_tokens_gpu[input_batch.idx_mapping] = (
-                num_sampled
-            )
+        self.model_state.postprocess_state(input_batch, num_sampled)
 
     @torch.inference_mode()
     def execute_model(

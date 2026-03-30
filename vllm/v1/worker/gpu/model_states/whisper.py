@@ -133,6 +133,7 @@ class WhisperModelState(ModelState):
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             encoder_seq_lens=encoder_seq_lens,
+            for_cudagraph_capture=for_capture,
         )
         return attn_metadata
 

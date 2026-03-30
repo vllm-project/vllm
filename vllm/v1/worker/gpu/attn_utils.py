@@ -17,7 +17,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 
@@ -123,7 +122,6 @@ def _reshape_kv_cache(
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
-            assert isinstance(kv_cache_spec, AttentionSpec)
 
             raw_tensor = kv_cache_raw_tensors[layer_name]
             assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
@@ -310,35 +308,3 @@ def build_attn_metadata(
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
-
-
-def prepare_mamba_hybrid_metadata(
-    req_states: RequestState,
-    idx_mapping: torch.Tensor,
-    num_reqs: int,
-    num_reqs_padded: int,
-    req_ids: list[str],
-    scheduled_spec_decode_tokens: dict[str, list[int]] | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    hybrid_accepted = torch.zeros(
-        num_reqs_padded,
-        dtype=req_states.num_accepted_tokens_gpu.dtype,
-        device=req_states.num_accepted_tokens_gpu.device,
-    )
-    hybrid_accepted[:num_reqs] = req_states.num_accepted_tokens_gpu[idx_mapping]
-
-    hybrid_draft_cpu = torch.full(
-        (num_reqs_padded,), -1, dtype=torch.int32, device="cpu"
-    )
-    if scheduled_spec_decode_tokens:
-        for batch_idx, req_id in enumerate(req_ids):
-            draft_ids = scheduled_spec_decode_tokens.get(req_id)
-            if draft_ids is None:
-                continue
-            req_state_idx = req_states.req_id_to_index[req_id]
-            if (
-                req_states.num_computed_prefill_tokens[req_state_idx]
-                >= req_states.prefill_len.np[req_state_idx]
-            ):
-                hybrid_draft_cpu[batch_idx] = len(draft_ids)
-    return hybrid_accepted, hybrid_draft_cpu

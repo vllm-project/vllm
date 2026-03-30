@@ -38,6 +38,13 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def postprocess_state(
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+    ) -> None:
+        return None
+
     @abstractmethod
     def get_mm_embeddings(
         self,
