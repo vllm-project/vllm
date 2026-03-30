@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
-from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -28,6 +27,31 @@ from vllm.v1.attention.backends.utils import KVCacheLayoutType
 logger = init_logger(__name__)
 
 FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+
+
+def _import_flashinfer():
+    """Lazily import flashinfer runtime symbols.
+
+    This must not run during parent-process config initialization, because
+    importing flashinfer may initialize CUDA. It is only safe to call this
+    from runtime paths after worker startup.
+    """
+    global trtllm_batch_decode_with_kv_cache_mla
+
+    if trtllm_batch_decode_with_kv_cache_mla is not None:
+        return
+
+    from flashinfer.decode import (  # noqa
+        trtllm_batch_decode_with_kv_cache_mla as _trtllm_batch_decode_with_kv_cache_mla,
+    )
+
+    trtllm_batch_decode_with_kv_cache_mla = _trtllm_batch_decode_with_kv_cache_mla
+
+
+if TYPE_CHECKING:
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+else:
+    trtllm_batch_decode_with_kv_cache_mla = None
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
@@ -96,11 +120,18 @@ class FlashInferMLABackend(MLACommonBackend):
         return "HND"
 
 
-g_fi_workspace = torch.zeros(
-    FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
-    dtype=torch.uint8,
-    device="cuda",
-)
+_fi_workspace: torch.Tensor | None = None
+
+
+def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
+    global _fi_workspace
+    if _fi_workspace is None or _fi_workspace.device != device:
+        _fi_workspace = torch.zeros(
+            FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
+            dtype=torch.uint8,
+            device=device,
+        )
+    return _fi_workspace
 
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -119,6 +150,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
+        _import_flashinfer()
         super().__init__(
             num_heads,
             head_size,
@@ -148,7 +180,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        self._workspace_buffer = g_fi_workspace
+        self._workspace_buffer: torch.Tensor | None = None
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
@@ -191,6 +223,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.bmm2_scale = 1.0
             if self.kv_cache_dtype.startswith("fp8"):
                 self.bmm2_scale *= layer._k_scale_float
+
+        if self._workspace_buffer is None:
+            self._workspace_buffer = _get_workspace_buffer(q.device)
 
         # Reuse pre-allocated zero-init output buffer to avoid a memset
         # kernel on every CUDA graph replay.

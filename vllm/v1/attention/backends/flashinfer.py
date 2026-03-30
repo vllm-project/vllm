@@ -4,19 +4,10 @@
 
 from dataclasses import dataclass
 from functools import partial
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
-from flashinfer import (
-    BatchDecodeWithPagedKVCacheWrapper,
-    BatchPrefillWithPagedKVCacheWrapper,
-    BatchPrefillWithRaggedKVCacheWrapper,
-    MultiLevelCascadeAttentionWrapper,
-)
-from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
-from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
 from typing_extensions import override
 
 from vllm import envs
@@ -83,6 +74,74 @@ def _get_trtllm_gen_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_gen_workspace_buffer
+
+
+def _import_flashinfer():
+    """Lazily import flashinfer runtime symbols.
+
+    This must not run during parent-process config initialization, because
+    importing flashinfer may initialize CUDA. It is only safe to call this
+    from runtime paths after worker startup.
+    """
+    global BatchDecodeWithPagedKVCacheWrapper
+    global BatchPrefillWithPagedKVCacheWrapper
+    global BatchPrefillWithRaggedKVCacheWrapper
+    global MultiLevelCascadeAttentionWrapper
+    global fast_decode_plan
+    global trtllm_batch_decode_with_kv_cache
+    global trtllm_batch_context_with_kv_cache
+    global FP4Tensor
+
+    if BatchDecodeWithPagedKVCacheWrapper is not None:
+        return
+
+    from flashinfer import (  # noqa
+        BatchDecodeWithPagedKVCacheWrapper as _BatchDecodeWithPagedKVCacheWrapper,
+        BatchPrefillWithPagedKVCacheWrapper as _BatchPrefillWithPagedKVCacheWrapper,
+        BatchPrefillWithRaggedKVCacheWrapper as _BatchPrefillWithRaggedKVCacheWrapper,
+        MultiLevelCascadeAttentionWrapper as _MultiLevelCascadeAttentionWrapper,
+    )
+    from flashinfer.decode import (  # noqa
+        fast_decode_plan as _fast_decode_plan,
+        trtllm_batch_decode_with_kv_cache as _trtllm_batch_decode_with_kv_cache,
+    )
+    from flashinfer.prefill import (  # noqa
+        trtllm_batch_context_with_kv_cache as _trtllm_batch_context_with_kv_cache,
+    )
+    from flashinfer.utils import FP4Tensor as _FP4Tensor  # noqa
+
+    BatchDecodeWithPagedKVCacheWrapper = _BatchDecodeWithPagedKVCacheWrapper
+    BatchPrefillWithPagedKVCacheWrapper = _BatchPrefillWithPagedKVCacheWrapper
+    BatchPrefillWithRaggedKVCacheWrapper = _BatchPrefillWithRaggedKVCacheWrapper
+    MultiLevelCascadeAttentionWrapper = _MultiLevelCascadeAttentionWrapper
+    fast_decode_plan = _fast_decode_plan
+    trtllm_batch_decode_with_kv_cache = _trtllm_batch_decode_with_kv_cache
+    trtllm_batch_context_with_kv_cache = _trtllm_batch_context_with_kv_cache
+    FP4Tensor = _FP4Tensor
+
+
+if TYPE_CHECKING:
+    from flashinfer import (
+        BatchDecodeWithPagedKVCacheWrapper,
+        BatchPrefillWithPagedKVCacheWrapper,
+        BatchPrefillWithRaggedKVCacheWrapper,
+        MultiLevelCascadeAttentionWrapper,
+    )
+    from flashinfer.decode import (
+        fast_decode_plan,
+        trtllm_batch_decode_with_kv_cache,
+    )
+    from flashinfer.prefill import trtllm_batch_context_with_kv_cache
+    from flashinfer.utils import FP4Tensor
+else:
+    BatchDecodeWithPagedKVCacheWrapper = None
+    BatchPrefillWithPagedKVCacheWrapper = None
+    BatchPrefillWithRaggedKVCacheWrapper = None
+    MultiLevelCascadeAttentionWrapper = None
+    fast_decode_plan = None
+    trtllm_batch_decode_with_kv_cache = None
+    trtllm_batch_context_with_kv_cache = None
+    FP4Tensor = None
 
 
 @triton.jit
@@ -206,6 +265,7 @@ class BatchDCPPrefillWrapper:
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
     ):
+        _import_flashinfer()
         if dcp_a2a:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
@@ -518,7 +578,7 @@ class FlashInferMetadata:
     `prefill` and `decode` fields will both be None.
     """
 
-    cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
+    cascade_wrapper: type["MultiLevelCascadeAttentionWrapper"] | None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -532,6 +592,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        _import_flashinfer()
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
@@ -728,7 +789,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(
         self,
-    ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
+    ) -> type["BatchPrefillWithPagedKVCacheWrapper"] | BatchDCPPrefillWrapper:
         if self._prefill_wrapper is None:
             if self.use_dcp:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
@@ -1207,6 +1268,8 @@ class FlashInferImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        _import_flashinfer()
+
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1715,6 +1778,7 @@ def fast_plan_decode(
     # Warm up with the original plan if it is first call, and always run the
     # original plan if we run for dynamic shape. For fixed shape (cudagraph),
     # this warm up is to generate the _cached_module for the decode wrapper.
+    _import_flashinfer()
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
             indptr=indptr_cpu,

@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
@@ -167,6 +168,7 @@ def create_vllm_config(
     enable_chunked_prefill: bool = True,
     add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
+    attention_backend: AttentionBackendEnum | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -203,6 +205,7 @@ def create_vllm_config(
     device_config = DeviceConfig()
     load_config = LoadConfig()
     compilation_config = CompilationConfig()
+    attention_config = AttentionConfig(backend=attention_backend)
 
     if add_mock_model_methods:
         # Add mock methods to satisfy backends that need them
@@ -233,6 +236,7 @@ def create_vllm_config(
         device_config=device_config,
         load_config=load_config,
         compilation_config=compilation_config,
+        attention_config=attention_config,
     )
 
 

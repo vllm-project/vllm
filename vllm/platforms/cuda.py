@@ -22,6 +22,7 @@ import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
+from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -627,7 +628,8 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @cache
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
-        major, minor = torch.cuda.get_device_capability(device_id)
+        # use cuda_get_device_properties to avoid cuda re-initialization error
+        major, minor = cuda_get_device_properties(device_id, ["major", "minor"])
         return DeviceCapability(major=major, minor=minor)
 
     @classmethod
