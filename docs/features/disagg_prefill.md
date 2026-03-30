@@ -140,10 +140,32 @@ Please refer to the [installation guide](../getting_started/installation/gpu.md)
 ```
 
 ### Step 3: Start the Router
-You can use a router such as:
+A routing layer is required to orchestrate the disaggregated Prefill–Decode workflow.
+
+You can use an existing router implementation, such as:
 - https://github.com/vllm-project/router
 
+For a complete end-to-end example, see:
+- https://github.com/vllm-project/router/blob/main/scripts/install.sh
+
+
+**NIXL connector**: Requires explicit Prefill and Decode endpoints. You must specify them via `--prefill` and `--decode` arguments.
+
+**NCCL connector**: Does not require explicit endpoints. Instead, it uses a ZMQ-based discovery mechanism, where Prefill and Decode instances register themselves via `--vllm-discovery-address`.
+
 ```bash
+
+  # When vLLM runs the NCCL connector, ZMQ based discovery is supported.
+  # See a working example in scripts/install.sh
+  cargo run --release -- \
+    --policy consistent_hash \
+    --vllm-pd-disaggregation \
+    --vllm-discovery-address 0.0.0.0:30001 \
+    --host 0.0.0.0 \
+    --port 10001 \
+    --prefill-policy consistent_hash \
+    --decode-policy consistent_hash
+
   # When vLLM runs the NIXL connector, prefill/decode URLs are required.
   # See a working example in scripts/llama3.1/ folder.
   cargo run --release -- \
@@ -156,18 +178,6 @@ You can use a router such as:
     --host 127.0.0.1 \
     --port 8090 \
     --intra-node-data-parallel-size 1 \
-
-
-  # When vLLM runs the NCCL connector, ZMQ based discovery is supported.
-  # See a working example in scripts/install.sh
-  cargo run --release -- \
-    --policy consistent_hash \
-    --vllm-pd-disaggregation \
-    --vllm-discovery-address 0.0.0.0:30001 \
-    --host 0.0.0.0 \
-    --port 10001 \
-    --prefill-policy consistent_hash \
-    --decode-policy consistent_hash
 ```
 
 ## Connectors
