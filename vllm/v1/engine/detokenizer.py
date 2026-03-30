@@ -350,6 +350,8 @@ class StopChecker:
         length to which output_text should be truncated, or -1 for no
         truncation.
         """
+        if not new_char_count or not stop:
+            return None
         if (rp := self.reasoning_parser) is not None:
             # Reasoning not ended => do not check stop strings.
             if not self.reasoning_ended:
@@ -358,9 +360,6 @@ class StopChecker:
                 )
             if not self.reasoning_ended:
                 return None
-        if not new_char_count or not stop:
-            return None
-
         for stop_str in stop:
             stop_string_len = len(stop_str)
             # Avoid searching already-searched text.
