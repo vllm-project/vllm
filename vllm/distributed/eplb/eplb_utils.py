@@ -35,7 +35,7 @@ class CpuGpuEvent:
         Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
 
-        Should only be called by the Async Eplb thread
+        Should only be called by the Async Eplb thread.
         """
         self._recorded.wait()
         self._event.wait(stream)
@@ -44,6 +44,8 @@ class CpuGpuEvent:
     def record(self, stream: torch.cuda.Stream | None = None):
         """
         Unblocks the waiting thread after calling event.record().
+
+        Should only be called by the main thread.
         """
         assert not self._recorded.is_set()
         self._event.record(stream)
