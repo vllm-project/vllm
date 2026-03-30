@@ -2,15 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.config import SpeculativeConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample, tl_rand64
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode.synthetic_rejection_sampler_utils import (
+    compute_synthetic_rejection_sampler_params,
+    synthetic_rejection_sample,
+)
 
 
 @triton.jit
@@ -211,12 +216,12 @@ def _probabilistic_rejection_kernel(
             else:
                 target_prob = tl.load(
                     target_probs_ptr + logit_idx * target_probs_stride + draft_sampled
-                )
+                ).to(tl.float64)
                 draft_prob = tl.load(
                     draft_probs_ptr + logit_idx * draft_probs_stride + draft_sampled
-                )
+                ).to(tl.float64)
                 pos = tl.load(pos_ptr + logit_idx)
-                u = tl.sum(tl.rand(seed, pos + tl.arange(0, 1)))
+                u = tl_rand64(seed, pos, includes_zero=False)
                 accepted &= target_prob > u * draft_prob
             tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
@@ -445,12 +450,26 @@ class RejectionSampler:
     def __init__(
         self,
         sampler: Sampler,
-        num_speculative_steps,
-        use_strict_rejection_sampling: bool = True,
+        spec_config: SpeculativeConfig,
     ):
         self.sampler = sampler
-        self.num_speculative_steps = num_speculative_steps
-        self.use_strict_rejection_sampling = use_strict_rejection_sampling
+        self.num_speculative_steps = spec_config.num_speculative_tokens
+        self.rejection_sample_method = spec_config.rejection_sample_method
+        if self.rejection_sample_method == "synthetic":
+            synthetic_acceptance_rate = spec_config.synthetic_acceptance_rate
+            if (
+                synthetic_acceptance_rate is None
+                or not 0.0 <= synthetic_acceptance_rate <= 1.0
+            ):
+                raise ValueError(
+                    f"synthetic_acceptance_rate must be in [0, 1], "
+                    f"but got {synthetic_acceptance_rate}"
+                )
+            self.base_acceptance_rate, self.decay_factor = (
+                compute_synthetic_rejection_sampler_params(
+                    synthetic_acceptance_rate, self.num_speculative_steps
+                )
+            )
 
     def _get_logprobs_tensors(
         self,
@@ -497,7 +516,7 @@ class RejectionSampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        if self.use_strict_rejection_sampling:
+        if self.rejection_sample_method == "strict":
             sampler_output = self.sampler(logits, input_batch)
             logprobs_tensors = sampler_output.logprobs_tensors
             sampled, num_sampled = strict_rejection_sample(
@@ -506,7 +525,7 @@ class RejectionSampler:
                 input_batch.cu_num_logits,
                 self.num_speculative_steps,
             )
-        else:
+        elif self.rejection_sample_method == "probabilistic":
             assert draft_logits is not None
             pos = input_batch.positions[input_batch.logits_indices]
             processed_logits = self.sampler.apply_sampling_params(
@@ -537,6 +556,24 @@ class RejectionSampler:
                 processed_logits
                 if self.sampler.logprobs_mode == "processed_logprobs"
                 else logits,
+            )
+        elif self.rejection_sample_method == "synthetic":
+            sampler_output = self.sampler(logits, input_batch)
+            logprobs_tensors = sampler_output.logprobs_tensors
+            sampled, num_sampled = synthetic_rejection_sample(
+                sampler_output.sampled_token_ids.view(-1),
+                draft_sampled,
+                input_batch.cu_num_logits,
+                input_batch.positions[input_batch.logits_indices],
+                input_batch.idx_mapping,
+                self.sampler.sampling_states.seeds.gpu,
+                self.base_acceptance_rate,
+                self.decay_factor,
+                self.num_speculative_steps,
+            )
+        else:
+            raise ValueError(
+                f"Unknown rejection sample method: {self.rejection_sample_method}"
             )
 
         return SamplerOutput(
