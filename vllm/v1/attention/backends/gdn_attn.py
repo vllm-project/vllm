@@ -317,6 +317,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
 
+        # Chunk prefill only; skip pure decode to avoid wasted CPU/HtoD work.
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
@@ -338,24 +339,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             ).to(device=gpu_device, non_blocking=True)
         else:
             has_initial_state = None
-
-        # Chunk prefill only; skip pure decode to avoid wasted CPU/HtoD/cache work.
-        if num_prefills > 0:
-            # NOTE:
-            # Pre-compute chunk_indices on CPU (avoiding GPU->CPU sync from
-            # .tolist()) and register the result in tensor_cache under the
-            # GPU cu_seqlens key so that downstream FLA ops hit the cache.
-            from vllm.model_executor.layers.fla.ops.index import (
-                prepare_chunk_indices,
-            )
-            from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
-
-            chunk_indices = prepare_chunk_indices(
-                non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
-            ).to(query_start_loc.device, non_blocking=True)
-            prepare_chunk_indices.register(  # type: ignore[attr-defined]
-                chunk_indices, non_spec_query_start_loc, FLA_CHUNK_SIZE
-            )
 
         # Function code counted on either presency non-spec decode or spec decode,
         # but not both.
