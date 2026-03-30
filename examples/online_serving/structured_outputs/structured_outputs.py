@@ -222,7 +222,7 @@ async def cli():
     args = parser.parse_args()
 
     base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-    client = openai.AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+    client = openai.AsyncOpenAI(base_url=base_url, api_key="EMPTY", timeout=60.0, max_retries=3)
     constraints = list(PARAMS) if "*" in args.constraint else list(set(args.constraint))
     model = (await client.models.list()).data[0].id
 

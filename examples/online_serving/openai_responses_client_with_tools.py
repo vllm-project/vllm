@@ -50,7 +50,7 @@ input_messages = [
 
 def main():
     base_url = "http://0.0.0.0:8000/v1"
-    client = OpenAI(base_url=base_url, api_key="empty")
+    client = OpenAI(base_url=base_url, api_key="empty", timeout=60.0, max_retries=3)
     model = get_first_model(client)
     response = client.responses.create(
         model=model, input=input_messages, tools=tools, tool_choice="required"

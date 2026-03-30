@@ -129,6 +129,8 @@ def main():
         # defaults to os.environ.get("OPENAI_API_KEY")
         api_key=openai_api_key,
         base_url=openai_api_base,
+        timeout=60.0,
+        max_retries=3,
     )
 
     # Get available models and select one

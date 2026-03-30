@@ -29,7 +29,7 @@ def example_no_filter():
     print("=" * 60)
 
     base_url = "http://0.0.0.0:8000/v1"
-    client = OpenAI(base_url=base_url, api_key="empty")
+    client = OpenAI(base_url=base_url, api_key="empty", timeout=60.0, max_retries=3)
     model = get_first_model(client)
 
     response = client.responses.create(
@@ -58,7 +58,7 @@ def example_wildcard():
     print("=" * 60)
 
     base_url = "http://0.0.0.0:8000/v1"
-    client = OpenAI(base_url=base_url, api_key="empty")
+    client = OpenAI(base_url=base_url, api_key="empty", timeout=60.0, max_retries=3)
     model = get_first_model(client)
 
     response = client.responses.create(
@@ -94,7 +94,7 @@ def example_specific_tools():
     print("=" * 60)
 
     base_url = "http://0.0.0.0:8000/v1"
-    client = OpenAI(base_url=base_url, api_key="empty")
+    client = OpenAI(base_url=base_url, api_key="empty", timeout=60.0, max_retries=3)
     model = get_first_model(client)
 
     response = client.responses.create(
@@ -125,7 +125,7 @@ def example_object_format():
     print("=" * 60)
 
     base_url = "http://0.0.0.0:8000/v1"
-    client = OpenAI(base_url=base_url, api_key="empty")
+    client = OpenAI(base_url=base_url, api_key="empty", timeout=60.0, max_retries=3)
     model = get_first_model(client)
 
     response = client.responses.create(

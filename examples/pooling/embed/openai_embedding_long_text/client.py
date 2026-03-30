@@ -53,7 +53,7 @@ def generate_long_text(base_text: str, repeat_count: int) -> str:
 
 def test_embedding_with_different_lengths():
     """Test embedding generation with different text lengths."""
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=60.0, max_retries=3)
 
     # Test cases with different text lengths
     test_cases = [
@@ -124,7 +124,7 @@ def test_embedding_with_different_lengths():
 
 def test_batch_embedding():
     """Test batch embedding with mixed-length inputs."""
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=60.0, max_retries=3)
 
     print("\n🔄 Testing Batch Embedding with Mixed Lengths")
     print("=" * 50)
@@ -168,7 +168,7 @@ def test_batch_embedding():
 
 def test_multiple_long_texts_batch():
     """Test batch processing with multiple long texts to verify chunk ID uniqueness."""
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=60.0, max_retries=3)
 
     print("\n🔧 Testing Multiple Long Texts in Batch (Chunk ID Fix Verification)")
     print("=" * 70)
@@ -284,7 +284,7 @@ def test_multiple_long_texts_batch():
 
 def test_embedding_consistency():
     """Test that chunked processing produces consistent results."""
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=60.0, max_retries=3)
 
     print("\n🔍 Testing Embedding Consistency")
     print("=" * 40)

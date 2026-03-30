@@ -96,7 +96,7 @@ def main():
     openai_api_base = args.model_url
 
     # Create an OpenAI client
-    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
+    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base, timeout=60.0, max_retries=3)
 
     # Define the Gradio chatbot interface using the predict function
     gradio_interface = build_gradio_interface(
