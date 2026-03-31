@@ -40,4 +40,7 @@ class Glm4MoeReasoningParser(BaseThinkingReasoningParser):
         parts = model_output.partition(self.start_token)
         after_start = parts[2] if parts[1] else parts[0]
         reasoning, _, content = after_start.partition(self.end_token)
+
+        # Normalize empty strings to None -- <think></think> means
+        # the model chose not to reason, not that reasoning is "".
         return reasoning or None, content or None
