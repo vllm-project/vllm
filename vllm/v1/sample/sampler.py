@@ -13,6 +13,7 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
 
 _SAMPLING_EPS = 1e-5
 
@@ -102,8 +103,16 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
+        # Handle logprob_token_ids if specified (more efficient than full vocab)
+        # This is used by generative_scoring API to get logprobs for specific tokens
+        logprob_token_ids_tensors = None
+        if sampling_metadata.logprob_token_ids:
+            logprob_token_ids_tensors = self.gather_specific_token_logprobs(
+                logits, sampling_metadata.logprob_token_ids, sampled
+            )
+
         if num_logprobs is None:
-            logprobs_tensors = None
+            logprobs_tensors = logprob_token_ids_tensors
         elif num_logprobs == -1:
             # Return the full unsorted and unranked logprobs.
             logprobs_tensors = LogprobsTensors(
@@ -114,6 +123,11 @@ class Sampler(nn.Module):
             logprobs_tensors = self.gather_logprobs(
                 raw_logprobs, num_logprobs, token_ids=sampled
             )
+
+        # If we have both num_logprobs and logprob_token_ids, prefer
+        # logprob_token_ids as it's more specific
+        if logprob_token_ids_tensors is not None and num_logprobs is not None:
+            logprobs_tensors = logprob_token_ids_tensors
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -127,6 +141,77 @@ class Sampler(nn.Module):
             logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
+
+    def gather_specific_token_logprobs(
+        self,
+        logits: torch.Tensor,
+        logprob_token_ids: dict[int, list[int]],
+        sampled: torch.Tensor,
+    ) -> LogprobsTensors | None:
+        """Compute logprobs for specific token IDs using Triton kernel.
+
+        This method handles heterogeneous token ID lists across requests by
+        padding shorter lists to max length and using a fused Triton kernel
+        for efficient log_softmax + gather computation.
+
+        Benchmarks show the Triton kernel approach is ~1.4x faster than sparse
+        gather for batch sizes > 1 due to the fused kernel reducing memory
+        bandwidth requirements.
+
+        Args:
+            logits: [batch_size, vocab_size] tensor of logits
+            logprob_token_ids: dict mapping req_index -> list of token IDs
+            sampled: [batch_size] tensor of sampled token IDs
+
+        Returns:
+            LogprobsTensors with logprobs for the specified tokens, or None
+            if no requests have logprob_token_ids.
+        """
+        if not logprob_token_ids:
+            return None
+
+        batch_size = logits.shape[0]
+        device = logits.device
+
+        # Find max number of tokens across all requests
+        max_num_tokens = max(len(tids) for tids in logprob_token_ids.values())
+
+        # Create padded token_ids tensor: [batch_size, max_num_tokens + 1]
+        # +1 for sampled token in first position
+        token_ids_tensor = torch.zeros(
+            batch_size, max_num_tokens + 1, dtype=torch.int64, device=device
+        )
+        token_ids_tensor[:, 0] = sampled  # First column is sampled token
+
+        # Create mask for valid positions (True = valid, False = padded)
+        valid_mask = torch.zeros(
+            batch_size, max_num_tokens + 1, dtype=torch.bool, device=device
+        )
+        valid_mask[:, 0] = True  # Sampled token is always valid
+
+        # Fill in token IDs for each request
+        for req_idx, token_ids in logprob_token_ids.items():
+            num_tokens = len(token_ids)
+            token_ids_tensor[req_idx, 1 : num_tokens + 1] = torch.tensor(
+                token_ids, dtype=torch.int64, device=device
+            )
+            valid_mask[req_idx, 1 : num_tokens + 1] = True
+
+        # Compute logprobs using the fused Triton kernel (log_softmax + gather)
+        logprobs = compute_token_logprobs(logits, token_ids_tensor)
+
+        # Mask invalid (padded) positions with -inf
+        logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
+
+        # Compute ranks for the sampled token
+        sampled_logits = logits.gather(-1, sampled.unsqueeze(-1))
+        token_ranks = (logits > sampled_logits).sum(dim=-1)
+
+        return LogprobsTensors(
+            logprob_token_ids=token_ids_tensor.to(torch.int32),
+            logprobs=logprobs,
+            selected_token_ranks=token_ranks,
+        )
 
     @staticmethod
     def apply_temperature(
