@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from collections.abc import Callable
+from contextlib import contextmanager
+from typing import Protocol
 
 import torch
 from torch._ops import OpOverload
+from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
@@ -31,6 +34,25 @@ def is_aiter_found() -> bool:
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
+
+
+class AiterCustomAllreduceProto(Protocol):
+    max_size: int
+    world_size: int
+    fully_connected: bool
+
+    @contextmanager
+    def capture(self): ...
+    def close(self) -> None: ...
+    def custom_fused_ar_rms(
+        self,
+        input: torch.Tensor,
+        residual_inp: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        use_1stage: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None: ...
+    def should_custom_ar(self, inp: torch.Tensor) -> bool: ...
 
 
 def is_aiter_found_and_supported() -> bool:
@@ -672,6 +694,47 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     return out, y_scale
 
 
+def _rocm_aiter_fused_allreduce_rmsnorm_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+
+    total_bytes = input_.numel() * input_.element_size()
+    hidden_dim = input_.shape[-1]
+    token_num = input_.shape[0]
+    hidden_ok = hidden_dim in (512, 1024, 2048, 4096)
+    token_ok = token_num <= 80
+    world_size = aiter_ar.world_size
+    full_nvlink = aiter_ar.fully_connected
+
+    if world_size == 2:
+        size_ok = True
+    elif full_nvlink and world_size <= 4:
+        size_ok = total_bytes < 160 * 1024
+    elif full_nvlink and world_size <= 8:
+        size_ok = total_bytes < 80 * 1024
+    else:
+        size_ok = False
+
+    use_1stage = hidden_ok and token_ok and size_ok
+    result = aiter_ar.custom_fused_ar_rms(input_, residual, weight, epsilon, use_1stage)
+    assert result is not None
+    return result[0], result[1]
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(input_), torch.empty_like(residual)
+
+
 def _rocm_aiter_per_tensor_quant_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
@@ -1072,6 +1135,9 @@ class rocm_aiter_ops:
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
+    _ALL_REDUCE_MAX_SIZE: int = 8192 * 1024 * 8 * 2
+    _CUSTOM_ALL_REDUCE: AiterCustomAllreduceProto | None = None
+
     @classmethod
     def refresh_env_variables(cls):
         """
@@ -1238,6 +1304,34 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
+
+    @classmethod
+    @if_aiter_supported
+    def initialize_aiter_allreduce(
+        cls, group: ProcessGroup, device: torch.device
+    ) -> None:
+        try:
+            from aiter.dist.device_communicators.custom_all_reduce import (
+                CustomAllreduce as AiterCustomAllreduce,
+            )
+
+            cls._CUSTOM_ALL_REDUCE = AiterCustomAllreduce(group, device)
+        except Exception:
+            cls._CUSTOM_ALL_REDUCE = None
+
+    @classmethod
+    def get_aiter_allreduce(cls) -> AiterCustomAllreduceProto | None:
+        return cls._CUSTOM_ALL_REDUCE
+
+    @classmethod
+    def destroy_aiter_allreduce(cls) -> None:
+        if cls._CUSTOM_ALL_REDUCE is not None:
+            cls._CUSTOM_ALL_REDUCE.close()
+            cls._CUSTOM_ALL_REDUCE = None
+
+    @classmethod
+    def get_aiter_allreduce_max_size(cls) -> int:
+        return cls._ALL_REDUCE_MAX_SIZE
 
     @staticmethod
     @if_aiter_supported
@@ -1425,6 +1519,12 @@ class rocm_aiter_ops:
                 fake_impl=_triton_rotary_embedding_fake,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm",
+                op_func=_rocm_aiter_fused_allreduce_rmsnorm_impl,
+                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_fake,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -1470,6 +1570,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_rotary_embedding_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
+
+    @staticmethod
+    def get_fused_allreduce_rmsnorm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
 
     @staticmethod
     def rms_norm(
