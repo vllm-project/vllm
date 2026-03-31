@@ -129,7 +129,6 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
         assert output
 
 
-
 @pytest.mark.parametrize("tp", [1])
 def test_quark_int8_w8a8_moe(vllm_runner, tp):
     """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
@@ -145,9 +144,9 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
             layer = model.model.layers[0]
             # MoE experts should use QuarkW8A8Int8MoEMethod
             moe = layer.mlp.experts
-            assert isinstance(
-                moe.quant_method, QuarkW8A8Int8MoEMethod
-            ), f"Expected QuarkW8A8Int8MoEMethod, got {type(moe.quant_method)}"
+            assert isinstance(moe.quant_method, QuarkW8A8Int8MoEMethod), (
+                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe.quant_method)}"
+            )
             # Non-MoE linear layers should use QuarkW8A8Int8
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)

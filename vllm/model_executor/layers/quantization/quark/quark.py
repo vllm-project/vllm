@@ -389,7 +389,6 @@ class QuarkConfig(QuantizationConfig):
 
         return is_weight_mxfp4 and is_input_fp8
 
-
     def _is_dynamic_per_token_w8a8(
         self,
         weight_quant: dict[str, Any] | None,
