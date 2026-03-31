@@ -182,12 +182,6 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
-        # Requests whose block frees are deferred pending async KV transfer
-        # completion. While this set is non-empty the engine must keep
-        # stepping so that the worker-side connector is polled for finished
-        # transfers.
-        self._deferred_block_req_ids: set[str] = set()
-
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -1829,15 +1823,12 @@ class Scheduler(SchedulerInterface):
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
-        else:
-            self._deferred_block_req_ids.add(request_id)
 
         return kv_xfer_params
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
-        self._deferred_block_req_ids.discard(request.request_id)
         del self.requests[request.request_id]
 
     @property
@@ -1860,7 +1851,7 @@ class Scheduler(SchedulerInterface):
         return num_waiting + len(self.running)
 
     def has_finished_requests(self) -> bool:
-        return len(self.finished_req_ids) > 0 or len(self._deferred_block_req_ids) > 0
+        return len(self.finished_req_ids) > 0
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
