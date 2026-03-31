@@ -6,8 +6,6 @@ nan_flag parameter.
 
 Usage (from /opt/vllm-source):
     python tools/jit_cache_nan.py
-    sed -i '1s/^/import cache_nan_ext\n/' vllm/_custom_ops.py
-    sed -i 's/torch\.ops\._C_cache_ops\.concat_and_cache_mla/cache_nan_ext.concat_and_cache_mla/g' vllm/_custom_ops.py
 """
 import os
 import textwrap
@@ -57,6 +55,7 @@ mod = load(
     extra_cuda_cflags=[
         "-O3",
         "--use_fast_math",
+        "-DENABLE_FP8",
     ],
     verbose=True,
 )
