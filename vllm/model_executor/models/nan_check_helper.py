@@ -877,6 +877,11 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     real_has_nan = real.isnan().any().item()
     real_has_inf = real.isinf().any().item()
 
+    # Check per-layer hidden_states NaN from mark() inside CUDA graph.
+    # mark() may see NaN at intermediate layers even when final output is clean
+    # (e.g., NaN in kv projection path doesn't propagate through attention).
+    per_layer_hs_nan = _nan_counts[:, 0].any().item()
+
     # Check kv_c_normed_real (col 17) for NaN OR Inf — seq_lens-filtered,
     # reliable during graph replay. Catches the initial poisoning event
     # even when hidden_states[:1] looks clean.
@@ -902,8 +907,8 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         and _kv_kernel_nan_flags[:, 0].any().item()
     )
 
-    if not (real_has_nan or real_has_inf or kv_poison or kv_write_nan
-            or kv_kernel_hit):
+    if not (real_has_nan or real_has_inf or per_layer_hs_nan or kv_poison
+            or kv_write_nan or kv_kernel_hit):
         _zero_all()
         return
 
@@ -977,6 +982,24 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                    f"kvc_post_norm_inf={kvc_post_inf} "
                    f"kpe_pre_rope_nan={kpe_pre_nan} "
                    f"kpe_pre_rope_inf={kpe_pre_inf}\n")
+            f.write(msg)
+            f.flush()
+            print(msg, file=sys.stderr, end="", flush=True)
+
+    if per_layer_hs_nan:
+        f = _get_log()
+        for layer_idx in range(nan_cpu.shape[0]):
+            hs_nan = nan_cpu[layer_idx, 0].item()
+            hs_inf = inf_cpu[layer_idx, 0].item() if inf_cpu is not None else 0
+            attn_nan = nan_cpu[layer_idx, 2].item()
+            moe_nan = nan_cpu[layer_idx, 3].item()
+            ma = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
+            if hs_nan + hs_inf + attn_nan + moe_nan == 0:
+                continue
+            msg = (f"[HS_NAN] layer={layer_idx} "
+                   f"input_nan={hs_nan} input_inf={hs_inf} "
+                   f"attn_nan={attn_nan} moe_nan={moe_nan} "
+                   f"hs_maxabs={ma:.4g}\n")
             f.write(msg)
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
