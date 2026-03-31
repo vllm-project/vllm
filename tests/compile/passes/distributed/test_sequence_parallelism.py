@@ -35,7 +35,10 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Only test CUDA or XPU",
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
@@ -178,7 +181,9 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_norm_quant", [True, False])
 @pytest.mark.parametrize("dynamic", [False, True])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on CUDA or XPU"
+)
 def test_sequence_parallelism_pass(
     test_model_cls: type[torch.nn.Module],
     custom_ops: str,
@@ -227,7 +232,7 @@ def sequence_parallelism_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{current_platform.device_type}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -257,7 +262,7 @@ def sequence_parallelism_pass_on_test_model(
             eliminate_noops=True,
         ),
     )  # NoOp needed for fusion
-    device_config = DeviceConfig(device=torch.device("cuda"))
+    device_config = DeviceConfig(device=torch.device(current_platform.device_type))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
