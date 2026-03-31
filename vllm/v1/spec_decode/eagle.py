@@ -494,7 +494,7 @@ class SpecDecodeBaseProposer:
             positions = self.positions[token_indices_to_sample]
         hidden_states = hidden_states[token_indices_to_sample]
 
-        if isinstance(attn_metadata, TreeAttentionMetadata):
+        if any(isinstance(md, TreeAttentionMetadata) for md in draft_attn_metadata_per_group):
             # Draft using tree attention - requires full logits for top-k
             logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
