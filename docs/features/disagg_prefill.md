@@ -136,7 +136,7 @@ This design enables finer-grained control over latency and resource utilization,
     --gpu-memory-utilization 0.8 \
     --trust-remote-code \
     --kv-transfer-config \
-    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"$KV_PREFILL_PORT","kv_connector_extra_config":{"proxy_ip":"$ZMQ_DISCOVERY_IP","proxy_port":"$ZMQ_DISCOVERY_PORT","http_ip":"'"$PREFILL_INSTANCE_IP_1"'","http_port":"$PREFILL_INSTANCE_PORT","send_type":"PUT_ASYNC"}}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"'"$KV_PREFILL_PORT"'","kv_connector_extra_config":{"proxy_ip":"'"$ZMQ_DISCOVERY_IP"'","proxy_port":"'"$ZMQ_DISCOVERY_PORT"'","http_ip":"'"$PREFILL_INSTANCE_IP_1"'","http_port":"'"$PREFILL_INSTANCE_PORT"'","send_type":"PUT_ASYNC"}}' &
 
   # Step 3: Start Decode Instances
   CUDA_VISIBLE_DEVICES=1 vllm serve "$MODEL_NAME" \
