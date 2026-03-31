@@ -9,12 +9,12 @@ from vllm.config import VllmConfig
 from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.eagle import EagleBaseProposer
 
 logger = init_logger(__name__)
 
 
-class DraftModelProposer(SpecDecodeBaseProposer):
+class DraftModelProposer(EagleBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,

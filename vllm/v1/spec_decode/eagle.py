@@ -39,7 +39,11 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.metadata import (
+    ProposeInput,
+    SpecDecodeMetadata,
+    SpecDecodeProposer,
+)
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
@@ -57,7 +61,7 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
-class SpecDecodeBaseProposer:
+class EagleBaseProposer(SpecDecodeProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -397,25 +401,109 @@ class SpecDecodeBaseProposer:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
+    def prepare_inputs(self, sampled_token_ids, input_batch, **kwargs):
+        spec_decode_metadata = kwargs["spec_decode_metadata"]
+        num_scheduled_tokens = kwargs["num_scheduled_tokens"]
+        aux_hidden_states = kwargs["aux_hidden_states"]
+        hidden_states = kwargs["hidden_states"]
+        valid_sampled_tokens_count = kwargs["valid_sampled_tokens_count"]
+        scheduler_output = kwargs["scheduler_output"]
+        spec_config = kwargs["spec_config"]
+        common_attn_metadata = kwargs["common_attn_metadata"]
+
+        num_rejected_tokens_gpu = None
+        if spec_decode_metadata is None:
+            token_indices_to_sample = None
+            # input_ids can be None for multimodal models.
+            target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
+            target_positions = self._get_positions(num_scheduled_tokens)
+            if self.use_aux_hidden_state_outputs:
+                assert aux_hidden_states is not None
+                target_hidden_states = torch.cat(
+                    [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
+                )
+            else:
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
+        else:
+            if spec_config.disable_padded_drafter_batch:
+                token_indices_to_sample = None
+                common_attn_metadata, token_indices = self.drafter.prepare_inputs_old(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    spec_decode_metadata.num_draft_tokens,
+                )
+                target_token_ids = self.input_ids.gpu[token_indices]
+                target_positions = self._get_positions(token_indices)
+                if self.use_aux_hidden_state_outputs:
+                    assert aux_hidden_states is not None
+                    target_hidden_states = torch.cat(
+                        [h[token_indices] for h in aux_hidden_states], dim=-1
+                    )
+                else:
+                    target_hidden_states = hidden_states[token_indices]
+            else:
+                (
+                    common_attn_metadata,
+                    token_indices_to_sample,
+                    num_rejected_tokens_gpu,
+                ) = self.drafter.prepare_inputs_padded(
+                    common_attn_metadata,
+                    spec_decode_metadata,
+                    valid_sampled_tokens_count,
+                )
+                total_num_tokens = common_attn_metadata.num_actual_tokens
+                # When padding the batch, token_indices is just a range
+                target_token_ids = self.input_ids.gpu[:total_num_tokens]
+                target_positions = self._get_positions(total_num_tokens)
+                if self.use_aux_hidden_state_outputs:
+                    assert aux_hidden_states is not None
+                    target_hidden_states = torch.cat(
+                        [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
+                    )
+                else:
+                    target_hidden_states = hidden_states[:total_num_tokens]
+
+        if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
+            mm_embed_inputs = self._gather_mm_embeddings(
+                scheduler_output,
+                shift_computed_tokens=1,
+            )
+        else:
+            mm_embed_inputs = None
+
+        return ProposeInput(
+            target_token_ids=target_token_ids,
+            # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
+            target_positions=target_positions,
+            # [num_tokens, hidden_size]
+            target_hidden_states=target_hidden_states,
+            # [batch_size]
+            next_token_ids=kwargs["next_token_ids"],
+            token_indices_to_sample=token_indices_to_sample,
+            common_attn_metadata=common_attn_metadata,
+            mm_embed_inputs=mm_embed_inputs,
+            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            slot_mappings=kwargs["slot_mappings"],
+        )
+
     def propose(
         self,
-        # [num_tokens]
-        target_token_ids: torch.Tensor,
-        # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
-        target_positions: torch.Tensor,
-        # [num_tokens, hidden_size]
-        target_hidden_states: torch.Tensor,
-        # [batch_size]
-        next_token_ids: torch.Tensor,
-        token_indices_to_sample: torch.Tensor | None,
-        common_attn_metadata: CommonAttentionMetadata,
-        sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        num_rejected_tokens_gpu: torch.Tensor | None = None,
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,
+        propose_input: ProposeInput,
     ) -> torch.Tensor:
+        # [num_tokens]
+        target_token_ids = propose_input.target_token_ids
+        # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
+        target_positions = propose_input.target_positions
+        # [num_tokens, hidden_size]
+        target_hidden_states = propose_input.target_hidden_states
+        # [batch_size]
+        next_token_ids = propose_input.next_token_ids
+        token_indices_to_sample = propose_input.token_indices_to_sample
+        common_attn_metadata = propose_input.common_attn_metadata
+        mm_embed_inputs = propose_input.mm_embed_inputs
+        num_rejected_tokens_gpu = propose_input.num_rejected_tokens_gpu
+        slot_mappings = propose_input.slot_mappings
+
         batch_size = common_attn_metadata.batch_size()
 
         if self.method in ("eagle3", "dflash"):
@@ -1147,7 +1235,7 @@ class SpecDecodeBaseProposer:
             total_num_drafts = self.cu_drafts_per_level[level + 1]
         return draft_token_ids_list
 
-    def prepare_inputs(
+    def prepare_inputs_old(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         sampled_token_ids: list[list[int]],
@@ -1730,7 +1818,7 @@ class SpecDecodeBaseProposer:
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
 
 
-class EagleProposer(SpecDecodeBaseProposer):
+class EagleProposer(EagleBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,

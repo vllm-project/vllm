@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import typing
 
 import numpy as np
-import torch
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+from vllm.v1.spec_decode.metadata import ProposeInput, SpecDecodeProposer
+
+if typing.TYPE_CHECKING:
+    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
-class NgramProposer:
+class NgramProposer(SpecDecodeProposer):
     def __init__(self, vllm_config: VllmConfig):
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.prompt_lookup_min is not None
@@ -55,9 +59,11 @@ class NgramProposer:
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
         self.propose(
-            [[]] * 1024,
-            np.zeros(1024, dtype=np.int32),
-            np.zeros((1024, self.max_model_len), dtype=np.int32),
+            ProposeInput(
+                sampled_token_ids=[[]] * 1024,
+                num_tokens_no_spec=np.zeros(1024, dtype=np.int32),
+                token_ids_cpu=np.zeros((1024, self.max_model_len), dtype=np.int32),
+            )
         )
 
     def batch_propose(
@@ -128,15 +134,26 @@ class NgramProposer:
 
         return draft_token_ids
 
-    def propose(
+    def prepare_inputs(
         self,
         sampled_token_ids: list[list[int]],
-        num_tokens_no_spec: np.ndarray,
-        token_ids_cpu: np.ndarray,
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,  # unused
-    ) -> list[list[int]]:
+        input_batch: "InputBatch",
+        **kwargs,
+    ) -> ProposeInput:
+        return ProposeInput(
+            sampled_token_ids=sampled_token_ids,
+            num_tokens_no_spec=input_batch.num_tokens_no_spec,
+            token_ids_cpu=input_batch.token_ids_cpu,
+        )
+
+    def propose(self, propose_input: ProposeInput) -> tuple[list[list[int]], None]:
+        sampled_token_ids = propose_input.sampled_token_ids
+        num_tokens_no_spec = propose_input.num_tokens_no_spec
+        token_ids_cpu = propose_input.token_ids_cpu
+
+        assert num_tokens_no_spec is not None
+        assert token_ids_cpu is not None
+
         # find which requests need ngram proposals
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(sampled_token_ids):
@@ -159,7 +176,7 @@ class NgramProposer:
             token_ids_cpu,
         )
 
-        return draft_token_ids
+        return draft_token_ids, None
 
     def load_model(self, *args, **kwargs):
         # No model to load.
