@@ -331,7 +331,7 @@ class MiniMaxM2Model(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
             )
         else:
@@ -518,7 +518,10 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                config.vocab_size, config.hidden_size, quant_config=None
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
             self.lm_head = PPMissingLayer()
