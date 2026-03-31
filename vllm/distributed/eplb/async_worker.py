@@ -147,11 +147,7 @@ async def transfer_run_periodically(
                             cuda_stream.wait_event(model_state.buffer_consumed_event)
                             model_state.buffer_consumed_event = None
 
-                        (
-                            model_state.is_unchanged,
-                            model_state.is_received_locally,
-                            model_state.recv_metadata,
-                        ) = await transfer_layer(
+                        model_state.recv_metadata = await transfer_layer(
                             old_layer_indices=old_layer_indices,
                             new_layer_indices=new_layer_indices,
                             expert_weights=model_state.model.expert_weights[layer_idx],
