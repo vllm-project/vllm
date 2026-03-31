@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -38,6 +39,70 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Key used in MultiKVConnectorStats.data for per-connector selection metrics.
+_SELECTION_KEY = "__selection__"
+
+
+@dataclass
+class _SelectionStats(KVConnectorStats):
+    """Per-connector selection statistics accumulated by MultiConnector.
+
+    Tracks how often each child connector is queried, wins the weighted
+    selection, contributes matched tokens, and misses.  Flows through the
+    existing KVConnectorStats pipeline so that counters are registered in
+    the APIServer process (the one that serves /metrics) rather than in the
+    EngineCore subprocess.
+    """
+
+    def __post_init__(self):
+        if not self.data:
+            self.reset()
+
+    def reset(self):
+        # {connector_name: {"queries": int, "hits": int,
+        #                    "hit_tokens": int, "misses": int}}
+        self.data = {}
+
+    def _ensure(self, name: str):
+        if name not in self.data:
+            self.data[name] = {
+                "queries": 0,
+                "hits": 0,
+                "hit_tokens": 0,
+                "misses": 0,
+            }
+
+    def record_query(self, name: str):
+        self._ensure(name)
+        self.data[name]["queries"] += 1
+
+    def record_hit(self, name: str, tokens: int):
+        self._ensure(name)
+        self.data[name]["hits"] += 1
+        self.data[name]["hit_tokens"] += tokens
+
+    def record_miss(self, name: str):
+        self._ensure(name)
+        self.data[name]["misses"] += 1
+
+    def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
+        if not isinstance(other, _SelectionStats):
+            return self
+        for name, counts in other.data.items():
+            if name not in self.data:
+                self.data[name] = dict(counts)
+            else:
+                for k, v in counts.items():
+                    self.data[name][k] = self.data[name].get(k, 0) + v
+        return self
+
+    def reduce(self) -> dict[str, Any]:
+        # Return a shallow copy so the caller can't mutate our state.
+        return dict(self.data)
+
+    def is_empty(self) -> bool:
+        return not self.data
 
 
 @dataclass
@@ -114,16 +179,91 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
         self._prom_metrics = prom_metrics
 
+        # Per-connector selection counters.  Labels: model_name, engine,
+        # connector.  Registered here (APIServer process) so they appear in
+        # the /metrics endpoint.
+        _sel_labels = labelnames + ["connector"]
+        self._counter_mc_queries = self._counter_cls(
+            name="vllm:kv_connector_mc_queries_total",
+            documentation=(
+                "Total cache-lookup queries issued to each child connector "
+                "by MultiConnector."
+            ),
+            labelnames=_sel_labels,
+        )
+        self._counter_mc_hits = self._counter_cls(
+            name="vllm:kv_connector_mc_hits_total",
+            documentation=(
+                "Number of times each child connector won the weighted "
+                "selection and will serve the load."
+            ),
+            labelnames=_sel_labels,
+        )
+        self._counter_mc_hit_tokens = self._counter_cls(
+            name="vllm:kv_connector_mc_hit_tokens_total",
+            documentation="Total tokens matched by the winning child connector.",
+            labelnames=_sel_labels,
+        )
+        self._counter_mc_misses = self._counter_cls(
+            name="vllm:kv_connector_mc_misses_total",
+            documentation=(
+                "Number of requests where each child connector had no cache hit."
+            ),
+            labelnames=_sel_labels,
+        )
+        # Cache of labeled metric instances keyed by (engine_idx, connector_name).
+        self._mc_queries: dict[tuple[int, str], Any] = {}
+        self._mc_hits: dict[tuple[int, str], Any] = {}
+        self._mc_hit_tokens: dict[tuple[int, str], Any] = {}
+        self._mc_misses: dict[tuple[int, str], Any] = {}
+
+    def _observe_selection(
+        self,
+        per_connector: dict[str, dict[str, int]],
+        engine_idx: int,
+    ) -> None:
+        """Update per-connector selection counters from a _SelectionStats dict."""
+        for conn_name, counts in per_connector.items():
+            key = (engine_idx, conn_name)
+            if key not in self._mc_queries:
+                label_vals = self.per_engine_labelvalues[engine_idx] + [conn_name]
+                self._mc_queries[key] = self._counter_mc_queries.labels(*label_vals)
+                self._mc_hits[key] = self._counter_mc_hits.labels(*label_vals)
+                self._mc_hit_tokens[key] = self._counter_mc_hit_tokens.labels(
+                    *label_vals
+                )
+                self._mc_misses[key] = self._counter_mc_misses.labels(*label_vals)
+            self._mc_queries[key].inc(counts.get("queries", 0))
+            self._mc_hits[key].inc(counts.get("hits", 0))
+            self._mc_hit_tokens[key].inc(counts.get("hit_tokens", 0))
+            self._mc_misses[key].inc(counts.get("misses", 0))
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        # Handle MultiConnector's own selection metrics first.
+        selection_data = transfer_stats_data.get(_SELECTION_KEY)
+        if selection_data is not None:
+            # Cross-process: msgspec serialises the dataclass as a dict with a
+            # "data" field.  Same-process: the _SelectionStats object itself.
+            per_conn = (
+                selection_data["data"]
+                if isinstance(selection_data, dict)
+                else selection_data.data
+            )
+            self._observe_selection(per_conn, engine_idx)
+
+        # Route child-connector stats.
         for connector_id, stats_data in transfer_stats_data.items():
+            if connector_id == _SELECTION_KEY:
+                continue
             assert connector_id in self._prom_metrics, (
-                f"{connector_id} is not contained in the list of registered connectors "
-                f"with Prometheus metrics support: {self._prom_metrics.keys()}"
+                f"{connector_id} is not contained in the list of registered "
+                f"connectors with Prometheus metrics support: "
+                f"{self._prom_metrics.keys()}"
             )
             self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
 
 
-class MultiConnector(KVConnectorBase_V1):
+class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     """
     A wrapper for using multiple KVConnectors at the same time.
 
@@ -165,6 +305,44 @@ class MultiConnector(KVConnectorBase_V1):
         ):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
+
+        # Per-connector load weights for weighted selection.
+        # Higher weight means a connector's hit is preferred even if
+        # another offers more tokens (e.g. fast CPU cache vs slow disk).
+        # Configured via "load_weight" in each connector's config.
+        assert vllm_config.kv_transfer_config is not None
+        connectors_cfg = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        self._load_weights: list[float] = [
+            float(cfg.get("kv_connector_extra_config", {}).get("load_weight", 1.0))
+            for cfg in connectors_cfg
+        ]
+        # Pad if config is shorter than connectors (shouldn't happen)
+        while len(self._load_weights) < len(self._connectors):
+            self._load_weights.append(1.0)
+
+        # Validate HMA: MultiConnector advertises SupportsHMA, but this
+        # only works if all children also support it.
+        if not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+            non_hma = [
+                type(c).__name__
+                for c in self._connectors
+                if not isinstance(c, SupportsHMA)
+            ]
+            if non_hma:
+                raise TypeError(
+                    f"MultiConnector has HMA enabled but these child "
+                    f"connectors do not support it: {non_hma}. Either "
+                    f"use --disable-hybrid-kv-cache-manager or replace "
+                    f"the non-HMA connectors."
+                )
+
+        # Human-readable names for per-connector Prometheus labels.
+        self._connector_names: list[str] = [type(c).__name__ for c in self._connectors]
+
+        # Per-connector selection stats; flushed via get_kv_connector_stats().
+        self._selection_stats = _SelectionStats()
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -315,11 +493,24 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.set_host_xfer_buffer_ops(copy_operation)
 
-    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
-        """Handle preempted requests for all sub-connectors."""
-        assert isinstance(kv_connector_metadata, MultiKVConnectorMetadata)
-        for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
-            c.handle_preemptions(cm)
+    def handle_preemptions(
+        self,
+        kv_connector_metadata: KVConnectorMetadata | set[str],
+    ):
+        """Handle preempted requests for all sub-connectors.
+
+        Stock vLLM 0.18.0 passes ``set[str]`` (preempted request IDs),
+        while the MultiConnector metadata path passes
+        ``MultiKVConnectorMetadata``.  Accept both.
+        """
+        if isinstance(kv_connector_metadata, set):
+            # Stock vLLM path — forward the raw set to every child.
+            for c in self._connectors:
+                c.handle_preemptions(kv_connector_metadata)  # type: ignore[arg-type]
+        else:
+            assert isinstance(kv_connector_metadata, MultiKVConnectorMetadata)
+            for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
+                c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)
@@ -347,26 +538,69 @@ class MultiConnector(KVConnectorBase_V1):
     # ==============================
     # Scheduler-side methods
     # ==============================
+    def get_timed_out_loads(self) -> set[str]:
+        """Aggregate timed-out loads from all child connectors."""
+        result: set[str] = set()
+        for c in self._connectors:
+            if hasattr(c, "get_timed_out_loads"):
+                result.update(c.get_timed_out_loads())
+        return result
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        to_return = (0, False)
+        # Weighted selection: each connector's hit is scored as
+        # tokens * load_weight.  The connector with the highest
+        # weighted score wins.  This lets a fast CPU cache (high
+        # weight) beat a slow disk cache unless the disk hit is
+        # substantially larger.
+        best_idx = -1
+        best_score = 0.0
+        best_result: tuple[int, bool] = (0, False)
+
+        # Track which connectors gave a definitive answer vs deferred.
+        per_connector_results: list[tuple[int, bool] | None] = []
+        any_resolved = False
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens
             )
-            # If there is a connector still looking up the matches,
-            # we return None to indicate that we are not done yet.
             if toks is None:
-                return (None, False)
-            # The first connector that has new matched tokens will be assigned
-            # to this request.
-            if to_return[0] == 0 and toks > 0:
-                self._requests_to_connector[request.request_id] = i
-                to_return = (toks, load_async)
-        return to_return
+                # Connector is still resolving (e.g. backpressured).
+                # Skip it — don't block connectors that already answered.
+                per_connector_results.append(None)
+                continue
+            any_resolved = True
+            name = self._connector_names[i]
+            self._selection_stats.record_query(name)
+            per_connector_results.append((toks, load_async))
+            if toks > 0:
+                score = toks * self._load_weights[i]
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+                    best_result = (toks, load_async)
+
+        # Only defer if ALL connectors returned None.
+        if not any_resolved:
+            return (None, False)
+
+        if best_idx >= 0:
+            winner_name = self._connector_names[best_idx]
+            self._requests_to_connector[request.request_id] = best_idx
+            self._selection_stats.record_hit(winner_name, best_result[0])
+            for i, result in enumerate(per_connector_results):
+                if i != best_idx and result is not None and result[0] == 0:
+                    self._selection_stats.record_miss(self._connector_names[i])
+        else:
+            # No connector had a hit (resolved ones all returned 0).
+            for i, result in enumerate(per_connector_results):
+                if result is not None:
+                    self._selection_stats.record_miss(self._connector_names[i])
+
+        return best_result
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -441,10 +675,24 @@ class MultiConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        return self.request_finished_all_groups(request, (blocks,))
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
         async_saves = 0
         kv_txfer_params = None
         for c in self._connectors:
-            async_save, txfer_params = c.request_finished(request, blocks)
+            if isinstance(c, SupportsHMA):
+                async_save, txfer_params = c.request_finished_all_groups(
+                    request, block_ids
+                )
+            else:
+                # Flatten block_ids for non-HMA connectors
+                flat = [bid for group in block_ids for bid in group]
+                async_save, txfer_params = c.request_finished(request, flat)
             if async_save:
                 async_saves += 1
             if txfer_params is not None:
@@ -510,8 +758,23 @@ class MultiConnector(KVConnectorBase_V1):
         # 1. Already-instantiated KVConnectorStats objects (same process)
         # 2. Serialized dicts (cross-process after serialization)
         # We need to reconstruct proper KVConnectorStats objects from dicts
-        reconstructed_data = {}
+        reconstructed_data: dict[str, KVConnectorStats] = {}
         for connector_name, stats_value in data.items():
+            # Selection stats are internal to MultiConnector — reconstruct
+            # directly without going through KVConnectorFactory.
+            if connector_name == _SELECTION_KEY:
+                if isinstance(stats_value, _SelectionStats):
+                    reconstructed_data[connector_name] = stats_value
+                else:
+                    assert isinstance(stats_value, dict) and "data" in stats_value, (
+                        f"Expected a dict with a 'data' field for "
+                        f"{_SELECTION_KEY!r}, got {stats_value!r}"
+                    )
+                    reconstructed_data[connector_name] = _SelectionStats(
+                        data=stats_value["data"]
+                    )
+                continue
+
             # If already a KVConnectorStats object, use it directly
             if isinstance(stats_value, KVConnectorStats):
                 reconstructed_data[connector_name] = stats_value
@@ -549,6 +812,14 @@ class MultiConnector(KVConnectorBase_V1):
                 # Lazy init to allow optional return value.
                 stats_by_connector = MultiKVConnectorStats()
             stats_by_connector[c.__class__.__name__] = stats
+
+        # Attach accumulated selection metrics, then reset for the next window.
+        if not self._selection_stats.is_empty():
+            if stats_by_connector is None:
+                stats_by_connector = MultiKVConnectorStats()
+            stats_by_connector[_SELECTION_KEY] = self._selection_stats
+            self._selection_stats = _SelectionStats()
+
         return stats_by_connector
 
     @classmethod

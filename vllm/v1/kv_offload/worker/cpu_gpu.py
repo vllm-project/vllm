@@ -9,7 +9,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
+from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
@@ -34,6 +34,8 @@ def expand_block_ids(
     block_size_factor: int,
     output: np.ndarray,
     skip_count: int = 0,
+    block_offsets: np.ndarray | None = None,
+    block_counts: np.ndarray | None = None,
 ):
     """
     Convert a list of block IDs to a list of matching block ids,
@@ -49,6 +51,26 @@ def expand_block_ids(
     and 3 maps to [12, 13, 14, 15]
     """
     assert skip_count < block_size_factor
+    if block_offsets is not None or block_counts is not None:
+        assert block_offsets is not None and block_counts is not None
+        assert len(block_offsets) == len(block_ids)
+        assert len(block_counts) == len(block_ids)
+
+        output_idx = 0
+        for block_id, block_offset, block_count in zip(
+            block_ids, block_offsets, block_counts
+        ):
+            assert block_offset >= 0
+            assert block_count >= 0
+            assert block_offset + block_count <= block_size_factor
+            base_block_id = block_id * block_size_factor
+            output_end_idx = output_idx + block_count
+            output[output_idx:output_end_idx] = base_block_id + np.arange(
+                block_offset, block_offset + block_count
+            )
+            output_idx = output_end_idx
+        assert output_idx == len(output)
+        return
 
     first_range = np.arange(skip_count, block_size_factor)
     full_range = np.arange(0, block_size_factor)
@@ -60,6 +82,67 @@ def expand_block_ids(
         output_end_idx = output_idx + len(indices)
         output[output_idx:output_end_idx] = base_block_id + indices
         output_idx = output_end_idx
+
+
+def build_transfer_indices(
+    src_spec: BlockIDsLoadStoreSpec,
+    dst_spec: BlockIDsLoadStoreSpec,
+    src_block_size_factor: int,
+    dst_block_size_factor: int,
+) -> np.ndarray:
+    src_blocks = src_spec.block_ids
+    dst_blocks = dst_spec.block_ids
+    assert src_blocks.ndim == 1
+    assert dst_blocks.ndim == 1
+
+    src_block_offsets = (
+        src_spec.block_offsets if isinstance(src_spec, GPULoadStoreSpec) else None
+    )
+    src_block_counts = (
+        src_spec.block_counts if isinstance(src_spec, GPULoadStoreSpec) else None
+    )
+    dst_block_offsets = (
+        dst_spec.block_offsets if isinstance(dst_spec, GPULoadStoreSpec) else None
+    )
+    dst_block_counts = (
+        dst_spec.block_counts if isinstance(dst_spec, GPULoadStoreSpec) else None
+    )
+
+    src_sub_block_count = (
+        int(np.sum(src_block_counts))
+        if src_block_counts is not None
+        else src_blocks.size * src_block_size_factor
+    )
+    dst_sub_block_count = (
+        int(np.sum(dst_block_counts))
+        if dst_block_counts is not None
+        else dst_blocks.size * dst_block_size_factor
+    )
+
+    src_sub_blocks_to_skip = 0
+    if src_block_counts is None and dst_block_counts is None:
+        src_sub_blocks_to_skip = -dst_blocks.size % src_block_size_factor
+        assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
+    else:
+        assert dst_sub_block_count == src_sub_block_count
+
+    src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
+    expand_block_ids(
+        src_blocks,
+        src_block_size_factor,
+        src_to_dst[:, 0],
+        skip_count=src_sub_blocks_to_skip,
+        block_offsets=src_block_offsets,
+        block_counts=src_block_counts,
+    )
+    expand_block_ids(
+        dst_blocks,
+        dst_block_size_factor,
+        src_to_dst[:, 1],
+        block_offsets=dst_block_offsets,
+        block_counts=dst_block_counts,
+    )
+    return src_to_dst
 
 
 class SingleDirectionOffloadingHandler(OffloadingHandler):
@@ -154,25 +237,13 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
-        src_blocks = src_spec.block_ids
-        dst_blocks = dst_spec.block_ids
-        assert src_blocks.ndim == 1
-        assert dst_blocks.ndim == 1
-
-        src_sub_block_count = src_blocks.size * self.src_block_size_factor
-        dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
-        src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
-
-        assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
-
-        src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
-        expand_block_ids(
-            src_blocks,
-            self.src_block_size_factor,
-            src_to_dst[:, 0],
-            skip_count=src_sub_blocks_to_skip,
+        src_to_dst = build_transfer_indices(
+            src_spec,
+            dst_spec,
+            src_block_size_factor=self.src_block_size_factor,
+            dst_block_size_factor=self.dst_block_size_factor,
         )
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
+        dst_sub_block_count = src_to_dst.shape[0]
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
         stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()

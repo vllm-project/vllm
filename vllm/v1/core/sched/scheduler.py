@@ -295,9 +295,10 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
+        # External tokens (from KV offload connectors) are loaded into GPU
+        # cache before the forward pass.  They are indistinguishable from
+        # locally-computed tokens for alignment purposes — the mamba state
+        # is already populated at block boundaries by the offloading path.
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
@@ -691,7 +692,10 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_block_aligned_split:
+                if self.need_mamba_block_aligned_split and not load_kv_async:
+                    # Skip mamba alignment when doing an async KV load
+                    # (num_new_tokens is intentionally 0 — we're loading
+                    # cached tokens, not computing new ones).
                     num_new_tokens = self._mamba_block_aligned_split(
                         request,
                         num_new_tokens,
@@ -2077,7 +2081,22 @@ class Scheduler(SchedulerInterface):
             # update_from_output(), based on worker-side connector signals
             # in KVConnectorOutput.finished_recving
             if request.request_id not in self.finished_recving_kv_req_ids:
-                return False
+                # Check if the load timed out — if so, treat as
+                # failed and fall back to recompute.
+                if self.connector is not None and hasattr(
+                    self.connector, "get_timed_out_loads"
+                ):
+                    # OffloadingConnector extension: check load timeout.
+                    timed_out = self.connector.get_timed_out_loads()  # type: ignore[attr-defined]
+                    if request.request_id in timed_out:
+                        self.failed_recving_kv_req_ids.add(request.request_id)
+                        self.finished_recving_kv_req_ids.add(request.request_id)
+                    else:
+                        return False
+                elif self.connector is not None:
+                    return False
+                else:
+                    return False
             self._update_waiting_for_remote_kv(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED

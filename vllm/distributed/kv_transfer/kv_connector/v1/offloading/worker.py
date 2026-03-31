@@ -58,6 +58,10 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
+        # Loads that failed validation (e.g. stale cache) and were never
+        # submitted to the I/O engine.  Reported as "finished receiving"
+        # so the scheduler falls back to recompute.
+        self._failed_load_req_ids: set[ReqId] = set()
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -318,14 +322,37 @@ class OffloadingConnectorWorker:
             self._jobs[job_id] = (req_id, False)
             assert req_id not in self._load_job
             self._load_job[req_id] = job_id
+            logger.debug(
+                "offloading worker submit load req_id=%s job_id=%s",
+                req_id,
+                job_id,
+            )
             success = self.worker.transfer_async(job_id, transfer_spec)
-            assert success
+            if not success:
+                logger.warning(
+                    "offloading worker load submission failed for "
+                    "req_id=%s job_id=%s (stale cache files?), "
+                    "falling back to recompute",
+                    req_id,
+                    job_id,
+                )
+                # Remove from tracking and mark as failed so
+                # get_finished() reports it as complete, letting the
+                # scheduler fall back to recompute.
+                del self._load_job[req_id]
+                del self._jobs[job_id]
+                self._failed_load_req_ids.add(req_id)
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)
             self._store_jobs[req_id].add(job_id)
+            logger.debug(
+                "offloading worker queue store req_id=%s job_id=%s",
+                req_id,
+                job_id,
+            )
             # NOTE(orozery): defer the store to the beginning of the next engine step,
             # so that offloading starts AFTER transfers related to token sampling,
             # thereby avoiding delays to token generation due to offloading.
@@ -346,6 +373,14 @@ class OffloadingConnectorWorker:
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
+            logger.debug(
+                "offloading worker finished job_id=%s success=%s "
+                "transfer_type=%s transfer_size=%s",
+                job_id,
+                transfer_result.success,
+                transfer_result.transfer_type,
+                transfer_result.transfer_size,
+            )
             assert transfer_result.success
             req_id, store = self._jobs.pop(job_id)
             if (
@@ -372,13 +407,26 @@ class OffloadingConnectorWorker:
                 req_job = self._load_job[req_id]
                 assert job_id == req_job
                 del self._load_job[req_id]
+                logger.debug(
+                    "offloading worker finished load req_id=%s job_id=%s",
+                    req_id,
+                    job_id,
+                )
                 finished_recving.add(req_id)
+
+        # Include loads that failed validation (stale cache) so the
+        # scheduler removes them from _reqs_being_loaded and falls
+        # back to recompute.
+        if self._failed_load_req_ids:
+            finished_recving.update(self._failed_load_req_ids)
+            self._failed_load_req_ids.clear()
 
         for req_id in finished_req_ids:
             pending_req_jobs = self._store_jobs.get(req_id)
             if pending_req_jobs:
                 self._finished_reqs_waiting_for_store.add(req_id)
             elif pending_req_jobs is not None:
+                logger.debug("offloading worker finished sending req_id=%s", req_id)
                 finished_sending.add(req_id)
                 del self._store_jobs[req_id]
 

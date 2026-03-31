@@ -48,12 +48,26 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         block_ids: list[int],
         group_sizes: Sequence[int],
         block_indices: Sequence[int] | None = None,
+        block_offsets: Sequence[int] | None = None,
+        block_counts: Sequence[int] | None = None,
     ):
         super().__init__(block_ids)
         assert sum(group_sizes) == len(block_ids)
         assert block_indices is None or len(block_indices) == len(group_sizes)
+        assert (block_offsets is None) == (block_counts is None)
+        if block_offsets is not None and block_counts is not None:
+            assert len(block_offsets) == len(block_ids)
+            assert len(block_counts) == len(block_ids)
         self.group_sizes: Sequence[int] = group_sizes
         self.block_indices: Sequence[int] | None = block_indices
+        self.block_offsets: np.ndarray | None = (
+            np.array(block_offsets, dtype=np.int64)
+            if block_offsets is not None
+            else None
+        )
+        self.block_counts: np.ndarray | None = (
+            np.array(block_counts, dtype=np.int64) if block_counts is not None else None
+        )
 
     @staticmethod
     def medium() -> str:

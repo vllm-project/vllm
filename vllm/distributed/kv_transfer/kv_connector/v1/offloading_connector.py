@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -41,7 +42,27 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 
-class OffloadingConnector(KVConnectorBase_V1):
+class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
+    @staticmethod
+    def _coerce_metadata(
+        metadata: KVConnectorMetadata,
+    ) -> OffloadingConnectorMetadata:
+        if isinstance(metadata, OffloadingConnectorMetadata):
+            return metadata
+        if all(
+            hasattr(metadata, field)
+            for field in ("reqs_to_load", "reqs_to_store", "reqs_to_flush")
+        ):
+            return OffloadingConnectorMetadata(
+                reqs_to_load=metadata.reqs_to_load,  # type: ignore[attr-defined]
+                reqs_to_store=metadata.reqs_to_store,  # type: ignore[attr-defined]
+                reqs_to_flush=metadata.reqs_to_flush,  # type: ignore[attr-defined]
+            )
+        raise TypeError(
+            "OffloadingConnector requires metadata with reqs_to_load, "
+            "reqs_to_store, and reqs_to_flush fields."
+        )
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
@@ -74,15 +95,28 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
-    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
+    def handle_preemptions(
+        self,
+        preempted_req_ids_or_metadata: set[str] | KVConnectorMetadata,
+    ):
         assert self.connector_worker is not None
-        assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.handle_preemptions(kv_connector_metadata)
+        # Stock vLLM passes preempted_req_ids (set[str]) directly.
+        # Our branch's EngineCore may also pass KVConnectorMetadata.
+        if isinstance(preempted_req_ids_or_metadata, (set, list)):
+            metadata = OffloadingConnectorMetadata(
+                reqs_to_load={},
+                reqs_to_store={},
+                reqs_to_flush=set(preempted_req_ids_or_metadata),
+            )
+        else:
+            metadata = self._coerce_metadata(preempted_req_ids_or_metadata)
+        self.connector_worker.handle_preemptions(metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.start_kv_transfers(self._connector_metadata)
+        self.connector_worker.start_kv_transfers(
+            self._coerce_metadata(self._get_connector_metadata())
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
@@ -98,12 +132,19 @@ class OffloadingConnector(KVConnectorBase_V1):
 
     def wait_for_save(self):
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.prepare_store_kv(self._connector_metadata)
+        self.connector_worker.prepare_store_kv(
+            self._coerce_metadata(self._get_connector_metadata())
+        )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         return self.connector_worker.get_finished(finished_req_ids)
+
+    def get_timed_out_loads(self) -> set[str]:
+        """Return req IDs whose loads exceeded the timeout."""
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_timed_out_loads()
+        return set()
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -135,6 +176,13 @@ class OffloadingConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return self.request_finished_all_groups(request, (block_ids,))
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
