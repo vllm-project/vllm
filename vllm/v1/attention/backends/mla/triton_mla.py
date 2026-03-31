@@ -5,15 +5,13 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
-)
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
@@ -31,6 +29,7 @@ class TritonMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -150,7 +149,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
-        num_kv_splits = 1 if vllm_is_batch_invariant() else 4
+        num_kv_splits = 1 if envs.VLLM_BATCH_INVARIANT else 4
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
@@ -186,7 +185,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.scale,
             PAGE_SIZE,
             k_scale=layer._k_scale,
-            v_scale=layer._v_scale,
+            v_scale=layer._k_scale,
         )
 
         return o, lse

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import platform
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -56,16 +57,19 @@ class CPUWorker(Worker):
         def check_preloaded_libs(name: str):
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
             if name not in ld_preload_list:
-                raise RuntimeError(
-                    f"{name} is not found in LD_PRELOAD. "
-                    "Please follow the section `set LD_PRELOAD` in "
+                logger.warning(
+                    "%s is not found in LD_PRELOAD. "
+                    "For best performance, please follow the section "
+                    "`set LD_PRELOAD` in "
                     "https://docs.vllm.ai/en/latest/getting_started/installation/cpu/ "
-                    "to setup required pre-loaded libraries."
+                    "to setup required pre-loaded libraries.",
+                    name,
                 )
 
-        check_preloaded_libs("libtcmalloc")
-        if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-            check_preloaded_libs("libiomp")
+        if sys.platform.startswith("linux"):
+            check_preloaded_libs("libtcmalloc")
+            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+                check_preloaded_libs("libiomp")
 
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
@@ -103,6 +107,15 @@ class CPUWorker(Worker):
             ret = torch.ops._C.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
+
+        # After the thread binding, changing thread num is not allowed
+        def skip_set_num_threads(x: int):
+            logger.warning(
+                "CPU backend doesn't allow to use "
+                "`torch.set_num_threads` after the thread binding, skip it."
+            )
+
+        torch.set_num_threads = skip_set_num_threads
 
         # Note: unique identifier for creating allreduce shared memory
         os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]

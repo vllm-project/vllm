@@ -33,19 +33,20 @@ class MultiModalFeatures(BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
     Carries hashes (for cache lookup / identification) and placeholder
-    positions so the downstream ``/generate`` service knows *where* in
+    positions so the downstream `/generate` service knows *where* in
     the token sequence each multimodal item lives.
 
-    .. note:: Phase 1 — metadata only.
-       Phase 2 should add ``mm_kwargs`` (processed tensor data) using a
-       binary transport so the ``/generate`` side can skip re-processing.
-       The ``/generate`` endpoint must also be updated to inject these
-       features into ``ProcessorInputs`` before passing to
-       ``InputProcessor.process_inputs``.
+    Note:
+        Phase 1 — metadata only.
+        Phase 2 should add `mm_kwargs` (processed tensor data) using a
+        binary transport so the ``/generate` side can skip re-processing.
+        The `/generate` endpoint must also be updated to inject these
+        features into `EngineInput` before passing to
+        `InputProcessor.process_inputs`.
     """
 
     mm_hashes: dict[str, list[str]]
-    """Per-modality item hashes, e.g. ``{"image": ["abc", "def"]}``."""
+    """Per-modality item hashes, e.g. `{"image": ["abc", "def"]}`."""
 
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
     """Per-modality placeholder ranges in the token sequence."""
@@ -93,6 +94,8 @@ class GenerateRequest(BaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=-(2**63),
+        le=2**63 - 1,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "

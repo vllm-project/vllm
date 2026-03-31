@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import datetime
 import hashlib
 import os
@@ -12,6 +11,7 @@ from typing import Any
 
 import albumentations
 import numpy as np
+import pybase64 as base64
 import rasterio
 import regex as re
 import torch
@@ -19,7 +19,7 @@ from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
 from vllm.config import VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
