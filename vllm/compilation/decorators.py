@@ -370,8 +370,6 @@ def _support_torch_compile(
                     "but no parameter of that type was found in the method signature. "
                     f"Please either annotate {init} or pass it as a keyword argument."
                 )
-        # NOTE: to support multimodal models (such as encoder),
-        # we may not have vllm_config so we may need to patch it
         if "vllm_config" in sig.parameters:
             kwargs["vllm_config"] = vllm_config
         if "prefix" in sig.parameters:
