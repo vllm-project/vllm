@@ -89,7 +89,17 @@ pub async fn setup_mock_engine_connections(
     engine_handshake: String,
     engine_id: impl Into<EngineId>,
 ) -> MockEngineConnections {
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for the client to bind the handshake socket before connecting.
+    // A fixed sleep is racy under CI load; instead poll for the socket file.
+    let socket_path = engine_handshake
+        .strip_prefix("ipc://")
+        .expect("handshake address must be ipc://");
+    for _ in 0..100 {
+        if Path::new(socket_path).exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let peer_identity = PeerIdentity::try_from(engine_id.into()).expect("peer id");
 
