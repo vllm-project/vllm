@@ -393,6 +393,8 @@ __global__ void reshape_and_cache_flash_kernel(
 //   bit 1 = FP8 NaN in k_pe write
 //   bit 2 = Inf in kv_c source
 //   bit 3 = Inf in k_pe source
+//   bit 4 = NaN in kv_c source
+//   bit 5 = NaN in k_pe source
 
 __device__ __forceinline__ bool is_inf_bits(__nv_bfloat16 v) {
   return (*reinterpret_cast<const uint16_t*>(&v) & 0x7FFFu) == 0x7F80u;
@@ -402,6 +404,16 @@ __device__ __forceinline__ bool is_inf_bits(uint16_t v) {
 }
 __device__ __forceinline__ bool is_inf_bits(float v) {
   return (__float_as_uint(v) & 0x7FFFFFFFu) == 0x7F800000u;
+}
+
+__device__ __forceinline__ bool is_nan_bits(__nv_bfloat16 v) {
+  return (*reinterpret_cast<const uint16_t*>(&v) & 0x7FFFu) > 0x7F80u;
+}
+__device__ __forceinline__ bool is_nan_bits(uint16_t v) {
+  return (v & 0x7FFFu) > 0x7C00u;
+}
+__device__ __forceinline__ bool is_nan_bits(float v) {
+  return (__float_as_uint(v) & 0x7FFFFFFFu) > 0x7F800000u;
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -449,6 +461,8 @@ __global__ void concat_and_cache_mla_kernel(
             atomicOr(nan_flag, (1 << nan_bit));
           if (is_inf_bits(sv))
             atomicOr(nan_flag, (1 << inf_bit));
+          if (is_nan_bits(sv))
+            atomicOr(nan_flag, (1 << (inf_bit + 2)));
         }
       }
     }
@@ -508,11 +522,13 @@ __global__ void concat_and_cache_ds_mla_kernel(
     const int64_t dst_idx = kv_lora_rank / 2 + 8 + pe_idx_start;
     // Vectorized store of two 16-bit values, performed as one 32-bit store
     *reinterpret_cast<int32_t*>(&kv_cache_16bit[dst_idx]) = vals;
-    // RoPE is stored as bf16 (no FP8 conversion) — check source for Inf
+    // RoPE is stored as bf16 (no FP8 conversion) — check source for Inf/NaN
     if (nan_flag != nullptr) {
       const scalar_t* pe_vals = reinterpret_cast<const scalar_t*>(&vals);
       if (is_inf_bits(pe_vals[0]) || is_inf_bits(pe_vals[1]))
         atomicOr(nan_flag, (1 << 3));
+      if (is_nan_bits(pe_vals[0]) || is_nan_bits(pe_vals[1]))
+        atomicOr(nan_flag, (1 << 5));
     }
     return;
   }
@@ -567,16 +583,18 @@ __global__ void concat_and_cache_ds_mla_kernel(
   *reinterpret_cast<uint64_t*>(&kv_cache[dst_idx_base]) =
       *reinterpret_cast<const uint64_t*>(result);
 
-  // Check FP8 output for NaN and source bf16 for Inf
+  // Check FP8 output for NaN and source bf16 for Inf/NaN
   if (nan_flag != nullptr) {
-    int fp8_nan = 0, src_inf = 0;
+    int fp8_nan = 0, src_inf = 0, src_nan = 0;
 #pragma unroll
     for (int i = 0; i < 8; i++) {
       fp8_nan |= ((result[i] & 0x7Fu) == 0x7Fu);
       src_inf |= is_inf_bits(vals[i]);
+      src_nan |= is_nan_bits(vals[i]);
     }
     if (fp8_nan) atomicOr(nan_flag, (1 << 0));
     if (src_inf) atomicOr(nan_flag, (1 << 2));
+    if (src_nan) atomicOr(nan_flag, (1 << 4));
   }
 }
 

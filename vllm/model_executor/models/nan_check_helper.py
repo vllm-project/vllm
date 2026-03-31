@@ -156,7 +156,8 @@ _kv_write_nan_counts: torch.Tensor | None = None
 
 # Per-layer int32 flags written by concat_and_cache_mla_kernel via atomicOr.
 # Bit layout: bit0=FP8 NaN in kv_c, bit1=FP8 NaN in k_pe,
-#             bit2=Inf in kv_c source, bit3=Inf in k_pe source.
+#             bit2=Inf in kv_c source, bit3=Inf in k_pe source,
+#             bit4=NaN in kv_c source, bit5=NaN in k_pe source.
 _kv_kernel_nan_flags: torch.Tensor | None = None
 
 
@@ -917,6 +918,8 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             1: "fp8_nan_k_pe",
             2: "inf_src_kv_c",
             3: "inf_src_k_pe",
+            4: "nan_src_kv_c",
+            5: "nan_src_k_pe",
         }
         f = _get_log()
         for layer_idx in range(kv_kernel_cpu.shape[0]):
