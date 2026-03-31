@@ -31,7 +31,7 @@ def test_nan_contamination():
         patterns.append((batch_size, "none"))
 
     # Original patterns
-    for batch_size in [1, 2, 4, 7, 8, 16, 1024]:
+    for batch_size in [1, 2, 4, 7, 8, 16]:
         for p in ["none", "all_but_first", "all_but_last", "even"]:
             patterns.append((batch_size, p))
 

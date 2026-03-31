@@ -12,6 +12,9 @@ Targets the EXACT decode path for DeepSeek-R1-0528-NVFP4-v2:
 
 Loads real weights from the model checkpoint (layer 0).
 
+SELF-CONTAINED: does NOT import from vllm._custom_ops (blocked by
+cache_nan_ext JIT extension). All needed functions are inlined.
+
 Run on GB200:
     python tools/test_nvfp4_gemm_nan.py
 """
@@ -21,26 +24,136 @@ import os
 import torch
 from torch.nn import Parameter
 
-# vllm imports
+# Load the _C extension directly (avoids _custom_ops.py import chain)
 import vllm._C  # noqa: F401
-from vllm._custom_ops import scaled_fp4_quant
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    convert_to_nvfp4_linear_kernel_format,
-    select_nvfp4_linear_backend,
-)
 
 try:
     from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
 except ImportError:
     flashinfer_scaled_fp4_mm = None
 
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    apply_nvfp4_linear,
-    NvFp4LinearBackend,
-    pad_nvfp4_activation_for_cutlass,
-    slice_nvfp4_output,
-)
 
+# ── Helpers inlined from vllm (avoids cache_nan_ext import) ──────────────
+
+
+def round_up(x: int, multiple: int) -> int:
+    return ((x + multiple - 1) // multiple) * multiple
+
+
+def create_fp4_scale_tensor(m, n, device, is_sf_swizzled_layout):
+    block_size = 16
+    if is_sf_swizzled_layout:
+        rounded_m = round_up(m, 128)
+        scale_n = n // block_size
+        rounded_n = round_up(scale_n, 4)
+        return torch.zeros(
+            (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+        )
+    else:
+        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
+
+
+def create_fp4_output_tensors(m, n, device, is_sf_swizzled_layout):
+    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+    output_scale = create_fp4_scale_tensor(m, n, device, is_sf_swizzled_layout)
+    return output, output_scale
+
+
+def scaled_fp4_quant(input, input_global_scale, is_sf_swizzled_layout=True):
+    assert input.ndim >= 1
+    other_dims = 1 if input.ndim == 1 else -1
+    input = input.reshape(other_dims, input.shape[-1])
+    m, n = input.shape
+    output, output_scale = create_fp4_output_tensors(
+        m, n, input.device, is_sf_swizzled_layout
+    )
+    torch.ops._C.scaled_fp4_quant.out(
+        input,
+        input_global_scale,
+        is_sf_swizzled_layout,
+        output=output,
+        output_scale=output_scale,
+    )
+    output_scale = output_scale.view(torch.float8_e4m3fn)
+    return output, output_scale
+
+
+def swizzle_blockscale(scale):
+    scale_ndim = scale.ndim
+    if scale_ndim == 2:
+        scale = scale.unsqueeze(0)
+    B, M, K = scale.shape
+    M_padded = round_up(M, 128)
+    K_padded = round_up(K, 4)
+    padded = torch.zeros(
+        (B, M_padded, K_padded), dtype=scale.dtype, device=scale.device
+    )
+    padded[:B, :M, :K] = scale
+    padded = padded.reshape(B, M_padded // 128, 4, 32, K_padded // 4, 4)
+    swizzled = padded.permute(0, 1, 4, 3, 2, 5).contiguous().cuda()
+    if scale_ndim == 2:
+        return swizzled.reshape(M_padded, K_padded)
+    return swizzled.reshape(B, M_padded, K_padded)
+
+
+def pad_nvfp4_weight_for_cutlass(weight, alignment=32):
+    weight_current_rows = weight.shape[0]
+    if weight_current_rows % alignment != 0:
+        total_rows = round_up(weight_current_rows, alignment)
+        pad_rows = total_rows - weight_current_rows
+        weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_rows)).contiguous()
+    weight_current_col_bytes = weight.shape[1]
+    weight_current_col_elements = weight_current_col_bytes * 2
+    weights_padding_bytes = 0
+    if weight_current_col_elements % alignment != 0:
+        total_cols = round_up(weight_current_col_elements, alignment)
+        pad_cols = total_cols - weight_current_col_elements
+        pad_bytes = pad_cols // 2
+        weight = torch.nn.functional.pad(weight, (0, pad_bytes, 0, 0)).contiguous()
+        weights_padding_bytes = pad_bytes
+    return weight, weights_padding_bytes
+
+
+def pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes):
+    if weights_padding_bytes > 0:
+        return torch.nn.functional.pad(x_fp4, (0, weights_padding_bytes)).contiguous()
+    return x_fp4
+
+
+def slice_nvfp4_output(out, output_size):
+    if out.shape[-1] != output_size:
+        return out[..., :output_size].contiguous()
+    return out
+
+
+def apply_nvfp4_linear(layer, x):
+    """Inlined FLASHINFER_CUTLASS path of apply_nvfp4_linear."""
+    weight = layer.weight
+    weight_scale = layer.weight_scale
+    input_global_scale_inv = layer.input_global_scale_inv
+    alpha = layer.alpha
+    output_size = layer.output_size_per_partition
+
+    output_dtype = x.dtype
+    output_shape = [*x.shape[:-1], output_size]
+
+    x_fp4, x_blockscale = scaled_fp4_quant(
+        x, input_global_scale_inv, is_sf_swizzled_layout=True
+    )
+
+    weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
+    x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
+
+    out = flashinfer_scaled_fp4_mm(
+        x_fp4, weight, x_blockscale, weight_scale, alpha,
+        output_dtype, backend="cutlass",
+    )
+
+    out = slice_nvfp4_output(out, output_size)
+    return out.view(*output_shape)
+
+
+# ── Weight loading / synthetic weights ───────────────────────────────────
 
 # DeepSeek V3/R1 MLA dimensions
 HIDDEN_SIZE = 7168
@@ -53,7 +166,6 @@ GROUP_SIZE = 16  # NVFP4 block size
 
 def load_layer0_weights(device):
     """Load fused_qkv_a_proj weights from the model checkpoint (layer 0)."""
-    # Find model path in common cache locations
     model_name = "DeepSeek-R1-0528-NVFP4-v2"
     search_paths = [
         "/mnt/local/hf_cache",
@@ -72,7 +184,6 @@ def load_layer0_weights(device):
                 break
 
     if model_dir is None:
-        # Try direct path
         for base in search_paths:
             candidates = glob.glob(f"{base}/**/{model_name}", recursive=True)
             if candidates:
@@ -85,14 +196,8 @@ def load_layer0_weights(device):
 
     print(f"Loading weights from: {model_dir}")
 
-    # Find safetensors files and load layer 0 fused_qkv_a_proj weights
     from safetensors import safe_open
 
-    # Weight keys for layer 0 fused_qkv_a_proj:
-    # model.layers.0.self_attn.fused_qkv_a_proj.weight
-    # model.layers.0.self_attn.fused_qkv_a_proj.input_scale
-    # model.layers.0.self_attn.fused_qkv_a_proj.weight_scale
-    # model.layers.0.self_attn.fused_qkv_a_proj.weight_scale_2
     prefix = "model.layers.0.self_attn.fused_qkv_a_proj"
     needed = {
         f"{prefix}.weight": "weight",
@@ -139,7 +244,7 @@ def make_synthetic_weights(device):
     }
 
 
-def build_layer(weights, backend):
+def build_layer(weights):
     """Build a fake layer module with the right attributes for apply_nvfp4_linear."""
 
     class FakeLayer(torch.nn.Module):
@@ -147,11 +252,9 @@ def build_layer(weights, backend):
 
     layer = FakeLayer()
 
-    # Set weight and scales as parameters (mimics ModelOptNvFp4LinearMethod)
     layer.weight = Parameter(weights["weight"], requires_grad=False)
     layer.weight_scale = Parameter(weights["weight_scale"], requires_grad=False)
 
-    # process_weights_after_loading logic
     input_global_scale = weights["input_scale"].max().to(torch.float32)
     layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
     weight_global_scale = weights["weight_scale_2"].max().to(torch.float32)
@@ -164,17 +267,24 @@ def build_layer(weights, backend):
     layer.input_size_per_partition = HIDDEN_SIZE
 
     # Convert to kernel format (swizzle scales, pad weights)
-    convert_to_nvfp4_linear_kernel_format(backend, layer)
+    swizzled_ws = swizzle_blockscale(layer.weight_scale.data)
+    padded_w, padding_cols = pad_nvfp4_weight_for_cutlass(layer.weight.data)
+    layer.weight = Parameter(padded_w, requires_grad=False)
+    layer.weight_scale = Parameter(swizzled_ws, requires_grad=False)
+    layer.weights_padding_cols = padding_cols
 
     return layer
 
 
 def test_nan_contamination():
+    assert flashinfer_scaled_fp4_mm is not None, (
+        "flashinfer not available — cannot test NVFP4 path"
+    )
+
     torch.manual_seed(42)
     device = "cuda"
 
-    backend = select_nvfp4_linear_backend()
-    print(f"NVFP4 backend: {backend.value}")
+    print("NVFP4 backend: flashinfer-cutlass (hardcoded)")
 
     # Try loading real weights, fall back to synthetic
     weights = load_layer0_weights(device)
@@ -186,16 +296,16 @@ def test_nan_contamination():
               f"weight={list(weights['weight'].shape)} "
               f"weight_scale={list(weights['weight_scale'].shape)}")
 
-    layer = build_layer(weights, backend)
+    layer = build_layer(weights)
 
     # CUDA graph decode patterns: first N tokens real, rest NaN padding
     patterns = []
-    for batch_size in [8, 16]:
+    for batch_size in [8, 16, 32, 64, 128, 256, 512, 1024]:
         for num_real in [1, 2, 3]:
             patterns.append((batch_size, f"first_{num_real}_real"))
         patterns.append((batch_size, "none"))
 
-    for batch_size in [1, 2, 4, 7, 8, 16]:
+    for batch_size in [1, 2, 4, 7, 8, 16, 32, 64, 128, 256, 512, 1024]:
         for p in ["none", "all_but_first", "all_but_last", "even"]:
             patterns.append((batch_size, p))
 
@@ -204,7 +314,7 @@ def test_nan_contamination():
                              device=device)
 
         # Reference: clean input through the real NVFP4 path
-        ref_output = apply_nvfp4_linear(backend, layer, hidden)
+        ref_output = apply_nvfp4_linear(layer, hidden)
 
         # Poison some tokens
         poisoned = hidden.clone()
@@ -223,7 +333,7 @@ def test_nan_contamination():
             poisoned[::2] = float("nan")
 
         # Run with poisoned input
-        test_output = apply_nvfp4_linear(backend, layer, poisoned)
+        test_output = apply_nvfp4_linear(layer, poisoned)
 
         # Check clean tokens
         for tok in range(batch_size):

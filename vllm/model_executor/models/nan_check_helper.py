@@ -437,6 +437,24 @@ def _get_log():
     return _log_fh
 
 
+_pad_log_fh = None
+
+
+def _get_pad_log():
+    global _pad_log_fh
+    if _pad_log_fh is None:
+        log_dir = "/mnt/lustre/vllm-vlm-elvircrn/logs/nan_check"
+        os.makedirs(log_dir, exist_ok=True)
+        hostname = os.environ.get("HOSTNAME", "unknown")
+        gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "x")
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"{log_dir}/{hostname}_gpu{gpu}_{ts}.pad.log"
+        _pad_log_fh = open(path, "a")  # noqa: SIM115
+        _pad_log_fh.write(f"=== Pad NaN log started {datetime.datetime.now()} ===\n")
+        _pad_log_fh.flush()
+    return _pad_log_fh
+
+
 
 def _zero_all():
     if _nan_counts is not None:
@@ -887,8 +905,8 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     hs_pad_max = num_padding * hidden_dim
     per_layer_real_nan = (_nan_counts[:, 0] > hs_pad_max).any().item()
     per_layer_pad_nan = (
-        not per_layer_real_nan and _nan_counts[:, 0].any().item()
-    )
+        (_nan_counts[:, 0] > 0) & (_nan_counts[:, 0] <= hs_pad_max)
+    ).any().item()
 
     # Check kv_c_normed_real (col 17) for NaN OR Inf — seq_lens-filtered,
     # reliable during graph replay. Catches the initial poisoning event
@@ -1031,9 +1049,9 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
 
-    if per_layer_pad_nan and not kv_kernel_hit:
-        # Log padding NaN only once as a summary (not per-layer flood)
-        f = _get_log()
+    if per_layer_pad_nan:
+        # Log padding NaN to separate .pad.log file
+        f = _get_pad_log()
         pad_layers = [i for i in range(nan_cpu.shape[0])
                       if nan_cpu[i, 0].item() > 0]
         msg = (f"[HS_PAD_NAN] padding-only NaN in {len(pad_layers)} layers "
