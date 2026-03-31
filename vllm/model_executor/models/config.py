@@ -395,8 +395,8 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             # greater than position_embedding.
             hf_text_config = model_config.hf_text_config
 
-            if isinstance(model_config.hf_overrides, dict):
-                # hf_overrides_kw
+            if hasattr(model_config.hf_overrides, "get"):
+                # Mapping-style hf_overrides_kw (including draft wrappers).
                 max_model_len = model_config.hf_overrides.get(
                     "max_model_len", model_config.max_model_len
                 )

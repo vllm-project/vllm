@@ -3,11 +3,15 @@
 
 import logging
 import os
+from collections import UserDict
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from multiprocessing.reduction import ForkingPickler
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
+from transformers import PretrainedConfig
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
@@ -27,6 +31,7 @@ from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
 )
+from vllm.model_executor.models.config import NomicBertModelConfig
 from vllm.platforms import current_platform
 
 
@@ -1171,3 +1176,340 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def _update_fake_nested_overrides(target, overrides):
+    for key, value in overrides.items():
+        if isinstance(value, dict):
+            if isinstance(target, dict):
+                nested_target = target.get(key)
+            else:
+                nested_target = getattr(target, key, None)
+
+            if nested_target is not None and (
+                isinstance(nested_target, (dict, PretrainedConfig))
+                or hasattr(nested_target, "__dict__")
+            ):
+                _update_fake_nested_overrides(nested_target, value)
+                continue
+
+        if isinstance(target, dict):
+            target[key] = value
+        else:
+            setattr(target, key, value)
+
+
+def _apply_fake_dict_overrides(config, overrides):
+    for key, value in overrides.items():
+        attr = getattr(config, key, None)
+        if attr is not None and isinstance(attr, PretrainedConfig):
+            _update_fake_nested_overrides(attr, value)
+        else:
+            setattr(config, key, value)
+
+
+class _FakeHFConfig(PretrainedConfig):
+    model_type = "fake"
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+_CALLABLE_TARGET_ROPE_PARAMETERS = {
+    "rope_type": "yarn",
+    "factor": 2.0,
+    "original_max_position_embeddings": 262_144,
+}
+
+
+def _callable_target_hf_overrides(hf_config):
+    hf_config.text_config.rope_parameters = _CALLABLE_TARGET_ROPE_PARAMETERS
+    return hf_config
+
+
+class _FakeDraftModelConfig:
+    def __init__(self, **kwargs):
+        self.model = kwargs["model"]
+        self.hf_overrides = kwargs["hf_overrides"]
+        self.max_model_len = kwargs["spec_target_max_model_len"]
+        self.hf_config = _FakeHFConfig(
+            model_type="qwen3_5",
+            architectures=["Qwen3ForCausalLM"],
+            rope_parameters={"rope_type": "default", "rope_theta": 1_000_000},
+            text_config=_FakeHFConfig(
+                rope_parameters={"rope_type": "default"},
+            ),
+        )
+
+        if callable(self.hf_overrides):
+            self.hf_config = self.hf_overrides(self.hf_config)
+        elif isinstance(self.hf_overrides, dict):
+            _apply_fake_dict_overrides(self.hf_config, self.hf_overrides)
+
+        self.hf_text_config = self.hf_config.text_config
+
+    def verify_with_parallel_config(self, parallel_config):
+        return None
+
+
+def _make_fake_target_model_config(hf_overrides):
+    return SimpleNamespace(
+        model="lukealonso/Qwen3.5-397B-A17B-NVFP4",
+        tokenizer="lukealonso/Qwen3.5-397B-A17B-NVFP4",
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+        dtype="bfloat16",
+        seed=0,
+        hf_overrides=hf_overrides,
+        hf_text_config=SimpleNamespace(model_type="qwen3_5"),
+        quantization=None,
+        tokenizer_revision=None,
+        max_model_len=524_288,
+        enforce_eager=False,
+        max_logprobs=20,
+        config_format="auto",
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_preserves_target_hf_overrides():
+    """Test that MTP draft config keeps target HF overrides."""
+    target_rope_parameters = {
+        "mrope_interleaved": True,
+        "mrope_section": [11, 11, 10],
+        "rope_type": "yarn",
+        "rope_theta": 10_000_000,
+        "partial_rotary_factor": 0.25,
+        "factor": 2.0,
+        "original_max_position_embeddings": 262_144,
+    }
+    target_hf_overrides = {
+        "text_config": {
+            "rope_parameters": target_rope_parameters,
+        },
+    }
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert callable(draft_model_config.hf_overrides)
+    assert (
+        draft_model_config.hf_config.text_config.rope_parameters
+        == target_rope_parameters
+    )
+    assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_does_not_propagate_callable_target_hf_overrides():
+    """Callable target overrides should not leak target-only mutations."""
+    target_model_config = _make_fake_target_model_config(_callable_target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert callable(draft_model_config.hf_overrides)
+    assert draft_model_config.hf_config.text_config.rope_parameters == {
+        "rope_type": "default"
+    }
+    assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_matches_top_level_dict_override_semantics():
+    """Top-level dict-valued attrs should be replaced, not merged."""
+    target_hf_overrides = {
+        "rope_parameters": {
+            "rope_type": "yarn",
+            "factor": 2.0,
+        },
+    }
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+    }
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_preserves_mapping_target_hf_overrides():
+    """Mapping-like target overrides should not be silently dropped."""
+    target_hf_overrides = UserDict(
+        {
+            "text_config": {
+                "rope_parameters": {
+                    "rope_type": "yarn",
+                    "factor": 2.0,
+                    "original_max_position_embeddings": 262_144,
+                },
+            },
+        }
+    )
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert callable(draft_model_config.hf_overrides)
+    assert (
+        draft_model_config.hf_overrides.get("text_config")
+        == dict(target_hf_overrides)["text_config"]
+    )
+    assert draft_model_config.hf_config.text_config.rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+        "original_max_position_embeddings": 262_144,
+    }
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_keeps_default_hf_config_override():
+    """Empty target overrides should still preserve the draft config rewrite."""
+    target_model_config = _make_fake_target_model_config({})
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert callable(draft_model_config.hf_overrides)
+    assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
+    assert draft_model_config.hf_config.architectures == ["Qwen3_5MTP"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_mapping_hf_overrides_is_picklable():
+    """Mapping-derived draft overrides should remain picklable."""
+    target_hf_overrides = UserDict(
+        {
+            "text_config": {
+                "rope_parameters": {
+                    "rope_type": "yarn",
+                    "factor": 2.0,
+                },
+            },
+        }
+    )
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    serialized_overrides = ForkingPickler.dumps(
+        speculative_config.draft_model_config.hf_overrides
+    )
+    restored_overrides = ForkingPickler.loads(serialized_overrides)
+    restored_config = restored_overrides(
+        _FakeHFConfig(
+            model_type="qwen3_5",
+            architectures=["Qwen3ForCausalLM"],
+            text_config=_FakeHFConfig(rope_parameters={"rope_type": "default"}),
+        )
+    )
+
+    assert restored_config.model_type == "qwen3_5_mtp"
+    assert restored_config.text_config.rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+    }
+
+
+@pytest.mark.skip_global_cleanup
+def test_mtp_draft_model_config_allows_non_dict_nested_override_values():
+    """Nested config attributes should allow scalar replacement values."""
+    target_hf_overrides = {
+        "text_config": None,
+    }
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
+
+    with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
+        speculative_config = SpeculativeConfig(
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.text_config is None
+    assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
+
+
+def test_nomic_config_honors_mapping_like_max_model_len_override():
+    """Mapping-like draft overrides should still affect Nomic max_model_len."""
+
+    class NomicBertConfig(_FakeHFConfig):
+        pass
+
+    hf_config = NomicBertConfig(
+        activation_function="swiglu",
+        mlp_fc1_bias=False,
+        mlp_fc2_bias=False,
+        qkv_proj_bias=False,
+        rotary_emb_scale_base=None,
+        rotary_emb_interleaved=False,
+        layer_norm_epsilon=1e-5,
+        n_inner=64,
+        n_embd=32,
+        n_layer=4,
+        num_attention_heads=4,
+        max_trained_positions=2048,
+        rope_parameters={"rope_type": "yarn"},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        hf_text_config=hf_config,
+        hf_overrides=SpeculativeConfig._get_draft_hf_overrides({"max_model_len": 1024}),
+        original_max_model_len=None,
+        max_model_len=4096,
+        encoder_config={"max_seq_length": 512},
+        model_arch_config=SimpleNamespace(),
+        get_and_verify_max_len=lambda value: value,
+    )
+
+    NomicBertModelConfig.verify_and_update_model_config(model_config)
+
+    assert model_config.max_model_len == 1024
+    assert model_config.encoder_config == {}

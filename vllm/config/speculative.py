@@ -3,6 +3,7 @@
 
 import ast
 import copy
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -62,6 +63,24 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
+
+
+class _DraftHfOverrides:
+    """Compose target-model HF overrides with draft-model overrides."""
+
+    def __init__(self, target_hf_overrides: Mapping[str, Any]) -> None:
+        self.target_hf_overrides = target_hf_overrides
+
+    def __call__(self, hf_config: PretrainedConfig) -> PretrainedConfig:
+        SpeculativeConfig._apply_hf_overrides_dict(
+            hf_config, dict(self.target_hf_overrides)
+        )
+        return SpeculativeConfig.hf_config_override(hf_config)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if isinstance(self.target_hf_overrides, Mapping):
+            return self.target_hf_overrides.get(key, default)
+        return default
 
 
 @config
@@ -355,6 +374,60 @@ class SpeculativeConfig:
 
         return hf_config
 
+    @staticmethod
+    def _update_nested_hf_config(
+        target: PretrainedConfig | dict[str, Any],
+        updates: dict[str, Any],
+    ) -> None:
+        for key, value in updates.items():
+            if isinstance(value, dict):
+                if isinstance(target, dict):
+                    nested_target = target.get(key)
+                else:
+                    nested_target = getattr(target, key, None)
+
+                if nested_target is not None and (
+                    isinstance(nested_target, dict)
+                    or hasattr(nested_target, "__dict__")
+                ):
+                    SpeculativeConfig._update_nested_hf_config(nested_target, value)
+                    continue
+
+            if isinstance(target, dict):
+                target[key] = value
+            else:
+                setattr(target, key, value)
+
+    @staticmethod
+    def _apply_hf_overrides_dict(
+        config: PretrainedConfig,
+        overrides: dict[str, Any],
+    ) -> None:
+        from transformers import PretrainedConfig
+
+        for key, value in overrides.items():
+            attr = getattr(config, key, None)
+            if (
+                attr is not None
+                and isinstance(attr, PretrainedConfig)
+                and isinstance(value, dict)
+            ):
+                SpeculativeConfig._update_nested_hf_config(attr, value)
+            else:
+                setattr(config, key, value)
+
+    @staticmethod
+    def _get_draft_hf_overrides(target_hf_overrides: Any) -> Any:
+        if isinstance(target_hf_overrides, Mapping):
+            if not target_hf_overrides:
+                return SpeculativeConfig.hf_config_override
+            return _DraftHfOverrides(copy.deepcopy(dict(target_hf_overrides)))
+
+        # Arbitrary callable hf_overrides can encode target-only config mutations
+        # (e.g. layer-count or architecture changes) that should not leak into
+        # the derived draft model. Preserve only the draft-specific rewrite here.
+        return SpeculativeConfig.hf_config_override
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -492,7 +565,9 @@ class SpeculativeConfig:
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=SpeculativeConfig.hf_config_override,
+                    hf_overrides=SpeculativeConfig._get_draft_hf_overrides(
+                        self.target_model_config.hf_overrides
+                    ),
                     config_format=self.target_model_config.config_format,
                 )
 
