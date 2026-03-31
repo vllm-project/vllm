@@ -15,13 +15,13 @@
 //   - reciprocal_approximate_ftz() for fast reciprocal
 
 #define NVFP4_ENABLE_ELTS16 1
-#include "nvfp4_utils.cuh"
+#include "libtorch_stable/quantization/fp4/nvfp4_utils.cuh"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
-#include "../../dispatch_utils.h"
+#include "dispatch_utils.h"
 
 namespace vllm {
 
