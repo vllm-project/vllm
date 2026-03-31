@@ -54,6 +54,7 @@ def test_colmodernvbert_text_relevance_ordering(vllm_runner):
 
     with vllm_runner(
         MODEL_NAME,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
@@ -71,6 +72,7 @@ def test_colmodernvbert_text_late_interaction(vllm_runner):
 
     with vllm_runner(
         MODEL_NAME,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
@@ -97,6 +99,7 @@ def test_colmodernvbert_image_token_embed(vllm_runner, image_assets):
     """Image input produces per-token embeddings including vision tokens."""
     with vllm_runner(
         MODEL_NAME,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
