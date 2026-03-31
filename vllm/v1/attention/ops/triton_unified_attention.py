@@ -7,6 +7,8 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import os
+
 import torch
 
 from vllm.logger import init_logger
@@ -18,6 +20,36 @@ from vllm.triton_utils import tl, triton
 logger = init_logger(__name__)
 is_batch_invariant = vllm_is_batch_invariant()
 float8_info = torch.finfo(current_platform.fp8_dtype())
+
+TRITON_ATTN_TILE_SIZE_PREFILL_ENV = "VLLM_TRITON_ATTN_TILE_SIZE_PREFILL"
+TRITON_ATTN_TILE_SIZE_DECODE_ENV = "VLLM_TRITON_ATTN_TILE_SIZE_DECODE"
+_GPT_OSS_SM8X_LARGE_PREFILL_TILE_MAX_SEQ_LEN = 16384
+
+
+def _get_tile_size_override(*, is_prefill: bool) -> int | None:
+    env_name = (
+        TRITON_ATTN_TILE_SIZE_PREFILL_ENV
+        if is_prefill
+        else TRITON_ATTN_TILE_SIZE_DECODE_ENV
+    )
+    raw_value = os.environ.get(env_name)
+    if raw_value in (None, ""):
+        return None
+    assert raw_value is not None
+
+    try:
+        override = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{env_name} must be a positive power-of-two integer, got {raw_value!r}."
+        ) from exc
+
+    if override <= 0 or override & (override - 1) != 0:
+        raise ValueError(
+            f"{env_name} must be a positive power-of-two integer, got {raw_value!r}."
+        )
+
+    return override
 
 
 @triton.jit
@@ -860,6 +892,47 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+def _is_gpt_oss_sm8x_sink_attention(
+    head_size: int,
+    num_kv_heads: int,
+    device_capability: DeviceCapability | None,
+    has_sinks: bool,
+) -> bool:
+    """Detect GPT-OSS attention geometry on Ada/GA10x-class SM8x GPUs.
+
+    GPT-OSS uses head_size=64, num_kv_heads=8, and attention sinks on every
+    layer. On SM86/SM89, the prefill path performs better with the larger
+    Triton tile size than the generic sink heuristic.
+    """
+    return (
+        has_sinks
+        and device_capability is not None
+        and device_capability.major == 8
+        and device_capability.minor in (6, 9)
+        and head_size == 64
+        and num_kv_heads == 8
+    )
+
+
+def _use_gpt_oss_sm8x_large_prefill_tile(
+    head_size: int,
+    num_kv_heads: int,
+    device_capability: DeviceCapability | None,
+    has_sinks: bool,
+    max_seq_len: int | None,
+) -> bool:
+    return (
+        max_seq_len is not None
+        and max_seq_len <= _GPT_OSS_SM8X_LARGE_PREFILL_TILE_MAX_SEQ_LEN
+        and _is_gpt_oss_sm8x_sink_attention(
+            head_size,
+            num_kv_heads,
+            device_capability,
+            has_sinks,
+        )
+    )
+
+
 def _use_small_sm8x_sink_tiles(
     device_capability: DeviceCapability | None,
     has_sinks: bool,
@@ -880,10 +953,12 @@ def _use_small_sm8x_sink_tiles(
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
+    num_kv_heads: int,
     element_size: int,
     is_prefill: bool,
     has_sinks: bool = False,
     device_capability: DeviceCapability | None = None,
+    max_seq_len: int | None = None,
 ) -> int:
     """Select tile size with Gemma3-specific optimization.
 
@@ -891,8 +966,31 @@ def _get_tile_size(
     the larger head dimension (128/256). For other models, use
     the default vLLM behavior.
     """
+    override = _get_tile_size_override(is_prefill=is_prefill)
+    if override is not None:
+        if element_size == 1 and override < 32:
+            env_name = (
+                TRITON_ATTN_TILE_SIZE_PREFILL_ENV
+                if is_prefill
+                else TRITON_ATTN_TILE_SIZE_DECODE_ENV
+            )
+            raise ValueError(
+                f"{env_name}={override} is invalid for fp8 attention; "
+                "tile size must be >= 32."
+            )
+        return override
+
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
+        return 32
+
+    if is_prefill and _use_gpt_oss_sm8x_large_prefill_tile(
+        head_size,
+        num_kv_heads,
+        device_capability,
+        has_sinks,
+        max_seq_len,
+    ):
         return 32
 
     if is_prefill and _use_small_sm8x_sink_tiles(device_capability, has_sinks):
@@ -987,14 +1085,17 @@ def unified_attention(
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size,
         sliding_window_val,
+        num_kv_heads,
         q.element_size(),
         is_prefill=True,
         has_sinks=sinks is not None,
         device_capability=device_capability,
+        max_seq_len=max_seqlen_k,
     )
     TILE_SIZE_DECODE = _get_tile_size(
         head_size,
         sliding_window_val,
+        num_kv_heads,
         q.element_size(),
         is_prefill=False,
         has_sinks=sinks is not None,
