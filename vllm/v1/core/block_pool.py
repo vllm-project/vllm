@@ -395,6 +395,10 @@ class BlockPool:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                # Clear stale priority from previous ownership.
+                block.priority = None
+                block.priority_expiry = None
+                block.priority_scope = None
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret

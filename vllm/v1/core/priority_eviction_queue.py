@@ -114,6 +114,7 @@ class PriorityEvictionQueue:
             # TTL expired — clear the priority on the block itself.
             block.priority = None
             block.priority_expiry = None
+            block.priority_scope = None
             return 0
         return block.priority
 
