@@ -7,13 +7,6 @@ Replaces the chain:
 with a **single Triton kernel** that reads the conv'd mixed_qkv output
 and writes directly to q/k/v/g/beta in the target contiguous layout.
 
-Kernel design:
-  Grid: (ceil(L, BLOCK_T), H + HV)
-  - Blocks [0, H):     process Q/K for one k-head, apply L2 norm
-  - Blocks [H, H+HV):  process V for one v-head, compute g/beta
-
-Single kernel is ~30% faster than dual-stream at typical sequence lengths
-(L≤2048)
 """
 
 from __future__ import annotations
