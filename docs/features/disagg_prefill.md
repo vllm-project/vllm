@@ -78,107 +78,140 @@ Request → Prefill (compute KV cache) → Transfer → Decode (generate tokens)
 
 This design enables finer-grained control over latency and resource utilization, especially in large-scale production deployments.
 
-## Before you begin
-Before enabling disaggregated prefilling, ensure your environment meets the following requirements.
-
-### Software and Hardware Requirements
-Please refer to the [installation guide](../getting_started/installation/gpu.md) for detailed setup instructions.
-
-!!!note
-    Ensure sufficient GPU capacity to allocate Prefill and Decode instances separately.
-
-### Deployment Requirements
-- Ability to run multiple vLLM instances (Prefill and Decode)
-- A routing layer (e.g., custom router or gateway) to:
-  - Direct requests to Prefill instances
-  - Forward KV cache to Decode instances
-
-### Network Requirements
-- High-bandwidth, low-latency network between Prefill and Decode instances
-- Recommended:
-  - RDMA / InfiniBand (for large-scale deployments)
-  - Or at least high-speed TCP (10Gb+)
-
-### Optional (Recommended)
-- Kubernetes or similar orchestration system for:
-  - Independent scaling of Prefill and Decode
-  - Resource isolation and scheduling
-- Monitoring and observability:
-  - GPU utilization
-  - TTFT and ITL metrics
-
 !!!note
     Disaggregated prefilling introduces additional KV cache transfer overhead, so network performance is critical.
     It is primarily designed for latency optimization, not throughput improvement.
 
 ## How to Run Disaggregated Prefilling
-- The number of Prefill and Decode instances can be scaled independently based on workload characteristics.
-- See the [Connectors](#connectors) section for the list of supported connectors.
+1. Choose a connector. See the [Connectors](#connectors) section for the list of supported connectors.
 
-### Step 1: Start Prefill Instances
-```bash
-  CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL_NAME" \
-    --host 0.0.0.0 \
-    --port 8100 \
-    --max-model-len 100 \
-    --gpu-memory-utilization 0.8 \
-    --trust-remote-code \
-    --kv-transfer-config \
-    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"14579","kv_connector_extra_config":{"proxy_ip":"'"$VLLM_HOST_IP"'","proxy_port":"30001","http_ip":"'"$VLLM_HOST_IP"'","http_port":"8100","send_type":"PUT_ASYNC"}}' &
-```
+2. Start the components in the following order:
+   - Router. Such as: https://github.com/vllm-project/router. **Start Router First** before P/D servers
+   - Prefill instances.
+   - Decode instances.
 
-### Step 2: Start Decode Instances
-```bash
-  CUDA_VISIBLE_DEVICES=1 vllm serve "$MODEL_NAME" \
-    --host 0.0.0.0 \
-    --port 8200 \
-    --max-model-len 100 \
-    --gpu-memory-utilization 0.8 \
-    --trust-remote-code \
-    --kv-transfer-config \
-    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":"1e10","kv_port":"14580","kv_connector_extra_config":{"proxy_ip":"'"$VLLM_HOST_IP"'","proxy_port":"30001","http_ip":"'"$VLLM_HOST_IP"'","http_port":"8200","send_type":"PUT_ASYNC"}}' &
-```
+    For a complete end-to-end example or more details, see: https://github.com/vllm-project/router/blob/main/scripts/install.sh
+3. Scale Prefill and Decode instances independently based on workload characteristics.
 
-### Step 3: Start the Router
-A routing layer is required to orchestrate the disaggregated Prefill–Decode workflow.
-
-You can use an existing router implementation, such as:
-- https://github.com/vllm-project/router
-
-For a complete end-to-end example, see:
-- https://github.com/vllm-project/router/blob/main/scripts/install.sh
-
-
-**NIXL connector**: Requires explicit Prefill and Decode endpoints. You must specify them via `--prefill` and `--decode` arguments.
-
-**NCCL connector**: Does not require explicit endpoints. Instead, it uses a ZMQ-based discovery mechanism, where Prefill and Decode instances register themselves via `--vllm-discovery-address`.
+### NCCL-based Connector
 
 ```bash
 
-  # When vLLM runs the NCCL connector, ZMQ based discovery is supported.
-  # See a working example in scripts/install.sh
+  export ROUTER_PORT=10001
+
+  # When vLLM runs the NCCL connector, ZMQ based discovery is supported. Prefill and Decode instances register themselves via `--vllm-discovery-address`.
+  export ZMQ_DISCOVERY_IP=0.0.0.0
+  export ZMQ_DISCOVERY_PORT=30001
+
+  # vLLM Prefill Instance ip and port, Please replace ip and port.
+  export PREFILL_INSTANCE_IP_1=0.0.0.0
+  export PREFILL_INSTANCE_PORT=8100
+  export KV_PREFILL_PORT=14579
+
+  # vLLM Decode Instance ip and port, Please replace ip and port.
+  export PREFILL_DECODE_IP_1=0.0.0.0
+  export PREFILL_DECODE_PORT=8200
+  export KV_DECODE_PORT=14580
+
+  export MODEL_NAME=Qwen/Qwen3-0.6B
+
+  # Install Router
+  pip install vllm-router
+
+  # Step 1: Start Router
   cargo run --release -- \
     --policy consistent_hash \
     --vllm-pd-disaggregation \
-    --vllm-discovery-address 0.0.0.0:30001 \
+    --vllm-discovery-address $ZMQ_DISCOVERY_IP:$ZMQ_DISCOVERY_PORT \
     --host 0.0.0.0 \
-    --port 10001 \
+    --port $ROUTER_PORT \
     --prefill-policy consistent_hash \
     --decode-policy consistent_hash
 
-  # When vLLM runs the NIXL connector, prefill/decode URLs are required.
-  # See a working example in scripts/llama3.1/ folder.
-  cargo run --release -- \
-    --policy consistent_hash \
-    --vllm-pd-disaggregation \
-    --prefill http://127.0.0.1:8100 \
-    #--prefill http://127.0.0.1:8101 \
-    --decode http://127.0.0.1:8200 \
-    #--decode http://127.0.0.1:8201 \
-    --host 127.0.0.1 \
-    --port 8090 \
-    --intra-node-data-parallel-size 1 \
+  # Step 2: Start Prefill Instances
+  CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port $PREFILL_INSTANCE_PORT \
+    --max-model-len 100 \
+    --gpu-memory-utilization 0.8 \
+    --trust-remote-code \
+    --kv-transfer-config \
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"$KV_PREFILL_PORT","kv_connector_extra_config":{"proxy_ip":"$ZMQ_DISCOVERY_IP","proxy_port":"$ZMQ_DISCOVERY_PORT","http_ip":"'"$PREFILL_INSTANCE_IP_1"'","http_port":"$PREFILL_INSTANCE_PORT","send_type":"PUT_ASYNC"}}' &
+
+  # Step 3: Start Decode Instances
+  CUDA_VISIBLE_DEVICES=1 vllm serve "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port $PREFILL_DECODE_PORT \
+    --max-model-len 100 \
+    --gpu-memory-utilization 0.8 \
+    --trust-remote-code \
+    --kv-transfer-config \
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":"1e10","kv_port":"$KV_DECODE_PORT","kv_connector_extra_config":{"proxy_ip":"'"$ZMQ_DISCOVERY_IP"'","proxy_port":"$ZMQ_DISCOVERY_PORT","http_ip":"'"$PREFILL_DECODE_IP_1"'","http_port":"$PREFILL_DECODE_PORT","send_type":"PUT_ASYNC"}}' &
+
+  # Step 4: Send a Test Request
+  # Please replace localhost with your correct Router ip
+  curl -s http://localhost:$ROUTER_PORT/v1/completions \
+  -H "Content-Type: application/json" \
+  -d  '{"model":"$MODEL_NAME","prompt":"Who won the world series in 2020?","max_tokens":64,"temperature":0.0}'
 ```
+Get more informations, https://github.com/vllm-project/vllm/blob/main/docs/design/p2p_nccl_connector.md
+
+### NIXL Connector
+```bash
+  # Install Nixl
+  pip install "nixl[cu13]"
+
+  # Install flashinfer related cubin and jit to skip local compilation
+  pip install flashinfer-cubin==0.6.4
+  pip install flashinfer-jit-cache==0.6.4 --index-url https://flashinfer.ai/whl/cu130
+  pip install fastsafetensors # to enable --load-format "fastsafetensors"
+
+  # Install Router
+  pip install vllm-router
+
+  export ROUTER_PORT=10001
+
+  export PREFILL_INSTANCE_IP_1=0.0.0.0
+  export PREFILL_INSTANCE_PORT_1=8001
+
+  export DECODE_INSTANCE_IP_1=0.0.0.0
+  export DECODE_INSTANCE_PORT_1=8200
+
+  export MODEL_NAME=Qwen/Qwen3-0.6B
+
+  # Step 1: Start Router
+  cargo run --release -- \
+    --policy round_robin \
+    --vllm-pd-disaggregation \
+    --prefill http://$PREFILL_INSTANCE_IP_1:$PREFILL_INSTANCE_PORT_1 \
+    #--prefill http://$PREFILL_INSTANCE_IP_2:$PREFILL_INSTANCE_PORT_2 \
+    --decode http://$DECODE_INSTANCE_IP_1:$DECODE_INSTANCE_PORT_1 \
+    #--decode http://$DECODE_INSTANCE_IP_2:$DECODE_INSTANCE_PORT_2 \
+    --host 127.0.0.1 \
+    --port $ROUTER_PORT \
+    --intra-node-data-parallel-size 4
+
+  # 1st GPU as prefiller
+  CUDA_VISIBLE_DEVICES=0 \
+  UCX_NET_DEVICES=all \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+  vllm serve $MODEL_NAME \
+    --port $PREFILL_INSTANCE_PORT_1 \
+    --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+
+  # 2nd GPU as decoder
+  CUDA_VISIBLE_DEVICES=1 \
+  UCX_NET_DEVICES=all \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
+  vllm serve $MODEL_NAME \
+    --port $DECODE_INSTANCE_PORT_1 \
+    --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+
+```
+
+  Get more informations, [NixlConnector Usage Guide](./nixl_connector_usage.md)
 
 ## Connectors
 
@@ -197,7 +230,25 @@ vLLM currently supports multiple connector implementations for disaggregated pre
   - [tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh)  
   - [nixl_connector_usage](nixl_connector_usage.md)
 
-  NixlConnector supports one or more backends (e.g., UCX, GDS).
+  NIXL connector requires explicit Prefill and Decode endpoints. You must specify them via `--prefill` and `--decode` arguments for Router. Such as:
+
+  ```bash
+
+    # When vLLM runs the NIXL connector, prefill/decode URLs are required.
+    # See a working example in scripts/llama3.1/ folder.
+    cargo run --release -- \
+      --policy consistent_hash \
+      --vllm-pd-disaggregation \
+      --prefill http://127.0.0.1:8100 \
+      #--prefill http://127.0.0.1:8101 \
+      --decode http://127.0.0.1:8200 \
+      #--decode http://127.0.0.1:8201 \
+      --host 127.0.0.1 \
+      --port 8090 \
+      --intra-node-data-parallel-size 1 \
+  ```
+
+  NixlConnector supports one or more backends (e.g., UCX, GDS) for KV cache transfer. It requires configuring the connector via `--kv-transfer-config` for vllm prefill and decode instances, for example:
   ```bash
   --kv-transfer-config '{
     "kv_connector": "NixlConnector",
