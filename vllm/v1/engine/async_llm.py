@@ -21,11 +21,17 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.gradient_params import GradientParams
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
+from vllm.outputs import (
+    STREAM_FINISHED,
+    GradientRequestOutput,
+    PoolingRequestOutput,
+    RequestOutput,
+)
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
@@ -292,7 +298,7 @@ class AsyncLLM(EngineClient):
         | PromptType
         | EngineInput
         | AsyncGenerator[StreamingInput, None],
-        params: SamplingParams | PoolingParams,
+        params: SamplingParams | PoolingParams | GradientParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -308,10 +314,12 @@ class AsyncLLM(EngineClient):
             raise EngineDeadError()
 
         is_pooling = isinstance(params, PoolingParams)
+        is_gradient = isinstance(params, GradientParams)
 
         if (
             self.vllm_config.cache_config.kv_sharing_fast_prefill
             and not is_pooling
+            and not is_gradient
             and params.prompt_logprobs
         ):
             raise ValueError(
@@ -383,7 +391,7 @@ class AsyncLLM(EngineClient):
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
-        if is_pooling or params.n == 1:
+        if is_pooling or is_gradient or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
@@ -847,6 +855,64 @@ class AsyncLLM(EngineClient):
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).
+        except Exception as e:
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s failed.", request_id)
+            raise EngineGenerateError() from e
+        finally:
+            if q is not None:
+                q.close()
+
+    async def compute_gradients(
+        self,
+        prompt: PromptType | EngineInput,
+        gradient_params: GradientParams,
+        request_id: str,
+        lora_request: LoRARequest | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[GradientRequestOutput, None]:
+        """Compute gradients for a prompt + target pair.
+
+        Same async queue pattern as encode() — single-shot request
+        that yields one GradientRequestOutput with finished=True.
+        """
+        q: RequestOutputCollector | None = None
+        try:
+            q = await self.add_request(
+                request_id,
+                prompt,
+                gradient_params,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+            )
+
+            finished = False
+            while not finished:
+                out = q.get_nowait() or await q.get()
+                assert isinstance(out, GradientRequestOutput)
+                finished = out.finished
+                yield out
+
+        except asyncio.CancelledError:
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s aborted.", request_id)
+            raise
+        except EngineDeadError:
+            if self.log_requests:
+                logger.info("Request %s failed (engine dead).", request_id)
+            raise
+        except ValueError:
+            if self.log_requests:
+                logger.info("Request %s failed (bad request).", request_id)
+            raise
         except Exception as e:
             if q is not None:
                 await self.abort(q.request_id, internal=True)

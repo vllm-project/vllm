@@ -66,6 +66,7 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.gradient_params import GradientParams
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -743,6 +744,46 @@ class Worker(WorkerBase):
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
+
+    def compute_gradients(
+        self,
+        prompt_token_ids: list[int],
+        gradient_params: "GradientParams",
+    ) -> dict:
+        """Compute gradients for a prompt + target pair.
+
+        Called via collective_rpc from EngineCore. Not decorated with
+        @torch.inference_mode() because GradientRunner needs gradients.
+
+        Returns a plain dict so the result is serializable across
+        process boundaries (multiproc executor).
+        """
+        from vllm.gradient_params import GradientParams as _GradientParams
+
+        assert isinstance(gradient_params, _GradientParams)
+        input_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=self.device)
+        out = self.model_runner.compute_gradients(input_ids, gradient_params)
+
+        result: dict = {}
+        if out.token_log_probs is not None:
+            result["token_log_probs"] = out.token_log_probs
+        if out.token_attributions is not None:
+            arr = out.token_attributions.cpu().numpy()
+            result["token_attributions_bytes"] = arr.tobytes()
+            result["token_attributions_shape"] = list(arr.shape)
+            result["token_attributions_dtype"] = str(arr.dtype)
+        if out.loss is not None:
+            result["loss"] = out.loss
+        if out.loss_gradients:
+            result["loss_gradients_packed"] = {}
+            for k, v in out.loss_gradients.items():
+                arr = v.cpu().numpy()
+                result["loss_gradients_packed"][k] = {
+                    "bytes": arr.tobytes(),
+                    "shape": list(arr.shape),
+                    "dtype": str(arr.dtype),
+                }
+        return result
 
     @torch.inference_mode()
     def execute_model(

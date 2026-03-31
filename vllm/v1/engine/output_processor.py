@@ -14,6 +14,8 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
+    GradientOutput,
+    GradientRequestOutput,
     PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
@@ -54,12 +56,23 @@ class RequestOutputCollector:
     def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.request_id = request_id
-        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.output: (
+            RequestOutput
+            | PoolingRequestOutput
+            | GradientRequestOutput
+            | Exception
+            | None
+        ) = None
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
 
-    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+    def put(
+        self,
+        output: (
+            RequestOutput | PoolingRequestOutput | GradientRequestOutput | Exception
+        ),
+    ) -> None:
         """Non-blocking put operation."""
         if self.output is None or isinstance(output, Exception):
             self.output = output
@@ -70,12 +83,17 @@ class RequestOutputCollector:
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
             self.output.add(output, aggregate=self.aggregate)
-        elif isinstance(self.output, PoolingRequestOutput) and isinstance(
-            output, PoolingRequestOutput
+        elif (
+            isinstance(self.output, PoolingRequestOutput)
+            and isinstance(output, PoolingRequestOutput)
+            or isinstance(self.output, GradientRequestOutput)
+            and isinstance(output, GradientRequestOutput)
         ):
             self.output = output
 
-    async def get(self) -> RequestOutput | PoolingRequestOutput:
+    async def get(
+        self,
+    ) -> RequestOutput | PoolingRequestOutput | GradientRequestOutput:
         """Get operation blocks on put event."""
         while (output := self.output) is None:
             await self.ready.wait()
@@ -85,7 +103,9 @@ class RequestOutputCollector:
             raise output
         return output
 
-    def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
+    def get_nowait(
+        self,
+    ) -> RequestOutput | PoolingRequestOutput | GradientRequestOutput | None:
         """Non-blocking get operation."""
         output = self.output
         if output is not None:
@@ -108,7 +128,7 @@ class RequestOutputCollector:
 
 @dataclass
 class OutputProcessorOutput:
-    request_outputs: list[RequestOutput | PoolingRequestOutput]
+    request_outputs: list[RequestOutput | PoolingRequestOutput | GradientRequestOutput]
     reqs_to_abort: list[str]
 
 
@@ -232,15 +252,26 @@ class RequestState:
             top_p = sampling_params.top_p
             n = sampling_params.n
             temperature = sampling_params.temperature
-        else:
+        elif request.pooling_params is not None:
             logprobs_processor = None
             detokenizer = None
             max_tokens_param = None
             top_p = None
             n = None
             temperature = None
-            assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
+        elif request.gradient_params is not None:
+            logprobs_processor = None
+            detokenizer = None
+            max_tokens_param = None
+            top_p = None
+            n = None
+            temperature = None
+            output_kind = request.gradient_params.output_kind
+        else:
+            raise ValueError(
+                "Request must have sampling_params, pooling_params, or gradient_params"
+            )
 
         assert request.external_req_id is not None
         return cls(
@@ -274,7 +305,8 @@ class RequestState:
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
-    ) -> RequestOutput | PoolingRequestOutput | None:
+        gradient_output: dict[str, Any] | None = None,
+    ) -> RequestOutput | PoolingRequestOutput | GradientRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
@@ -306,6 +338,11 @@ class RequestState:
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
+
+        if gradient_output is not None:
+            return self._new_gradient_request_output(
+                external_req_id, gradient_output, finished
+            )
 
         if pooling_output is not None:
             return self._new_request_output(
@@ -408,6 +445,46 @@ class RequestState:
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
+
+    def _new_gradient_request_output(
+        self,
+        external_req_id: str,
+        gradient_output: dict[str, Any],
+        finished: bool,
+    ) -> GradientRequestOutput:
+        prompt_token_ids = self.prompt_token_ids
+        if prompt_token_ids is None:
+            prompt_token_ids = list(range(self.prompt_len))
+
+        # Reconstruct numpy arrays from packed bytes format.
+        token_attributions = None
+        if "token_attributions_bytes" in gradient_output:
+            token_attributions = np.frombuffer(
+                gradient_output["token_attributions_bytes"],
+                dtype=np.dtype(gradient_output["token_attributions_dtype"]),
+            ).reshape(gradient_output["token_attributions_shape"])
+
+        loss_gradients = None
+        if "loss_gradients_packed" in gradient_output:
+            loss_gradients = {}
+            for k, packed in gradient_output["loss_gradients_packed"].items():
+                loss_gradients[k] = np.frombuffer(
+                    packed["bytes"],
+                    dtype=np.dtype(packed["dtype"]),
+                ).reshape(packed["shape"])
+
+        return GradientRequestOutput(
+            request_id=external_req_id,
+            outputs=GradientOutput(
+                token_log_probs=gradient_output.get("token_log_probs"),
+                token_attributions=token_attributions,
+                loss=gradient_output.get("loss"),
+                loss_gradients=loss_gradients,
+            ),
+            prompt_token_ids=prompt_token_ids,
+            target_token_ids=gradient_output.get("target_token_ids", []),
+            finished=finished,
+        )
 
 
 class OutputProcessor:
@@ -597,7 +674,9 @@ class OutputProcessor:
         within the loop below.
         """
 
-        request_outputs: list[RequestOutput | PoolingRequestOutput] = []
+        request_outputs: list[
+            RequestOutput | PoolingRequestOutput | GradientRequestOutput
+        ] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
@@ -613,6 +692,7 @@ class OutputProcessor:
 
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
+            gradient_output = engine_core_output.gradient_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
@@ -620,7 +700,7 @@ class OutputProcessor:
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
 
-            if pooling_output is None:
+            if pooling_output is None and gradient_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
@@ -643,6 +723,7 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 routed_experts,
+                gradient_output=gradient_output,
             ):
                 if req_state.streaming_input:
                     request_output.finished = False

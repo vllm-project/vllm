@@ -149,6 +149,12 @@ class EngineCore:
             block_size=scheduler_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+
+        # Gradient requests are queued here during add_request() and
+        # executed during step() so that request processing is not blocked.
+        self._queued_gradient_requests: deque[Request] = deque()
+        # Completed gradient outputs awaiting delivery in the next step().
+        self._pending_gradient_outputs: list[tuple[int, EngineCoreOutputs]] = []
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -302,6 +308,12 @@ class EngineCore:
                 f"request_id must be a string, got {type(request.request_id)}"
             )
 
+        # Gradient requests are queued and executed during step() so
+        # that request processing is not blocked by GPU computation.
+        if request.gradient_params is not None:
+            self._queued_gradient_requests.append(request)
+            return
+
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks() if task in POOLING_TASKS
@@ -322,6 +334,45 @@ class EngineCore:
             )
 
         self.scheduler.add_request(request)
+
+    def _handle_gradient_request(self, request: Request) -> None:
+        """Handle gradient computation via collective_rpc.
+
+        Gradient requests bypass the scheduler because they need
+        torch.enable_grad() and cannot be batched with inference.
+        """
+        gradient_params = request.gradient_params
+        assert gradient_params is not None
+        assert request.prompt_token_ids is not None, (
+            "Gradient requests require prompt_token_ids"
+        )
+
+        gradient_result = None
+        finish_reason = FinishReason.STOP
+        try:
+            # collective_rpc returns [result_per_worker]; take first.
+            results = self.model_executor.collective_rpc(
+                "compute_gradients",
+                args=(request.prompt_token_ids, gradient_params),
+            )
+            gradient_result = results[0]
+            gradient_result["target_token_ids"] = gradient_params.target_token_ids
+        except Exception:
+            logger.exception(
+                "Gradient computation failed for request %s",
+                request.request_id,
+            )
+            finish_reason = FinishReason.ERROR
+
+        output = EngineCoreOutput(
+            request_id=request.request_id,
+            new_token_ids=[],
+            gradient_output=gradient_result or {},
+            finish_reason=finish_reason,
+        )
+        self._pending_gradient_outputs.append(
+            (request.client_index, EngineCoreOutputs(outputs=[output]))
+        )
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -377,6 +428,18 @@ class EngineCore:
         )
         self._iteration_index += 1
 
+    def _flush_gradient_outputs(
+        self,
+        engine_core_outputs: dict[int, EngineCoreOutputs],
+    ) -> None:
+        """Merge pending gradient outputs into the step's output dict."""
+        for client_index, grad_outputs in self._pending_gradient_outputs:
+            if client_index in engine_core_outputs:
+                engine_core_outputs[client_index].outputs.extend(grad_outputs.outputs)
+            else:
+                engine_core_outputs[client_index] = grad_outputs
+        self._pending_gradient_outputs.clear()
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -384,9 +447,19 @@ class EngineCore:
         was executed.
         """
 
+        # Process any queued gradient requests. These are executed here
+        # rather than in add_request() so the request processing loop
+        # is not blocked by GPU computation.
+        self._process_gradient_queue()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            # Even if scheduler is idle, flush pending gradient outputs.
+            if self._pending_gradient_outputs:
+                outputs: dict[int, EngineCoreOutputs] = {}
+                self._flush_gradient_outputs(outputs)
+                return outputs, False
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -406,7 +479,16 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # Flush any pending gradient outputs into the result.
+        self._flush_gradient_outputs(engine_core_outputs)
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _process_gradient_queue(self) -> None:
+        """Execute all queued gradient requests."""
+        while self._queued_gradient_requests:
+            request = self._queued_gradient_requests.popleft()
+            self._handle_gradient_request(request)
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -434,6 +516,9 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+
+        # Process any queued gradient requests.
+        self._process_gradient_queue()
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
@@ -533,6 +618,9 @@ class EngineCore:
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+
+        # Flush any pending gradient outputs into the result.
+        self._flush_gradient_outputs(engine_core_outputs)
 
         return engine_core_outputs, model_executed
 
@@ -1255,8 +1343,9 @@ class EngineCoreProc(EngineCore):
                 return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (method := getattr(self, method_name)) and method(
-                *self._convert_msgspec_args(method, args)
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))

@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.gradient_params import GradientParams
 from vllm.inputs import (
     EngineInput,
     PromptType,
@@ -24,7 +25,12 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.sampling_params import SamplingParams
-from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
+from vllm.tasks import (
+    GENERATION_TASKS,
+    GRADIENT_TASKS,
+    POOLING_TASKS,
+    SupportedTask,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
@@ -80,10 +86,10 @@ class InputProcessor:
 
     def _validate_params(
         self,
-        params: SamplingParams | PoolingParams,
+        params: SamplingParams | PoolingParams | GradientParams,
         supported_tasks: tuple[SupportedTask, ...],
     ) -> None:
-        """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
+        """Raise `ValueError` if params are not valid."""
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
@@ -129,10 +135,20 @@ class InputProcessor:
                 )
 
             params.verify(self.model_config)
+        elif isinstance(params, GradientParams):
+            supported_gradient_tasks = [
+                task for task in supported_tasks if task in GRADIENT_TASKS
+            ]
+            if not supported_gradient_tasks:
+                raise ValueError(
+                    "This model does not support gradient computation. "
+                    "Gradient computation requires a text generation model."
+                )
+            params.verify()
         else:
             raise TypeError(
-                f"params must be either SamplingParams or PoolingParams, "
-                f"but got {type(params).__name__}"
+                f"params must be SamplingParams, PoolingParams, or "
+                f"GradientParams, but got {type(params).__name__}"
             )
 
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
@@ -196,7 +212,7 @@ class InputProcessor:
         self,
         request_id: str,
         prompt: PromptType | EngineInput,
-        params: SamplingParams | PoolingParams,
+        params: SamplingParams | PoolingParams | GradientParams,
         supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -261,6 +277,7 @@ class InputProcessor:
 
         sampling_params = None
         pooling_params = None
+        gradient_params = None
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
@@ -277,6 +294,8 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+        elif isinstance(params, GradientParams):
+            gradient_params = params.clone()
         else:
             pooling_params = params.clone()
 
@@ -325,6 +344,7 @@ class InputProcessor:
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
+            gradient_params=gradient_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),

@@ -11,9 +11,10 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
+from vllm.gradient_params import GradientParams
 from vllm.inputs import EngineInput, PromptType
 from vllm.lora.request import LoRARequest
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import GradientRequestOutput, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
@@ -97,6 +98,20 @@ class EngineClient(ABC):
         reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
+        ...
+
+    @abstractmethod
+    def compute_gradients(
+        self,
+        prompt: PromptType | EngineInput,
+        gradient_params: GradientParams,
+        request_id: str,
+        lora_request: LoRARequest | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[GradientRequestOutput, None]:
+        """Compute gradients for a request."""
         ...
 
     @abstractmethod

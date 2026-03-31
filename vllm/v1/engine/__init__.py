@@ -10,6 +10,7 @@ import msgspec
 import numpy as np
 import torch
 
+from vllm.gradient_params import GradientParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -80,6 +81,9 @@ class EngineCoreRequest(
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
 
+    # Gradient computation params (default None for backward compat).
+    gradient_params: GradientParams | None = None
+
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
     client_index: int = 0
@@ -102,12 +106,14 @@ class EngineCoreRequest(
     reasoning_ended: bool | None = None
 
     @property
-    def params(self) -> SamplingParams | PoolingParams:
-        """Return the processed params (sampling or pooling)."""
+    def params(self) -> SamplingParams | PoolingParams | GradientParams:
+        """Return the processed params (sampling, pooling, or gradient)."""
         if self.sampling_params is not None:
             return self.sampling_params
-        assert self.pooling_params is not None
-        return self.pooling_params
+        if self.pooling_params is not None:
+            return self.pooling_params
+        assert self.gradient_params is not None
+        return self.gradient_params
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -150,6 +156,7 @@ class EngineCoreOutput(
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
 
     pooling_output: torch.Tensor | None = None
+    gradient_output: dict[str, Any] | None = None
 
     finish_reason: FinishReason | None = None
     stop_reason: int | str | None = None
