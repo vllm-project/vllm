@@ -222,6 +222,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
       "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
+
+  // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+  // conditionally compiled so impl registration is in source file
+  ops.def(
+      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
 #endif
 
   // Hadamard transforms
@@ -267,6 +272,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // AWQ ops
   ops.impl("awq_gemm", TORCH_BOX(&awq_gemm));
   ops.impl("awq_dequantize", TORCH_BOX(&awq_dequantize));
+
+  // DSV3 fused A GEMM: conditionally compiled so impl registration is in
+  // source file (dsv3_fused_a_gemm.cu)
 #endif
 }
 

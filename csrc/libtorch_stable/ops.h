@@ -147,6 +147,9 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
                                      int64_t split_k_iters, int64_t thx,
                                      int64_t thy);
 
+// DSV3 fused A GEMM: conditionally compiled so declaration and impl
+// registration are in the source file (dsv3_fused_a_gemm.cu)
+
 #endif
 
 torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
