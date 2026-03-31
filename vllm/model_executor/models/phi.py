@@ -189,7 +189,7 @@ class PhiLayer(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = PhiMLP(config, quant_config, prefix=f"{prefix}.mlp")
@@ -231,7 +231,7 @@ class PhiModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

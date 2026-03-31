@@ -218,7 +218,7 @@ class GLMBlock(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.self_attention",
         )
         self.hidden_dropout = config.hidden_dropout
@@ -291,7 +291,7 @@ class GLMTransformer(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
@@ -361,7 +361,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.encoder",
         )
 
