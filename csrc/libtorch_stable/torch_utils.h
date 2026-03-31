@@ -6,6 +6,7 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/shim_utils.h>
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <deque>
@@ -77,4 +78,11 @@ inline cudaStream_t get_current_cuda_stream(int32_t device_index = -1) {
   TORCH_ERROR_CODE_CHECK(
       aoti_torch_get_current_cuda_stream(device_index, &stream_ptr));
   return reinterpret_cast<cudaStream_t>(stream_ptr);
+}
+
+// Utility to get the current cuBLAS handle using stable APIs.
+inline cublasHandle_t get_current_cuda_blas_handle() {
+  void* blas_handle_ptr = nullptr;
+  TORCH_ERROR_CODE_CHECK(torch_get_current_cuda_blas_handle(&blas_handle_ptr));
+  return reinterpret_cast<cublasHandle_t>(blas_handle_ptr);
 }

@@ -1,20 +1,28 @@
 #include "allspark_utils.cuh"
-#include <torch/all.h>
-#include "core/registration.h"
+
+#include <torch/csrc/stable/c/shim.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+
 #include <cublas_v2.h>
 
-at::Tensor as_g_workspace;
+#include "core/registration.h"
+#include "libtorch_stable/torch_utils.h"
+
+torch::stable::Tensor as_g_workspace;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
-torch::Tensor allspark_w8a16_gemm(
-    torch::Tensor const& a, torch::Tensor const& b_qweight,
-    torch::Tensor const& b_scales, std::optional<torch::Tensor> const& b_qzeros,
-    int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
+torch::stable::Tensor allspark_w8a16_gemm(
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b_qweight,
+    torch::stable::Tensor const& b_scales,
+    std::optional<torch::stable::Tensor> const& b_qzeros, int64_t n,
+    int64_t group_size, int64_t sm_count, int64_t sm_version,
     int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
-  TORCH_CHECK_NOT_IMPLEMENTED(
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false, "allspark_w8a16_gemm(..) requires CUDA_ARCH >= 8.0");
-  return torch::empty({1, 1});
+  return torch::stable::empty({1, 1});
 }
 
 #else
@@ -848,8 +856,8 @@ void restore_N32_K16_dequantize_rhs_w8a16(const QT* qdata, const FT* scales,
                                           const int N_32align, const int N,
                                           const int K, const int GroupSize,
                                           cudaStream_t stream) {
-  TORCH_CHECK(N % 8 == 0 && K % 16 == 0 && N_32align % 32 == 0,
-              "Unsupported shape");
+  STD_TORCH_CHECK(N % 8 == 0 && K % 16 == 0 && N_32align % 32 == 0,
+                  "Unsupported shape");
   if (GroupSize == -1) {
     const int BLOCK = 128;
     dim3 grid(N_32align / 32, ((K / 16) + 3) / 4);
@@ -859,7 +867,7 @@ void restore_N32_K16_dequantize_rhs_w8a16(const QT* qdata, const FT* scales,
   }
   // TODO: Support SubChannel
   else {
-    TORCH_CHECK(false, "Now only support PerChannel");
+    STD_TORCH_CHECK(false, "Now only support PerChannel");
   }
 }
 
@@ -916,24 +924,27 @@ void allspark_qgemm_w8a16_perc_ampere(
 
 }  // namespace allspark
 
-torch::Tensor allspark_w8a16_gemm(
-    torch::Tensor const& a, torch::Tensor const& b_qweight,
-    torch::Tensor const& b_scales, std::optional<torch::Tensor> const& b_qzeros,
-    int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
+torch::stable::Tensor allspark_w8a16_gemm(
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b_qweight,
+    torch::stable::Tensor const& b_scales,
+    std::optional<torch::stable::Tensor> const& b_qzeros, int64_t n,
+    int64_t group_size, int64_t sm_count, int64_t sm_version,
     int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
   // Verify device and strides
-  TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
-  TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
+  STD_TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
+  STD_TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
 
-  TORCH_CHECK(b_qweight.device().is_cuda(), "b_qweight is not on GPU");
-  TORCH_CHECK(b_qweight.is_contiguous(), "b_qweight is not contiguous");
+  STD_TORCH_CHECK(b_qweight.device().is_cuda(), "b_qweight is not on GPU");
+  STD_TORCH_CHECK(b_qweight.is_contiguous(), "b_qweight is not contiguous");
 
-  TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
-  TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
+  STD_TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
+  STD_TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
   if (has_zp) {
-    TORCH_CHECK(b_qzeros.value().device().is_cuda(), "b_qzeros is not on GPU");
-    TORCH_CHECK(b_qzeros.value().is_contiguous(), "b_qzeros is not contiguous");
+    STD_TORCH_CHECK(b_qzeros.value().device().is_cuda(),
+                    "b_qzeros is not on GPU");
+    STD_TORCH_CHECK(b_qzeros.value().is_contiguous(),
+                    "b_qzeros is not contiguous");
   }
 
   int m = a.size(0);
@@ -941,16 +952,17 @@ torch::Tensor allspark_w8a16_gemm(
   int k = a.size(1);
 
   // Verify shape
-  TORCH_CHECK(b_qweight.size(0) == n_32align,
-              "Shape mismatch: b_qweight.size(0) = ", b_qweight.size(0),
-              ", n_32align = ", n_32align);
-  TORCH_CHECK(b_qweight.size(1) == k,
-              "Shape mismatch: b_qweight.size(1) = ", b_qweight.size(1),
-              ", k = ", k);
+  STD_TORCH_CHECK(b_qweight.size(0) == n_32align,
+                  "Shape mismatch: b_qweight.size(0) = ", b_qweight.size(0),
+                  ", n_32align = ", n_32align);
+  STD_TORCH_CHECK(b_qweight.size(1) == k,
+                  "Shape mismatch: b_qweight.size(1) = ", b_qweight.size(1),
+                  ", k = ", k);
 
-  TORCH_CHECK(group_size == -1, "Currently only supports group_size = -1");
+  STD_TORCH_CHECK(group_size == -1, "Currently only supports group_size = -1");
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
   const void* a_ptr = reinterpret_cast<const void*>(a.data_ptr());
   const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(b_qweight.data_ptr());
   const void* b_scale_ptr = reinterpret_cast<const void*>(b_scales.data_ptr());
@@ -959,12 +971,12 @@ torch::Tensor allspark_w8a16_gemm(
     b_zero_ptr = reinterpret_cast<const void*>(b_qzeros.value().data_ptr());
   }
 
-  auto c_options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  torch::Tensor c = torch::empty({m, n}, c_options);
-  void* c_ptr = reinterpret_cast<void*>(c.data_ptr());
+  auto c =
+      torch::stable::empty({m, n}, a.scalar_type(), std::nullopt, a.device());
+  void* c_ptr = reinterpret_cast<void*>(c.mutable_data_ptr());
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
+  cudaStream_t stream = get_current_cuda_stream();
+  cublasHandle_t handle = get_current_cuda_blas_handle();
 
   allspark::BlockTileSplitkParams fused_gemm_params;
 
@@ -976,14 +988,15 @@ torch::Tensor allspark_w8a16_gemm(
         m, n, k, sm_count, fused_gemm_params);
   }
 
-  auto ws_options = torch::TensorOptions().dtype(at::kChar).device(a.device());
   if (as_g_workspace.numel() <
       ws_size) {  // ws_options: kChar, so numel() is bytes
-    as_g_workspace = torch::empty({long(ws_size)}, ws_options);
+    as_g_workspace = torch::stable::empty({static_cast<int64_t>(ws_size)},
+                                          torch::headeronly::ScalarType::Char,
+                                          std::nullopt, a.device());
   }
   void* ws = reinterpret_cast<void*>(as_g_workspace.data_ptr());
 
-  if (a.dtype() == at::ScalarType::Half) {
+  if (a.scalar_type() == torch::headeronly::ScalarType::Half) {
     allspark::allspark_qgemm_w8a16_perc_ampere<__half, uint8_t>(
         reinterpret_cast<const __half*>(a_ptr), b_ptr,
         reinterpret_cast<const __half*>(b_scale_ptr),
@@ -991,7 +1004,7 @@ torch::Tensor allspark_w8a16_gemm(
         reinterpret_cast<__half*>(c_ptr), m, n_32align, n, k, ws,
         fused_gemm_params, group_size, CUBLAS_M_THRESHOLD, sm_version, stream,
         handle);
-  } else if (a.dtype() == at::ScalarType::BFloat16) {
+  } else if (a.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     allspark::allspark_qgemm_w8a16_perc_ampere<__nv_bfloat16, uint8_t>(
         reinterpret_cast<const __nv_bfloat16*>(a_ptr), b_ptr,
         reinterpret_cast<const __nv_bfloat16*>(b_scale_ptr),
@@ -1006,6 +1019,6 @@ torch::Tensor allspark_w8a16_gemm(
 
 #endif
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("allspark_w8a16_gemm", &allspark_w8a16_gemm);
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+  m.impl("allspark_w8a16_gemm", TORCH_BOX(&allspark_w8a16_gemm));
 }

@@ -471,22 +471,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
-  # Only build AllSpark kernels if we are building for at least some compatible archs.
-  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
-  if (ALLSPARK_ARCHS)
-    set(ALLSPARK_SRCS
-       "csrc/quantization/gptq_allspark/allspark_repack.cu"
-       "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${ALLSPARK_SRCS}"
-      CUDA_ARCHS "${ALLSPARK_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${ALLSPARK_SRCS}")
-    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
-  else()
-    message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures")
-  endif()
-
   # Expert-specialization MXFP8 blockscaled grouped kernels (SM100+).
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
@@ -660,6 +644,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
                    "in CUDA target architectures.")
+  endif()
+
+  # Only build AllSpark kernels if we are building for at least some compatible archs.
+  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
+  if (ALLSPARK_ARCHS)
+    set(SRCS
+       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_repack.cu"
+       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${ALLSPARK_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
+  else()
+    message(STATUS "Not building AllSpark kernels as no compatible archs found"
+                   " in CUDA target architectures")
   endif()
 
   #
