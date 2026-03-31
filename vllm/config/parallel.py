@@ -53,9 +53,9 @@ All2AllBackend = Literal[
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
 
-    window_size: int = 1000
+    window_size: int = Field(default=1000, gt=0)
     """Window size for expert load recording."""
-    step_interval: int = 3000
+    step_interval: int = Field(default=3000, gt=0)
     """
     Interval for rearranging experts in expert parallelism.
 
@@ -71,7 +71,7 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
-    log_balancedness_interval: int = 1
+    log_balancedness_interval: int = Field(default=1, gt=0)
     """
     Interval for logging the balancedness.
     """
@@ -214,14 +214,18 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model workers, either "ray" or "mp"
+    """
+    Backend to use for distributed model workers, either "ray" or "mp"
     (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
     is less than or equal to the number of GPUs available, "mp" will be used to
     keep processing on a single host. Otherwise, an error will be raised. To use "mp"
     you must also set nnodes, and to use "ray" you must manually set
     distributed_executor_backend to "ray".
 
-    Note that tpu only support Ray for distributed inference."""
+    Note:
+        [TPU](https://docs.vllm.ai/projects/tpu/en/latest/) platform only supports Ray
+        for distributed inference.
+    """
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
