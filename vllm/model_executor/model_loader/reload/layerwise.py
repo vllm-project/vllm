@@ -11,7 +11,10 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    initialize_single_dummy_weight,
+)
 
 from .meta import (
     capture_layer_to_meta,
@@ -223,10 +226,11 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         elif info.load_numel <= 0:
             # first load but received no weights. This happens on dummy load
             if info.kernel_tensors is None:
-                materialize_layer(layer, info)
+                _layerwise_process(layer, info)
+                continue
 
             # reloading: place kernel tensors back as a fallback
-            else:
+            elif info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
                 _place_kernel_tensors(layer, info)
 
@@ -257,6 +261,12 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     """
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
+
+    # If no weights were loaded (e.g. dummy loading), initialize with
+    # small random values to avoid NaN from zero/garbage data
+    if len(info.loaded_weights) <= 0:
+        for tensor in get_layer_tensors(layer).values():
+            initialize_single_dummy_weight(tensor)
 
     # Reset online quantization flag so process_weights_after_loading
     # will run again during reload
