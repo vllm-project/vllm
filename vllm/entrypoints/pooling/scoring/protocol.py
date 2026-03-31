@@ -12,14 +12,11 @@ from vllm.entrypoints.pooling.base.protocol import (
     ClassifyRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.entrypoints.pooling.score.utils import (
-    ScoreContentPartParam,
-    ScoreInput,
-    ScoreInputs,
-)
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
+
+from .typing import ScoreContentPartParam, ScoreInput
 
 
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
@@ -43,13 +40,13 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
 
 
 class ScoreDataRequest(ScoreRequestMixin):
-    data_1: ScoreInputs
-    data_2: ScoreInputs
+    data_1: ScoreInput | list[ScoreInput]
+    data_2: ScoreInput | list[ScoreInput]
 
 
 class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
-    queries: ScoreInputs
-    documents: ScoreInputs
+    queries: ScoreInput | list[ScoreInput]
+    documents: ScoreInput | list[ScoreInput]
 
     @property
     def data_1(self):
@@ -61,8 +58,8 @@ class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
 
 
 class ScoreQueriesItemsRequest(ScoreRequestMixin):
-    queries: ScoreInputs
-    items: ScoreInputs
+    queries: ScoreInput | list[ScoreInput]
+    items: ScoreInput | list[ScoreInput]
 
     @property
     def data_1(self):
@@ -74,8 +71,8 @@ class ScoreQueriesItemsRequest(ScoreRequestMixin):
 
 
 class ScoreTextRequest(ScoreRequestMixin):
-    text_1: ScoreInputs
-    text_2: ScoreInputs
+    text_1: ScoreInput | list[ScoreInput]
+    text_2: ScoreInput | list[ScoreInput]
 
     @property
     def data_1(self):
@@ -96,7 +93,7 @@ ScoreRequest: TypeAlias = (
 
 class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     query: ScoreInput
-    documents: ScoreInputs
+    documents: ScoreInput | list[ScoreInput]
     top_n: int = Field(default_factory=lambda: 0)
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -116,6 +113,9 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
             task=task,
             use_activation=self.use_activation,
         )
+
+
+ScoringRequest: TypeAlias = ScoreRequest | RerankRequest
 
 
 class RerankDocument(BaseModel):
@@ -154,3 +154,6 @@ class ScoreResponse(OpenAIBaseModel):
     model: str
     data: list[ScoreResponseData]
     usage: UsageInfo
+
+
+ScoringResponse: TypeAlias = RerankResponse | ScoreResponse
