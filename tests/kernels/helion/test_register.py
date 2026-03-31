@@ -35,6 +35,11 @@ from vllm.kernels.helion.register import (
     validate_helion_settings,
 )
 
+if _HOP_AVAILABLE:
+    from helion._compiler._dynamo.higher_order_ops import (
+        helion_kernel_wrapper_mutation,
+    )
+
 
 def _add_kernel(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     out = torch.empty_like(x)
@@ -941,3 +946,60 @@ class TestKernelRegistry:
         registered = get_registered_kernels()
         assert "disabled_kernel" in registered
         assert registered["disabled_kernel"] is wrapper
+
+
+@pytest.mark.skipif(not _HOP_AVAILABLE, reason="Requires PyTorch >= 2.11 for HOP")
+class TestTorchCompileHOP:
+    """Test that HelionKernelWrapper emits the correct HOP under torch.compile."""
+
+    def test_compiled_graph_contains_helion_hop(self):
+        """Verify torch.compile on a HelionKernelWrapper emits a
+        helion_kernel_wrapper_mutation HOP node in the FX graph."""
+        configs = {"default": helion.Config(block_sizes=[4, 4])}
+
+        with dummy_kernel_registry(configs=configs) as register:
+            add_helion_kernel = register(
+                op_name="test_torch_compile_add_kernel",
+                config_picker=lambda args, keys: "default",
+            )(_add_kernel)
+
+        captured_graph: torch.fx.GraphModule | None = None
+
+        def capturing_backend(gm, example_inputs):
+            nonlocal captured_graph
+            assert captured_graph is None, "Backend called multiple times"
+            captured_graph = gm
+            return gm.forward
+
+        def f(x, y):
+            return add_helion_kernel(x, y)
+
+        torch._dynamo.reset()
+        compiled_f = torch.compile(f, backend=capturing_backend, fullgraph=True)
+
+        x = torch.randn(4, 4, device="cuda")
+        y = torch.randn(4, 4, device="cuda")
+
+        # Run compiled version and capture graph
+        compiled_result = compiled_f(x, y)
+
+        assert captured_graph is not None
+        hop_nodes = [
+            node
+            for node in captured_graph.graph.nodes
+            if node.op == "call_function"
+            and node.target is helion_kernel_wrapper_mutation
+        ]
+        assert len(hop_nodes) > 0, (
+            "Expected helion_kernel_wrapper_mutation HOP node in compiled graph, "
+            f"but found none. Graph nodes: "
+            f"{[(n.op, n.target) for n in captured_graph.graph.nodes]}"
+        )
+
+        # Verify compiled result matches eager execution
+        eager_result = f(x, y)  # Run in eager mode
+
+        assert torch.allclose(compiled_result, eager_result, atol=1e-5, rtol=1e-5), (
+            "Compiled execution result doesn't match eager execution. "
+            f"Max difference: {torch.max(torch.abs(compiled_result - eager_result))}"
+        )
