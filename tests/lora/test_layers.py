@@ -56,13 +56,20 @@ TOLERANCES = {
 }
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_cpu()),
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_cpu()
+        or current_platform.is_xpu()
+    ),
     reason="Backend not supported",
 )
 
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
-    if current_platform.is_cuda_alike()
+    [
+        f"{current_platform.device_type}:{i}"
+        for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    ]
+    if (current_platform.is_cuda_alike() or current_platform.is_xpu())
     else ["cpu"]
 )
 
@@ -91,7 +98,7 @@ def skip_cuda_with_stage_false(request):
     On cuda-like platforms, we use the same kernels for prefill and decode
     stage, and 'stage' is generally ignored, so we only need to test once.
     """
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         try:
             if hasattr(request.node, "callspec") and hasattr(
                 request.node.callspec, "params"
@@ -196,7 +203,7 @@ def create_random_inputs(
     input_size: tuple[int, ...],
     input_range: tuple[float, float],
     input_type: torch.dtype = torch.int,
-    device: torch.device = "cuda",
+    device: torch.device = f"{current_platform.device_type}",
 ) -> tuple[list[torch.Tensor], list[int], list[int]]:
     """Creates random inputs.
 
@@ -240,6 +247,10 @@ def check_punica_wrapper(punica_wrapper) -> bool:
         from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
 
         return type(punica_wrapper) is PunicaWrapperGPU
+    elif current_platform.is_xpu():
+        from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+
+        return type(punica_wrapper) is PunicaWrapperXPU
     elif current_platform.is_cpu():
         from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
 
@@ -259,8 +270,7 @@ def test_embeddings(
     # For multi-GPU testing of Triton kernel, we must explicitly set the CUDA
     # device, see: https://github.com/triton-lang/triton/issues/2925
     # Same below.
-    if current_platform.is_cuda_alike():
-        torch.accelerator.set_device_index(device)
+    torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
     max_loras = 8
@@ -358,8 +368,7 @@ def test_embeddings(
 def test_lm_head_logits_processor(
     default_vllm_config, dist_init, num_loras, device, vocab_size, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
-        torch.accelerator.set_device_index(device)
+    torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
     max_loras = 8
@@ -475,8 +484,7 @@ def test_lm_head_logits_processor_invalid_vocab_size(
     default_vllm_config, dist_init, vocab_size, device
 ) -> None:
     """Test that LogitsProcessorWithLoRA raises ValueError for invalid vocab sizes."""
-    if current_platform.is_cuda_alike():
-        torch.accelerator.set_device_index(device)
+    torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
     max_loras = 8
@@ -504,8 +512,7 @@ def test_linear_replicated(
     device,
     stage,
 ) -> None:
-    if current_platform.is_cuda_alike():
-        torch.accelerator.set_device_index(device)
+    torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)
@@ -611,8 +618,7 @@ def test_linear_replicated(
 def test_linear_parallel(
     default_vllm_config, dist_init, num_loras, orientation, fully_shard, device, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
-        torch.accelerator.set_device_index(device)
+    torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)
@@ -684,7 +690,6 @@ def test_linear_parallel(
             max_loras,
             512,
         )
-
         lora_result = lora_linear(torch.cat(inputs))[0]
 
         expected_results: list[torch.Tensor] = []
@@ -736,8 +741,7 @@ def test_linear_parallel(
 def test_column_parallel_packed(
     default_vllm_config, dist_init, num_loras, repeats, fully_shard, device, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
-        torch.accelerator.set_device_index(device)
+    torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)
@@ -884,8 +888,7 @@ def test_column_parallel_packed(
 def test_merged_column_parallel_variable_slice(
     default_vllm_config, dist_init, num_loras, num_slices, device, stage
 ) -> None:
-    if current_platform.is_cuda_alike():
-        torch.accelerator.set_device_index(device)
+    torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)

@@ -71,7 +71,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
     reason=(
         "Mxfp4 LoRA on ROCm is blocked by a spawn compatibility issue. "
         "The fused_moe_lora Triton kernel crashes in spawned subprocesses, "

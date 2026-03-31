@@ -49,9 +49,7 @@ def dist_init():
 
     temp_file = tempfile.mkstemp()[1]
 
-    backend = "nccl"
-    if current_platform.is_cpu() or current_platform.is_tpu():
-        backend = "gloo"
+    backend = current_platform.dist_backend
 
     with ensure_current_vllm_config():
         init_distributed_environment(
@@ -70,9 +68,7 @@ def dist_init():
 def dist_init_torch_only():
     if torch.distributed.is_initialized():
         return
-    backend = "nccl"
-    if current_platform.is_cpu():
-        backend = "gloo"
+    backend = current_platform.dist_backend
 
     temp_file = tempfile.mkstemp()[1]
     torch.distributed.init_process_group(
