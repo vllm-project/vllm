@@ -634,3 +634,255 @@ class TestUpdateGlobalVectors:
             raise AssertionError("Expected ValueError for invalid phase")
         except ValueError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# TestBackfillRegistration
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillRegistration:
+    """Verify the backfill registration logic that runs during lazy
+    manager initialization in ``_update_steering_buffers``.
+
+    When the SteeringManager is first created, requests already in the
+    batch need their steering configs registered retroactively.  The
+    backfill must be phase-aware: requests still in prefill register
+    their prefill config, while requests that start directly in decode
+    (full prefix-cache hit where ``num_computed >= num_prompt``) must
+    register their decode config instead.
+    """
+
+    @staticmethod
+    def _run_backfill(
+        manager: SteeringManager,
+        requests: list[dict],
+    ) -> None:
+        """Simulate the backfill loop from ``_update_steering_buffers``.
+
+        Each entry in *requests* is a dict with keys:
+            num_computed: int
+            num_prompt: int
+            prefill_hash: int
+            decode_hash: int
+            effective_prefill: dict | None
+            effective_decode: dict | None
+        """
+        for req in requests:
+            num_computed = req["num_computed"]
+            num_prompt = req["num_prompt"]
+
+            if num_computed < num_prompt:
+                ph = req["prefill_hash"]
+                if ph != 0 and (ph, "prefill") not in manager.config_to_row:
+                    eff = req.get("effective_prefill")
+                    if eff:
+                        manager.register_config(ph, eff, phase="prefill")
+            else:
+                dh = req["decode_hash"]
+                if dh != 0 and (dh, "decode") not in manager.config_to_row:
+                    eff = req.get("effective_decode")
+                    if eff:
+                        manager.register_config(dh, eff, phase="decode")
+
+    def test_prefill_request_registers_prefill_config(self):
+        """A request in prefill (num_computed < num_prompt) registers
+        its prefill steering config during backfill."""
+        mgr = _make_manager()
+        prefill_vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 0,
+                    "num_prompt": 100,
+                    "prefill_hash": 42,
+                    "decode_hash": 43,
+                    "effective_prefill": prefill_vectors,
+                    "effective_decode": {_HP: {0: [2.0] * HIDDEN_SIZE}},
+                },
+            ],
+        )
+        assert (42, "prefill") in mgr.config_to_row
+        assert (43, "decode") not in mgr.config_to_row
+
+    def test_decode_start_request_registers_decode_config(self):
+        """A request starting in decode (num_computed >= num_prompt,
+        e.g. full prefix-cache hit) registers its decode steering
+        config during backfill."""
+        mgr = _make_manager()
+        decode_vectors = {_HP: {0: [3.0] * HIDDEN_SIZE}}
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 100,
+                    "num_prompt": 100,
+                    "prefill_hash": 42,
+                    "decode_hash": 43,
+                    "effective_prefill": {_HP: {0: [1.0] * HIDDEN_SIZE}},
+                    "effective_decode": decode_vectors,
+                },
+            ],
+        )
+        assert (43, "decode") in mgr.config_to_row
+        assert (42, "prefill") not in mgr.config_to_row
+
+    def test_mixed_prefill_and_decode_requests(self):
+        """A batch with both prefill and decode-start requests registers
+        the correct phase config for each."""
+        mgr = _make_manager()
+        prefill_vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        decode_vectors = {_HP: {0: [2.0] * HIDDEN_SIZE}}
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 0,
+                    "num_prompt": 100,
+                    "prefill_hash": 10,
+                    "decode_hash": 11,
+                    "effective_prefill": prefill_vectors,
+                    "effective_decode": {_HP: {0: [9.0] * HIDDEN_SIZE}},
+                },
+                {
+                    "num_computed": 50,
+                    "num_prompt": 50,
+                    "prefill_hash": 20,
+                    "decode_hash": 21,
+                    "effective_prefill": {_HP: {0: [8.0] * HIDDEN_SIZE}},
+                    "effective_decode": decode_vectors,
+                },
+            ],
+        )
+        # First request: in prefill
+        assert (10, "prefill") in mgr.config_to_row
+        assert (11, "decode") not in mgr.config_to_row
+        # Second request: in decode (num_computed == num_prompt)
+        assert (21, "decode") in mgr.config_to_row
+        assert (20, "prefill") not in mgr.config_to_row
+
+    def test_zero_hash_skipped_in_both_phases(self):
+        """Requests with hash=0 (no per-request steering) are skipped
+        in both prefill and decode backfill paths."""
+        mgr = _make_manager()
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 0,
+                    "num_prompt": 100,
+                    "prefill_hash": 0,
+                    "decode_hash": 0,
+                    "effective_prefill": None,
+                    "effective_decode": None,
+                },
+                {
+                    "num_computed": 100,
+                    "num_prompt": 100,
+                    "prefill_hash": 0,
+                    "decode_hash": 0,
+                    "effective_prefill": None,
+                    "effective_decode": None,
+                },
+            ],
+        )
+        assert mgr.num_active_configs == 0
+
+    def test_none_effective_steering_skipped(self):
+        """If effective_prefill/effective_decode is None, registration
+        is skipped even with a nonzero hash."""
+        mgr = _make_manager()
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 0,
+                    "num_prompt": 100,
+                    "prefill_hash": 42,
+                    "decode_hash": 0,
+                    "effective_prefill": None,
+                    "effective_decode": None,
+                },
+                {
+                    "num_computed": 100,
+                    "num_prompt": 100,
+                    "prefill_hash": 0,
+                    "decode_hash": 43,
+                    "effective_prefill": None,
+                    "effective_decode": None,
+                },
+            ],
+        )
+        assert mgr.num_active_configs == 0
+
+    def test_decode_backfill_vectors_populate_correctly(self):
+        """Verify that a decode config registered via backfill has
+        correct vectors in the steering table after population."""
+        mgr = _make_manager()
+        base_vec = torch.ones(HIDDEN_SIZE) * 1.0
+        decode_global = torch.ones(HIDDEN_SIZE) * 3.0
+        per_req_vec = [7.0] * HIDDEN_SIZE
+
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=decode_global, phase="decode"
+        )
+
+        decode_vectors = {_HP: {0: per_req_vec}}
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 200,
+                    "num_prompt": 200,
+                    "prefill_hash": 50,
+                    "decode_hash": 51,
+                    "effective_prefill": {_HP: {0: [1.0] * HIDDEN_SIZE}},
+                    "effective_decode": decode_vectors,
+                },
+            ],
+        )
+
+        assert (51, "decode") in mgr.config_to_row
+        row = mgr.config_to_row[(51, "decode")]
+
+        layers = _make_layers(mgr, layer_indices=[0])
+        mgr.populate_steering_tables(layers)
+        table = getattr(layers[0], _TABLE_ATTR)
+
+        # Expected: (base + decode_global) + per_req = 1+3+7 = 11.0
+        expected = base_vec + decode_global + torch.tensor(per_req_vec)
+        assert torch.allclose(table[row], expected), (
+            f"Backfill-registered decode row should be "
+            f"(base+decode_global)+per_req.\n"
+            f"Expected: {expected}\nGot: {table[row]}"
+        )
+
+    def test_already_registered_config_not_duplicated(self):
+        """Backfill skips configs already present in config_to_row."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        # Pre-register the config
+        row_pre = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        assert mgr.config_refcounts[(42, "prefill")] == 1
+
+        # Backfill should skip because (42, "prefill") already registered
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 0,
+                    "num_prompt": 100,
+                    "prefill_hash": 42,
+                    "decode_hash": 0,
+                    "effective_prefill": vectors,
+                    "effective_decode": None,
+                },
+            ],
+        )
+        # Refcount should still be 1 — backfill did not re-register
+        assert mgr.config_refcounts[(42, "prefill")] == 1
+        assert mgr.config_to_row[(42, "prefill")] == row_pre
