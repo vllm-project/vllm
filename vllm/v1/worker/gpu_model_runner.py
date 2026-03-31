@@ -590,15 +590,6 @@ class GPUModelRunner(
             self.use_async_scheduling and self.num_spec_tokens > 0
         )
 
-            # setup Dynamic Speculative Decoding
-            self.dynamic_sd_manager: DynamicSpeculativeDecodingManager | None = None
-            if self.speculative_config.dynamic_config:
-                self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
-                    self.speculative_config.dynamic_config,
-                    self.vllm_config.scheduler_config.max_num_seqs,
-                    self.speculative_config.num_speculative_tokens,
-                )
-
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # NOTE(rob): num_prompt_logprobs only includes reqs
@@ -807,8 +798,7 @@ class GPUModelRunner(
         self.runner_only_attn_layers: set[str] = set()
 
         # Cached outputs.
-        self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
-        self._optimal_num_speculative_tokens: int | None = None
+        self._draft_token_ids: list[list[int]] | torch.Tensor | None = None        
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
@@ -1205,16 +1195,6 @@ class GPUModelRunner(
         is_last_rank = get_pp_group().is_last_rank
         req_data = scheduler_output.scheduled_cached_reqs
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-
-        # When dynamic SD chose a smaller K in the previous step, trim the
-        # scheduler output in-place so that input preparation, rejection
-        # accounting, and prev_num_draft_len all reflect the actual K.
-        if (
-            self._optimal_num_speculative_tokens is not None
-            and self.use_async_scheduling
-            and scheduled_spec_tokens
-        ):
-            self._trim_spec_tokens_for_dynamic_sd(scheduler_output)
 
         # Save scheduler-allocated spec lengths before trimming so
         # prev_num_draft_len keeps the optimistic count for rejection correction.
@@ -4342,7 +4322,6 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                optimal_num_speculative_tokens=(self._optimal_num_speculative_tokens),
             )
 
         if not self.use_async_scheduling:
@@ -4410,43 +4389,10 @@ class GPUModelRunner(
                 req_state.output_token_ids.append(-1)
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
-    def _trim_spec_tokens_for_dynamic_sd(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> None:
-        """Trim scheduled spec tokens to match dynamic SD's optimal K.
-
-        Called in _update_states when async scheduling is active and the
-        previous step determined a lower optimal K than what the scheduler
-        allocated.  Modifies scheduler_output in-place so that the engine
-        core's update_from_output sees the trimmed counts in its rejection
-        logic, avoiding double-correction with the scheduler-side fix.
-        """
-        k = self._optimal_num_speculative_tokens
-        assert k is not None
-        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
-        for req_id in list(spec_decode_tokens):
-            tokens = spec_decode_tokens[req_id]
-            scheduled_k = len(tokens)
-            if scheduled_k <= k:
-                continue
-            tokens_to_trim = scheduled_k - k
-            scheduler_output.total_num_scheduled_tokens -= tokens_to_trim
-            scheduler_output.num_scheduled_tokens[req_id] -= tokens_to_trim
-            if k == 0:
-                spec_decode_tokens.pop(req_id)
-            else:
-                spec_decode_tokens[req_id] = tokens[:k]
-
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
-        # When Dynamic SD reduced the number of speculative tokens,
-        # the GPU tensor was zero-padded to num_spec_tokens for scatter
-        # indexing, but the scheduler should only see the real draft tokens.
-        k = self._optimal_num_speculative_tokens
-        if k is not None and k < self.num_spec_tokens:
-            draft_token_ids = [ids[:k] for ids in draft_token_ids]
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def _copy_draft_token_ids_to_cpu(
@@ -4539,28 +4485,17 @@ class GPUModelRunner(
         common_attn_metadata: CommonAttentionMetadata,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
     ) -> list[list[int]] | torch.Tensor:
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
 
-        if self.dynamic_sd_manager:
-            num_speculative_tokens = self.dynamic_sd_manager.step(
-                scheduler_output.spec_decoding_stats_all,
-                self.input_batch.num_reqs,
-            )
-        else:
-            num_speculative_tokens = spec_config.num_speculative_tokens
-        self._optimal_num_speculative_tokens = (
-            num_speculative_tokens if self.dynamic_sd_manager else None
-        )
-
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if spec_config.method == "ngram":
             from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens,
+                scheduler_output.num_spec_tokens_to_schedule,
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
@@ -4586,7 +4521,7 @@ class GPUModelRunner(
             batch_size = next_token_ids.shape[0]
 
             draft_token_ids, num_valid_draft_tokens = self.drafter.propose(
-                num_speculative_tokens,
+                scheduler_output.num_spec_tokens_to_schedule,
                 self.num_tokens_no_spec_gpu[:batch_size],
                 self.token_ids_gpu_tensor[:batch_size],
                 valid_sampled_token_ids_gpu,
@@ -4608,7 +4543,7 @@ class GPUModelRunner(
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, SuffixDecodingProposer)
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens,
+                scheduler_output.num_spec_tokens_to_schedule,
                 self.input_batch,
                 sampled_token_ids,
                 slot_mappings=slot_mappings,
@@ -4635,7 +4570,7 @@ class GPUModelRunner(
                 hidden_states = sample_hidden_states[indices]
 
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=num_speculative_tokens,
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
                 slot_mappings=slot_mappings,
@@ -4653,7 +4588,7 @@ class GPUModelRunner(
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=num_speculative_tokens,
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 sampled_token_ids=sampled_token_ids,
                 target_hidden_states=target_hidden_states,
                 common_attn_metadata=common_attn_metadata,
@@ -4778,7 +4713,7 @@ class GPUModelRunner(
                 mm_embed_inputs = None
 
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=num_speculative_tokens,
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,

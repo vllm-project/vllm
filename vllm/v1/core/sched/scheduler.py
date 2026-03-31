@@ -58,6 +58,7 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.v1.spec_decode.dynamic.manager import DynamicSpeculativeDecodingManager
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -213,10 +214,17 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
-        self.spec_decoding_stats_all = None
+        self.dynamic_sd_manager = None
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
-            self.spec_decoding_stats_all = SpecDecodingStats.new(self.num_spec_tokens)
+            # setup Dynamic Speculative Decoding
+            self.dynamic_sd_manager: DynamicSpeculativeDecodingManager | None = None
+            if speculative_config.dynamic_config:
+                self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
+                    speculative_config.dynamic_config,
+                    self.scheduler_config.max_num_seqs,
+                    self.num_spec_tokens,
+                )
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
@@ -906,6 +914,13 @@ class Scheduler(SchedulerInterface):
             else None
         )
 
+        # Dynamic speculative decoding: compute optimal K
+        num_spec_tokens_to_schedule = None
+        if self.dynamic_sd_manager is not None and len(num_scheduled_tokens) > 0:
+            num_spec_tokens_to_schedule = self.dynamic_sd_manager.step(
+                len(num_scheduled_tokens)
+            )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -923,6 +938,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             spec_decoding_stats_all=self.spec_decoding_stats_all,
             new_block_ids_to_zero=new_block_ids_to_zero,
+            num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1978,6 +1994,11 @@ class Scheduler(SchedulerInterface):
         num_invalid_spec_tokens: dict[str, int] | None,
         request_id: str,
     ) -> SpecDecodingStats | None:
+        if num_invalid_spec_tokens:
+            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
+        if self.dynamic_sd_manager is not None and num_draft_tokens:
+            self.dynamic_sd_manager.observe_draft(num_draft_tokens, num_accepted_tokens)
+        
         # Save this so its accessible by scheduler and can
         # be sent to engine for Dynamic SD.
         if self.spec_decoding_stats_all is not None:
@@ -1990,8 +2011,6 @@ class Scheduler(SchedulerInterface):
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
-        if num_invalid_spec_tokens:
-            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )

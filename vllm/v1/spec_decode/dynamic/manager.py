@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.config.speculative import DynamicSpeculativeConfig
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 
 class DynamicSpeculativeDecodingManager:
@@ -25,6 +26,9 @@ class DynamicSpeculativeDecodingManager:
         self.available_batch_sizes = sorted(self.dynamic_config.batch_stats.keys())
         self.steps = 0
         self.warmup_steps = warmup_steps
+
+        # Cumulative stats for online acceptance rate updates
+        self.stats = SpecDecodingStats.new(vllm_num_speculative_tokens)
 
         # Sanity check
         assert (
@@ -177,3 +181,7 @@ class DynamicSpeculativeDecodingManager:
                 chosen_num_drafts = num_drafts
 
         return chosen_num_drafts
+
+    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int) -> None:
+        """Record draft/accept counts for online acceptance rate updates."""
+        self.stats.observe_draft(num_draft_tokens, num_accepted_tokens)
