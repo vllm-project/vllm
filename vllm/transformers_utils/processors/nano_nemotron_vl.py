@@ -857,13 +857,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
     @property
     def supports_video(self) -> bool:
-        return self.video_token_id is not None
+        return True
 
     @property
-    def video_token_id(self) -> int | None:
-        if self.video_token is None:
-            return None
-        return self.tokenizer.get_vocab().get(self.video_token, None)
+    def video_token_id(self) -> int:
+        assert self.video_token is not None
+        return self.tokenizer.get_vocab()[self.video_token]
 
     @property
     def image_token_id(self) -> int:

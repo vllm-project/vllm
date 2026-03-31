@@ -16,7 +16,7 @@ from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -209,11 +209,15 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def is_dynamic_tiler(self) -> bool:
-        return self.get_hf_processor().dynamic_tiler is not None
+        return BaseNanoNemotronVLProcessor.use_dynamic_resolution(self.get_hf_config())
 
-    @cached_property
+    @property
     def supports_video(self):
-        return self.get_hf_processor().supports_video
+        return True
+
+    @property
+    def supports_audio(self) -> bool:
+        return self.sound_config is not None
 
     def get_video_token(self) -> str | None:
         return IMG_CONTEXT
@@ -222,8 +226,8 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_mm_config().video_pruning_rate
 
     @property
-    def audio_extractor(self) -> ParakeetExtractor | None:
-        return self.get_hf_processor().audio_extractor
+    def sound_config(self) -> PretrainedConfig | None:
+        return getattr(self.get_hf_config(), "sound_config", None)
 
     def get_default_tok_params(self) -> TokenizeParams:
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
@@ -231,14 +235,14 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         image_limit = {"image": None}
         video_limit = {"video": None} if self.supports_video else {}
-        audio_limit = {"audio": None} if self.audio_extractor is not None else {}
+        audio_limit = {"audio": None} if self.supports_audio else {}
         return {**image_limit, **video_limit, **audio_limit}
 
     def get_data_parser(self):
         target_sr = None
         target_channels = None
-        if extractor := self.audio_extractor:
-            target_sr = extractor.sampling_rate
+        if self.sound_config:
+            target_sr = self.sound_config.sampling_rate
             target_channels = 1
 
         return MultiModalDataParser(
@@ -370,7 +374,7 @@ class NanoNemotronVLMultiModalProcessor(
         fields = self._get_image_fields_config(hf_inputs)
         if self.info.supports_video:
             fields |= self._get_video_fields_config(hf_inputs)
-        if self.info.audio_extractor:
+        if self.info.supports_audio:
             fields |= self._get_audio_fields_config(hf_inputs)
 
         return fields
@@ -535,7 +539,7 @@ class NanoNemotronVLMultiModalProcessor(
             prompt_repls.append(
                 self._get_prompt_repl_video(mm_items, hf_processor, out_mm_data)
             )
-        if self.info.audio_extractor:
+        if self.info.supports_audio:
             prompt_repls.append(
                 self._get_prompt_repl_audio(mm_items, hf_processor, out_mm_data)
             )
@@ -771,12 +775,14 @@ class NanoNemotronVLDummyInputsBuilder(
         else:
             dummy_video = {}
 
-        if extractor := self.info.audio_extractor:
+        if sound_config := self.info.sound_config:
             num_audios = mm_counts.get("audio", 0)
             audio_overrides = mm_options.get("audio") if mm_options else None
             tokens_per_audio = max(1, seq_len // max(num_audios, 1))
-            max_audio_num_samples = MAX_AUDIO_LEN_S * extractor.sampling_rate
-            calculated_max_audio_num_samples = extractor.audio_length(tokens_per_audio)
+            max_audio_num_samples = MAX_AUDIO_LEN_S * sound_config.sampling_rate
+            calculated_max_audio_num_samples = ParakeetExtractor.audio_length(
+                sound_config, tokens_per_audio
+            )
             audio_len = min(max_audio_num_samples, calculated_max_audio_num_samples)
             dummy_audio = {
                 "audio": self._get_dummy_audios(
