@@ -394,10 +394,7 @@ class MultiprocExecutor(Executor):
             aggregate=aggregate,
         )
 
-        if non_block:
-            return future
-
-        return future.result()
+        return future if non_block else future.result()
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
