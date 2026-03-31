@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
 
-from fastapi.responses import JSONResponse
+from fastapi import Request
+from fastapi.responses import JSONResponse, Response
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
@@ -11,6 +13,10 @@ from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.renderers import BaseRenderer
+from vllm.v1.pool.late_interaction import (
+    build_late_interaction_doc_params,
+    build_late_interaction_query_params,
+)
 
 from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
@@ -22,6 +28,7 @@ from .protocol import (
     ScoreRequest,
     ScoreResponse,
     ScoreResponseData,
+    ScoringRequest,
 )
 from .typing import ScoreInput
 
@@ -30,6 +37,17 @@ logger = init_logger(__name__)
 
 class ServingScores(PoolingServing):
     request_id_prefix = "score"
+
+    def __init__(
+        self, *args, use_gpu_for_late_interaction_scoring: bool = True, **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.score_type = self.model_config.score_type
+        self.use_gpu_for_late_interaction_scoring = (
+            self.score_type == "late-interaction"
+            and use_gpu_for_late_interaction_scoring
+        )
 
     def init_io_processor(
         self,
@@ -45,6 +63,107 @@ class ServingScores(PoolingServing):
             renderer=renderer,
             chat_template_config=chat_template_config,
         )
+
+    async def __call__(
+        self,
+        request: ScoringRequest,
+        raw_request: Request | None = None,
+    ) -> Response:
+        if not self.use_gpu_for_late_interaction_scoring:
+            await super().__call__(request, raw_request)
+
+        return await self.gpu_for_late_interaction_scoring(request, raw_request)
+
+    async def gpu_for_late_interaction_scoring(
+        self,
+        request: ScoringRequest,
+        raw_request: Request | None = None,
+    ) -> Response:
+        """
+        Run pooling score MaxSim on GPU in the API server process.
+        Can significantly improve late-interaction scoring performance.
+        """
+
+        model_name = self.models.model_name()
+        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
+
+        await self._check_model(request)
+
+        ctx = ScoringServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=request_id,
+        )
+
+        self._validate_request(ctx)
+        self._maybe_get_adapters(ctx)
+        await self.io_processor.pre_process_online_async(ctx)
+
+        offset = cast(int, ctx.intermediates)
+        query_engine_inputs = ctx.engine_inputs[:offset]
+        doc_engine_inputs = ctx.engine_inputs[offset:]
+        default_pooling_params = request.to_pooling_params("token_embed")
+
+        # stage 1: encode queries and cache token embeddings on workers.
+        query_keys = [
+            f"{request_id}-query-{i}" for i in range(len(query_engine_inputs))
+        ]
+        query_uses = [len(doc_engine_inputs) if offset == 1 else 1] * len(
+            query_engine_inputs
+        )
+
+        query_pooling_params_list = []
+        for i in range(len(query_engine_inputs)):
+            pooling_params = default_pooling_params.clone()
+            pooling_params.late_interaction_params = (
+                build_late_interaction_query_params(
+                    query_key=query_keys[i],
+                    query_uses=query_uses[i],
+                )
+            )
+            query_pooling_params_list.append(pooling_params)
+
+        query_ctx = ScoringServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=request_id,
+            pooling_params=query_pooling_params_list,
+            prompt_request_ids=query_keys,
+            engine_inputs=query_engine_inputs,
+        )
+
+        await self._prepare_generators(query_ctx)
+        await self._collect_batch(query_ctx)
+
+        # stage 2: encode docs and return scalar scores from workers.
+        doc_keys = [f"{request_id}-query-{i}" for i in range(len(query_engine_inputs))]
+
+        doc_pooling_params_list = []
+        for i in range(len(doc_engine_inputs)):
+            query_idx = 0 if offset == 1 else i
+            pooling_params = default_pooling_params.clone()
+            pooling_params.late_interaction_params = build_late_interaction_doc_params(
+                query_key=query_keys[query_idx]
+            )
+            query_pooling_params_list.append(pooling_params)
+
+        doc_ctx = ScoringServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=request_id,
+            pooling_params=doc_pooling_params_list,
+            prompt_request_ids=doc_keys,
+            engine_inputs=doc_engine_inputs,
+        )
+
+        await self._prepare_generators(doc_ctx)
+        await self._collect_batch(doc_ctx)
+
+        # await self.io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)
 
     async def _build_response(
         self,
