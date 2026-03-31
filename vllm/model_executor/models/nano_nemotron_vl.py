@@ -7,7 +7,6 @@
 #     LICENSE is in root directory.
 # --------------------------------------------------------
 
-import copy
 import math
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
@@ -1498,15 +1497,13 @@ class NemotronH_Nano_VL_V2(
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: "VllmConfig"):
         text_config = vllm_config.model_config.hf_config.text_config
-        temp_vllm_config = copy.deepcopy(vllm_config)
-        temp_vllm_config.model_config.hf_config = text_config
+        temp_vllm_config = vllm_config.with_hf_config(text_config)
         return NemotronHForCausalLM.get_mamba_state_shape_from_config(temp_vllm_config)
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: "VllmConfig"):
         text_config = vllm_config.model_config.hf_config.text_config
-        temp_vllm_config = copy.deepcopy(vllm_config)
-        temp_vllm_config.model_config.hf_config = text_config
+        temp_vllm_config = vllm_config.with_hf_config(text_config)
         return NemotronHForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
 
     @classmethod
