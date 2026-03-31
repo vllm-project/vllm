@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import io
 import json
 
 import openai  # use the official client for correctness check
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import torch
@@ -83,11 +83,8 @@ def example_prompt_embeds(hf_runner):
     return [_encode_embeds(item) for item in example_embeddings]
 
 
-@pytest.fixture(scope="module", params=["", "--disable-frontend-multiprocessing"])
-def server_with_prompt_embeds(default_server_args, request):
-    if request.param:
-        default_server_args.append(request.param)
-
+@pytest.fixture(scope="module")
+def server_with_prompt_embeds(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
