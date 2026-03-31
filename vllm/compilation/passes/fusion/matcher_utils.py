@@ -203,7 +203,7 @@ class MatcherRMSNorm(MatcherCustomOp):
             return self.forward_rocm_aiter(input, weight)
 
         result = torch.empty_like(input)
-        _, result = auto_functionalized(
+        out = auto_functionalized(
             self._rmsnorm_op,
             result=result,
             input=input,
@@ -211,7 +211,7 @@ class MatcherRMSNorm(MatcherCustomOp):
             epsilon=self.epsilon,
         )
 
-        return result
+        return out[1]
 
     def forward_native(
         self,
@@ -267,7 +267,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         if self.match_rocm_aiter:
             return self.forward_rocm_aiter(input, weight, residual)
 
-        _, result, residual = auto_functionalized(
+        out = auto_functionalized(
             self._rmsnorm_op,
             input=input,
             residual=residual,
@@ -275,7 +275,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
             epsilon=self.epsilon,
         )
 
-        return result, residual
+        return out[1], out[2]
 
     def forward_native(
         self,
@@ -385,7 +385,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             fp8_min = finfo.min
             fp8_max = finfo.max
 
-            _, result, scale = auto_functionalized(
+            out = auto_functionalized(
                 self.QUANT_OP,
                 input=input,
                 output_q=result,
@@ -398,21 +398,21 @@ class MatcherQuantFP8(MatcherCustomOp):
                 dummy_is_scale_transposed=self.has_col_major_scales,
                 dummy_is_tma_aligned=self.is_tma_aligned,
             )
-            return result, scale
+            return out[1], out[2]
 
         if self.quant_key.scale.static:
             assert scale is not None
-            _, result = auto_functionalized(
+            out = auto_functionalized(
                 self.QUANT_OP, result=result, input=input, scale=scale
             )
-            return result, scale
+            return out[1], scale
         else:
             assert scale is None
             scale = self.make_scale(input)
-            _, result, scale = auto_functionalized(
+            out = auto_functionalized(
                 self.QUANT_OP, result=result, input=input, scale=scale, scale_ub=None
             )
-            return result, scale
+            return out[1], out[2]
 
     def forward_native(
         self,

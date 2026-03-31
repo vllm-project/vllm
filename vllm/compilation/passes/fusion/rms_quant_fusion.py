@@ -305,7 +305,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             fp8_min = finfo.min
             fp8_max = finfo.max
 
-            _, result, scale = auto_functionalized(
+            out = auto_functionalized(
                 self.quant_matcher.QUANT_OP,
                 input=result_rms,
                 output_q=result,
@@ -318,6 +318,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
                 dummy_is_scale_transposed=self.has_col_major_scales,
                 dummy_is_tma_aligned=self.is_tma_aligned,
             )
+            result, scale = out[1], out[2]
 
             return result, residual, scale
 
@@ -402,7 +403,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             fp8_min = finfo.min
             fp8_max = finfo.max
 
-            _, result, scale = auto_functionalized(
+            out = auto_functionalized(
                 self.quant_matcher.QUANT_OP,
                 input=result_rms,
                 output_q=result,
@@ -415,6 +416,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
                 dummy_is_scale_transposed=self.has_col_major_scales,
                 dummy_is_tma_aligned=self.is_tma_aligned,
             )
+            result, scale = out[1], out[2]
 
             return result, scale
 
