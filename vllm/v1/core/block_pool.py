@@ -183,11 +183,6 @@ class BlockPool:
         # Priority eviction queue for blocks with explicit retention
         # priority. Blocks without priority stay in the LRU free_block_queue.
         self.priority_eviction_queue = PriorityEvictionQueue()
-        # Fast-path flag: set to True when any block receives a priority
-        # via _apply_retention_to_block. Avoids per-block checks in
-        # free_blocks/touch/get_new_blocks when retention is never used.
-        self._has_prioritized_blocks = False
-
         self.metrics_collector = metrics_collector
 
     def get_cached_block(
@@ -371,11 +366,10 @@ class BlockPool:
         if self.priority_eviction_queue.num_blocks == 0:
             ret = self.free_block_queue.popleft_n(num_blocks)
         else:
-            ret: list[KVCacheBlock] = []
+            ret = list[KVCacheBlock]()
 
             # Phase 1: Drain unprioritized blocks from LRU free list first.
-            num_from_free = min(
-                num_blocks, self.free_block_queue.num_free_blocks)
+            num_from_free = min(num_blocks, self.free_block_queue.num_free_blocks)
             if num_from_free > 0:
                 ret.extend(self.free_block_queue.popleft_n(num_from_free))
 
@@ -385,8 +379,8 @@ class BlockPool:
             for _ in range(num_remaining):
                 block = self.priority_eviction_queue.pop_lowest()
                 assert block is not None, (
-                    "Priority eviction queue is empty but we need "
-                    "more blocks")
+                    "Priority eviction queue is empty but we need more blocks"
+                )
                 ret.append(block)
 
         # Finalize: evict cached state and increment ref counts.
@@ -457,8 +451,11 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in an eviction queue, remove it.
             if block.ref_cnt == 0 and not block.is_null:
-                if has_prioritized and block.block_id in \
-                        self.priority_eviction_queue._block_ids_in_queue:
+                if (
+                    has_prioritized
+                    and block.block_id
+                    in self.priority_eviction_queue._block_ids_in_queue
+                ):
                     self.priority_eviction_queue.remove(block)
                 else:
                     self.free_block_queue.remove(block)
@@ -553,7 +550,6 @@ class BlockPool:
             # Escalation: any scope can raise priority and take ownership.
             block.priority = best_priority
             block.priority_scope = scope
-            self._has_prioritized_blocks = True
             if best_duration is not None:
                 block.priority_expiry = time.monotonic() + best_duration
             else:
@@ -609,7 +605,6 @@ class BlockPool:
         # Clear the priority eviction queue — all prioritized free blocks
         # lose their priority when hashes are reset below.
         self.priority_eviction_queue = PriorityEvictionQueue()
-        self._has_prioritized_blocks = False
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
