@@ -531,6 +531,8 @@ def _fused_norm_rope_kernel(
     kv_stride,
     kv_rms_norm_w_ptr,
     kv_rms_eps,
+    kv_c_out_ptr,
+    kv_c_out_stride,
     KV_DIM: tl.constexpr,
     # KV RoPE
     kpe_ptr,
@@ -606,15 +608,15 @@ def _fused_norm_rope_kernel(
         # Merged so the normed kv_c and RoPE'd k_pe can be written
         # to the MLA KV cache directly without a separate kernel.
 
-        # KV RMS Norm (result stays in registers for MLA cache write)
+        # KV RMS Norm
         kv_block = tl.arange(0, KV_DIM)
         kv_c = tl.load(kv_ptr + tok_idx * kv_stride + kv_block)
         kv_c_rms_w = tl.load(kv_rms_norm_w_ptr + kv_block)
         kv_c = _rms_norm(kv_c, kv_c_rms_w, kv_rms_eps, KV_DIM)
+        # Write normed kv_c (needed by MHA prefill path)
+        tl.store(kv_c_out_ptr + tok_idx * kv_c_out_stride + kv_block, kv_c)
 
-        # KV RoPE (interleaved) on k_pe — in registers only.
-        # k_pe is not needed after the cache write (MLA decode reads
-        # from kv_cache), so we skip writing back to kpe_ptr.
+        # KV RoPE (interleaved) on k_pe
         pos = tl.load(pos_ptr + tok_idx)
         cos, sin = _cos_sin_cache_kernel(
             kpe_rope_cos_sin_cache_ptr,
@@ -628,6 +630,9 @@ def _fused_norm_rope_kernel(
         x2 = tl.load(kpe_base + dim_off * 2 + 1).to(tl.float32)
         r1 = x1 * cos - x2 * sin
         r2 = x2 * cos + x1 * sin
+        # Write RoPE'd k_pe back (needed by MHA prefill path)
+        tl.store(kpe_base + dim_off * 2, r1)
+        tl.store(kpe_base + dim_off * 2 + 1, r2)
 
         # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
         if mla_cache_entry_stride == 0:
@@ -756,7 +761,7 @@ def fused_norm_rope(
     mla_kv_cache: torch.Tensor | None = None,
     mla_kv_cache_dtype: str = "auto",
     mla_k_scale: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert positions.ndim == 1
     assert q_c.ndim == 2
     assert kv_c.ndim == 2
@@ -809,6 +814,7 @@ def fused_norm_rope(
     )
 
     q_c_out = torch.empty_like(q_c)
+    kv_c_out = torch.empty_like(kv_c)
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
         # Q RMS norm
@@ -825,6 +831,8 @@ def fused_norm_rope(
         kv_c.stride(0),
         kv_rms_norm_w,
         kv_rms_eps,
+        kv_c_out,
+        kv_c_out.stride(0),
         kv_dim,
         # KV RoPE
         k_pe,
@@ -862,7 +870,7 @@ def fused_norm_rope(
         topk,
         TOPK_BLOCK_SIZE=1024,
     )
-    return q_c_out
+    return q_c_out, kv_c_out
 
 
 @triton.jit
