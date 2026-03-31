@@ -1216,11 +1216,14 @@ def test_ir_op_priority_default():
     # Assert default is applied to ops
     priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
     assert priority_config.rms_norm == ["vllm_c", "native"]
+    assert priority_config.fused_add_rms_norm == ["vllm_c", "native"]
 
     # Assert single ops override the default
-    assert IrOpPriorityConfig.with_default(
-        ["vllm_c", "native"], rms_norm=["oink", "native"]
-    ) == IrOpPriorityConfig(rms_norm=["oink", "native"])
+    priority_config = IrOpPriorityConfig.with_default(
+        ["native"], rms_norm=["oink", "native"]
+    )
+    assert priority_config.rms_norm == ["oink", "native"]
+    assert priority_config.fused_add_rms_norm == ["native"]
 
 
 def test_ir_op_priority_str():
