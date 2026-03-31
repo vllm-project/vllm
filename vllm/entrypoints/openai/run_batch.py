@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
 import sys
 import tempfile
@@ -542,12 +543,10 @@ async def run_request(
         response = create_error_response(e)
 
     if isinstance(response, JSONResponse):
-        try:
+        with contextlib.suppress(pydantic.ValidationError):
             response = TypeAdapter(AllResponse | ErrorResponse).validate_python(
                 json.loads(response.body)
             )
-        except pydantic.ValidationError:
-            pass
 
     if isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(
