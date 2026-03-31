@@ -76,10 +76,8 @@ ENV UV_LINK_MODE="copy"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
-<<<<<<< HEAD
     --mount=type=bind,src=requirements/xpu-test.in,target=/workspace/vllm/requirements/xpu-test.in \
     uv pip install --upgrade pip && \
-<<<<<<< HEAD
     uv pip install -r requirements/xpu.txt && \
     uv pip compile /workspace/vllm/requirements/xpu-test.in \
         -o /workspace/vllm/requirements/xpu-test.txt \
@@ -92,15 +90,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force && \
     export CMAKE_PREFIX_PATH="$(python3 -c 'import site; print(site.getsitepackages()[0])'):${CMAKE_PREFIX_PATH}" && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu-test.txt
-=======
-    uv pip install -r requirements/xpu.txt
->>>>>>> 847ab26c5 (remove vllm/collect_env.py from PR)
-=======
-    --mount=type=bind,src=requirements/xpu-test.txt,target=/workspace/vllm/requirements/xpu-test.txt \
-    uv pip install --upgrade pip && \
-    uv pip install -r requirements/xpu.txt && \
-    uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu-test.txt
->>>>>>> b445acd9e (unset target)
 
 
 
@@ -122,12 +111,9 @@ CMD ["/bin/bash"]
 
 FROM vllm-base AS vllm-openai
 
-# install additional dependencies for openai api server
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
-
 # install development dependencies (for testing)
-RUN uv pip install -e tests/vllm_test_utils
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -e tests/vllm_test_utils
 
 # install NIXL and UCX from source code
 ARG UCX_VERSION=e5d98879705239d254ede40b4a52891850cb5349
