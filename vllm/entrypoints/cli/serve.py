@@ -10,19 +10,13 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import (
-    run_server,
-    run_server_worker,
-    setup_server,
-)
+from vllm.entrypoints.openai.api_server import run_server, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.utils.system_utils import decorate_logs, set_process_title
-from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -50,6 +44,12 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
+
+        if getattr(args, "grpc", False):
+            from vllm.entrypoints.grpc_server import serve_grpc
+
+            uvloop.run(serve_grpc(args))
+            return
 
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
@@ -102,6 +102,15 @@ class ServeSubcommand(CLISubcommand):
                         "Defaulting api_server_count to data_parallel_size (%d).",
                         args.api_server_count,
                     )
+
+        # Elastic EP currently only supports running with at most one API server.
+        if getattr(args, "enable_elastic_ep", False) and args.api_server_count > 1:
+            logger.warning(
+                "Elastic EP only supports running with with at most one API server. "
+                "Capping api_server_count from %d to 1.",
+                args.api_server_count,
+            )
+            args.api_server_count = 1
 
         if args.api_server_count < 1:
             run_headless(args)
@@ -198,7 +207,6 @@ def run_headless(args: argparse.Namespace):
 
     # Create the engines.
     engine_manager = CoreEngineProcManager(
-        target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
         start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
@@ -210,7 +218,7 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        engine_manager.monitor_engine_liveness()
     finally:
         timeout = None
         if shutdown_requested:
@@ -224,12 +232,6 @@ def run_multi_api_server(args: argparse.Namespace):
     assert not args.headless
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
-
-    if num_api_servers > 1 and getattr(args, "use_gpu_for_pooling_score", False):
-        # TODO(wentao): remove this once well tested
-        raise ValueError(
-            "--use-gpu-for-pooling-score cannot be used with api_server_count > 1 now"
-        )
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
@@ -276,10 +278,9 @@ def run_multi_api_server(args: argparse.Namespace):
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers
-    ) as (local_engine_manager, coordinator, addresses):
+    ) as (local_engine_manager, coordinator, addresses, tensor_queue):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
-            target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
             sock=sock,
             args=args,
@@ -289,6 +290,7 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator
             else None,
+            tensor_queue=tensor_queue,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
@@ -331,19 +333,3 @@ def run_multi_api_server(args: argparse.Namespace):
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
-
-
-def run_api_server_worker_proc(
-    listen_address, sock, args, client_config=None, **uvicorn_kwargs
-) -> None:
-    """Entrypoint for individual API server worker processes."""
-    client_config = client_config or {}
-    server_index = client_config.get("client_index", 0)
-
-    # Set process title and add process-specific prefix to stdout and stderr.
-    set_process_title("APIServer", str(server_index))
-    decorate_logs()
-
-    uvloop.run(
-        run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
-    )

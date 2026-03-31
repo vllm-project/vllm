@@ -7,7 +7,6 @@ import json
 import time
 from typing import Annotated, Any, Literal
 
-import torch
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
@@ -36,7 +35,8 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-_LONG_INFO = torch.iinfo(torch.long)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class CompletionRequest(OpenAIBaseModel):
@@ -57,7 +57,7 @@ class CompletionRequest(OpenAIBaseModel):
     max_tokens: int | None = 16
     n: int = 1
     presence_penalty: float | None = 0.0
-    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
@@ -78,9 +78,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
-        None
-    )
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
     # --8<-- [end:completion-sampling-params]
@@ -108,6 +106,8 @@ class CompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "

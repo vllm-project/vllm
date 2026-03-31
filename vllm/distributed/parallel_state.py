@@ -40,13 +40,16 @@ import torch
 import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
-from torch.distributed import Backend, ProcessGroup
+from torch.distributed import Backend, ProcessGroup, Store
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
-from vllm.distributed.utils import StatelessProcessGroup
+from vllm.distributed.utils import (
+    StatelessProcessGroup,
+    get_cached_tcp_store_client,
+)
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_distributed_init_method
@@ -1164,9 +1167,9 @@ def init_model_parallel_group(
 def _init_stateless_group(
     group_ranks: list[list[int]],
     group_name: str,
-    group_ports: list[list[int]],
     host: str,
     backend: str,
+    coord_store: Store,
     use_device_communicator: bool = True,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
@@ -1180,7 +1183,7 @@ def _init_stateless_group(
         use_device_communicator=use_device_communicator,
         group_name=group_name,
         host=host,
-        group_ports=group_ports,
+        coord_store=coord_store,
         global_rank=world.rank,
         global_world_size=world.world_size,
     )
@@ -1321,7 +1324,9 @@ def _init_elastic_ep_world(
     group_ranks = [all_ranks[i : i + 1] for i in range(global_world_size)]
     if global_rank in all_ranks:
         group_ranks = [all_ranks]
-    group_ports = [parallel_config.get_next_stateless_world_group_port()]
+    coord_store = get_cached_tcp_store_client(
+        parallel_config.data_parallel_master_ip, parallel_config._coord_store_port
+    )
     world = StatelessGroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
@@ -1329,7 +1334,7 @@ def _init_elastic_ep_world(
         use_device_communicator=False,
         group_name="world",
         host=parallel_config.data_parallel_master_ip,
-        group_ports=group_ports,
+        coord_store=coord_store,
         global_rank=global_rank,
         global_world_size=global_world_size,
     )
@@ -1513,7 +1518,13 @@ def initialize_model_parallel(
     config = get_current_vllm_config()
     data_parallel_size = config.parallel_config.data_parallel_size
     enable_elastic_ep = config.parallel_config.enable_elastic_ep
+    parallel_config = config.parallel_config
+    coord_store: Store | None = None
     if enable_elastic_ep:
+        coord_store = get_cached_tcp_store_client(
+            parallel_config.data_parallel_master_ip,
+            parallel_config._coord_store_port,
+        )
         # Use stateless world group for global information
         world_size = get_world_group().world_size
         rank = get_world_group().rank
@@ -1633,16 +1644,12 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        parallel_config = config.parallel_config
-        dp_ports = [
-            parallel_config.get_next_stateless_dp_group_port() for _ in group_ranks
-        ]
         _DP = _init_stateless_group(
             group_ranks,
             "dp",
-            dp_ports,
             parallel_config.data_parallel_master_ip,
             backend,
+            coord_store=coord_store,
         )
     else:
         _DP = init_model_parallel_group(
@@ -1665,16 +1672,12 @@ def initialize_model_parallel(
         )
         group_ranks = [x.tolist() for x in group_ranks]
         if enable_elastic_ep:
-            parallel_config = config.parallel_config
-            ep_ports = [
-                parallel_config.get_next_stateless_ep_group_port() for _ in group_ranks
-            ]
             _EP = _init_stateless_group(
                 group_ranks,
                 "ep",
-                ep_ports,
                 parallel_config.data_parallel_master_ip,
                 backend,
+                coord_store=coord_store,
             )
         else:
             _EP = init_model_parallel_group(
@@ -1687,22 +1690,14 @@ def initialize_model_parallel(
         # using torch.distributed in execution with torch.distributed in EPLB.
         global _EPLB
         assert _EPLB is None, "EPLB group is already initialized"
-        if (
-            config is not None
-            and config.parallel_config is not None
-            and config.parallel_config.enable_eplb
-        ):
+        if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
-                eplb_ports = [
-                    parallel_config.get_next_stateless_eplb_group_port()
-                    for _ in group_ranks
-                ]
                 _EPLB = _init_stateless_group(
                     group_ranks,
                     "eplb",
-                    eplb_ports,
                     parallel_config.data_parallel_master_ip,
                     backend,
+                    coord_store=coord_store,
                 )
             else:
                 _EPLB = init_model_parallel_group(
@@ -1906,6 +1901,17 @@ def destroy_distributed_environment():
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     # Reset environment variable cache
     envs.disable_envs_cache()
+
+    # Reset rocm_aiter_ops class variables to match current os.environ.
+    # These are class-level attributes that persist across tests and are
+    # NOT restored by monkeypatch (which only restores os.environ).
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.refresh_env_variables()
+
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 
@@ -1964,6 +1970,7 @@ def in_the_same_node_as(
             if rank == source_rank:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
+                assert shm.buf is not None, "Buffer was not created"
                 shm.buf[: len(magic_message)] = magic_message
                 if isinstance(pg, ProcessGroup):
                     torch.distributed.broadcast_object_list(
@@ -1990,6 +1997,7 @@ def in_the_same_node_as(
                     lambda *args, **kwargs: None,
                 ):
                     shm = shared_memory.SharedMemory(name=name)
+                assert shm.buf is not None, "Buffer was not opened"
                 if shm.buf[: len(magic_message)] == magic_message:
                     is_in_the_same_node[rank] = 1
     except Exception as e:

@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import asdict
 from typing import NamedTuple
 
 import pytest
 from PIL import Image
 
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
 from vllm.multimodal.utils import encode_image_url
@@ -129,26 +128,8 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
     # Using tmp_path as the storage path to store KV
     print(f"KV storage path at: {str(tmp_path)}")
 
-    # Configure the ExampleConnector
-    kv_transfer_config = KVTransferConfig(
-        kv_connector="ExampleConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
-    )
-
-    engine_args = EngineArgs(
-        model=MODEL_NAME,
-        max_model_len=8192,
-        max_num_seqs=1,
-        gpu_memory_utilization=0.4,
-        attention_config=AttentionConfig(backend=attn_backend),
-        enforce_eager=True,
-        kv_transfer_config=kv_transfer_config,
-        limit_mm_per_prompt={"image": 2},
-    )
-
     # don't put this import at the top level
-    # it will call torch.cuda.device_count()
+    # it will call torch.accelerator.device_count()
     from transformers import AutoProcessor
 
     # Create processor to handle the chat prompt
@@ -163,8 +144,20 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
     assert image_1 != image_2, "The images should not be identical"
 
     # Create the LLM instance
-    engine_args = asdict(engine_args)
-    llm = LLM(**engine_args)
+    llm = LLM(
+        model=MODEL_NAME,
+        max_model_len=8192,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.4,
+        attention_config=AttentionConfig(backend=attn_backend),
+        enforce_eager=True,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+        ),
+        limit_mm_per_prompt={"image": 2},
+    )
 
     # Prepare the input cases
     input_cases = [

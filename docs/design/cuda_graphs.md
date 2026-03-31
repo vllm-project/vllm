@@ -12,6 +12,7 @@ In this document we will discuss the:
 * [CUDA Graphs modes](#cudagraphmodes)
 * [Detailed design](#detailed-design)
 * [Example usage of the different CUDA Graphs modes](#usage-guide)
+* [Vision Encoder (ViT) CUDA Graphs](cuda_graphs_multimodal.md)
 
 !!! note
     In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
@@ -174,18 +175,18 @@ Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that
 The following table lists backends that support full CUDA Graphs at the time of writing.
 
 | Attention Backend | cudagraph_support | Comments |
-|:---|:---|:---|
+| :---------------- | :---------------- | :------- |
 | FlashAttention v2 | `UNIFORM_BATCH` | Actually `ALWAYS` but workaround to fallback to `FULL_AND_PIECEWISE` for performance reason |
 | FlashAttention v3 | `ALWAYS` | has unified routine for both batches, so `FULL` mode is good |
 | Triton Attention | `ALWAYS` | prefer `FULL_AND_PIECEWISE` since it has different kernels for prefill/mixed and pure decode batches |
-| AITER FlashAttention | `UNIFORM_BATCH`| |
+| AITER FlashAttention | `UNIFORM_BATCH` | |
 | FlashInfer | `UNIFORM_SINGLE_TOKEN_DECODE` | Will be set to `UNIFORM_BATCH` when using TRTLLM attention on Blackwell |
 | FlashMLA | `UNIFORM_BATCH` | |
 | FlashInferMLA | `UNIFORM_BATCH` | |
 | FlashInferMLASparse | `UNIFORM_BATCH` | |
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | CUTLASS MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
-| Mamba attention| `UNIFORM_SINGLE_TOKEN_DECODE` | |
+| Mamba attention | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 
 Unlisted backends are all declared as `NEVER`.
 

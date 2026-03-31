@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
 import torch
@@ -51,7 +51,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
@@ -85,6 +89,26 @@ class AttentionBackend(ABC):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         raise NotImplementedError
+
+    @classmethod
+    def get_kv_cache_block_dim(
+        cls,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> int:
+        """Discover which tensor dim is the block index, since different
+        backends lay out dims differently."""
+        _S = 1234567
+        shape = cls.get_kv_cache_shape(
+            _S,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_dtype_str=cache_dtype_str,
+        )
+        return shape.index(_S)
 
     @staticmethod
     def get_kv_cache_stride_order(
@@ -144,14 +168,8 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
-        from vllm.config.cache import BlockSize
-
         if block_size is None:
             return True
-
-        valid_sizes = get_args(BlockSize)
-        if block_size not in valid_sizes:
-            return False
 
         supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_kernel_block_sizes:
@@ -166,6 +184,17 @@ class AttentionBackend(ABC):
             if block_size % supported_size == 0:
                 return True
         return False
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        supported_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_sizes:
+            return default_block_size
+
+        if cls.supports_block_size(default_block_size):
+            return default_block_size
+
+        return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -192,6 +221,17 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        """Check if backend supports non-causal (bidirectional) attention
+        for decoder models.
+
+        Unlike ENCODER_ONLY attention type which implies a different
+        execution model, this refers to non-causal attention within the
+        standard paged-KV-cache decoder path.
+        """
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -210,7 +250,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -224,7 +264,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -232,6 +272,7 @@ class AttentionBackend(ABC):
         use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
+        use_non_causal: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -264,6 +305,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
             invalid_reasons.append(f"attention type {attn_type} not supported")
+        if use_non_causal and not cls.supports_non_causal():
+            invalid_reasons.append("non-causal attention not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -281,6 +324,10 @@ class AttentionBackend(ABC):
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
+
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return False
 
 
 class AttentionMetadata:
@@ -332,6 +379,11 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
+
+    is_prefilling: torch.Tensor | None = None
+    """(batch_size,) bool tensor: True if request is still in prefill phase
+    (num_computed_tokens < num_prompt_tokens). Used by some backends to
+    distinguish actual decodes from short extends."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -414,6 +466,7 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            is_prefilling=maybe_slice_reqs(self.is_prefilling),
         )
 
 
