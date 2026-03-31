@@ -110,13 +110,8 @@ This command will do the following:
 In case you see an error like `HTTP Error 404` when fetching `metadata.json`, the base commit selected for your install may not be built yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to use the latest already-built main commit.
 
 ```bash
-unset VLLM_PRECOMPILED_WHEEL_COMMIT
-export VLLM_USE_PRECOMPILED=1
-uv pip install --editable .
-
-# fallback: use latest already-built main commit
-export VLLM_USE_PRECOMPILED=1
 export VLLM_PRECOMPILED_WHEEL_COMMIT=nightly
+export VLLM_USE_PRECOMPILED=1
 uv pip install --editable .
 ```
 
