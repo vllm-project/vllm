@@ -43,7 +43,6 @@ import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup, Store
 
 import vllm.envs as envs
-from vllm.config import FaultToleranceConfig
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
@@ -60,6 +59,7 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config import FaultToleranceConfig
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
@@ -325,7 +325,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
-        fault_tolerance_config: FaultToleranceConfig | None = None,
+        fault_tolerance_config: "FaultToleranceConfig | None" = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -1165,7 +1165,7 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
-    fault_tolerance_config: FaultToleranceConfig | None = None,
+    fault_tolerance_config: "FaultToleranceConfig | None" = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1185,7 +1185,7 @@ def _init_stateless_group(
     backend: str,
     coord_store: Store,
     use_device_communicator: bool = True,
-    fault_tolerance_config: FaultToleranceConfig | None = None,
+    fault_tolerance_config: "FaultToleranceConfig | None" = None,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -1502,7 +1502,7 @@ def initialize_model_parallel(
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
-    fault_tolerance_config: FaultToleranceConfig | None = None,
+    fault_tolerance_config: "FaultToleranceConfig | None" = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -1757,7 +1757,7 @@ def ensure_model_parallel_initialized(
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
-    fault_tolerance_config: FaultToleranceConfig | None = None,
+    fault_tolerance_config: "FaultToleranceConfig | None" = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected

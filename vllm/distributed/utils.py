@@ -16,7 +16,7 @@ import uuid
 from collections import deque
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.distributed import ProcessGroup, Store, TCPStore
@@ -29,10 +29,12 @@ from torch.distributed.distributed_c10d import (
 from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
-from vllm.config import FaultToleranceConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import suppress_stdout
+
+if TYPE_CHECKING:
+    from vllm.config import FaultToleranceConfig
 
 logger = init_logger(__name__)
 
@@ -531,7 +533,7 @@ def stateless_init_torch_distributed_process_group(
     group_name: str | None = None,
     return_store: bool = False,
     listen_socket: socket.socket | None = None,
-    fault_tolerance_config: FaultToleranceConfig | None = None,
+    fault_tolerance_config: "FaultToleranceConfig | None" = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
     """
     A replacement for `torch.distributed.init_process_group` that does not
