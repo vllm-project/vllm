@@ -878,9 +878,14 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     real_has_inf = real.isinf().any().item()
 
     # Check per-layer hidden_states NaN from mark() inside CUDA graph.
-    # mark() may see NaN at intermediate layers even when final output is clean
-    # (e.g., NaN in kv projection path doesn't propagate through attention).
-    per_layer_hs_nan = _nan_counts[:, 0].any().item()
+    # mark() checks all padded tokens, so filter out padding-only NaN.
+    # tok0 has NaN only if count > num_padding * hidden_dim.
+    hidden_dim = hidden_states.shape[-1]
+    padded = (_saved_batch_info["padded_size"]
+              if _saved_batch_info else total)
+    num_padding = padded - n
+    hs_pad_max = num_padding * hidden_dim
+    per_layer_hs_nan = (_nan_counts[:, 0] > hs_pad_max).any().item()
 
     # Check kv_c_normed_real (col 17) for NaN OR Inf — seq_lens-filtered,
     # reliable during graph replay. Catches the initial poisoning event
@@ -1003,26 +1008,19 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
 
     if per_layer_hs_nan:
         f = _get_log()
-        # Deduce token-0 NaN from total counts.
-        # mark() runs inside CUDA graph on all padded tokens (frozen slice).
-        # padding_nan_max = max NaN from padding-only.
-        # If count > padding_nan_max, the real token also has NaN.
-        hidden_dim = hidden_states.shape[-1]
-        padded = (_saved_batch_info["padded_size"]
-                  if _saved_batch_info else total)
-        num_padding = padded - n
-        padding_nan_max = num_padding * hidden_dim
+        # hidden_dim, padded, num_padding, hs_pad_max already computed above
         for layer_idx in range(nan_cpu.shape[0]):
             hs_nan = nan_cpu[layer_idx, 0].item()
             hs_inf = inf_cpu[layer_idx, 0].item() if inf_cpu is not None else 0
             attn_nan = nan_cpu[layer_idx, 2].item()
             moe_nan = nan_cpu[layer_idx, 3].item()
             ma = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
-            if hs_nan + hs_inf + attn_nan + moe_nan == 0:
+            # Only report layers where tok0 has NaN (above padding threshold)
+            if hs_nan <= hs_pad_max and hs_inf == 0 and attn_nan <= hs_pad_max and moe_nan <= hs_pad_max:
                 continue
             # Determine if real token (tok 0) has NaN
-            tok0_nan = "YES" if hs_nan > padding_nan_max else "NO"
-            real_nan_elems = max(0, hs_nan - padding_nan_max)
+            tok0_nan = "YES" if hs_nan > hs_pad_max else "NO"
+            real_nan_elems = max(0, hs_nan - hs_pad_max)
             msg = (f"[HS_NAN] layer={layer_idx} "
                    f"input_nan={hs_nan} tok0_nan={tok0_nan} "
                    f"real_nan_elems={real_nan_elems} "
