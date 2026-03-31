@@ -196,7 +196,6 @@ class DefaultMoERunner(MoERunner):
         self.quant_method = quant_method
         self.reduce_results = reduce_results
         self.enable_dbo = enable_dbo
-        self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
 
         # Chunked all2all staging tensor
         # These need to exist ahead of time due to CUDAgraph construction
@@ -424,6 +423,8 @@ class DefaultMoERunner(MoERunner):
                 router_logits=router_logits,
             )
 
+            # Passing shared_experts_input in case SharedExpertsOrder is
+            # NO_OVERLAP or MULTI_STREAM_OVERLAPPED.
             fused_out = self.quant_method.apply(
                 layer=layer,
                 x=hidden_states,

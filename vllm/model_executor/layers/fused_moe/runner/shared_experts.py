@@ -101,7 +101,7 @@ class SharedExperts:
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
-        if self._has_external_experts and not self._use_dp_chunking:
+        if self._has_external_experts:
             return SharedExpertsOrder.EXTERNAL
 
         if self._quant_method.mk_owns_shared_expert:
