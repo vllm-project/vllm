@@ -26,6 +26,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -36,7 +37,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
     SparseMLAAttentionImpl,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
