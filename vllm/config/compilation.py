@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field, fields
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -266,9 +266,9 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_act_padding = False
-        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_rope_kvcache and not current_platform.is_cuda_alike():
             logger.warning_once(
-                "KV cache fusion currently only enabled on ROCm. "
+                "KV cache fusion currently only enabled on CUDA/ROCm. "
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
@@ -281,9 +281,9 @@ class PassConfig:
         TODO also log the compile ranges for which this is enabled.
         """
         enabled_fusions = [
-            f.name[len("fuse_") :]
-            for f in fields(self)
-            if getattr(self, f.name) and f.name.startswith("fuse_")
+            name[len("fuse_") :]
+            for name, value in vars(self).items()
+            if name.startswith("fuse_") and value
         ]
 
         if enabled_fusions:

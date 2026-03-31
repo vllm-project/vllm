@@ -23,6 +23,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
@@ -139,10 +140,8 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     """Enable if rotary embedding custom op is active and
     use_inductor_graph_partition is enabled.
     """
-    from vllm._aiter_ops import rocm_aiter_ops
-
     return (
-        rocm_aiter_ops.is_enabled()
+        current_platform.is_cuda_alike()
         and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
         and (
             cfg.compilation_config.use_inductor_graph_partition
