@@ -973,7 +973,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Molmo2ForConditionalGeneration": _HfExamplesInfo(
         "allenai/Molmo2-8B",
-        extras={"olmo": "allenai/Molmo2-O-7B"},
+        extras={
+            "olmo": "allenai/Molmo2-O-7B",
+            "molmoweb-8b": "allenai/MolmoWeb-8B",
+            "molmoweb-4b": "allenai/MolmoWeb-4B",
+        },
         min_transformers_version="4.51",
         trust_remote_code=True,
         # required by current PrefixLM implementation
