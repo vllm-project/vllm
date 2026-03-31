@@ -225,19 +225,20 @@ class TestSetSteeringVectorsThreeTier:
     """Tests for three-tier steering (base, prefill, decode)."""
 
     def test_set_prefill_only(self, worker, model):
-        """Setting prefill vectors writes to buffers."""
+        """Prefill-only vectors do NOT write to shared buffers."""
         vec = [2.0] * 8
         result = worker.set_steering_vectors(prefill_vectors={_HP: {0: vec}})
         assert result == [0]
-        # Prefill vectors are written to the buffer
-        assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 16.0
+        # Phase-specific vectors are NOT written to the shared buffer
+        assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
 
     def test_set_decode_only(self, worker, model):
-        """Setting decode vectors writes to buffers."""
+        """Decode-only vectors do NOT write to shared buffers."""
         vec = [3.0] * 8
         result = worker.set_steering_vectors(decode_vectors={_HP: {1: vec}})
         assert result == [1]
-        assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 24.0
+        # Phase-specific vectors are NOT written to the shared buffer
+        assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
 
     def test_set_all_three_tiers(self, worker, model):
         """Setting all three tiers in one call."""
@@ -290,6 +291,22 @@ class TestSetSteeringVectorsThreeTier:
         assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 0.0
         # Layer 2 should have the new values
         assert model.layers[2].steering_vector_post_mlp_pre_ln.sum().item() == 8.0
+
+    def test_buffer_reflects_base_not_phase_vectors(self, worker, model):
+        """When all three tiers target the same layer, the shared buffer
+        should only contain the base vector -- prefill/decode values must
+        not overwrite it."""
+        base_vec = [1.0] * 8
+        prefill_vec = [10.0] * 8
+        decode_vec = [100.0] * 8
+        worker.set_steering_vectors(
+            vectors={_HP: {0: base_vec}},
+            prefill_vectors={_HP: {0: prefill_vec}},
+            decode_vectors={_HP: {0: decode_vec}},
+        )
+        # Buffer should reflect base (sum = 8.0), not prefill (80) or decode (800)
+        buf_sum = model.layers[0].steering_vector_post_mlp_pre_ln.sum().item()
+        assert buf_sum == pytest.approx(8.0)
 
 
 # --- clear_steering_vectors ---
