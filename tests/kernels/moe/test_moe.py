@@ -1664,7 +1664,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         intermediate_size_per_partition=n,
         num_local_experts=e,
         num_logical_experts=e,
-        activation="silu",
+        activation=MoEActivation.SILU,
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=dtype,
@@ -1695,13 +1695,25 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.topk_group = 1
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
-        layer.activation = "silu"
+        layer.activation = MoEActivation.SILU
         layer.e_score_correction_bias = None
         layer.routing_method_type = RoutingMethodType.Renormalize
+        layer.expert_map = None
+        layer.apply_router_weight_on_input = False
+        layer.routed_scaling_factor = None
+        layer.shared_experts = None
+        layer._maybe_init_expert_routing_tables = lambda: None
 
         quant_method.process_weights_after_loading(layer)
 
-        trtllm_output = quant_method.forward_monolithic_cuda(
+        assert quant_method.moe_kernel is not None, (
+            "moe_kernel should be set after process_weights_after_loading"
+        )
+        assert quant_method.supports_internal_mk, (
+            "supports_internal_mk should be True after setup"
+        )
+
+        trtllm_output = quant_method.apply_monolithic(
             layer=layer,
             x=a,
             router_logits=router_logits,
