@@ -21,6 +21,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -48,9 +49,7 @@ from vllm.multimodal.evs import (
 from vllm.multimodal.inputs import (
     AudioItem,
     BatchedTensorInputs,
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -308,6 +307,20 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
 class NanoNemotronVLMultiModalProcessor(
     BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """
+        Bypass `call_hf_processor_mm_only` by no-op overriding`_call_hf_processor`,
+        so it chooses this path:
+        `type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor`
+        """
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
         if self.info.is_dynamic_tiler:
             pixel_values_flat = MultiModalFieldConfig.batched("image")
@@ -576,7 +589,7 @@ class NanoNemotronVLMultiModalProcessor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         use_audio_in_video = bool(
             inputs.hf_processor_mm_kwargs.get("use_audio_in_video", False)
         )
@@ -632,7 +645,7 @@ class NanoNemotronVLMultiModalProcessor(
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
+        return MultiModalInput(
             type="multimodal",
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
