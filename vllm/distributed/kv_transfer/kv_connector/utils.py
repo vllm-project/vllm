@@ -599,6 +599,32 @@ class TpKVTopology:
             remote_pcp_size,
         )
 
+    def get_local_consumer_count_for_remote_worker_key(
+        self,
+        remote_engine_id: EngineId,
+        remote_worker_key: tuple[int, int],
+    ) -> int:
+        """Return the total number of local (D-side) workers that will send
+        a done-notification to the given remote (P-side) worker.
+
+        The count is the product of:
+        - tp_consumers: D TP ranks whose KV head range overlaps with the P
+          TP rank.  When D.tp_size > P.tp_size this is D.tp_size/P.tp_size;
+          otherwise it is 1.
+        - dcp_consumers: D DCP ranks whose token slice overlaps with the P
+          DCP rank.  Token overlap requires
+          ``D.dcp_rank % gcd(D,P) == P.dcp_rank % gcd(D,P)``, so there are
+          exactly ``D.dcp_size / gcd(D.dcp_size, P.dcp_size)`` such ranks.
+        """
+        remote_tp_size = self.remote_tp_size[remote_engine_id]
+        remote_dcp_size = self.remote_dcp_size[remote_engine_id]
+        # TP consumers: how many D TP ranks read from this one P TP rank.
+        tp_consumers = max(1, self.tp_size // remote_tp_size)
+        # DCP consumers: how many D DCP ranks have token overlap with this
+        # P DCP rank.
+        dcp_consumers = int(self.dcp_size // np.gcd(self.dcp_size, remote_dcp_size))
+        return tp_consumers * dcp_consumers
+
     @staticmethod
     def get_block_positions(block_num: int, dcp_size: int, dcp_rank: int) -> np.ndarray:
         local_positions = np.arange(block_num)
