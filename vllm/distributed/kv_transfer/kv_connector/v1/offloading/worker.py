@@ -58,6 +58,7 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
+        self._completed_disk_prefetches: list = []
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -318,12 +319,12 @@ class OffloadingConnectorWorker:
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         # Process disk→CPU prefetches BEFORE GPU transfers.
-        # This ensures prefetched blocks are in CPU pinned RAM
-        # before swap_blocks tries to load them to GPU.
-        if metadata.disk_prefetches and self._get_disk_handlers():
+        if metadata.disk_prefetches:
             handlers = self._get_disk_handlers()
             if handlers:
                 handlers.process_prefetch_requests(metadata.disk_prefetches)
+                # Track completed prefetches to report back to scheduler
+                self._completed_disk_prefetches.extend(metadata.disk_prefetches)
 
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)

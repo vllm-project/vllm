@@ -274,10 +274,10 @@ class OffloadingConnectorScheduler:
         disk_prefetches: list[DiskPrefetchSpec] = []
         from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
         if isinstance(self.manager, TieredOffloadingManager):
-            for req in self.manager.take_prefetch_requests():
+            for p in self.manager.take_outbound_prefetches():
                 disk_prefetches.append(DiskPrefetchSpec(
-                    cpu_block_ids=req.cpu_block_ids,
-                    disk_block_ids=req.disk_block_ids,
+                    cpu_block_ids=p.cpu_block_ids,
+                    disk_block_ids=p.disk_block_ids,
                 ))
 
         meta = OffloadingConnectorMetadata(

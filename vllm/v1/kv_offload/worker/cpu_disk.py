@@ -100,8 +100,8 @@ class DiskIOWorker:
         self, cpu_block_ids: list[int], disk_block_ids: list[int]
     ) -> None:
         """
-        Queue reads and WAIT for them — the caller needs the data
-        in CPU before it can be loaded to GPU.
+        Queue reads and WAIT for them (blocking).
+        Use submit_async_reads for non-blocking.
         """
         futures: list[Future] = []
         for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
@@ -110,10 +110,23 @@ class DiskIOWorker:
                     self._read_block, tidx, cpu_bid, disk_bid
                 )
                 futures.append(fut)
-
-        # Wait for all reads to complete — GPU needs this data
         for fut in futures:
             fut.result()
+
+    def submit_async_reads(
+        self, cpu_block_ids: list[int], disk_block_ids: list[int]
+    ) -> None:
+        """
+        Queue reads without waiting (non-blocking).
+        Reads complete in background. The data lands in the CPU
+        tensors asynchronously — caller should not assume data is
+        ready until the next engine step.
+        """
+        for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
+            for tidx in range(len(self.cpu_tensors)):
+                self._pool.submit(
+                    self._read_block, tidx, cpu_bid, disk_bid
+                )
 
     def drain_completed_writes(self) -> int:
         """Drain completed write futures. Returns count drained."""

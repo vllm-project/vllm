@@ -3,23 +3,18 @@
 """
 TieredOffloadingManager: GPU → CPU (pinned) → Disk (NVMe)
 
-Full three-tier cache with async prefetch (inspired by SGLang HiCache):
+Full three-tier with async prefetch (SGLang HiCache-inspired):
 
-WRITES (worker-side, fire-and-forget):
-  GPU→CPU swap completes → callback writes same blocks to disk in background
-
-READS / PREFETCH (async, non-blocking):
-  1. lookup() counts CPU blocks only, never blocks
-  2. Scheduler calls request_prefetch() for blocks on disk but not CPU
-  3. Worker's PrefetchWorker thread reads disk→CPU in background
-  4. On completion, blocks appear in CPU → next lookup() finds them
-  5. Request gets scheduled with cached prefix
-
-The scheduler NEVER blocks on disk I/O.
+WRITES: Worker-side fire-and-forget after GPU→CPU completes.
+READS:  Two-phase async prefetch:
+  Phase 1 (lookup): Detect disk blocks, queue prefetch, DON'T mark ready
+  Phase 2 (worker): Read disk→CPU in background between engine steps
+  Phase 3 (complete_prefetch): Mark blocks ready in CPU policy
+  Phase 4 (next lookup): Blocks found in CPU → counted as hits
 """
-import threading
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Literal
 
 from vllm.logger import init_logger
@@ -74,25 +69,16 @@ class DiskBlockIndex:
         return len(self._index)
 
 
-class PrefetchRequest:
-    """A request to promote blocks from disk to CPU."""
-
-    def __init__(
-        self,
-        block_hashes: list[BlockHash],
-        disk_block_ids: list[int],
-        cpu_block_ids: list[int],
-    ):
-        self.block_hashes = block_hashes
-        self.disk_block_ids = disk_block_ids
-        self.cpu_block_ids = cpu_block_ids
-        self.completed = threading.Event()
+@dataclass
+class PendingPrefetch:
+    """A prefetch that has been dispatched to the worker but not yet completed."""
+    block_hashes: list[BlockHash]
+    cpu_block_ids: list[int]
+    disk_block_ids: list[int]
 
 
 class TieredOffloadingManager(OffloadingManager):
-    """
-    GPU → CPU (pinned) → Disk (NVMe) with async prefetch.
-    """
+    """GPU → CPU (pinned) → Disk (NVMe) with async prefetch."""
 
     def __init__(
         self,
@@ -111,14 +97,14 @@ class TieredOffloadingManager(OffloadingManager):
         )
         self._disk = DiskBlockIndex(num_disk_blocks)
         self.block_size = block_size
-        self.write_threshold = write_threshold
 
-        # Prefetch state
-        self._prefetch_queue: deque[PrefetchRequest] = deque()
-        self._active_prefetches: dict[BlockHash, PrefetchRequest] = {}
-        # Blocks that have been prefetched to CPU but not yet
-        # "officially" stored (need complete_store equivalent)
-        self._prefetched_blocks: set[BlockHash] = set()
+        # Prefetch queues
+        # Outbound: scheduler → worker (to be read from disk)
+        self._outbound_prefetches: list[PendingPrefetch] = []
+        # Inbound: worker → scheduler (completed reads, need CPU policy insert)
+        self._completed_prefetches: list[PendingPrefetch] = []
+        # Track what's currently being prefetched to avoid duplicates
+        self._inflight_prefetch_hashes: set[BlockHash] = set()
 
         logger.info(
             "TieredOffloadingManager: cpu=%d blocks, disk=%d blocks, "
@@ -126,15 +112,13 @@ class TieredOffloadingManager(OffloadingManager):
             num_cpu_blocks, num_disk_blocks, write_threshold,
         )
 
-    # ── Core OffloadingManager interface ─────────────────────────
+    # ── OffloadingManager interface ──────────────────────────────
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
-        """Count consecutive blocks available in CPU.
+        """Count CPU-ready blocks. Queue prefetch for disk blocks."""
+        # First: process any completed prefetches from previous cycle
+        self._process_completed_prefetches()
 
-        Also queues prefetch for disk-resident blocks that follow
-        the CPU-resident prefix. This is non-blocking — the prefetch
-        happens in the background on the worker.
-        """
         block_list = list(block_hashes)
         cpu_count = 0
         for bh in block_list:
@@ -144,62 +128,63 @@ class TieredOffloadingManager(OffloadingManager):
             else:
                 break
 
-        # Check if blocks beyond the CPU prefix are on disk
-        # and trigger async prefetch if so
+        # Queue prefetch for consecutive disk blocks beyond CPU prefix
         remaining = block_list[cpu_count:]
         if remaining:
-            disk_hashes = []
-            disk_ids = []
-            for bh in remaining:
-                if bh in self._active_prefetches:
-                    continue  # Already being prefetched
-                if bh in self._prefetched_blocks:
-                    continue  # Already prefetched, will be in CPU soon
-                disk_id = self._disk.get_block_id(bh)
-                if disk_id is not None:
-                    disk_hashes.append(bh)
-                    disk_ids.append(disk_id)
-                else:
-                    break  # No more consecutive disk blocks
-
-            if disk_hashes:
-                self._queue_prefetch(disk_hashes, disk_ids)
+            self._maybe_queue_prefetch(remaining)
 
         return cpu_count
 
-    def _queue_prefetch(
-        self, block_hashes: list[BlockHash], disk_block_ids: list[int]
-    ) -> None:
-        """Queue an async prefetch: disk → CPU.
+    def _maybe_queue_prefetch(self, block_hashes: list[BlockHash]) -> None:
+        """Queue async prefetch for disk-resident blocks.
 
-        Allocates CPU slots and creates a PrefetchRequest that the
-        worker will consume.
+        Does NOT insert into CPU policy — blocks are only marked ready
+        after the worker completes the disk read and signals back.
         """
-        # Allocate CPU blocks for the prefetched data
+        disk_hashes: list[BlockHash] = []
+        disk_ids: list[int] = []
+
+        for bh in block_hashes:
+            if bh in self._inflight_prefetch_hashes:
+                continue  # Already being prefetched
+            # Check if already in CPU (might have been prefetched since last check)
+            cpu_block = self._cpu._policy.get(bh)
+            if cpu_block is not None:
+                continue
+            disk_id = self._disk.get_block_id(bh)
+            if disk_id is not None:
+                disk_hashes.append(bh)
+                disk_ids.append(disk_id)
+            else:
+                break  # No more consecutive disk blocks
+
+        if not disk_hashes:
+            return
+
+        # Allocate CPU slots for incoming data
         cpu_block_ids: list[int] = []
         valid_hashes: list[BlockHash] = []
         valid_disk_ids: list[int] = []
 
-        for bh, disk_id in zip(block_hashes, disk_block_ids):
-            # Make room if needed
+        for bh, disk_id in zip(disk_hashes, disk_ids):
             if self._cpu._get_num_free_blocks() == 0:
                 evicted = self._cpu._policy.evict(1, set())
                 if evicted:
                     for _, eblock in evicted:
                         self._cpu._free_block(eblock)
                 else:
-                    break  # Can't make room
+                    break
 
             blocks = self._cpu._allocate_blocks([bh])
             if not blocks:
                 break
-            cpu_block = blocks[0]
-            # Mark as ready with ref_cnt=0 (data will arrive async)
-            # The block won't be used until prefetch completes and
-            # the next lookup finds it in CPU
-            cpu_block.ref_cnt = 0
-            self._cpu._policy.insert(bh, cpu_block)
 
+            cpu_block = blocks[0]
+            # ref_cnt stays at -1 (NOT READY) until disk read completes.
+            # This prevents lookup() from counting these blocks as hits.
+            # Insert into policy so _process_completed_prefetches can
+            # find and mark ready later.
+            self._cpu._policy.insert(bh, cpu_block)
             cpu_block_ids.append(cpu_block.block_id)
             valid_hashes.append(bh)
             valid_disk_ids.append(disk_id)
@@ -207,31 +192,73 @@ class TieredOffloadingManager(OffloadingManager):
         if not valid_hashes:
             return
 
-        req = PrefetchRequest(
+        prefetch = PendingPrefetch(
             block_hashes=valid_hashes,
-            disk_block_ids=valid_disk_ids,
             cpu_block_ids=cpu_block_ids,
+            disk_block_ids=valid_disk_ids,
         )
-        self._prefetch_queue.append(req)
+        self._outbound_prefetches.append(prefetch)
         for bh in valid_hashes:
-            self._active_prefetches[bh] = req
+            self._inflight_prefetch_hashes.add(bh)
 
-        logger.debug(
-            "Queued prefetch: %d blocks from disk to CPU", len(valid_hashes)
-        )
+        logger.debug("Queued prefetch: %d blocks disk→CPU", len(valid_hashes))
 
-    def take_prefetch_requests(self) -> list[PrefetchRequest]:
-        """Drain pending prefetch requests (consumed by worker)."""
-        reqs: list[PrefetchRequest] = []
-        while self._prefetch_queue:
-            reqs.append(self._prefetch_queue.popleft())
-        return reqs
+    def _process_completed_prefetches(self) -> None:
+        """Insert completed prefetch blocks into CPU policy as ready.
 
-    def complete_prefetch(self, req: PrefetchRequest) -> None:
-        """Called when a prefetch completes (data is now in CPU)."""
-        for bh in req.block_hashes:
-            self._active_prefetches.pop(bh, None)
-            self._prefetched_blocks.discard(bh)
+        Called at the start of each lookup() cycle.
+        """
+        while self._completed_prefetches:
+            prefetch = self._completed_prefetches.pop()
+            for bh, cpu_bid in zip(
+                prefetch.block_hashes, prefetch.cpu_block_ids
+            ):
+                self._inflight_prefetch_hashes.discard(bh)
+                # Now insert into policy as ready (ref_cnt=0)
+                cpu_block = self._cpu._policy.get(bh)
+                if cpu_block is None:
+                    # Block was evicted while prefetch was in flight — skip
+                    continue
+                if cpu_block.block_id == cpu_bid and not cpu_block.is_ready:
+                    cpu_block.ref_cnt = 0  # Mark ready
+
+    def take_outbound_prefetches(self) -> list[PendingPrefetch]:
+        """Drain prefetch requests for the worker to process."""
+        out = self._outbound_prefetches
+        self._outbound_prefetches = []
+        return out
+
+    def mark_prefetches_completed(
+        self, prefetches: list[PendingPrefetch]
+    ) -> None:
+        """Worker signals that disk reads completed."""
+        self._completed_prefetches.extend(prefetches)
+
+    def mark_prefetches_by_cpu_ids(self, cpu_block_ids: list[int]) -> None:
+        """Mark prefetched blocks as ready by their CPU block IDs.
+
+        Called from the scheduler when the worker reports completion.
+        Finds the matching PendingPrefetch and moves it to completed.
+        """
+        cpu_id_set = set(cpu_block_ids)
+        # Find matching inflight prefetch hashes and create a
+        # synthetic PendingPrefetch for completion processing
+        matched_hashes: list[BlockHash] = []
+        matched_cpu_ids: list[int] = []
+        for bh in list(self._inflight_prefetch_hashes):
+            cpu_block = self._cpu._policy.get(bh)
+            if cpu_block is not None and cpu_block.block_id in cpu_id_set:
+                matched_hashes.append(bh)
+                matched_cpu_ids.append(cpu_block.block_id)
+
+        if matched_hashes:
+            self._completed_prefetches.append(PendingPrefetch(
+                block_hashes=matched_hashes,
+                cpu_block_ids=matched_cpu_ids,
+                disk_block_ids=[],  # Not needed for completion
+            ))
+
+    # ── Standard OffloadingManager methods ───────────────────────
 
     def prepare_load(self, block_hashes: Iterable[BlockHash]) -> LoadStoreSpec:
         return self._cpu.prepare_load(block_hashes)
@@ -248,11 +275,9 @@ class TieredOffloadingManager(OffloadingManager):
         result = self._cpu.prepare_store(block_hashes)
         if result is None:
             return None
-
         # Track in disk index — actual write happens on worker side
         for bh in result.block_hashes_to_store:
             self._disk.allocate(bh)
-
         return result
 
     def complete_store(

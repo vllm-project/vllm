@@ -132,6 +132,19 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
+        # Process completed disk prefetches — mark blocks as ready in CPU
+        if connector_output.completed_disk_prefetches:
+            from vllm.v1.kv_offload.disk.manager import (
+                PendingPrefetch,
+                TieredOffloadingManager,
+            )
+            mgr = self.connector_scheduler.manager
+            if isinstance(mgr, TieredOffloadingManager):
+                for cpu_ids, disk_ids in connector_output.completed_disk_prefetches:
+                    # We don't have block_hashes here — reconstruct from
+                    # the manager's inflight tracking
+                    mgr.mark_prefetches_by_cpu_ids(cpu_ids)
+
     def request_finished(
         self,
         request: "Request",
@@ -151,6 +164,21 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
+
+    def get_completed_disk_prefetches(
+        self,
+    ) -> list[tuple[list, list[int]]] | None:
+        """Return completed disk→CPU prefetches for scheduler processing."""
+        if self.connector_worker is None:
+            return None
+        completed = self.connector_worker._completed_disk_prefetches
+        if not completed:
+            return None
+        result = [
+            (p.cpu_block_ids, p.disk_block_ids) for p in completed
+        ]
+        self.connector_worker._completed_disk_prefetches = []
+        return result
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:

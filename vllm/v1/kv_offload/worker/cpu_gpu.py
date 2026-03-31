@@ -347,16 +347,19 @@ class CpuGpuOffloadingHandlers:
         self._disk_io.drain_completed_writes()
 
     def process_prefetch_requests(self, requests: list) -> None:
-        """Process disk→CPU prefetch requests from the scheduler.
+        """Submit disk→CPU prefetch requests (non-blocking).
 
         Each request has .cpu_block_ids and .disk_block_ids.
-        Reads from disk into CPU tensors, making blocks available
-        for subsequent CPU→GPU loads.
+        Submits reads to the DiskIOWorker thread pool and returns
+        immediately. The reads complete in the background — blocks
+        become available by the next engine step when the scheduler
+        processes the completion signal.
 
-        Blocking — reads must complete before GPU can use the data.
-        Reads are parallelized via DiskIOWorker thread pool.
+        This does NOT block the engine step, keeping GPU utilization high.
         """
         if self._disk_io is None:
             return
         for req in requests:
-            self._disk_io.submit_reads(req.cpu_block_ids, req.disk_block_ids)
+            self._disk_io.submit_async_reads(
+                req.cpu_block_ids, req.disk_block_ids
+            )
