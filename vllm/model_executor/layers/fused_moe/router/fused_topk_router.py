@@ -20,6 +20,7 @@ def vllm_topk_softmax(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
+    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_softmax(
         topk_weights,
@@ -27,6 +28,7 @@ def vllm_topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
+        enable_pdl=enable_pdl,
     )
 
     return topk_weights, topk_indices
@@ -38,6 +40,7 @@ def vllm_topk_sigmoid(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
+    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -45,6 +48,7 @@ def vllm_topk_sigmoid(
         token_expert_indices,
         gating_output,
         renormalize,
+        enable_pdl=enable_pdl,
     )
 
     return topk_weights, topk_indices

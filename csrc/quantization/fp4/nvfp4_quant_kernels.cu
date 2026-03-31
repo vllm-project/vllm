@@ -36,7 +36,7 @@
 namespace vllm {
 
 // Use UE4M3 by default.
-template <class Type, bool UE8M0_SF = false>
+template <class Type, bool UE8M0_SF = false, bool ENABLE_PDL = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, int32_t num_padded_cols,
                     Type const* __restrict__ in,
@@ -55,6 +55,12 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   int sf_m = round_up<int>(numRows, 128);
   int32_t const colIdx = blockDim.x * blockIdx.y + threadIdx.x;
   int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  if constexpr (ENABLE_PDL) {
+    asm volatile("griddepcontrol.wait;");
+  }
+#endif
 
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
@@ -103,10 +109,16 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       }
     }
   }
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  if constexpr (ENABLE_PDL) {
+    asm volatile("griddepcontrol.launch_dependents;");
+  }
+#endif
 }
 
 // Use UE4M3 by default.
-template <class Type, bool UE8M0_SF = false>
+template <class Type, bool UE8M0_SF = false, bool ENABLE_PDL = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     cvt_fp16_to_fp4_sf_major(int32_t numRows, int32_t numCols,
                              int32_t sf_n_unpadded, int32_t num_packed_cols,
@@ -123,6 +135,13 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
   int32_t const colIdx = blockDim.x * blockIdx.y + threadIdx.x;
   int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  if constexpr (ENABLE_PDL) {
+    asm volatile("griddepcontrol.launch_dependents;");
+    asm volatile("griddepcontrol.wait;");
+  }
+#endif
 
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
@@ -177,7 +196,7 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf,
-                             bool is_sf_swizzled_layout) {
+                             bool is_sf_swizzled_layout, bool enable_pdl) {
   int32_t m = input.size(0);
   int32_t n = input.size(1);
 
@@ -217,10 +236,29 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
       using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
       auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
       // NOTE: We don't support e8m0 scales at this moment.
-      vllm::cvt_fp16_to_fp4<cuda_type, false><<<grid, block, 0, stream>>>(
-          m, n, num_padded_cols, input_ptr, input_sf_ptr,
-          reinterpret_cast<uint32_t*>(output_ptr),
-          reinterpret_cast<uint32_t*>(sf_out));
+      if (enable_pdl) {
+        cudaLaunchConfig_t config;
+        config.gridDim = grid;
+        config.blockDim = block;
+        config.dynamicSmemBytes = 0;
+        config.stream = stream;
+        cudaLaunchAttribute attrs[1];
+        attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attrs[0].val.programmaticStreamSerializationAllowed = 1;
+        config.numAttrs = 1;
+        config.attrs = attrs;
+        cudaLaunchKernelEx(&config,
+                           vllm::cvt_fp16_to_fp4<cuda_type, false, true>, m, n,
+                           num_padded_cols, input_ptr, input_sf_ptr,
+                           reinterpret_cast<uint32_t*>(output_ptr),
+                           reinterpret_cast<uint32_t*>(sf_out));
+      } else {
+        vllm::cvt_fp16_to_fp4<cuda_type, false, false>
+            <<<grid, block, 0, stream>>>(
+                m, n, num_padded_cols, input_ptr, input_sf_ptr,
+                reinterpret_cast<uint32_t*>(output_ptr),
+                reinterpret_cast<uint32_t*>(sf_out));
+      }
     });
   } else {
     int num_packed_cols = n / CVT_FP4_ELTS_PER_THREAD;
@@ -233,11 +271,29 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
       using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
       auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
       // NOTE: We don't support e8m0 scales at this moment.
-      vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false>
-          <<<grid, block, 0, stream>>>(m, n, sf_n_unpadded, num_packed_cols,
-                                       input_ptr, input_sf_ptr,
-                                       reinterpret_cast<uint32_t*>(output_ptr),
-                                       reinterpret_cast<uint32_t*>(sf_out));
+      if (enable_pdl) {
+        cudaLaunchConfig_t config;
+        config.gridDim = grid;
+        config.blockDim = block;
+        config.dynamicSmemBytes = 0;
+        config.stream = stream;
+        cudaLaunchAttribute attrs[1];
+        attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attrs[0].val.programmaticStreamSerializationAllowed = 1;
+        config.numAttrs = 1;
+        config.attrs = attrs;
+        cudaLaunchKernelEx(
+            &config, vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false, true>, m,
+            n, sf_n_unpadded, num_packed_cols, input_ptr, input_sf_ptr,
+            reinterpret_cast<uint32_t*>(output_ptr),
+            reinterpret_cast<uint32_t*>(sf_out));
+      } else {
+        vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false, false>
+            <<<grid, block, 0, stream>>>(
+                m, n, sf_n_unpadded, num_packed_cols, input_ptr, input_sf_ptr,
+                reinterpret_cast<uint32_t*>(output_ptr),
+                reinterpret_cast<uint32_t*>(sf_out));
+      }
     });
   }
 }

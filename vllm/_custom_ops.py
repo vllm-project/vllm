@@ -100,6 +100,7 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         *,
         output: torch.Tensor,
         output_scale: torch.Tensor,
+        enable_pdl: bool = False,
     ) -> None:
         return None
 
@@ -1605,6 +1606,7 @@ def scaled_fp4_quant(
     input_global_scale: torch.Tensor,
     is_sf_swizzled_layout: bool = True,
     backend: str = "none",
+    enable_pdl: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
@@ -1654,6 +1656,7 @@ def scaled_fp4_quant(
             is_sf_swizzled_layout,
             output=output,
             output_scale=output_scale,
+            enable_pdl=enable_pdl,
         )
 
     output_scale = output_scale.view(torch.float8_e4m3fn)
@@ -2270,6 +2273,20 @@ def dsv3_router_gemm(
     return output
 
 
+def fp32_router_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        router_weight.shape[0],
+        device=hidden_states.device,
+        dtype=torch.float32,
+    )
+    torch.ops._moe_C.fp32_router_gemm(output, hidden_states, router_weight)
+    return output
+
+
 def gpt_oss_router_gemm(
     hidden_states: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
 ) -> torch.Tensor:
@@ -2290,6 +2307,7 @@ def topk_softmax(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
         topk_weights,
@@ -2298,6 +2316,7 @@ def topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        enable_pdl,
     )
 
 
@@ -2308,6 +2327,7 @@ def topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
@@ -2316,6 +2336,7 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        enable_pdl,
     )
 
 

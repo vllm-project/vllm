@@ -12,12 +12,13 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 @PluggableLayer.register("gate_linear")
 class GateLinear(ReplicatedLinear):
-    """MoE gate linear layer with three-tier GEMM dispatch:
+    """MoE gate linear layer with multi-tier GEMM dispatch:
 
-    1. DSV3 specialized kernel (SM90+, batch<=16, supported dims)
-    2. gpt-oss specialized kernel (SM90+, batch<=128, supported dims)
-    3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 + fp32 out_dtype)
-    4. F.linear via ReplicatedLinear (ultimate fallback)
+    1. DSV3 specialized kernel (SM90+, fp32 out, M<=16, H=7168, E=256/384)
+    2. fp32 specialized kernel  (SM90+, fp32 in/out, M<=32, H=3072, E=256)
+    3. gpt-oss specialized kernel (SM90+, bf16, M<=128, H=2880, E=32/128)
+    4. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
+    5. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
@@ -31,6 +32,11 @@ class GateLinear(ReplicatedLinear):
     # Dimensions supported by the gpt-oss specialized kernel
     GPT_OSS_SUPPORTED_NUM_EXPERTS = [32, 128]
     GPT_OSS_SUPPORTED_HIDDEN_SIZES = [2880]
+
+    # Dimensions supported by the fp32 specialized kernel
+    FP32_SUPPORTED_NUM_EXPERTS = [256]
+    FP32_SUPPORTED_HIDDEN_SIZES = [3072]
+    FP32_MAX_TOKENS = 32
 
     def __init__(
         self,
@@ -81,6 +87,16 @@ class GateLinear(ReplicatedLinear):
             and input_size in self.GPT_OSS_SUPPORTED_HIDDEN_SIZES
         )
 
+        # fp32 specialized kernel eligibility (SM90+, exact dims, fp32 weight)
+        self.allow_fp32_router_gemm = (
+            not bias
+            and self.weight.dtype == torch.float32
+            and current_platform.is_cuda()
+            and is_hopper_or_blackwell
+            and output_size in self.FP32_SUPPORTED_NUM_EXPERTS
+            and input_size in self.FP32_SUPPORTED_HIDDEN_SIZES
+        )
+
         # cuBLAS bf16→fp32 eligibility
         self.allow_cublas_router_gemm = (
             self.allow_specialized_router_gemm
@@ -117,23 +133,61 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 2: gpt-oss specialized kernel
+        # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
+        # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
+        # capture does not freeze the runtime num_tokens branch.
+        if self.allow_fp32_router_gemm:
+            output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight)
+            return output, None
+
+        # Tier 3: gpt-oss specialized kernel
         if self.allow_gpt_oss_router_gemm:
             output = torch.ops.vllm.gpt_oss_router_gemm(x, self.weight, self.bias)
             return output, None
 
-        # Tier 3: cuBLAS bf16→fp32
+        # Tier 4: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = ops.router_gemm_bf16_fp32(x, self.weight)
             return output, None
 
-        # Tier 4: F.linear (ReplicatedLinear)
+        # Tier 5: F.linear (ReplicatedLinear)
         if self.out_dtype is not None and x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
         output, output_bias = super().forward(x)
         if self.out_dtype is not None and output.dtype != self.out_dtype:
             output = output.to(self.out_dtype)
         return output, output_bias
+
+
+_FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
+
+
+def fp32_router_gemm_dispatch_impl(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """
+    Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
+    otherwise fall back to F.linear.
+    This must be wrapped in a custom op because our torch.compile integration
+    does not support runtime dispatching on num_tokens.
+    """
+    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+        return ops.fp32_router_gemm(x, weight)
+    else:
+        return torch.nn.functional.linear(x.float(), weight)
+
+
+def fp32_router_gemm_dispatch_fake(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=torch.float32)
+
+
+direct_register_custom_op(
+    op_name="fp32_router_gemm_dispatch",
+    op_func=fp32_router_gemm_dispatch_impl,
+    fake_impl=fp32_router_gemm_dispatch_fake,
+)
 
 
 def gpt_oss_router_gemm_impl(

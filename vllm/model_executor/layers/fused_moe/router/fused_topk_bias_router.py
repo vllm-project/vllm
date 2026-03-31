@@ -23,6 +23,7 @@ def vllm_topk_softmax(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_softmax(
         topk_weights,
@@ -31,6 +32,7 @@ def vllm_topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        enable_pdl,
     )
 
     return topk_weights, topk_indices
@@ -43,6 +45,7 @@ def vllm_topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    enable_pdl: bool = True,  # FIXME
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -51,6 +54,7 @@ def vllm_topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        enable_pdl,
     )
 
     return topk_weights, topk_indices

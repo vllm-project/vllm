@@ -6,14 +6,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
-      "bias) -> ()");
+      "bias, bool enable_pdl=False) -> ()");
   m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
 
   // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
-      "bias) -> ()");
+      "bias, bool enable_pdl=False) -> ()");
   m.impl("topk_sigmoid", torch::kCUDA, &topk_sigmoid);
 
   // Calculate the result of moe by summing up the partial results
@@ -138,6 +138,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "gpt_oss_router_gemm(Tensor! output, Tensor input, Tensor weights, "
       "Tensor bias) -> ()");
   m.impl("gpt_oss_router_gemm", torch::kCUDA, &gpt_oss_router_gemm);
+
+  // BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+)
+  // conditionally compiled so impl registration is in source file
+  m.def("fp32_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
 #endif
 }
 
