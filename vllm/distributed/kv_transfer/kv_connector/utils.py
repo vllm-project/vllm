@@ -5,7 +5,7 @@ KV cache helper for store.
 """
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
@@ -516,6 +516,355 @@ class TpKVTopology:
         return cache if self.split_k_and_v else [cache]
 
 
+# ---- Mamba-HMA hetero-TP transfer config ----
+#
+# Key insight: FA and Mamba require *different* numbers of P ranks when
+# P is replicated for FA but always TP-sharded for Mamba.
+#
+#   Config   fa_reads  mamba_reads  same?
+#   2p1d     2         2            yes
+#   4p1d     2         4            NO
+#   4p2d     1         2            NO
+
+
+def _physical_head_range(tp_size: int, num_heads: int, rank: int) -> range:
+    """Physical KV head range stored in a rank's KV cache tensor.
+
+    When ``tp_size <= num_heads``: sharded, K/TP contiguous heads per rank.
+    When ``tp_size > num_heads``: 1 physical head per rank.  Heads are
+    distributed **contiguously** (matching vLLM's GQA weight partitioning):
+    consecutive ranks share a head before moving to the next one.
+    """
+    if tp_size <= num_heads:
+        assert num_heads % tp_size == 0
+        per_rank = num_heads // tp_size
+        return range(rank * per_rank, (rank + 1) * per_rank)
+    else:
+        h = rank * num_heads // tp_size
+        return range(h, h + 1)
+
+
+def _range_overlap(a: range, b: range) -> range:
+    start = max(a.start, b.start)
+    stop = min(a.stop, b.stop)
+    return range(start, max(start, stop))
+
+
+@dataclass
+class HeteroTPTransferConfig:
+    """Precomputed transfer plan for one (D rank, P engine) pair.
+
+    Currently only instantiated for Mamba-HMA (hybrid SSM+Attention) models
+    where FA and mamba require different splitting factors.  Could be extended
+    to other model types that need non-uniform hetero-TP transfer sizing.
+
+    All descriptor sizes are computed here.  The guarantee is:
+        local_entry_size == remote_entry_size   (for NIXL)
+
+    Attributes that start with ``fa_`` concern FlashAttention KV cache.
+    Attributes that start with ``mamba_`` concern Mamba conv/SSM state.
+    """
+
+    # ---- Input parameters (from handshake) ----
+    tp_ratio: int
+    K: int  # total_num_kv_heads (before TP sharding)
+    d_tp: int  # D engine's tensor_parallel_size
+    p_tp: int  # P engine's tensor_parallel_size
+    d_rank: int  # this D worker's TP rank
+    use_mla: bool
+
+    # Per-layer block lengths (bytes, K+V combined for blocks_first).
+    # Uniform across layers for current models.
+    d_block_len: int  # D's block_len_per_layer (representative)
+    p_block_len: int  # P's block_len_per_layer (from handshake)
+    is_blocks_first: bool  # kv_topo.is_kv_layout_blocks_first
+
+    # ---- Derived: computed in __post_init__ ----
+    #
+    # Physical heads per rank (what the KV tensor actually stores)
+    d_physical_heads: int = field(init=False)
+    p_physical_heads: int = field(init=False)
+
+    # How many distinct P ranks D needs for FA data
+    physical_fa_num_reads: int = field(init=False)
+
+    # Which P ranks contribute unique FA heads (ordered by head index)
+    fa_read_targets: list[int] = field(init=False)
+
+    # All P ranks needed for mamba (always abs_tp for tp_ratio < 0)
+    mamba_num_reads: int = field(init=False)
+
+    # All P ranks this D rank communicates with (FA ∪ mamba)
+    transfer_targets: list[int] = field(init=False)
+
+    # FA descriptor entry size (K or V side, for blocks_first layout)
+    # Guaranteed: fa_entry_size is the SAME for local handle AND remote desc.
+    fa_entry_size: int = field(init=False)
+
+    # Replication flags
+    is_d_replicated: bool = field(init=False)
+    is_p_replicated: bool = field(init=False)
+
+    # Pre-built set for fast lookup
+    _fa_target_set: frozenset[int] = field(init=False, repr=False)
+    # Map: P rank → index in fa_read_targets (for head slot offset)
+    _fa_target_index: dict[int, int] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        K = self.K
+        self.is_d_replicated = self.d_tp > K
+        self.is_p_replicated = self.p_tp > K
+
+        self.d_physical_heads = max(1, K // self.d_tp)
+        self.p_physical_heads = max(1, K // self.p_tp)
+
+        abs_tp = -self.tp_ratio if self.tp_ratio < 0 else 1
+
+        # ---- Mamba range (computed first so FA can prefer ranks in it) ----
+        mamba_range: range | None = None
+        if self.tp_ratio < 0:
+            mamba_range = range(self.d_rank * abs_tp, (self.d_rank + 1) * abs_tp)
+
+        # ---- FA read targets ----
+        if self.use_mla or self.tp_ratio >= 0:
+            self.physical_fa_num_reads = 1
+            self.fa_read_targets = (
+                [0]
+                if self.use_mla
+                # Must match kv_topo.get_target_remote_ranks (d_rank // tp_ratio).
+                else [
+                    self.d_rank // self.tp_ratio if self.tp_ratio > 0 else self.d_rank
+                ]
+            )
+        else:
+            d_needs = _physical_head_range(self.d_tp, K, self.d_rank)
+            # When mamba range exists, prefer P ranks within it so that
+            # FA targets are a subset of mamba transfer_targets (avoids
+            # orphaned FA targets outside the transfer loop).
+            search_range = mamba_range if mamba_range is not None else range(self.p_tp)
+            seen: set[tuple[int, int]] = set()
+            targets: list[int] = []
+            for p in search_range:
+                p_has = _physical_head_range(self.p_tp, K, p)
+                ov = _range_overlap(d_needs, p_has)
+                if len(ov) > 0:
+                    key = (ov.start, ov.stop)
+                    if key not in seen:
+                        seen.add(key)
+                        targets.append(p)
+            if not targets:
+                # Fallback: search globally (should not happen in practice)
+                for p in range(self.p_tp):
+                    p_has = _physical_head_range(self.p_tp, K, p)
+                    ov = _range_overlap(d_needs, p_has)
+                    if len(ov) > 0:
+                        key = (ov.start, ov.stop)
+                        if key not in seen:
+                            seen.add(key)
+                            targets.append(p)
+            self.fa_read_targets = targets
+            self.physical_fa_num_reads = len(targets)
+
+        self._fa_target_set = frozenset(self.fa_read_targets)
+        self._fa_target_index = {r: i for i, r in enumerate(self.fa_read_targets)}
+
+        # ---- Mamba targets ----
+        if mamba_range is not None and abs_tp > self.physical_fa_num_reads:
+            self.mamba_num_reads = abs_tp
+            self.transfer_targets = list(mamba_range)
+        else:
+            self.mamba_num_reads = self.physical_fa_num_reads
+            self.transfer_targets = list(self.fa_read_targets)
+
+        # ---- FA entry size ----
+        # For blocks_first: block_len_per_layer includes K+V; // 2 gives K (or V).
+        # Use min(D, P) because D indexes into P when tp_ratio > 0,
+        # and P is the natural unit when tp_ratio < 0.
+        effective_block_len = min(self.d_block_len, self.p_block_len)
+        if self.is_blocks_first:
+            self.fa_entry_size = effective_block_len // 2
+        else:
+            self.fa_entry_size = effective_block_len
+
+        self._validate()
+
+    def _validate(self) -> None:
+        """Cross-check internal consistency."""
+        if self.is_d_replicated and self.is_p_replicated and self.tp_ratio > 0:
+            logger.info(
+                "Both-replicated hetero-TP: D_TP=%d > P_TP=%d > K=%d. "
+                "Using d_rank // tp_ratio routing with relative head offset.",
+                self.d_tp,
+                self.p_tp,
+                self.K,
+            )
+
+        # FA targets must be a subset of transfer_targets
+        tt_set = set(self.transfer_targets)
+        for t in self.fa_read_targets:
+            if t not in tt_set:
+                logger.error(
+                    "FA target P rank %d is NOT in transfer_targets %s. "
+                    "This will cause missed FA reads!",
+                    t,
+                    self.transfer_targets,
+                )
+
+        # For tp_ratio < 0 with blocks_first: D_K_half / reads should == P_K_half
+        if (
+            self.is_blocks_first
+            and self.tp_ratio < 0
+            and self.physical_fa_num_reads > 0
+        ):
+            d_k_half = self.d_block_len // 2
+            p_k_half = self.p_block_len // 2
+            expected_local = d_k_half // self.physical_fa_num_reads
+            if expected_local != p_k_half:
+                logger.warning(
+                    "FA size mismatch: D_K_half=%d / reads=%d = %d, "
+                    "but P_K_half=%d.  This may indicate a head count or "
+                    "Mamba-HMA inflation inconsistency.",
+                    d_k_half,
+                    self.physical_fa_num_reads,
+                    expected_local,
+                    p_k_half,
+                )
+
+    # ---- Query methods ----
+
+    def should_skip_fa(self, p_rank: int) -> bool:
+        """Whether to skip FA groups for this P rank (mamba-only transfer)."""
+        return p_rank not in self._fa_target_set
+
+    def fa_head_slot(self, p_rank: int) -> int:
+        """Index into D's FA block for this P rank's head data.
+
+        For P ranks in fa_read_targets, returns 0, 1, ..., reads-1.
+        For P ranks NOT in fa_read_targets (replicated duplicates),
+        returns the slot of the matching FA target with the same head.
+        """
+        if p_rank in self._fa_target_index:
+            return self._fa_target_index[p_rank]
+        # Duplicate head: find which fa_target has the same physical head
+        p_head = _physical_head_range(self.p_tp, self.K, p_rank)
+        for target in self.fa_read_targets:
+            t_head = _physical_head_range(self.p_tp, self.K, target)
+            if _range_overlap(p_head, t_head):
+                return self._fa_target_index[target]
+        return 0  # fallback
+
+    @property
+    def indexes_into_remote(self) -> bool:
+        """Whether D indexes into a sub-slice of P's FA block.
+
+        True only when both sides shard (neither replicates) and D_TP > P_TP.
+        When either side replicates, offset logic must account for physical
+        head placement rather than a simple tp_ratio slice.
+        """
+        return (
+            not self.is_d_replicated
+            and not self.is_p_replicated
+            and not self.use_mla
+            and self.tp_ratio > 0
+        )
+
+    def fa_rank_offset(self, remote_kv_block_len: int) -> int:
+        """Byte offset into P's FA block for this D rank.
+
+        When D is replicated (D_TP > K), multiple D ranks share a head.
+        Computes offset *relative to the target P rank's first head*
+        so it works regardless of how many heads P has.
+        When neither side replicates, falls back to tp_rank % tp_ratio.
+        Returns 0 when D does not index into P's block.
+        """
+        if self.use_mla or self.tp_ratio <= 0:
+            return 0
+        if self.is_d_replicated:
+            d_head = self.d_rank * self.K // self.d_tp
+            p_rank = self.fa_read_targets[0]
+            p_start = p_rank * self.K // self.p_tp
+            return (d_head - p_start) * remote_kv_block_len
+        return self.d_rank % self.tp_ratio * remote_kv_block_len
+
+    @property
+    def needs_split_handles(self) -> bool:
+        """Whether per-P-rank split handles are needed.
+
+        True when FA and mamba have different read counts, requiring
+        different splitting factors in the local handle.
+        """
+        return self.tp_ratio < 0 and not self.use_mla and len(self.transfer_targets) > 1
+
+    def compute_split_handle_data(
+        self,
+        src_blocks_data: list[tuple[int, int, int]],
+        num_fa_descs: int,
+        abs_tp: int,
+    ) -> list[list[tuple[int, int, int]]]:
+        """Compute per-P-rank (addr, len, tp) triples for Mamba-HMA split handles.
+
+        FA descriptors (indices < num_fa_descs) are sliced by
+        ``physical_fa_num_reads``; mamba descriptors are sliced uniformly
+        by ``abs_tp``.
+
+        Returns one list of triples per transfer target.
+        """
+        all_handle_data: list[list[tuple[int, int, int]]] = []
+        for p_idx, p_rank in enumerate(self.transfer_targets):
+            handle_data: list[tuple[int, int, int]] = []
+            skip_fa = self.should_skip_fa(p_rank)
+            fa_slot = self.fa_head_slot(p_rank) if not skip_fa else 0
+
+            for j, (addr, local_len, tp) in enumerate(src_blocks_data):
+                if j < num_fa_descs:
+                    assert self.physical_fa_num_reads >= 1
+                    fa_chunk = local_len // self.physical_fa_num_reads
+                    handle_data.append((addr + fa_slot * fa_chunk, fa_chunk, tp))
+                else:
+                    mamba_chunk = local_len // abs_tp
+                    handle_data.append((addr + p_idx * mamba_chunk, mamba_chunk, tp))
+            all_handle_data.append(handle_data)
+        return all_handle_data
+
+    def filter_block_ids_for_rank(
+        self,
+        remote_rank: int,
+        local_ids: BlockIds,
+        remote_ids: BlockIds,
+        is_mamba_group: list[bool],
+    ) -> tuple[BlockIds, BlockIds]:
+        """Zero out FA groups for P ranks outside fa_read_targets.
+
+        Returns (filtered_local_ids, filtered_remote_ids).  When the
+        remote rank carries FA data for this D rank, returns the inputs
+        unchanged.
+        """
+        if not self.should_skip_fa(remote_rank):
+            return local_ids, remote_ids
+        num_groups = len(local_ids)
+        filtered_local: list[list[int]] = [
+            [] if not is_mamba_group[g] else local_ids[g] for g in range(num_groups)
+        ]
+        filtered_remote: list[list[int]] = [
+            [] if not is_mamba_group[g] else remote_ids[g] for g in range(num_groups)
+        ]
+        return filtered_local, filtered_remote
+
+    def describe(self) -> str:
+        """One-line summary for logging."""
+        return (
+            f"HeteroTPTransferConfig("
+            f"tp_ratio={self.tp_ratio}, K={self.K}, "
+            f"d_tp={self.d_tp}, p_tp={self.p_tp}, d_rank={self.d_rank}, "
+            f"physical_fa_reads={self.physical_fa_num_reads}, "
+            f"mamba_reads={self.mamba_num_reads}, "
+            f"fa_targets={self.fa_read_targets}, "
+            f"transfer_targets={self.transfer_targets}, "
+            f"fa_entry_size={self.fa_entry_size}, "
+            f"d_block_len={self.d_block_len}, p_block_len={self.p_block_len})"
+        )
+
+
 def get_current_attn_backends(
     vllm_config: VllmConfig, layer_names: list[str] | None = None
 ) -> list[type[AttentionBackend]]:
@@ -559,3 +908,50 @@ def get_current_attn_backend(
 ) -> type[AttentionBackend]:
     """Get the first attention backend for the given layers."""
     return get_current_attn_backends(vllm_config, layer_names)[0]
+
+
+# TODO (ZhanqiuHu): Consolidate TpKVTopology and HeteroTPTransferConfig
+# into a single engine-agnostic TransferTopology class.
+# 6 of 9 HeteroTPTransferConfig init fields duplicate TpKVTopology data.
+#
+# @dataclass
+# class EngineTransferInfo:
+#     """Per-remote-engine transfer state, computed at handshake."""
+#     p_tp: int
+#     tp_ratio: int
+#     p_block_len: int
+#     block_size: int
+#     # Mamba-specific (None for non-mamba models)
+#     fa_read_targets: list[int] | None = None
+#     transfer_targets: list[int] | None = None
+#     physical_fa_num_reads: int | None = None
+#     mamba_num_reads: int | None = None
+#     fa_entry_size: int | None = None
+#
+# class TransferTopology:
+#     """Single source of truth for TP topology + transfer sizing."""
+#     # Shared (set once at init, replaces duplicate fields)
+#     tp_rank: int          # == TpKVTopology.tp_rank == HeteroTP.d_rank
+#     tp_size: int          # == TpKVTopology.tp_size == HeteroTP.d_tp
+#     total_num_kv_heads: int  # == HeteroTP.K
+#     is_mla: bool          # == HeteroTP.use_mla
+#     is_mamba: bool
+#     is_blocks_first: bool # == HeteroTP.is_blocks_first
+#     d_block_len: int
+#
+#     # Per-engine (populated via register_engine() at handshake)
+#     _engines: dict[EngineId, EngineTransferInfo]
+#
+#     def register_engine(self, engine_id, p_tp, p_block_len, ...): ...
+#
+#     # General (from TpKVTopology)
+#     def tp_ratio(self, engine_id) -> int: ...
+#     def target_remote_ranks(self, engine_id) -> list[int]: ...
+#     def is_kv_replicated(self, engine_id) -> bool: ...
+#
+#     # Mamba-specific (from HeteroTPTransferConfig, gated by is_mamba)
+#     def fa_rank_offset(self, engine_id, block_len) -> int: ...
+#     def physical_fa_num_reads(self, engine_id) -> int: ...
+#     def transfer_targets(self, engine_id) -> list[int]: ...
+#     def should_skip_fa(self, engine_id, p_rank) -> bool: ...
+#     def filter_block_ids_for_rank(self, engine_id, ...) -> ...: ...

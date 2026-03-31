@@ -149,13 +149,13 @@ def derive_mamba_conv_split(
 
 
 def compute_mamba_phys_ratio(ssm_sizes: tuple[int, ...], block_len: int) -> int:
-    """Physical kernel blocks per logical mamba block.
+    """Derive _physical_blocks_per_logical_kv_block from remote metadata.
 
-    Called during P/D handshake to learn the remote engine's ratio.
-    Under HMA, P and D may pad differently, so this can differ per engine.
+    The remote engine's ratio is not sent directly in the handshake, so we
+    reconstruct it: total mamba state per logical block / block_len.
 
     Args:
         ssm_sizes: (conv_state_bytes, ssm_state_bytes) from NixlAgentMetadata.
-        block_len: the engine's block_len in bytes.
+        block_len: the engine's block_len in bytes (from block_lens[0]).
     """
     return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)
