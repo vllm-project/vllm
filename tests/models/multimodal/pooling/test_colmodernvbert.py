@@ -15,6 +15,9 @@ from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
 MODEL_NAME = "ModernVBERT/colmodernvbert-merged"
 COLBERT_DIM = 128
 DTYPE = "half"
+# Fixme:
+#  Update colmodernvbert code to support the latest HF version
+#  and remove revision set.
 REVISION = "4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee"
 
 
