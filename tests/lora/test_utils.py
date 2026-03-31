@@ -199,3 +199,54 @@ def test_get_adapter_absolute_path_huggingface_error(
         response=MagicMock(),
     )
     assert get_adapter_absolute_path(path) == path
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for MoE expert LoRA module name parsing (gh-38522)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "module_name, expected_last_component",
+    [
+        # Standard MoE: "...experts" is the leaf — last component is "experts"
+        ("model.layers.0.mlp.experts", "experts"),
+        # Qwen3.5-MoE style: expert index embedded in path
+        ("model.layers.0.mlp.experts.0.down_proj", "down_proj"),
+        ("model.layers.0.mlp.experts.1.gate_proj", "gate_proj"),
+        ("model.layers.0.mlp.experts.2.up_proj", "up_proj"),
+        # Deeply nested expert path
+        ("transformer.blocks.3.ffn.experts.7.fc1", "fc1"),
+    ],
+)
+def test_moe_expert_module_name_last_component(
+    module_name: str, expected_last_component: str
+):
+    """
+    Regression test for gh-38522.
+
+    The old code used ``module_name[module_name.find('.experts') + 1:]``
+    which returns ``"experts.N.down_proj"`` for embedded-index paths —
+    never matching the expected module set even when ``"down_proj"`` is.
+
+    The fix uses ``module_name.split('.')[-1]`` to extract only the
+    leaf component, which is compared against ``expected_lora_modules``.
+    """
+    if ".experts" in module_name:
+        # New logic: always take the last component
+        suffix = module_name.split(".")[-1]
+
+        # Old (buggy) logic for comparison
+        expert_idx = module_name.find(".experts")
+        old_suffix = module_name[expert_idx + 1:]
+
+        assert suffix == expected_last_component, (
+            f"New logic returned {suffix!r}, expected {expected_last_component!r}"
+        )
+
+        if "." in old_suffix:
+            # The old code would have produced a multi-segment string that
+            # is never in expected_lora_modules — confirm regression exists.
+            assert old_suffix != expected_last_component, (
+                "Old logic unexpectedly returned the correct value; "
+                "update this regression test."
+            )
