@@ -761,11 +761,17 @@ class MooncakeConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
+        # Mooncake currently operates as non-DCP and single-PCP topology.
+        self._dcp_size: dict[EngineId, int] = {self.engine_id: 1}
+        self._pcp_size: dict[EngineId, int] = {self.engine_id: 1}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
         self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
+            dcp_rank=0,
             engine_id=self.engine_id,
             remote_tp_size=self._tp_size,  # shared state
+            remote_dcp_size=self._dcp_size,  # shared state
+            remote_pcp_size=self._pcp_size,  # shared state
             remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),

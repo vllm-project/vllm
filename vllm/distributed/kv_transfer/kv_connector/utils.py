@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
@@ -327,7 +328,10 @@ class TpKVTopology:
     """
 
     tp_rank: int
+    dcp_rank: int
     remote_tp_size: dict[EngineId, int]
+    remote_dcp_size: dict[EngineId, int]
+    remote_pcp_size: dict[EngineId, int]
     is_mla: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
@@ -391,6 +395,14 @@ class TpKVTopology:
     @property
     def tp_size(self) -> int:
         return self.remote_tp_size[self.engine_id]
+
+    @property
+    def dcp_size(self) -> int:
+        return self.remote_dcp_size[self.engine_id]
+
+    @property
+    def pcp_size(self) -> int:
+        return self.remote_pcp_size[self.engine_id]
 
     @property
     def block_size(self) -> int:
@@ -488,6 +500,144 @@ class TpKVTopology:
     ) -> list[int]:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
         return self.get_target_remote_ranks(remote_tp_size)
+
+    def get_valid_remote_worker_keys(
+        self,
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        remote_pcp_size: int,
+    ) -> list[tuple[int, int]]:
+        # return all valid remote worker keys based on PCP, TP and DCP layout.
+        valid_remote_keys = []
+        eff_tp_size = remote_tp_size // self.total_num_kv_heads
+        for remote_pcp_rank in range(remote_pcp_size):
+            for remote_tp_rank in range(remote_tp_size):
+                if remote_pcp_size == remote_dcp_size:
+                    remote_dcp_rank = remote_pcp_rank
+                else:
+                    remote_dcp_rank = (
+                        remote_pcp_rank * eff_tp_size + remote_tp_rank % eff_tp_size
+                    )
+                valid_remote_keys.append((remote_tp_rank, remote_dcp_rank))
+        return valid_remote_keys
+
+    def has_kv_cache_overlap(
+        self,
+        remote_tp_rank: int,
+        remote_dcp_rank: int,
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        remote_pcp_size: int,
+    ) -> bool:
+        """Check KV cache overlap between local worker and a remote worker.
+
+        Overlap requires both:
+        1) KV head-range overlap.
+        2) DCP token-slice overlap.
+        """
+
+        # Condition H: head overlap.
+        if self.is_mla and remote_pcp_size == remote_dcp_size:
+            # For MLA models with alined PCP and DCP, all workers in the same TP group
+            # have the same KV cache, so we need to check TP rank alignment for better
+            # load balance.
+            head_overlap = (
+                self.tp_size // self.tp_rank == remote_tp_size // remote_tp_rank
+            )
+        else:
+            local_num_kv_heads = self.total_num_kv_heads
+            local_eff_tp = min(self.tp_size, local_num_kv_heads)
+            remote_eff_tp = min(remote_tp_size, self.total_num_kv_heads)
+
+            local_kv_group = self.tp_rank * local_eff_tp // self.tp_size
+            remote_kv_group = remote_tp_rank * remote_eff_tp // remote_tp_size
+
+            head_overlap = (
+                local_kv_group * remote_eff_tp < (remote_kv_group + 1) * local_eff_tp
+                and remote_kv_group * local_eff_tp
+                < (local_kv_group + 1) * remote_eff_tp
+            )
+
+        # Condition T: token overlap.
+        common_dcp = np.gcd(self.dcp_size, remote_dcp_size)
+        token_overlap = self.dcp_rank % common_dcp == remote_dcp_rank % common_dcp
+
+        return head_overlap and token_overlap
+
+    def get_target_remote_worker_keys(
+        self,
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        remote_pcp_size: int,
+    ) -> list[tuple[int, int]]:
+        """Select remote worker keys that have KV overlap with local worker."""
+
+        remote_worker_keys: list[tuple[int, int]] = []
+        for remote_tp_rank, remote_dcp_rank in self.get_valid_remote_worker_keys(
+            remote_tp_size, remote_dcp_size, remote_pcp_size
+        ):
+            if self.has_kv_cache_overlap(
+                remote_tp_rank=remote_tp_rank,
+                remote_dcp_rank=remote_dcp_rank,
+                remote_tp_size=remote_tp_size,
+                remote_dcp_size=remote_dcp_size,
+                remote_pcp_size=remote_pcp_size,
+            ):
+                remote_worker_keys.append((remote_tp_rank, remote_dcp_rank))
+        return remote_worker_keys
+
+    def get_target_remote_worker_keys_from_engine_id(
+        self,
+        remote_engine_id: EngineId,
+    ) -> list[tuple[int, int]]:
+        remote_tp_size = self.remote_tp_size[remote_engine_id]
+        remote_dcp_size = self.remote_dcp_size[remote_engine_id]
+        remote_pcp_size = self.remote_pcp_size[remote_engine_id]
+        return self.get_target_remote_worker_keys(
+            remote_tp_size,
+            remote_dcp_size,
+            remote_pcp_size,
+        )
+
+    @staticmethod
+    def get_block_positions(block_num: int, dcp_size: int, dcp_rank: int) -> np.ndarray:
+        local_positions = np.arange(block_num)
+        global_positions = local_positions * dcp_size + dcp_rank
+        return global_positions
+
+    def get_matched_blocks(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        remote_dcp_size: int,
+        remote_dcp_rank: int,
+        local_block_offset: int = 0,
+    ) -> tuple[BlockIds, BlockIds]:
+        remote_global_positions = self.get_block_positions(
+            block_num=len(remote_block_ids[0]),
+            dcp_size=remote_dcp_size,
+            dcp_rank=remote_dcp_rank,
+        )
+        local_global_positions = (
+            self.get_block_positions(
+                block_num=len(local_block_ids[0]),
+                dcp_size=self.dcp_size,
+                dcp_rank=self.dcp_rank,
+            )
+            + local_block_offset
+        )
+        matched_positions = np.union1d(remote_global_positions, local_global_positions)
+        local_matched_indices = matched_positions // self.dcp_size
+        remote_matched_indices = matched_positions // remote_dcp_size
+        local_matched_block_ids = [
+            [block_ids[i] for i in local_matched_indices if i < len(block_ids)]
+            for block_ids in local_block_ids
+        ]
+        remote_matched_block_ids = [
+            [block_ids[i] for i in remote_matched_indices if i < len(block_ids)]
+            for block_ids in remote_block_ids
+        ]
+        return local_matched_block_ids, remote_matched_block_ids
 
     def get_transfer_cache_regions(
         self, cache: torch.Tensor, layer_spec: "KVCacheSpec"

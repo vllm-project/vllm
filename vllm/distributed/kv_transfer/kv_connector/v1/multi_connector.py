@@ -436,7 +436,7 @@ class MultiConnector(KVConnectorBase_V1):
         return None
 
     def set_xfer_handshake_metadata(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+        self, metadata: dict[Any, KVConnectorHandshakeMetadata]
     ) -> None:
         """
         Set the KV connector handshake metadata for all sub-connectors.

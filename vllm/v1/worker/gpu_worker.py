@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.parallel_state import (
     Handle,
+    get_dcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -494,7 +495,11 @@ class Worker(WorkerBase):
             return None
 
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        try:
+            dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            dcp_rank = 0
+        return {(tp_rank, dcp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

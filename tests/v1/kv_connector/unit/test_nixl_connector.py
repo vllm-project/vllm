@@ -384,11 +384,10 @@ def test_kv_transfer_handshake(dist_init):
         decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
         expected_agent_metadata = decoder.decode(metadata.agent_metadata_bytes)
 
-        # The scheduler connector expects metadata to be in
-        # dict[int, KVConnectorHandshakeMetadata], where the first key is
-        # the dp_rank, the second key is the tp_rank.
+        # The scheduler connector expects metadata to be keyed by
+        # (tp_rank, dcp_rank).
         scheduler_connector = scheduler.get_kv_connector()
-        scheduler_connector.set_xfer_handshake_metadata({0: metadata})
+        scheduler_connector.set_xfer_handshake_metadata({(0, 0): metadata})
 
         # Simulate a request that finishes prefill, which returns
         # corresponding NixlConnectorMetadata for decode instance.
@@ -478,7 +477,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
-    ) -> dict[int, str]:
+    ) -> dict[tuple[int, int], str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
@@ -508,7 +507,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # When remote tp_size > local tp_size, handshake with multiple
         # remote ranks.
         num_handshakes = 1 if tp_ratio > 0 else -tp_ratio
-        remote_agents: dict[int, str] = {}
+        remote_agents: dict[tuple[int, int], str] = {}
         for remote_tp_rank in range(num_handshakes):
             remote_agent_name = self.add_remote_agent(
                 NixlAgentMetadata(
@@ -523,11 +522,12 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     kv_cache_layout="HND",
                     block_size=self.block_size,
                     ssm_sizes=(0, 0),
+                    dcp_rank=self.dcp_rank,
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
             )
-            remote_agents[remote_tp_rank] = remote_agent_name
+            remote_agents[(remote_tp_rank, self.dcp_rank)] = remote_agent_name
         return remote_agents
 
 
@@ -725,7 +725,10 @@ class TestNixlHandshake:
 
         def check_handshake(remote_tp_size: int):
             tp_ratio = remote_tp_size // local_tp_size
-            assert set(remote_agents.keys()) == set(range(tp_ratio))
+            expected_worker_keys = {
+                (remote_tp_rank, worker.dcp_rank) for remote_tp_rank in range(tp_ratio)
+            }
+            assert set(remote_agents.keys()) == expected_worker_keys
 
             remote_engine_id = worker.REMOTE_ENGINE_ID
             assert worker._tp_size[remote_engine_id] == remote_tp_size
@@ -734,8 +737,9 @@ class TestNixlHandshake:
             assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
             assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
             assert remote_engine_id in worker.dst_xfer_side_handles
-            assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
-                range(tp_ratio)
+            assert (
+                set(worker.dst_xfer_side_handles[remote_engine_id].keys())
+                == expected_worker_keys
             )
 
         remote_agents = worker._nixl_handshake(
