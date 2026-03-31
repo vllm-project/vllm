@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use vllm_llm::{Logprobs, PositionLogprobs};
 
-use crate::backend::TextBackend;
 use crate::error::Error;
+use crate::tokenizers::Tokenizer;
 
 /// One decoded token candidate and its logprob metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,8 +47,8 @@ pub struct DecodedPromptLogprobs {
 /// decoded-token representation.
 ///
 /// Each returned position corresponds to one generated token position from the same `llm` update.
-pub(super) fn decode_logprobs<B: TextBackend + ?Sized>(
-    backend: &B,
+pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
+    tokenizer: &T,
     logprobs: &Logprobs,
     skip_special_tokens: bool,
 ) -> Result<DecodedLogprobs, Error> {
@@ -56,7 +56,7 @@ pub(super) fn decode_logprobs<B: TextBackend + ?Sized>(
         positions: logprobs
             .positions
             .iter()
-            .map(|position| decode_position_logprobs(backend, position, skip_special_tokens))
+            .map(|position| decode_position_logprobs(tokenizer, position, skip_special_tokens))
             .try_collect()?,
     })
 }
@@ -66,8 +66,8 @@ pub(super) fn decode_logprobs<B: TextBackend + ?Sized>(
 ///
 /// The returned payload stores the first prompt token separately and decodes the remaining scored
 /// prompt positions into `scored_positions`, matching vLLM's prompt-logprobs semantics.
-pub(super) fn decode_prompt_logprobs<B: TextBackend + ?Sized>(
-    backend: &B,
+pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
+    tokenizer: &T,
     prompt_token_ids: &[u32],
     logprobs: &Logprobs,
     skip_special_tokens: bool,
@@ -76,11 +76,11 @@ pub(super) fn decode_prompt_logprobs<B: TextBackend + ?Sized>(
         .first()
         .copied()
         .expect("prompt logprobs require at least one prompt token");
-    let first_token = backend.decode(&[first_token_id], skip_special_tokens)?;
+    let first_token = tokenizer.decode(&[first_token_id], skip_special_tokens)?;
     let scored_positions = logprobs
         .positions
         .iter()
-        .map(|position| decode_position_logprobs(backend, position, skip_special_tokens))
+        .map(|position| decode_position_logprobs(tokenizer, position, skip_special_tokens))
         .try_collect()?;
 
     Ok(DecodedPromptLogprobs {
@@ -92,8 +92,8 @@ pub(super) fn decode_prompt_logprobs<B: TextBackend + ?Sized>(
 /// Decode one token position's raw candidate set into decoded token strings plus logprob metadata.
 ///
 /// This decodes every candidate token ID independently through the active text backend.
-fn decode_position_logprobs<B: TextBackend + ?Sized>(
-    backend: &B,
+fn decode_position_logprobs<T: Tokenizer + ?Sized>(
+    tokenizer: &T,
     position: &PositionLogprobs,
     skip_special_tokens: bool,
 ) -> Result<DecodedPositionLogprobs, Error> {
@@ -102,7 +102,7 @@ fn decode_position_logprobs<B: TextBackend + ?Sized>(
             .entries
             .iter()
             .map(|entry| {
-                backend
+                tokenizer
                     .decode(&[entry.token_id], skip_special_tokens)
                     .map(|token| DecodedTokenLogprob {
                         token,
@@ -121,9 +121,9 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct ByteBackend;
+    struct ByteTokenizer;
 
-    impl TextBackend for ByteBackend {
+    impl crate::tokenizers::Tokenizer for ByteTokenizer {
         fn encode(&self, _text: &str) -> crate::Result<Vec<u32>> {
             unreachable!()
         }
@@ -137,11 +137,15 @@ mod tests {
             )
             .into_owned())
         }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
     }
 
     #[test]
     fn decode_logprobs_decodes_every_candidate_token() {
-        let backend = ByteBackend;
+        let tokenizer = ByteTokenizer;
         let logprobs = Logprobs {
             positions: vec![PositionLogprobs {
                 entries: vec![
@@ -160,7 +164,7 @@ mod tests {
         };
 
         assert_eq!(
-            decode_logprobs(&backend, &logprobs, false).unwrap(),
+            decode_logprobs(&tokenizer, &logprobs, false).unwrap(),
             DecodedLogprobs {
                 positions: vec![DecodedPositionLogprobs {
                     entries: vec![
@@ -182,7 +186,7 @@ mod tests {
 
     #[test]
     fn decode_prompt_logprobs_separates_first_prompt_token() {
-        let backend = ByteBackend;
+        let tokenizer = ByteTokenizer;
         let logprobs = Logprobs {
             positions: vec![PositionLogprobs {
                 entries: vec![TokenLogprob {
@@ -194,7 +198,7 @@ mod tests {
         };
 
         assert_eq!(
-            decode_prompt_logprobs(&backend, &[b'p' as u32, b'x' as u32], &logprobs, false)
+            decode_prompt_logprobs(&tokenizer, &[b'p' as u32, b'x' as u32], &logprobs, false)
                 .unwrap(),
             DecodedPromptLogprobs {
                 first_token: "p".to_string(),

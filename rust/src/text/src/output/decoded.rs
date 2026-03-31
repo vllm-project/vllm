@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -9,10 +7,10 @@ use vllm_llm::{FinishReason, GenerateOutputStream};
 use super::logprobs::{
     DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
 };
-use crate::backend::TextBackend;
 use crate::error::Error;
 use crate::incremental::IncrementalDecoder;
 use crate::take;
+use crate::tokenizers::DynTokenizer;
 
 /// Request-neutral options for incremental text decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,9 +73,9 @@ pub enum DecodedTextEvent {
 
 /// Convert the output token stream from the `vllm_llm` layer into incrementally decoded text.
 #[try_stream(ok = DecodedTextEvent, error = Error)]
-pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
+pub async fn decoded_text_event_stream(
     request_id: String,
-    backend: Arc<B>,
+    tokenizer: DynTokenizer,
     raw_stream: GenerateOutputStream,
     mut decode_options: TextDecodeOptions,
     intermediate: bool,
@@ -98,7 +96,7 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
                 .prompt_token_ids()
                 .expect("first llm output must carry prompt token ids");
             prompt_token_count = Some(prompt_token_ids.len());
-            backend.create_decode_stream(
+            tokenizer.create_decode_stream(
                 prompt_token_ids,
                 decode_options.skip_special_tokens,
                 // If we are excluding stop strings from output, we need to buffer
@@ -127,7 +125,7 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
                     .prompt_logprobs()
                     .map(|logprobs| {
                         decode_prompt_logprobs(
-                            backend.as_ref(),
+                            tokenizer.as_ref(),
                             output
                                 .prompt_token_ids()
                                 .expect("first llm output must carry prompt token ids"),
@@ -199,7 +197,7 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
             .as_ref()
             .map(|logprobs| {
                 decode_logprobs(
-                    backend.as_ref(),
+                    tokenizer.as_ref(),
                     logprobs,
                     decode_options.skip_special_tokens,
                 )

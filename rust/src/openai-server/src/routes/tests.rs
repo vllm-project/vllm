@@ -34,6 +34,7 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::TextBackend;
+use vllm_text::tokenizers::{DynTokenizer, Tokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -366,6 +367,26 @@ struct FakeChatBackend {
     model_id: Option<String>,
 }
 
+#[derive(Debug)]
+struct FakeChatTokenizer;
+
+impl Tokenizer for FakeChatTokenizer {
+    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
+        Ok(text.bytes().map(u32::from).collect())
+    }
+
+    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_text::Result<String> {
+        Ok(
+            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
+                .into_owned(),
+        )
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        token.bytes().next().map(u32::from)
+    }
+}
+
 impl FakeChatBackend {
     fn new() -> Self {
         Self { model_id: None }
@@ -379,15 +400,8 @@ impl FakeChatBackend {
 }
 
 impl TextBackend for FakeChatBackend {
-    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
-    }
-
-    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_text::Result<String> {
-        Ok(
-            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                .into_owned(),
-        )
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(FakeChatTokenizer)
     }
 
     fn model_id(&self) -> Option<&str> {
@@ -414,9 +428,12 @@ impl ChatBackend for FakeChatBackend {
 #[derive(Clone, Debug)]
 struct FailingDecodeChatBackend;
 
-impl TextBackend for FailingDecodeChatBackend {
+#[derive(Debug)]
+struct FailingDecodeTokenizer;
+
+impl Tokenizer for FailingDecodeTokenizer {
     fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
-        FakeChatBackend::new().encode(text)
+        FakeChatTokenizer.encode(text)
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
@@ -426,7 +443,17 @@ impl TextBackend for FailingDecodeChatBackend {
             ));
         }
 
-        FakeChatBackend::new().decode(token_ids, skip_special_tokens)
+        FakeChatTokenizer.decode(token_ids, skip_special_tokens)
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        FakeChatTokenizer.token_to_id(token)
+    }
+}
+
+impl TextBackend for FailingDecodeChatBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(FailingDecodeTokenizer)
     }
 }
 

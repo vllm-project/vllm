@@ -17,6 +17,7 @@ use vllm_engine_core_client::protocol::{
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+use vllm_text::tokenizers::{DynTokenizer, Tokenizer};
 use vllm_text::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
     TextBackend,
@@ -155,6 +156,33 @@ struct FakeChatBackend {
     model_id: Option<String>,
 }
 
+#[derive(Debug)]
+struct FakeChatTokenizer;
+
+impl Tokenizer for FakeChatTokenizer {
+    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
+        Ok(text.bytes().map(u32::from).collect())
+    }
+
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
+        let bytes = token_ids
+            .iter()
+            .filter_map(|id| {
+                if skip_special_tokens && *id == SPECIAL_STOP_TOKEN_ID {
+                    None
+                } else {
+                    Some(*id as u8)
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        token.bytes().next().map(u32::from)
+    }
+}
+
 impl fmt::Debug for FakeChatBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FakeChatBackend").finish_non_exhaustive()
@@ -185,22 +213,8 @@ impl FakeChatBackend {
 }
 
 impl TextBackend for FakeChatBackend {
-    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
-    }
-
-    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
-        let bytes = token_ids
-            .iter()
-            .filter_map(|id| {
-                if skip_special_tokens && *id == SPECIAL_STOP_TOKEN_ID {
-                    None
-                } else {
-                    Some(*id as u8)
-                }
-            })
-            .collect::<Vec<_>>();
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(FakeChatTokenizer)
     }
 
     fn model_id(&self) -> Option<&str> {
@@ -234,13 +248,29 @@ struct FailingDecodeBackend {
     inner: FakeChatBackend,
 }
 
-impl TextBackend for FailingDecodeBackend {
+#[derive(Debug)]
+struct FailingDecodeTokenizer;
+
+impl Tokenizer for FailingDecodeTokenizer {
     fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
-        self.inner.encode(text)
+        FakeChatTokenizer.encode(text)
     }
 
-    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> vllm_text::Result<String> {
-        Err(vllm_text::Error::Tokenizer("decode failed".to_string()))
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
+        if token_ids.contains(&(b'i' as u32)) {
+            return Err(vllm_text::Error::Tokenizer("decode failed".to_string()));
+        }
+        FakeChatTokenizer.decode(token_ids, skip_special_tokens)
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        FakeChatTokenizer.token_to_id(token)
+    }
+}
+
+impl TextBackend for FailingDecodeBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(FailingDecodeTokenizer)
     }
 }
 

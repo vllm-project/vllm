@@ -21,8 +21,8 @@ use vllm_chat::ChatLlm;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
-use vllm_text::TextLlm;
 use vllm_text::backends::hf::HfTextBackend;
+use vllm_text::{TextBackend, TextLlm};
 
 use crate::routes::build_router;
 use crate::state::AppState;

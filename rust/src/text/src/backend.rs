@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::incremental::{DecodeStream, IncrementalDecoder};
+use crate::tokenizers::DynTokenizer;
 
 /// Tokenizer/model-derived hints used to enrich text-generation requests before they are lowered
 /// into engine-core.
@@ -21,28 +21,12 @@ pub struct SamplingHints {
 
 /// Minimal text-processing backend needed by `vllm-text`.
 pub trait TextBackend: Send + Sync {
-    /// Encode one prompt string into token IDs.
-    fn encode(&self, text: &str) -> Result<Vec<u32>>;
+    /// Return the tokenizer used by this backend.
+    fn tokenizer(&self) -> DynTokenizer;
 
-    /// Decode one token sequence into text.
-    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
-
-    /// Create a stateful incremental decoder primed with the given prompt tokens.
-    ///
-    /// The prompt tokens provide left context for the first generated token; the decoder does not
-    /// re-emit prompt text.
-    fn create_decode_stream(
-        &self,
-        prompt_token_ids: &[u32],
-        skip_special_tokens: bool,
-        hold_back_bytes: usize,
-    ) -> Box<dyn IncrementalDecoder + '_> {
-        Box::new(DecodeStream::new(
-            self,
-            prompt_token_ids,
-            skip_special_tokens,
-            hold_back_bytes,
-        ))
+    /// Return whether the loaded model is a mixture-of-experts model.
+    fn is_moe(&self) -> bool {
+        false
     }
 
     /// Return the backend model ID when available.

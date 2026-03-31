@@ -1,7 +1,7 @@
 use std::mem::take;
 
-use crate::backend::TextBackend;
 use crate::error::Result;
+use crate::tokenizers::Tokenizer;
 
 /// Stateful incremental decoder that emits text chunks one token at a time.
 pub trait IncrementalDecoder: Send {
@@ -20,12 +20,12 @@ pub trait IncrementalDecoder: Send {
     fn output(&self) -> &str;
 }
 
-/// [`IncrementalDecoder`] built on [`TextBackend::decode()`] with prefix-diffing.
+/// [`IncrementalDecoder`] built on [`Tokenizer::decode()`] with prefix-diffing.
 ///
 /// This is the same sliding-window algorithm used by `tokenizers::DecodeStream` and
 /// `fastokens::DecodeStream`.
-pub(crate) struct DecodeStream<'a, B: TextBackend + ?Sized> {
-    backend: &'a B,
+pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
+    tokenizer: &'a T,
     skip_special_tokens: bool,
     min_bytes_to_buffer: usize,
     // mutated state
@@ -36,15 +36,15 @@ pub(crate) struct DecodeStream<'a, B: TextBackend + ?Sized> {
     output_index: usize,
 }
 
-impl<'a, B: TextBackend + ?Sized> DecodeStream<'a, B> {
+impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
     pub(crate) fn new(
-        backend: &'a B,
+        tokenizer: &'a T,
         prompt_token_ids: &[u32],
         skip_special_tokens: bool,
         min_bytes_to_buffer: usize,
     ) -> Self {
         Self {
-            backend,
+            tokenizer,
             skip_special_tokens,
             min_bytes_to_buffer,
             ids: prompt_token_ids.to_vec(),
@@ -56,10 +56,10 @@ impl<'a, B: TextBackend + ?Sized> DecodeStream<'a, B> {
     }
 }
 
-impl<B: TextBackend + ?Sized> IncrementalDecoder for DecodeStream<'_, B> {
+impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     fn push_token(&mut self, token_id: u32) -> Result<usize> {
         if self.prefix.is_empty() && !self.ids.is_empty() {
-            let new_prefix = self.backend.decode(&self.ids, self.skip_special_tokens)?;
+            let new_prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             if !new_prefix.ends_with('\u{FFFD}') {
                 self.prefix = new_prefix;
                 self.prefix_index = self.ids.len();
@@ -67,13 +67,13 @@ impl<B: TextBackend + ?Sized> IncrementalDecoder for DecodeStream<'_, B> {
         }
 
         self.ids.push(token_id);
-        let string = self.backend.decode(&self.ids, self.skip_special_tokens)?;
+        let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         let prefix_len = self.prefix.len();
         let new_bytes = string.len().saturating_sub(prefix_len);
         if new_bytes > 0 && !string.ends_with('\u{FFFD}') {
             self.cumulative_output.push_str(&string[prefix_len..]);
             self.ids.drain(..self.prefix_index);
-            self.prefix = self.backend.decode(&self.ids, self.skip_special_tokens)?;
+            self.prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             self.prefix_index = self.ids.len();
             Ok(new_bytes)
         } else {
@@ -95,7 +95,7 @@ impl<B: TextBackend + ?Sized> IncrementalDecoder for DecodeStream<'_, B> {
 
     fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)> {
         if !self.ids.is_empty() {
-            let text = self.backend.decode(&self.ids, self.skip_special_tokens)?;
+            let text = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             let prefix_len = self.prefix.len();
             self.ids.clear();
             self.prefix.clear();
@@ -126,7 +126,7 @@ mod tests {
     #[derive(Debug)]
     struct Utf8Backend;
 
-    impl TextBackend for Utf8Backend {
+    impl Tokenizer for Utf8Backend {
         fn encode(&self, _text: &str) -> Result<Vec<u32>> {
             unreachable!()
         }
@@ -134,6 +134,10 @@ mod tests {
         fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
             let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
             Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
         }
     }
 
@@ -192,7 +196,7 @@ mod tests {
     #[derive(Debug)]
     struct SpecialTokenBackend;
 
-    impl TextBackend for SpecialTokenBackend {
+    impl Tokenizer for SpecialTokenBackend {
         fn encode(&self, _text: &str) -> Result<Vec<u32>> {
             unreachable!()
         }
@@ -208,6 +212,10 @@ mod tests {
                 }
             }
             Ok(text)
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
         }
     }
 

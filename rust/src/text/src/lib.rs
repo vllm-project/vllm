@@ -32,6 +32,7 @@ mod incremental;
 mod lower;
 pub mod output;
 mod request;
+pub mod tokenizers;
 
 /// Shared streamed text output type used by raw completions and other text-only northbound paths.
 pub trait TextOutputStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
@@ -79,8 +80,9 @@ impl TextLlm {
     pub async fn generate(&self, mut request: TextRequest) -> Result<impl TextOutputStream> {
         request.validate()?;
 
+        let tokenizer = self.backend.tokenizer();
         let prompt_token_ids = match take(&mut request.prompt) {
-            Prompt::Text(text) => self.backend.encode(&text)?,
+            Prompt::Text(text) => tokenizer.encode(&text)?,
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
             Prompt::TokenIds(token_ids) => token_ids,
@@ -94,7 +96,7 @@ impl TextLlm {
         let raw_stream = self.llm.generate(prepared.generate_request).await?;
         let decoded_stream = output::decoded_text_event_stream(
             prepared.text_request.request_id,
-            self.backend.clone(),
+            tokenizer,
             raw_stream,
             prepared.text_request.decode_options,
             prepared.text_request.intermediate,
