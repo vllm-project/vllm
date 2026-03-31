@@ -273,8 +273,10 @@ class AWQLinearMethod(LinearMethodBase):
 
         # num_tokens >= threshold
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
-
-        if FP16_MATMUL_HEURISTIC_CONDITION:
+        # Here idea is the always take the first branch, never call awq_gemm as it does not get caught
+        # by batch invariance.
+        from vllm import envs
+        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
             out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
             out = torch.matmul(reshaped_x, out)
         else:
