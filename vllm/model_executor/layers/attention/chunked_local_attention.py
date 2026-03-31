@@ -8,7 +8,6 @@ from vllm.config import CacheConfig, ModelConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -98,10 +97,7 @@ class ChunkedLocalAttention(Attention):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
-            assert model_config is not None, (
-                "model_config is required when cache_config is not provided"
-            )
-            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
+            kv_cache_dtype = "auto"
 
         underlying_attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype)
         attn_backend = create_chunked_local_attention_backend(
@@ -115,6 +111,7 @@ class ChunkedLocalAttention(Attention):
             num_kv_heads=num_kv_heads,
             alibi_slopes=alibi_slopes,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=prefix,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,

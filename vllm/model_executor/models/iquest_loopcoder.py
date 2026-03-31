@@ -47,7 +47,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.llama import LlamaMLP
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
 from vllm.v1.attention.backend import AttentionType
 
 from .utils import (
@@ -149,12 +148,9 @@ class LoopCoderAttention(nn.Module):
                         sliding_window=self.loop_window_size,
                     )
                 else:
-                    assert model_config is not None, (
-                        "model_config is required when cache_config is not provided"
-                    )
                     loop_cache_config = CacheConfig(
                         sliding_window=self.loop_window_size,
-                        cache_dtype=TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype],
+                        cache_dtype="auto",
                     )
 
             self.attn.append(

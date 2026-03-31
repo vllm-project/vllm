@@ -8,7 +8,6 @@ import torch
 from vllm.config import CacheConfig, ModelConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
-from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -69,10 +68,7 @@ class EncoderOnlyAttention(Attention):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
-            assert model_config is not None, (
-                "model_config is required when cache_config is not provided"
-            )
-            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
+            kv_cache_dtype = "auto"
 
         underlying_attn_backend = get_attn_backend(
             head_size,
@@ -93,6 +89,7 @@ class EncoderOnlyAttention(Attention):
             head_size=head_size,
             scale=scale,
             cache_config=cache_config,
+            model_config=model_config,
             attn_backend=attn_backend,
             attn_type=AttentionType.ENCODER_ONLY,
             **kwargs,

@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
-from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -295,10 +294,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
-            assert model_config is not None, (
-                "model_config is required when cache_config is not provided"
-            )
-            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
+            kv_cache_dtype = "auto"
 
         underlying_attn_backend = get_attn_backend(
             head_size,
@@ -317,6 +313,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             num_kv_heads=num_kv_heads,
             alibi_slopes=alibi_slopes,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             logits_soft_cap=logits_soft_cap,
             per_layer_sliding_window=per_layer_sliding_window,
@@ -349,6 +346,7 @@ class WhisperCausalAttention(nn.Module):
         per_layer_sliding_window: int | None = None,
         block_pool_size: int = 1,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -391,6 +389,7 @@ class WhisperCausalAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=AttentionType.DECODER,
@@ -449,11 +448,11 @@ class WhisperCausalAttention(nn.Module):
 class WhisperCausalEncoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         sliding_window = getattr(config, "sliding_window", None)
         block_pool_size = config.block_pool_size
         assert block_pool_size > 1
-
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -467,6 +466,7 @@ class WhisperCausalEncoderLayer(nn.Module):
             block_pool_size=block_pool_size,
             per_layer_sliding_window=sliding_window,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )

@@ -25,7 +25,6 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
-    TORCH_DTYPE_TO_KV_CACHE_STR,
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
@@ -223,10 +222,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = cache_config.cache_dtype
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
-            assert model_config is not None, (
-                "model_config is required when cache_config is not provided"
-            )
-            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
+            kv_cache_dtype = "auto"
             calculate_kv_scales = False
 
         # llm-compressor mdls need to set cache_dtype to "fp8" manually.
@@ -260,10 +256,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
                 skip = True
             if skip:
-                assert model_config is not None, (
-                    "model_config is required for kv_cache_dtype_skip_layers"
-                )
-                kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
+                kv_cache_dtype = "auto"
                 calculate_kv_scales = False
             logger.info(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
