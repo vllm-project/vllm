@@ -1068,7 +1068,13 @@ def set_buildkite_meta(key, value):
     if not _has_buildkite_agent():
         return
     # Use list form to avoid shell injection via key/value content.
-    sh(["buildkite-agent", "meta-data", "set", key, value], timeout=10)
+    try:
+        sh(
+            ["buildkite-agent", "meta-data", "set", key, value],
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        warn(f"buildkite-agent meta-data set '{key}' failed")
 
 
 # ==========================================================================
@@ -3467,154 +3473,166 @@ def check_infra_health():
     None of these checks are fatal (we warn, not exit) because the test
     might still pass on degraded infra. But the warnings make post-mortem
     much faster.
+
+    IMPORTANT: Every check is wrapped in try/except so a single failure
+    (timeout, missing binary, permission error) never crashes the script
+    or skips subsequent checks. The function itself is also wrapped at
+    the call site in main() inside ``with timed(...):``.
     """
     section("Infrastructure health checks")
 
-    # -- 1. DNS resolution --
-    # Resolve the hosts that THIS job will actually contact: the Docker
-    # registry (configurable) and huggingface.co (model downloads).
-    # Only test relevant hosts -- hardcoding public endpoints like
-    # ghcr.io is wrong when CI uses a private registry or mirror.
-    # Without this pre-check, a DNS failure surfaces minutes later as
-    # "dial tcp: lookup ...: no such host" after Docker exhausts its
-    # internal retry loop. Catching it here fails in <5s with context.
     registry = os.environ.get("VLLM_CI_REGISTRY", "docker.io")
-    dns_hosts = []  # type: list[str]
-    # Extract hostname from registry (strip port if present).
-    registry_host = registry.split(":")[0].split("/")[0]
-    dns_hosts.append(registry_host)
-    # HuggingFace is always needed for model downloads.
-    dns_hosts.append("huggingface.co")
-    # Deduplicate while preserving order.
-    seen = set()  # type: set[str]
-    dns_hosts = [h for h in dns_hosts if not (h in seen or seen.add(h))]
 
-    dns_ok = True
-    for host in dns_hosts:
-        r = sh(f"getent hosts {host} 2>/dev/null", capture=True, timeout=5)
-        if r.returncode != 0 or not r.stdout.strip():
-            dns_ok = False
-            warn(
-                f"{_DIAG_PREFIX} DNS resolution failed for '{host}'. "
-                f"Docker pull and model downloads may fail. "
-                f"Check pod DNS policy and kube-dns/coredns health."
-            )
-    if dns_ok:
-        info(f"DNS resolution: OK ({', '.join(dns_hosts)})")
+    # -- 1. DNS resolution --
+    try:
+        dns_hosts = []  # type: list[str]
+        registry_host = registry.split(":")[0].split("/")[0]
+        dns_hosts.append(registry_host)
+        dns_hosts.append("huggingface.co")
+        seen = set()  # type: set[str]
+        dns_hosts = [h for h in dns_hosts if not (h in seen or seen.add(h))]
+        dns_ok = True
+        for host in dns_hosts:
+            try:
+                r = sh(
+                    f"getent hosts {host} 2>/dev/null",
+                    capture=True,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                dns_ok = False
+                warn(
+                    f"{_DIAG_PREFIX} DNS resolution timed out "
+                    f"for '{host}' (>5s). DNS may be broken."
+                )
+                continue
+            if r.returncode != 0 or not r.stdout.strip():
+                dns_ok = False
+                warn(
+                    f"{_DIAG_PREFIX} DNS resolution failed "
+                    f"for '{host}'. Docker pull and model "
+                    f"downloads may fail. Check pod DNS policy "
+                    f"and kube-dns/coredns health."
+                )
+        if dns_ok:
+            info(f"DNS resolution: OK ({', '.join(dns_hosts)})")
+    except Exception as exc:
+        warn(f"DNS check failed unexpectedly: {exc}")
 
     # -- 2. Docker registry reachability --
-    # Try to reach the registry API. We don't need to authenticate --
-    # a TCP connection or HTTP response is enough to confirm the network
-    # path is open.
-    r = sh(
-        f"curl -sf --connect-timeout 10 --max-time 15 "
-        f"-o /dev/null -w '%{{http_code}}' https://{registry}/v2/ 2>/dev/null",
-        capture=True,
-    )
-    if r.returncode != 0:
-        warn(
-            f"{_DIAG_PREFIX} Cannot reach Docker registry '{registry}'. "
-            f"docker pull will likely fail. "
-            f"Check network connectivity, proxy settings, and firewall rules."
-        )
-    else:
-        info(f"Docker registry ({registry}): reachable")
-
-    # -- 2b. Network throughput --
-    # Download 1MB from a real endpoint and measure speed. We try
-    # multiple URLs across different providers so a single repo or
-    # CDN being down doesn't blind us. Each URL is a file that our
-    # test suite actually uses (models downloaded during tests).
-    # Last resort: ping our own GitHub repo (always available if
-    # the network is functional at all).
-    _throughput_probes = [
-        # HF models used by the test suite (1MB range request each).
-        (
-            "HF/TitanML-tiny-mixtral",
-            "https://huggingface.co/TitanML/tiny-mixtral"
-            "/resolve/main/model.safetensors",
-        ),
-        (
-            "HF/Qwen2.5-0.5B",
-            "https://huggingface.co/Qwen/Qwen2.5-0.5B/resolve/main/model.safetensors",
-        ),
-        (
-            "HF/whisper-tiny",
-            "https://huggingface.co/openai/whisper-tiny/resolve/main/model.safetensors",
-        ),
-        # GitHub: our own repo (raw file, always available).
-        (
-            "GitHub/vllm-project",
-            "https://raw.githubusercontent.com/vllm-project/vllm/main/README.md",
-        ),
-    ]
-    speed_measured = False
-    for probe_name, probe_url in _throughput_probes:
+    try:
         r = sh(
-            f"curl -sf --connect-timeout 5 --max-time 15 "
-            f"-r 0-1048575 "
-            f"-o /dev/null -w '%{{speed_download}}' "
-            f"'{probe_url}' 2>/dev/null",
+            f"curl -sf --connect-timeout 10 --max-time 15 "
+            f"-o /dev/null -w '%{{http_code}}' "
+            f"https://{registry}/v2/ 2>/dev/null",
             capture=True,
         )
-        if r.returncode != 0 or not r.stdout.strip():
-            continue
-        try:
-            speed_bps = float(r.stdout.strip())
-        except (ValueError, OverflowError):
-            continue
-        # Skip bogus measurements (empty response, <1KB transferred).
-        if speed_bps < 1:
-            continue
-        speed_mbps = speed_bps / (1024 * 1024)
-        speed_measured = True
-        if speed_bps < 1024 * 100:  # < 100 KB/s
+        if r.returncode != 0:
             warn(
-                f"{_DIAG_PREFIX} Network throughput: "
-                f"{speed_mbps:.2f} MB/s via {probe_name} "
-                f"(very slow, <100KB/s). "
-                f"Docker pull and model downloads will be "
-                f"severely affected. Check network bandwidth, "
-                f"proxy throttling, and NIC health."
-            )
-        elif speed_bps < 1024 * 1024:  # < 1 MB/s
-            warn(
-                f"Network throughput: {speed_mbps:.2f} MB/s "
-                f"via {probe_name} "
-                f"(slow, may cause pull timeouts)"
+                f"{_DIAG_PREFIX} Cannot reach Docker registry "
+                f"'{registry}'. docker pull will likely fail. "
+                f"Check network connectivity, proxy settings, "
+                f"and firewall rules."
             )
         else:
-            info(f"Network throughput: {speed_mbps:.1f} MB/s via {probe_name} (OK)")
-        break  # first successful probe is enough
-    if not speed_measured:
-        warn(
-            f"{_DIAG_PREFIX} Network throughput: could not "
-            f"measure (all {len(_throughput_probes)} probes "
-            f"failed). Network may be unreachable."
-        )
+            info(f"Docker registry ({registry}): reachable")
+    except Exception as exc:
+        warn(f"Registry reachability check failed: {exc}")
+
+    # -- 2b. Network throughput --
+    try:
+        _throughput_probes = [
+            (
+                "HF/TitanML-tiny-mixtral",
+                "https://huggingface.co/TitanML/tiny-mixtral"
+                "/resolve/main/model.safetensors",
+            ),
+            (
+                "HF/Qwen2.5-0.5B",
+                "https://huggingface.co/Qwen/Qwen2.5-0.5B"
+                "/resolve/main/model.safetensors",
+            ),
+            (
+                "HF/whisper-tiny",
+                "https://huggingface.co/openai/whisper-tiny"
+                "/resolve/main/model.safetensors",
+            ),
+            (
+                "GitHub/vllm-project",
+                "https://raw.githubusercontent.com/vllm-project/vllm/main/README.md",
+            ),
+        ]
+        speed_measured = False
+        for probe_name, probe_url in _throughput_probes:
+            try:
+                r = sh(
+                    f"curl -sf --connect-timeout 5 "
+                    f"--max-time 15 -r 0-1048575 "
+                    f"-o /dev/null "
+                    f"-w '%{{speed_download}}' "
+                    f"'{probe_url}' 2>/dev/null",
+                    capture=True,
+                )
+            except subprocess.TimeoutExpired:
+                continue
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+            try:
+                speed_bps = float(r.stdout.strip())
+            except (ValueError, OverflowError):
+                continue
+            if speed_bps < 1:
+                continue
+            speed_mbps = speed_bps / (1024 * 1024)
+            speed_measured = True
+            if speed_bps < 1024 * 100:
+                warn(
+                    f"{_DIAG_PREFIX} Network throughput: "
+                    f"{speed_mbps:.2f} MB/s via "
+                    f"{probe_name} (very slow, <100KB/s). "
+                    f"Docker pull and model downloads will "
+                    f"be severely affected."
+                )
+            elif speed_bps < 1024 * 1024:
+                warn(
+                    f"Network throughput: "
+                    f"{speed_mbps:.2f} MB/s via "
+                    f"{probe_name} (slow, may cause "
+                    f"pull timeouts)"
+                )
+            else:
+                info(f"Network throughput: {speed_mbps:.1f} MB/s via {probe_name} (OK)")
+            break
+        if not speed_measured:
+            warn(
+                f"{_DIAG_PREFIX} Network throughput: could "
+                f"not measure (all "
+                f"{len(_throughput_probes)} probes failed)."
+            )
+    except Exception as exc:
+        warn(f"Network throughput check failed: {exc}")
 
     # -- 3. Available memory --
-    r = sh("cat /proc/meminfo 2>/dev/null", capture=True)
-    if r.returncode == 0:
-        for line in r.stdout.splitlines():
-            if line.startswith("MemAvailable:"):
-                try:
+    try:
+        r = sh("cat /proc/meminfo 2>/dev/null", capture=True)
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                if line.startswith("MemAvailable:"):
                     avail_kb = int(line.split()[1])
                     avail_gb = avail_kb / (1024 * 1024)
                     info(f"Available memory: {avail_gb:.1f} GB")
                     if avail_gb < 8:
                         warn(
-                            f"{_DIAG_PREFIX} Low available memory: {avail_gb:.1f} GB. "
-                            f"Tests may OOM or the kubelet may evict this pod. "
-                            f"Check node memory pressure: kubectl top node"
+                            f"{_DIAG_PREFIX} Low available "
+                            f"memory: {avail_gb:.1f} GB. "
+                            f"Tests may OOM or the kubelet "
+                            f"may evict this pod."
                         )
-                except (ValueError, IndexError):
-                    pass
-                break
+                    break
+    except Exception as exc:
+        warn(f"Memory check failed: {exc}")
 
     # -- 4. Disk I/O latency --
-    # Write a small file and measure time. Healthy disks complete in <50ms.
-    # Degraded NFS or network storage can take seconds.
     try:
         test_file = Path(tempfile.gettempdir()) / ".disk_io_check"
         start = time.monotonic()
@@ -3623,42 +3641,33 @@ def check_infra_health():
         latency_ms = (time.monotonic() - start) * 1000
         if latency_ms > 500:
             warn(
-                f"{_DIAG_PREFIX} Disk I/O latency: {latency_ms:.0f}ms (>500ms). "
-                f"Storage may be degraded (slow NFS, worn SSD, network storage issue). "
-                f"Test performance will be affected."
+                f"{_DIAG_PREFIX} Disk I/O latency: "
+                f"{latency_ms:.0f}ms (>500ms). Storage "
+                f"may be degraded."
             )
         elif latency_ms > 100:
             warn(f"Disk I/O latency: {latency_ms:.0f}ms (elevated but usable)")
         else:
             info(f"Disk I/O latency: {latency_ms:.0f}ms (OK)")
-    except OSError:
-        warn("Could not perform disk I/O check")
+    except Exception as exc:
+        warn(f"Disk I/O check failed: {exc}")
 
-    # -- 5. Pod restart count (K8s only) --
-    if is_k8s():
-        # The Downward API can expose restart count, but it's not always
-        # configured. Check the container's start time as a proxy: if the
-        # container was created very recently (< 60s ago), we may have just
-        # been restarted.
-        r = sh("cat /proc/1/stat 2>/dev/null", capture=True)
-        if r.returncode == 0:
-            # /proc/1/stat field 22 is the start time in clock ticks.
-            # We can also check uptime more simply:
-            r2 = sh("cat /proc/uptime 2>/dev/null", capture=True)
-            if r2.returncode == 0:
-                try:
-                    uptime_s = float(r2.stdout.split()[0])
-                    if uptime_s < 120:
-                        warn(
-                            f"{_DIAG_PREFIX} Pod uptime is only {uptime_s:.0f}s. "
-                            f"This pod was recently (re)started. If tests fail, "
-                            f"check for repeated restarts (kubectl describe pod) "
-                            f"which may indicate a flaky node or resource limit."
-                        )
-                    else:
-                        info(f"Pod uptime: {uptime_s:.0f}s")
-                except (ValueError, IndexError):
-                    pass
+    # -- 5. Pod uptime (K8s only) --
+    try:
+        if is_k8s():
+            r = sh("cat /proc/uptime 2>/dev/null", capture=True)
+            if r.returncode == 0:
+                uptime_s = float(r.stdout.split()[0])
+                if uptime_s < 120:
+                    warn(
+                        f"{_DIAG_PREFIX} Pod uptime is only "
+                        f"{uptime_s:.0f}s. This pod was "
+                        f"recently (re)started."
+                    )
+                else:
+                    info(f"Pod uptime: {uptime_s:.0f}s")
+    except Exception as exc:
+        warn(f"Pod uptime check failed: {exc}")
 
 
 def docker_pull_with_retry(image, retries=DOCKER_PULL_RETRIES):
@@ -5652,56 +5661,78 @@ def main():
 
     # -- Phase 1: Environment + config --
     section("Environment")
-    log_k8s_context()
-    log_effective_config()
+    with suppress(Exception):
+        log_k8s_context()
+    with suppress(Exception):
+        log_effective_config()
 
     # -- Phase 1b: Hard resets (destructive, one-shot) --
-    execute_hard_resets()
+    with suppress(Exception):
+        execute_hard_resets()
 
     # -- Phase 2: Infrastructure health --
+    # Docker health is always checked (fatal if Docker is down).
+    # Infra checks are diagnostic only -- they must NEVER crash the script.
+    check_docker_health()
     if ENABLE_INFRA_CHECKS:
-        with timed("Infrastructure health checks"):
-            check_docker_health()
-            check_infra_health()
+        try:
+            with timed("Infrastructure health checks"):
+                check_infra_health()
+        except Exception as exc:
+            warn(
+                f"Infrastructure health checks crashed "
+                f"unexpectedly: {exc}. Continuing anyway."
+            )
     else:
         info("Infrastructure checks DISABLED (VLLM_ROCM_CI_INFRA_CHECKS=0)")
-        # Docker health is always checked -- can't run without Docker.
-        check_docker_health()
 
     # -- Phase 3: GPU pre-flight --
+    # Zombie cleanup and VRAM checks are best-effort. If they crash
+    # (e.g., rocm-smi hangs, fuser missing), we still attempt the test.
+    # GPU health validation (Phase 4) IS fatal: no GPUs = no point.
     if ENABLE_GPU_PREFLIGHT:
-        with timed("GPU pre-flight"):
-            kill_gpu_zombies()
-            wait_for_clean_gpus()
+        try:
+            with timed("GPU pre-flight"):
+                kill_gpu_zombies()
+                wait_for_clean_gpus()
+        except Exception as exc:
+            warn(f"GPU pre-flight crashed: {exc}. Continuing.")
 
         section("ROCm info")
-        try:
+        with suppress(Exception):
             sh("rocminfo", timeout=ROCM_SMI_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            warn(f"rocminfo timed out after {ROCM_SMI_TIMEOUT_S}s")
 
-        # -- Phase 4: GPU health --
+        # -- Phase 4: GPU health (fatal if GPUs not visible) --
         validate_gpu_health()
     else:
         info("GPU pre-flight DISABLED (VLLM_ROCM_CI_GPU_PREFLIGHT=0)")
 
     # -- Phase 5: Docker + cache housekeeping --
+    # Housekeeping is best-effort: a crash in stale container cleanup
+    # or cache eviction should not prevent the test from running.
     with timed("Docker and cache housekeeping"):
-        cleanup_stale_containers()
+        with suppress(Exception):
+            cleanup_stale_containers()
         if ENABLE_DOCKER_EVICTION:
-            cleanup_docker_disk()
+            with suppress(Exception):
+                cleanup_docker_disk()
         else:
             info("Docker eviction DISABLED (VLLM_ROCM_CI_DOCKER_EVICTION=0)")
         if ENABLE_CACHE_EVICTION:
-            evict_all_caches()  # L1 (local)
-            evict_all_l2_caches()  # L2 (NFS, nightly only)
+            with suppress(Exception):
+                evict_all_caches()
+            with suppress(Exception):
+                evict_all_l2_caches()
         else:
             info("Cache eviction DISABLED (VLLM_ROCM_CI_CACHE_EVICTION=0)")
 
     # -- Phase 6: GPU reset --
     if ENABLE_GPU_PREFLIGHT:
-        with timed("GPU reset"):
-            reset_gpus()
+        try:
+            with timed("GPU reset"):
+                reset_gpus()
+        except Exception as exc:
+            warn(f"GPU reset crashed: {exc}. Continuing.")
     else:
         info("GPU reset DISABLED (VLLM_ROCM_CI_GPU_PREFLIGHT=0)")
 
@@ -5776,8 +5807,13 @@ def main():
         warn("BUILDKITE_AGENT_META_DATA_RENDER_DEVICES is empty")
 
     # Set up all persistent caches (HF, ModelScope, test data, pip, etc.).
+    # Cache setup failure should not block the test -- caches are a
+    # performance optimization, not a correctness requirement.
     if ENABLE_CACHE:
-        setup_caches()
+        try:
+            setup_caches()
+        except Exception as exc:
+            warn(f"Cache setup crashed: {exc}. Tests will run without cache.")
     else:
         info("Persistent caches DISABLED (VLLM_ROCM_CI_CACHE_ENABLED=0)")
 
