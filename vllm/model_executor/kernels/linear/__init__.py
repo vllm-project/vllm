@@ -20,7 +20,6 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
-    DynamicMMLinearKernel,
     MMLinearKernel,
     MMLinearLayerConfig,
 )
@@ -143,7 +142,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 
 # in priority/performance order (when available)
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
-    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | DynamicMMLinearKernel]]
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,

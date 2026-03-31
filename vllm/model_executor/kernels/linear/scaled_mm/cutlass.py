@@ -224,11 +224,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self,
         A: torch.Tensor,
         B: torch.Tensor,
-        out_dtype: torch.dtype,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        **kwargs,
     ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
                 A,

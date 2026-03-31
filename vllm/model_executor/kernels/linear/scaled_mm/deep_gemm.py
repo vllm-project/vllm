@@ -108,19 +108,16 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self,
         A: torch.Tensor,
         B: torch.Tensor,
-        out_dtype: torch.dtype,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        **kwargs,
     ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
         output = torch.empty(
             (A.shape[0], B.shape[0]),
             dtype=out_dtype,
             device=A.device,
         )
-
         torch.ops.vllm.fp8_gemm_nt_op(A, As, B, Bs, output, self.use_deep_gemm_e8m0)
-
         return output
 
 

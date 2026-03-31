@@ -153,11 +153,10 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self,
         A: torch.Tensor,
         B: torch.Tensor,
-        out_dtype: torch.dtype,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        **kwargs,
     ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
