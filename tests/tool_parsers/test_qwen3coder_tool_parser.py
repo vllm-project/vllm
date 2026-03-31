@@ -31,13 +31,13 @@ def qwen3_tokenizer():
 
 
 @pytest.fixture
-def qwen3_tool_parser(qwen3_tokenizer):
-    return Qwen3CoderToolParser(qwen3_tokenizer)
+def qwen3_tool_parser(qwen3_tokenizer, sample_tools):
+    return Qwen3CoderToolParser(qwen3_tokenizer, tools=sample_tools)
 
 
 @pytest.fixture
-def qwen3_xml_tool_parser(qwen3_tokenizer):
-    return Qwen3XMLToolParser(qwen3_tokenizer)
+def qwen3_xml_tool_parser(qwen3_tokenizer, sample_tools):
+    return Qwen3XMLToolParser(qwen3_tokenizer, tools=sample_tools)
 
 
 @pytest.fixture(params=["xml"])
@@ -376,7 +376,7 @@ TX
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(qwen3_tool_parser_parametrized):
+def test_extract_tool_calls_type_conversion(qwen3_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -417,10 +417,9 @@ hello world
 </function>
 </tool_call>"""
 
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
@@ -859,7 +858,7 @@ TX
 
 
 def test_extract_tool_calls_complex_type_with_single_quote(
-    qwen3_tool_parser_parametrized,
+    qwen3_tokenizer,
 ):
     """Test parameter type conversion based on tool schema"""
     tools = [
@@ -889,10 +888,9 @@ def test_extract_tool_calls_complex_type_with_single_quote(
 </function>
 </tool_call>"""
 
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["obj_param"] == {"key": "value"}
