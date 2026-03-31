@@ -34,6 +34,18 @@ class FaultToleranceConfig:
     Port used to publish engine fault and status change notifications.
     """
 
+    gloo_comm_timeout_sec: int = 30
+    """
+    The timeout (in seconds) for gloo communication.
+    """
+
+    worker_cmd_addr: str | None = None
+    """
+    ZMQ address used by EngineCoreSentinel to dispatch instructions to 
+    WorkerSentinel instances. This address is assigned dynamically during 
+    runtime.
+    """
+
     fault_state_pub_topic: str = "vllm_fault"
     """
     The topic string to use for publishing fault state messages via ZMQ.

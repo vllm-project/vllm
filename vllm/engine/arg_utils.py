@@ -633,6 +633,7 @@ class EngineArgs:
     engine_recovery_timeout_sec: int = FaultToleranceConfig.engine_recovery_timeout_sec
     internal_fault_report_port: int = FaultToleranceConfig.internal_fault_report_port
     external_fault_notify_port: int = FaultToleranceConfig.external_fault_notify_port
+    gloo_comm_timeout_sec: int = FaultToleranceConfig.gloo_comm_timeout_sec
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
@@ -1373,6 +1374,10 @@ class EngineArgs:
             "--external-fault-notify-port",
             **fault_tolerance_kwargs["external_fault_notify_port"],
         )
+        fault_tolerance_group.add_argument(
+            "--gloo-comm-timeout-sec",
+            **fault_tolerance_kwargs["gloo_comm_timeout_sec"],
+        )
 
         # Other arguments
         parser.add_argument(
@@ -1976,6 +1981,7 @@ class EngineArgs:
             engine_recovery_timeout_sec=self.engine_recovery_timeout_sec,
             internal_fault_report_port=self.internal_fault_report_port,
             external_fault_notify_port=self.external_fault_notify_port,
+            gloo_comm_timeout_sec=self.gloo_comm_timeout_sec,
         )
 
         # Compilation config overrides

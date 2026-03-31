@@ -316,8 +316,9 @@ class Worker(WorkerBase):
 
         if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(
-                self.vllm_config,
-                self.device,
+                vllm_config=self.vllm_config,
+                pause_event=self.model_runner.pause_event,
+                device=self.device,
             )
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
@@ -1054,6 +1055,7 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
+        fault_tolerance_config=vllm_config.fault_tolerance_config,
     )
 
     # Init ec connector here before KV caches init

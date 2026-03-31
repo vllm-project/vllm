@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 import msgspec
 import zmq
@@ -43,8 +44,36 @@ class FaultInfo(msgspec.Struct):
         )
 
 
+class FaultToleranceResult(msgspec.Struct):
+    """
+    Result of applying fault tolerance instructions.
+    """
+
+    request_id: str
+    success: bool
+    reason: str | None = None
+
+
+class FaultToleranceRequest(msgspec.Struct):
+    """
+    Request for fault tolerance instructions, used in the fault tolerance protocol.
+    """
+
+    request_id: str
+    instruction: str
+    params: dict[str, Any]
+
+    @classmethod
+    def builder(
+        cls, request_id: str, instruction: str, params: dict[str, Any]
+    ) -> "FaultToleranceRequest":
+        return cls(request_id=request_id, instruction=instruction, params=params)
+
+
 @dataclass
 class FaultToleranceZmqAddresses:
+    ft_request_addresses: list[str]
+    ft_result_addresses: list[str]
     # ZMQ fault_state_pub_socket address of client sentinel
     fault_state_pub_socket_addr: str
     # ZMQ engine_fault socket address of EngineCoreSentinel
@@ -55,7 +84,14 @@ class FaultToleranceZmqAddresses:
     engine_core_sentinel_identities: dict[int, bytes]
 
     @classmethod
-    def build(cls, host: str, dp_size: int, ft_config: FaultToleranceConfig):
+    def build(
+        cls,
+        host,
+        dp_size,
+        ft_request_addresses,
+        ft_result_addresses,
+        ft_config: FaultToleranceConfig,
+    ):
         engine_fault_socket_addr = get_engine_client_zmq_addr(
             local_only=False,
             host=host,
@@ -74,12 +110,16 @@ class FaultToleranceZmqAddresses:
             fault_state_pub_socket_addr=fault_state_pub_socket_addr,
             engine_fault_socket_addr=engine_fault_socket_addr,
             engine_core_sentinel_identities=engine_core_sentinel_identities,
+            ft_request_addresses=ft_request_addresses,
+            ft_result_addresses=ft_result_addresses,
         )
 
     def to_str(self) -> str:
         payload = {
             "fault_state_pub_socket_addr": self.fault_state_pub_socket_addr,
             "engine_fault_socket_addr": self.engine_fault_socket_addr,
+            "ft_request_addresses": self.ft_request_addresses,
+            "ft_result_addresses": self.ft_result_addresses,
             "engine_core_sentinel_identities": {
                 str(rank): identity.hex()
                 for rank, identity in self.engine_core_sentinel_identities.items()
@@ -95,6 +135,8 @@ class FaultToleranceZmqAddresses:
             for rank, identity_hex in payload["engine_core_sentinel_identities"].items()
         }
         return cls(
+            ft_request_addresses=payload["ft_request_addresses"],
+            ft_result_addresses=payload["ft_result_addresses"],
             fault_state_pub_socket_addr=payload["fault_state_pub_socket_addr"],
             engine_fault_socket_addr=payload["engine_fault_socket_addr"],
             engine_core_sentinel_identities=identities,

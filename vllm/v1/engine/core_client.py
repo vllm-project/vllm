@@ -55,7 +55,11 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance import ClientSentinel
-from vllm.v1.fault_tolerance.utils import FaultToleranceZmqAddresses
+from vllm.v1.fault_tolerance.utils import (
+    FaultToleranceRequest,
+    FaultToleranceResult,
+    FaultToleranceZmqAddresses,
+)
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -270,6 +274,11 @@ class EngineCoreClient(ABC):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        raise NotImplementedError
+
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
         raise NotImplementedError
 
     async def fault_reporter(self):
@@ -912,7 +921,8 @@ class AsyncMPClient(MPClient):
                 self.client_sentinel = ClientSentinel(
                     vllm_config=vllm_config,
                     fault_tolerance_addresses=ft_addr,
-                    shutdown_callback=self.shutdown,
+                    call_utility_async=self._call_utility_async,
+                    core_engines=self.core_engines,
                 )
                 self.resources.client_sentinel = self.client_sentinel
             self.engine_status = {
@@ -1164,6 +1174,14 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def handle_fault(
+        self, ft_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        res = await self._call_utility_async(
+            ft_request.instruction, ft_request, engine=b"client_sentinel"
+        )
+        return FaultToleranceResult(**res)
 
     def _engine_status_listener(self):
         decoder = msgspec.msgpack.Decoder()
