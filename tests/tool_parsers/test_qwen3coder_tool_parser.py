@@ -1019,7 +1019,7 @@ def test_none_tool_calls_filtered(qwen3_tool_parser, sample_tools):
     assert args["state"] == "TX"
 
 
-def test_anyof_parameter_not_double_encoded(qwen3_tool_parser):
+def test_anyof_parameter_not_double_encoded(qwen3_tokenizer):
     """Regression: anyOf parameters must not be double-encoded (PR #36032)."""
     tools = [
         ChatCompletionToolsParam(
@@ -1038,6 +1038,8 @@ def test_anyof_parameter_not_double_encoded(qwen3_tool_parser):
         )
     ]
 
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+
     model_output = (
         "<tool_call>\n"
         "<function=update_record>\n"
@@ -1047,7 +1049,7 @@ def test_anyof_parameter_not_double_encoded(qwen3_tool_parser):
     )
 
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
+    result = parser.extract_tool_calls(model_output, request=request)
 
     assert result.tools_called
     assert len(result.tool_calls) == 1

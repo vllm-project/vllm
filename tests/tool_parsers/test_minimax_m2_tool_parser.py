@@ -6,7 +6,6 @@ import json
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
@@ -449,38 +448,16 @@ class TestLargeChunks:
         }
 
 
-def _make_request_with_tools(tools_spec):
-    """Build a ChatCompletionRequest with tool definitions.
-
-    *tools_spec* is a list of dicts, each with 'name' and 'parameters' keys.
-    """
-    tools = []
-    for spec in tools_spec:
-        tools.append(
-            ChatCompletionToolsParam(
-                function=FunctionDefinition(
-                    name=spec["name"],
-                    parameters=spec["parameters"],
-                ),
-            )
-        )
-    return ChatCompletionRequest(
-        messages=[],
-        model="test-model",
-        tools=tools,
-    )
-
-
 class TestAnyOfNullableParam:
     """Regression: anyOf nullable parameter parsing (PR #32342)."""
 
-    def test_anyof_nullable_param_non_null_value(self, parser):
+    def test_anyof_nullable_param_non_null_value(self):
         """A valid non-null string should be preserved, not collapsed to None."""
-        request = _make_request_with_tools(
-            [
-                {
-                    "name": "update_profile",
-                    "parameters": {
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="update_profile",
+                    parameters={
                         "type": "object",
                         "properties": {
                             "nickname": {
@@ -488,9 +465,10 @@ class TestAnyOfNullableParam:
                             },
                         },
                     },
-                }
-            ]
-        )
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
 
         results = _feed(
             parser,
@@ -499,20 +477,19 @@ class TestAnyOfNullableParam:
                 '<parameter name="nickname">Alice</parameter>'
                 "</invoke></minimax:tool_call>",
             ],
-            request=request,
         )
         tc = _collect_tool_calls(results)
         assert len(tc) == 1
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["nickname"] == "Alice"
 
-    def test_anyof_nullable_param_null_value(self, parser):
+    def test_anyof_nullable_param_null_value(self):
         """An actual null-like value should be returned as None/null."""
-        request = _make_request_with_tools(
-            [
-                {
-                    "name": "update_profile",
-                    "parameters": {
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="update_profile",
+                    parameters={
                         "type": "object",
                         "properties": {
                             "nickname": {
@@ -520,9 +497,10 @@ class TestAnyOfNullableParam:
                             },
                         },
                     },
-                }
-            ]
-        )
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
 
         results = _feed(
             parser,
@@ -531,20 +509,19 @@ class TestAnyOfNullableParam:
                 '<parameter name="nickname">null</parameter>'
                 "</invoke></minimax:tool_call>",
             ],
-            request=request,
         )
         tc = _collect_tool_calls(results)
         assert len(tc) == 1
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["nickname"] is None
 
-    def test_anyof_nullable_param_object_value(self, parser):
+    def test_anyof_nullable_param_object_value(self):
         """A valid object value in anyOf with null should parse as dict."""
-        request = _make_request_with_tools(
-            [
-                {
-                    "name": "update_settings",
-                    "parameters": {
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="update_settings",
+                    parameters={
                         "type": "object",
                         "properties": {
                             "config": {
@@ -552,9 +529,10 @@ class TestAnyOfNullableParam:
                             },
                         },
                     },
-                }
-            ]
-        )
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
 
         results = _feed(
             parser,
@@ -564,7 +542,6 @@ class TestAnyOfNullableParam:
                 "</parameter>"
                 "</invoke></minimax:tool_call>",
             ],
-            request=request,
         )
         tc = _collect_tool_calls(results)
         assert len(tc) == 1
