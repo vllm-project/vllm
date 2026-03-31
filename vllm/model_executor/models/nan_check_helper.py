@@ -155,9 +155,11 @@ def mark_fp8_nan(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
 _kv_write_nan_counts: torch.Tensor | None = None
 
 # Per-layer int32 flags written by concat_and_cache_mla_kernel via atomicOr.
+# Shape: (num_layers, 2) — [layer, 0] = bit flags, [layer, 1] = min token_idx.
 # Bit layout: bit0=FP8 NaN in kv_c, bit1=FP8 NaN in k_pe,
 #             bit2=Inf in kv_c source, bit3=Inf in k_pe source,
 #             bit4=NaN in kv_c source, bit5=NaN in k_pe source.
+# token_idx initialized to INT_MAX; kernel uses atomicMin to capture first hit.
 _kv_kernel_nan_flags: torch.Tensor | None = None
 
 
@@ -168,19 +170,22 @@ def _ensure_kv_write_counts(num_layers: int, device: torch.device) -> None:
             num_layers, dtype=torch.int64, device=device)
     if _kv_kernel_nan_flags is None or _kv_kernel_nan_flags.shape[0] < num_layers:
         _kv_kernel_nan_flags = torch.zeros(
-            num_layers, dtype=torch.int32, device=device)
+            num_layers, 2, dtype=torch.int32, device=device)
+        # Column 1 = min token_idx, init to INT_MAX
+        _kv_kernel_nan_flags[:, 1] = 0x7FFFFFFF
 
 
 def get_kernel_nan_flag(layer_idx: int) -> "torch.Tensor | None":
-    """Return a 1-element int32 view for the kernel's atomicOr nan_flag.
+    """Return a 2-element int32 view for the kernel's nan_flag.
 
+    Element [0] = bit flags (atomicOr), [1] = min token_idx (atomicMin).
     Returns None if checks are disabled or flags not yet allocated.
     """
     if not _per_layer_checks_enabled:
         return None
     if _kv_kernel_nan_flags is None:
         return None
-    return _kv_kernel_nan_flags[layer_idx:layer_idx + 1]
+    return _kv_kernel_nan_flags[layer_idx]
 
 
 def mark_kv_cache_write(
@@ -439,7 +444,8 @@ def _zero_all():
     if _kv_write_nan_counts is not None:
         _kv_write_nan_counts.zero_()
     if _kv_kernel_nan_flags is not None:
-        _kv_kernel_nan_flags.zero_()
+        _kv_kernel_nan_flags[:, 0] = 0
+        _kv_kernel_nan_flags[:, 1] = 0x7FFFFFFF
 
 
 def _emit_report(
@@ -885,7 +891,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     # Check kernel-side NaN/Inf flags (set by concat_and_cache_mla_kernel)
     kv_kernel_hit = (
         _kv_kernel_nan_flags is not None
-        and _kv_kernel_nan_flags.any().item()
+        and _kv_kernel_nan_flags[:, 0].any().item()
     )
 
     if not (real_has_nan or real_has_inf or kv_poison or kv_write_nan
@@ -924,13 +930,23 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         }
         f = _get_log()
         for layer_idx in range(kv_kernel_cpu.shape[0]):
-            bits = kv_kernel_cpu[layer_idx].item()
+            bits = kv_kernel_cpu[layer_idx, 0].item()
             if bits == 0:
                 continue
+            tok_idx = kv_kernel_cpu[layer_idx, 1].item()
+            if tok_idx == 0x7FFFFFFF:
+                tok_idx = -1  # no token captured
             flags = [name for bit, name in _BIT_NAMES.items()
                      if bits & (1 << bit)]
+            is_padding = (
+                "PADDING" if tok_idx >= 0 and tok_idx >= n
+                else "REAL" if tok_idx >= 0
+                else "?"
+            )
             msg = (f"[KV_KERNEL_NAN] layer={layer_idx} "
-                   f"bits=0x{bits:02x} flags={','.join(flags)}\n")
+                   f"bits=0x{bits:02x} flags={','.join(flags)} "
+                   f"first_tok={tok_idx} num_actual={n} "
+                   f"tok_type={is_padding}\n")
             f.write(msg)
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)

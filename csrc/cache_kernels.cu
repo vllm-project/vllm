@@ -457,12 +457,18 @@ __global__ void concat_and_cache_mla_kernel(
             fp8::scaled_convert<cache_t, scalar_t, kv_dt>(sv, *scale);
         dst[dst_idx] = out;
         if (nan_flag != nullptr) {
-          if ((static_cast<uint8_t>(out) & 0x7Fu) == 0x7Fu)
-            atomicOr(nan_flag, (1 << nan_bit));
-          if (is_inf_bits(sv))
-            atomicOr(nan_flag, (1 << inf_bit));
-          if (is_nan_bits(sv))
-            atomicOr(nan_flag, (1 << (inf_bit + 2)));
+          int hit = 0;
+          if ((static_cast<uint8_t>(out) & 0x7Fu) == 0x7Fu) {
+            atomicOr(&nan_flag[0], (1 << nan_bit)); hit = 1;
+          }
+          if (is_inf_bits(sv)) {
+            atomicOr(&nan_flag[0], (1 << inf_bit)); hit = 1;
+          }
+          if (is_nan_bits(sv)) {
+            atomicOr(&nan_flag[0], (1 << (inf_bit + 2))); hit = 1;
+          }
+          if (hit)
+            atomicMin(&nan_flag[1], static_cast<int32_t>(token_idx));
         }
       }
     }
@@ -525,10 +531,15 @@ __global__ void concat_and_cache_ds_mla_kernel(
     // RoPE is stored as bf16 (no FP8 conversion) — check source for Inf/NaN
     if (nan_flag != nullptr) {
       const scalar_t* pe_vals = reinterpret_cast<const scalar_t*>(&vals);
-      if (is_inf_bits(pe_vals[0]) || is_inf_bits(pe_vals[1]))
-        atomicOr(nan_flag, (1 << 3));
-      if (is_nan_bits(pe_vals[0]) || is_nan_bits(pe_vals[1]))
-        atomicOr(nan_flag, (1 << 5));
+      int hit = 0;
+      if (is_inf_bits(pe_vals[0]) || is_inf_bits(pe_vals[1])) {
+        atomicOr(&nan_flag[0], (1 << 3)); hit = 1;
+      }
+      if (is_nan_bits(pe_vals[0]) || is_nan_bits(pe_vals[1])) {
+        atomicOr(&nan_flag[0], (1 << 5)); hit = 1;
+      }
+      if (hit)
+        atomicMin(&nan_flag[1], static_cast<int32_t>(token_idx));
     }
     return;
   }
@@ -592,9 +603,12 @@ __global__ void concat_and_cache_ds_mla_kernel(
       src_inf |= is_inf_bits(vals[i]);
       src_nan |= is_nan_bits(vals[i]);
     }
-    if (fp8_nan) atomicOr(nan_flag, (1 << 0));
-    if (src_inf) atomicOr(nan_flag, (1 << 2));
-    if (src_nan) atomicOr(nan_flag, (1 << 4));
+    int hit = 0;
+    if (fp8_nan) { atomicOr(&nan_flag[0], (1 << 0)); hit = 1; }
+    if (src_inf) { atomicOr(&nan_flag[0], (1 << 2)); hit = 1; }
+    if (src_nan) { atomicOr(&nan_flag[0], (1 << 4)); hit = 1; }
+    if (hit)
+      atomicMin(&nan_flag[1], static_cast<int32_t>(token_idx));
   }
 }
 
