@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 
 if not has_triton_kernels():
@@ -14,6 +15,7 @@ if not has_triton_kernels():
         allow_module_level=True,
     )
 
+import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
 import triton_kernels.swiglu
 from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
@@ -303,6 +305,12 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         pc2,
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
+    if current_platform.is_device_capability_family(100):
+        constraints = {
+            "is_persistent": True,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+
     if a_dtype == "bf16" and w_dtype == "mx4":
         quant_config = mxfp4_w4a16_moe_quant_config(
             w1_scale=pc1,
@@ -376,12 +384,21 @@ def test_legacy_routing(
     logits = gating_output
     if sm_first:
         logits = torch.softmax(logits, dim=-1)
-    sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
-    topk_ids = sparse_logits.indx.to(torch.long)
-    topk_weights = sparse_logits.vals
-    routing_data_ref, gather_indx_ref, scatter_indx_ref = make_routing_data(
-        topk_ids, topk_weights, num_experts
-    )
+    topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
+    # topk_fn returns SparseMatrix on NVIDIA, plain tuple on ROCm.
+    if isinstance(topk_result, tuple):
+        topk_weights, topk_ids_raw, bitmatrix = topk_result
+        from triton_kernels.routing import routing_from_bitmatrix
+
+        routing_data_ref, gather_indx_ref, scatter_indx_ref = routing_from_bitmatrix(
+            bitmatrix, topk_weights, topk_ids_raw, num_experts, topk
+        )
+    else:
+        topk_ids = topk_result.indx.to(torch.long)
+        topk_weights = topk_result.vals
+        routing_data_ref, gather_indx_ref, scatter_indx_ref = make_routing_data(
+            topk_ids, topk_weights, num_experts
+        )
 
     routing_data, gather_indx, scatter_indx = legacy_routing(
         gating_output, topk, sm_first=sm_first

@@ -876,10 +876,6 @@ def cutlass_scaled_mm_azp(
     return out.view(*target_shape)
 
 
-def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_sparse_scaled_mm_supported(cuda_device_capability)
-
-
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
     if cuda_device_capability < 90 or cuda_device_capability >= 110:
         return False
@@ -888,94 +884,6 @@ def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
     except AttributeError:
         # Return False on non-CUDA platforms where it is not available
         return False
-
-
-def cutlass_sparse_compress(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compresses a sparse matrix for use with Cutlass sparse operations.
-
-    This function takes a dense tensor and compresses it into two components:
-    non-zero elements and metadata. The compressed representation is compatible
-    with Cutlass sparse kernels.
-
-    Args:
-        a (torch.Tensor):
-            The input tensor to be compressed. Must have one of the following data types:
-            - `torch.int8`
-            - `torch.float8_e4m3fn`
-            - `torch.bfloat16`
-            - `torch.float16`
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]:
-            A tuple containing:
-            - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
-            - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
-
-    Raises:
-        ValueError: If the compression operation fails.
-
-    Notes:
-        - The `a_meta` tensor has a data type of `torch.uint8`.
-        - Each metadata element encodes the sparsity of 4 non-zero elements (i.e., `elemsPerMetaElem = 4`).
-        - The shape of `a_nzs` is `(m, k // 2)`, where `m` and `k` are the dimensions of the input tensor.
-        - The shape of `a_meta` is `(m, k // 2 // elemsPerMetaElem)`.
-    """
-    assert a.dtype in [torch.int8, torch.float8_e4m3fn, torch.bfloat16, torch.float16]
-    assert a.is_contiguous()
-
-    # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
-    elemsPerMetaElem = 4
-    assert a.shape[1] % (2 * elemsPerMetaElem) == 0
-
-    return torch.ops._C.cutlass_sparse_compress(a)
-
-
-def cutlass_scaled_sparse_mm(
-    a: torch.Tensor,
-    bt_nzs: torch.Tensor,
-    bt_meta: torch.Tensor,
-    scale_a: torch.Tensor,
-    scale_b: torch.Tensor,
-    out_dtype: torch.dtype,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """
-    Performs a scaled sparse matrix multiplication using Cutlass.
-
-    Steps:
-    1. Create a dense matrix `a` of shape (m, k) on the CUDA device:
-    `a = torch.randn((m, k), device='cuda')`.
-
-    2. Create a dense matrix `b` of shape (k, n) on the CUDA device:
-    `b = torch.randn((k, n), device='cuda')`.
-
-    3. Prune matrix `b` to 2:4 sparsity along the specified dimension:
-    `b = prune_to_2_4(b, dim=0)`.
-
-    4. Compress the transposed sparse matrix `b.t()`:
-    `bt_nzs, bt_meta = cutlass_sparse_compress(b.t())`.
-
-    5. Perform sparse matrix multiplication using the compressed matrix,
-    applying scaling factors for `a` and `b`, and the output data type:
-    `out = cutlass_scaled_sparse_mm(a, bt_nzs, bt_meta, scale_a, scale_b, out_dtype)`.
-
-    Returns:
-    - The result of the scaled sparse matrix multiplication.
-    """
-    assert bt_nzs.shape[0] % 16 == 0 and bt_nzs.shape[1] % 16 == 0
-    assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
-    assert bias is None or bias.shape[0] == bt_nzs.shape[0] and bias.dtype == out_dtype
-
-    m = a.shape[0]
-    n = bt_nzs.shape[0]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-
-    torch.ops._C.cutlass_scaled_sparse_mm(
-        out, a, bt_nzs, bt_meta, scale_a, scale_b, bias
-    )
-
-    return out
 
 
 def get_cutlass_moe_mm_data(
@@ -2154,7 +2062,7 @@ def selective_scan_fwd(
     cache_indices: torch.Tensor | None,
     has_initial_state: torch.Tensor | None,
     ssm_states: torch.Tensor,
-    pad_slot_id: int,
+    null_block_id: int,
     block_size: int = 1024,
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
@@ -2176,7 +2084,7 @@ def selective_scan_fwd(
         cache_indices,
         has_initial_state,
         ssm_states,
-        pad_slot_id,
+        null_block_id,
         block_size,
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
@@ -3057,6 +2965,38 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         M = mat1.size(0)
         N = mat2.size(0)
         return torch.empty((M, N), dtype=out_dtype)
+
+
+if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
+
+    @register_fake("_C::convert_weight_packed_scale_zp")
+    def convert_weight_packed_scale_zp_fake(
+        qweight: torch.Tensor,
+        qzeros: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.empty_like(qweight),
+            torch.empty_like(qzeros),
+            torch.empty_like(scales),
+        )
+
+
+if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
+
+    @register_fake("_C::int4_scaled_mm_cpu")
+    def int4_scaled_mm_cpu_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        w_zeros: torch.Tensor,
+        w_scales: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        N = w_scales.size(0) * w_scales.size(-1)
+        return torch.empty((x.size(0), N), dtype=x.dtype, device=x.device)
+
+
+_supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
 
 
 class CPUDNNLGEMMHandler:
