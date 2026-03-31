@@ -128,17 +128,46 @@ class TieredOffloadingManager(OffloadingManager):
 
     # ── Core interface ───────────────────────────────────────────
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
-        """Count CPU-ready blocks.
+    _lookup_count = 0
 
-        If this returns 0 and there are disk blocks available, the
-        caller (OffloadingConnectorScheduler.get_num_new_matched_tokens)
-        should call try_disk_prefetch() and return None to the scheduler
-        to defer the request.
-        """
-        # First, mark any completed prefetches as ready
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
+        """Count CPU-ready blocks."""
         self._finalize_completed_prefetches()
-        return self._cpu.lookup(block_hashes)
+        result = self._cpu.lookup(block_hashes)
+
+        # Debug: log stats every 100 lookups
+        TieredOffloadingManager._lookup_count += 1
+        if TieredOffloadingManager._lookup_count % 100 == 0:
+            stats = self.get_debug_stats()
+            logger.info(
+                "DISK_DEBUG lookup#%d result=%s stats=%s",
+                TieredOffloadingManager._lookup_count, result, stats,
+            )
+        return result
+
+    def get_debug_stats(self) -> dict:
+        """Debug stats for diagnosing stalls."""
+        total_blocks = self._cpu._num_blocks
+        allocated = self._cpu._num_allocated_blocks
+        free_list = len(self._cpu._free_list)
+        # Count blocks by ref_cnt
+        ref_counts = {-1: 0, 0: 0}
+        for bh, block in self._cpu._policy.blocks.items():
+            rc = block.ref_cnt
+            ref_counts[rc] = ref_counts.get(rc, 0) + 1
+        return {
+            "total": total_blocks,
+            "allocated": allocated,
+            "free_list": free_list,
+            "available": free_list + (total_blocks - allocated),
+            "in_policy": len(self._cpu._policy.blocks),
+            "ref_cnt_dist": ref_counts,
+            "active_prefetches": len(self._active_prefetches),
+            "pending_dispatch": len(self._pending_dispatch),
+            "pending_completion": len(self._pending_completion),
+            "disk_index_size": self._disk.size,
+            "prefetch_reserved": self._prefetch_blocks_reserved,
+        }
 
     def try_disk_prefetch(
         self,
@@ -182,8 +211,13 @@ class TieredOffloadingManager(OffloadingManager):
 
         # Use prepare_store to allocate CPU blocks via the normal path.
         # This handles eviction, block allocation, policy insertion.
+        logger.info(
+            "DISK_DEBUG try_prefetch: %d disk blocks, budget=%d, reserved=%d",
+            len(disk_hashes), budget, self._prefetch_blocks_reserved,
+        )
         result = self._cpu.prepare_store(disk_hashes)
         if result is None:
+            logger.warning("DISK_DEBUG prefetch prepare_store returned None")
             return False  # Can't allocate, fall back to re-prefill
 
         # Get the CPU block IDs that were allocated
