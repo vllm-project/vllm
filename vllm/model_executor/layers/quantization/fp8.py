@@ -174,6 +174,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
@@ -189,6 +190,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.is_checkpoint_fp8_serialized:
@@ -572,9 +574,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             )
 
             replace_parameter(layer, "weight", qweight.data)
-            layer.weight_scale_inv = torch.nn.Parameter(
-                weight_scale_inv.data, requires_grad=False
-            )
+            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
 
             if self.use_deep_gemm:
                 maybe_post_process_fp8_weight_block(layer)
@@ -585,12 +585,15 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             replace_parameter(layer, "weight_scale", weight_scale.data)
 
             if self.use_marlin:
+                # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
+                # AttributeError if backend selection changes.
                 if hasattr(self.fp8_linear, "marlin_input_dtype"):
                     self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
                 self.fp8_linear.process_weights_after_loading(layer)
             else:
                 replace_parameter(layer, "weight", qweight.t().data)
 
+        # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
 
 
@@ -1056,6 +1059,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -1066,38 +1070,16 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         if self.block_quant:
             assert self.weight_block_size is not None
             from vllm.model_executor.layers.quantization.utils.quant_utils import (
-                scaled_quantize,
+                scaled_quantize_experts,
             )
 
-            block_n, block_k = self.weight_block_size
-            num_experts = layer.local_num_experts
-
-            w13_list = []
-            w13_scale_list = []
-            w2_list = []
-            w2_scale_list = []
-
-            for expert in range(num_experts):
-                q13, s13 = scaled_quantize(
-                    layer.w13_weight[expert],
-                    GroupShape(*self.weight_block_size),
-                    fp8_dtype,
-                )
-                w13_list.append(q13)
-                w13_scale_list.append(s13)
-
-                q2, s2 = scaled_quantize(
-                    layer.w2_weight[expert],
-                    GroupShape(*self.weight_block_size),
-                    fp8_dtype,
-                )
-                w2_list.append(q2)
-                w2_scale_list.append(s2)
-
-            w13 = torch.stack(w13_list)
-            w13_scale = torch.stack(w13_scale_list)
-            w2 = torch.stack(w2_list)
-            w2_scale = torch.stack(w2_scale_list)
+            group_shape = GroupShape(*self.weight_block_size)
+            w13, w13_scale = scaled_quantize_experts(
+                layer.w13_weight, group_shape, fp8_dtype
+            )
+            w2, w2_scale = scaled_quantize_experts(
+                layer.w2_weight, group_shape, fp8_dtype
+            )
 
             if current_platform.is_fp8_fnuz():
                 w13, w13_scale, _ = normalize_e4m3fn_to_e4m3fnuz(w13, w13_scale)
@@ -1130,6 +1112,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w2_input_scale=layer.w2_input_scale,
         )
 
+        # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
 
 

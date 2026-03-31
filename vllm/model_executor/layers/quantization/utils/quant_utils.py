@@ -317,6 +317,31 @@ def scaled_quantize(
     return x_scl_sat.to(quant_dtype).contiguous(), scale.float().reciprocal()
 
 
+def scaled_quantize_experts(
+    expert_weights: torch.Tensor,
+    group_shape: GroupShape,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Block-quantize a 3D (num_experts, out, in) weight tensor per expert.
+
+    Applies ``scaled_quantize`` to each expert slice independently and
+    stacks the results back into 3D tensors.
+
+    Returns:
+        (quantized_weights, quantized_scales_inv) each with leading expert dim.
+    """
+    assert expert_weights.ndim == 3
+    num_experts = expert_weights.shape[0]
+    quantized_weights, quantized_scales_inv = [], []
+    for expert_idx in range(num_experts):
+        quantized_weight, quantized_scale_inv = scaled_quantize(
+            expert_weights[expert_idx], group_shape, quant_dtype
+        )
+        quantized_weights.append(quantized_weight)
+        quantized_scales_inv.append(quantized_scale_inv)
+    return torch.stack(quantized_weights), torch.stack(quantized_scales_inv)
+
+
 # inverses `scaled_quantize`
 def scaled_dequantize(
     x_q: torch.Tensor,
