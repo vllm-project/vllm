@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import re
 import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, overload
@@ -28,6 +29,7 @@ else:
     Executor = Any
 
 logger = init_logger(__name__)
+_NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
@@ -259,6 +261,27 @@ class ParallelConfig:
     nnodes: int = 1
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
+    numa_bind: bool = False
+    """Enable NUMA binding for GPU worker subprocesses."""
+    numa_bind_nodes: list[int] | None = None
+    """NUMA node to bind each GPU worker to.
+
+    Specify one NUMA node per visible GPU, for example `[0, 0, 1, 1]`
+    for a 4-GPU system with GPUs 0-1 on NUMA node 0 and GPUs 2-3 on
+    NUMA node 1. If unset and `numa_bind=True`, vLLM auto-detects the
+    GPU-to-NUMA topology. The values are passed to `numactl --membind`
+    and `--cpunodebind`, so they must be valid `numactl` NUMA node indices.
+    """
+    numa_bind_cpus: list[str] | None = None
+    """Optional CPU lists to bind each GPU worker to.
+
+    Specify one CPU list per visible GPU, for example
+    `["0-3", "4-7", "8-11", "12-15"]`. When set, vLLM uses
+    `numactl --physcpubind` instead of `--cpunodebind`. This is useful
+    for custom policies such as binding to PCT or other high-frequency cores.
+    Each entry must use `numactl --physcpubind` CPU-list syntax, for example
+    `"0-3"` or `"0,2,4-7"`.
+    """
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
@@ -345,6 +368,48 @@ class ParallelConfig:
         """Skip validation if the value is `None` when initialisation is delayed."""
         return None if value is None else handler(value)
 
+    @field_validator("numa_bind_nodes")
+    @classmethod
+    def _validate_numa_bind_nodes(
+        cls, value: list[int] | None
+    ) -> list[int] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("numa_bind_nodes must not be empty.")
+        if any(node < 0 for node in value):
+            raise ValueError("numa_bind_nodes must contain non-negative integers.")
+        return value
+
+    @field_validator("numa_bind_cpus")
+    @classmethod
+    def _validate_numa_bind_cpus(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("numa_bind_cpus must not be empty.")
+
+        for cpuset in value:
+            if not cpuset:
+                raise ValueError("numa_bind_cpus entries must not be empty.")
+            if not _NUMACTL_CPUSET_PATTERN.fullmatch(cpuset):
+                raise ValueError(
+                    "numa_bind_cpus entries must use numactl CPU list syntax, "
+                    "for example '0-3' or '0,2,4-7'."
+                )
+            for part in cpuset.split(","):
+                if "-" not in part:
+                    continue
+                start_str, end_str = part.split("-", 1)
+                if int(start_str) > int(end_str):
+                    raise ValueError(
+                        "numa_bind_cpus ranges must be ascending, "
+                        f"but got '{cpuset}'."
+                    )
+        return value
+
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
@@ -371,6 +436,13 @@ class ParallelConfig:
         if self.data_parallel_size <= 1 and self.data_parallel_external_lb:
             raise ValueError(
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
+            )
+
+        if not self.numa_bind and (
+            self.numa_bind_nodes is not None or self.numa_bind_cpus is not None
+        ):
+            raise ValueError(
+                "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
             )
 
         if self.enable_eplb:
