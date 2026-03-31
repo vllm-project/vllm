@@ -585,7 +585,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         include_usage = False if include_usage is None else include_usage
         include_continuous_usage = (
-            False if continuous_usage is None else continuous_usage
+            False if continuous_usage is None or not include_usage else continuous_usage
         )
 
         policy = self.usage_policy
