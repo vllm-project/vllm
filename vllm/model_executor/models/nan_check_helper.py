@@ -969,10 +969,24 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             hs_maxabs = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
             fused_qkv_nan = ad[0].item() if ad is not None else 0
             fused_qkv_inf = ai[0].item() if ai is not None else 0
+            # Padding-aware: deduce if tok0 contributed NaN
+            hidden_dim = hidden_states.shape[-1]
+            padded = (_saved_batch_info["padded_size"]
+                      if _saved_batch_info else total)
+            num_padding = padded - n
+            # fused_qkv output dim = 2112, kv_c dim = 512, k_pe dim = 64
+            fqkv_pad_max = num_padding * 2112
+            kvc_pad_max = num_padding * 512
+            kpe_pad_max = num_padding * 64
+            hs_pad_max = num_padding * hidden_dim
+            tok0_hs_nan = "YES" if nan_cpu[layer_idx, 0].item() > hs_pad_max else "NO"
+            tok0_fqkv_nan = "YES" if fused_qkv_nan > fqkv_pad_max else "NO"
             msg = (f"[KV_KERNEL_NAN] layer={layer_idx} "
                    f"bits=0x{bits:02x} flags={','.join(flags)} "
                    f"first_tok={tok_idx} num_actual={n} "
                    f"tok_type={is_padding} "
+                   f"tok0_hs_nan={tok0_hs_nan} "
+                   f"tok0_fqkv_nan={tok0_fqkv_nan} "
                    f"hs_maxabs={hs_maxabs:.4g} "
                    f"fused_qkv_nan={fused_qkv_nan} "
                    f"fused_qkv_inf={fused_qkv_inf} "
@@ -981,13 +995,23 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                    f"kvc_post_norm_nan={kvc_post_nan} "
                    f"kvc_post_norm_inf={kvc_post_inf} "
                    f"kpe_pre_rope_nan={kpe_pre_nan} "
-                   f"kpe_pre_rope_inf={kpe_pre_inf}\n")
+                   f"kpe_pre_rope_inf={kpe_pre_inf} "
+                   f"padded={padded}\n")
             f.write(msg)
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
 
     if per_layer_hs_nan:
         f = _get_log()
+        # Deduce token-0 NaN from total counts.
+        # mark() runs inside CUDA graph on all padded tokens (frozen slice).
+        # padding_nan_max = max NaN from padding-only.
+        # If count > padding_nan_max, the real token also has NaN.
+        hidden_dim = hidden_states.shape[-1]
+        padded = (_saved_batch_info["padded_size"]
+                  if _saved_batch_info else total)
+        num_padding = padded - n
+        padding_nan_max = num_padding * hidden_dim
         for layer_idx in range(nan_cpu.shape[0]):
             hs_nan = nan_cpu[layer_idx, 0].item()
             hs_inf = inf_cpu[layer_idx, 0].item() if inf_cpu is not None else 0
@@ -996,10 +1020,16 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             ma = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
             if hs_nan + hs_inf + attn_nan + moe_nan == 0:
                 continue
+            # Determine if real token (tok 0) has NaN
+            tok0_nan = "YES" if hs_nan > padding_nan_max else "NO"
+            real_nan_elems = max(0, hs_nan - padding_nan_max)
             msg = (f"[HS_NAN] layer={layer_idx} "
-                   f"input_nan={hs_nan} input_inf={hs_inf} "
+                   f"input_nan={hs_nan} tok0_nan={tok0_nan} "
+                   f"real_nan_elems={real_nan_elems} "
+                   f"input_inf={hs_inf} "
                    f"attn_nan={attn_nan} moe_nan={moe_nan} "
-                   f"hs_maxabs={ma:.4g}\n")
+                   f"hs_maxabs={ma:.4g} "
+                   f"padded={padded} actual={n}\n")
             f.write(msg)
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
