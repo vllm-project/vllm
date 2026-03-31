@@ -107,9 +107,8 @@ class InputBatch:
         # seq_len equals to query_len
         input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
         input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
-        # Pad for full CUDA graph mode. Use 1 instead of 0 to prevent
-        # NaN from empty softmax in attention kernels.
-        input_buffers.seq_lens[num_reqs:] = 1
+        # Pad for full CUDA graph mode.
+        input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
 
         query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
