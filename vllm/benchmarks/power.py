@@ -9,15 +9,6 @@ from abc import ABC, abstractmethod
 import numpy as np
 import torch
 
-# # TODO: try to use platform.is_rocm().
-# if torch.version.hip:
-#     try:
-#         import amdsmi
-
-#         amdsmi.amdsmi_init(amdsmi.AmdSmiInitFlags.INIT_ALL_PROCESSORS)
-#     except Exception as e:
-#         amdsmi.amdsmi_init(amdsmi.AmdSmiInitFlags.INIT_AMD_GPUS)
-
 
 class PowerRecorderMixin(ABC):
     """Abstract base class for power recorders."""
