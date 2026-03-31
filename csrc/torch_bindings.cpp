@@ -263,10 +263,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization ops
 #ifndef USE_ROCM
-  // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
-  ops.def(
-      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.

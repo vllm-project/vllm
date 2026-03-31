@@ -301,11 +301,6 @@ int64_t qr_max_size();
 #endif
 
 #ifndef USE_ROCM
-void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
-                       torch::Tensor const& mat_b);
-#endif
-
-#ifndef USE_ROCM
 torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
                                     torch::Tensor const& norm_weight,
                                     torch::Tensor workspace, int64_t const rank,
