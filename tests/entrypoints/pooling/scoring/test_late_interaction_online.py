@@ -6,7 +6,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
+from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 
 from .util import ColBERTScoringHfRunner
 
