@@ -3,10 +3,15 @@
 //
 // Fused QK RMSNorm + RoPE + KV Cache Write + FP8 Per-Tensor Quantisation
 //
-// One CUDA thread-block processes one token.
-//   Q heads:  RMSNorm → RoPE → write BF16/FP16 to q_out
-//   K heads:  RMSNorm → RoPE → FP8 quantise → write to paged k_cache
-//   V heads:  FP8 quantise → write to paged v_cache
+// v2 – Interleaved V-store / K-compute design:
+//   Phase 1 (per KV head):
+//     Load V[h] → FP8 convert → store v_cache  (fire-and-forget)
+//     Load K[h] → smem → RMSNorm → RoPE → store k_cache
+//   Phase 2 (per Q head):
+//     Load Q[h] → smem → RMSNorm → RoPE → store q_out
+//
+// V stores are non-blocking and overlap with K's RMSNorm computation,
+// effectively hiding V's store latency for free.
 //
 // Build (standalone, for rapid testing):
 //   torch.utils.cpp_extension.load(
@@ -69,26 +74,38 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val) {
   // through half for a rough approximation.  Good enough for correctness
   // testing on Ampere / older GPUs.
   val = fminf(fmaxf(val, -448.f), 448.f);
-  // Pack into unsigned byte via half roundtrip (lossy but deterministic).
   __half h = __float2half_rn(val);
-  // Re-interpret the 16-bit pattern; truncate mantissa.
   unsigned short bits = *reinterpret_cast<unsigned short*>(&h);
-  // Simplified E4M3: sign(1) | exp(4) | man(3)
   uint8_t sign = (bits >> 15) & 1;
-  int exp_h = ((bits >> 10) & 0x1F) - 15;   // de-bias half exponent
-  int man_h = (bits >> 7) & 0x7;             // top 3 mantissa bits
-  int exp_fp8 = exp_h + 7;                   // re-bias for E4M3 (bias=7)
+  int exp_h = ((bits >> 10) & 0x1F) - 15;
+  int man_h = (bits >> 7) & 0x7;
+  int exp_fp8 = exp_h + 7;
   if (exp_fp8 <= 0) {
-    return (sign << 7);                       // ±0 / underflow
+    return (sign << 7);
   }
   if (exp_fp8 >= 15) {
-    return (sign << 7) | 0x7E;               // max normal (±448)
+    return (sign << 7) | 0x7E;
   }
   return (sign << 7) | ((exp_fp8 & 0xF) << 3) | (man_h & 0x7);
 #endif
 }
 
-// ── Main fused kernel ────────────────────────────────────────────────
+// ── Cache write helpers ──────────────────────────────────────────────
+
+// Write a single element to the paged cache (FP8 or model dtype).
+template <typename scalar_t, bool IS_FP8>
+__device__ __forceinline__ void write_cache_elem(
+    void* cache_ptr, int idx, float val, float scale) {
+  if constexpr (IS_FP8) {
+    reinterpret_cast<uint8_t*>(cache_ptr)[idx] =
+        float_to_fp8_e4m3(val / scale);
+  } else {
+    reinterpret_cast<scalar_t*>(cache_ptr)[idx] =
+        static_cast<scalar_t>(val);
+  }
+}
+
+// ── Main fused kernel (v2 – interleaved V/K) ────────────────────────
 //
 // Template params:
 //   scalar_t  – BFloat16 or Half (model dtype)
@@ -131,7 +148,7 @@ __global__ void fused_kernel(
   const scalar_t* sin_ptr = cos_ptr + embed_dim;
 
   // ── Shared memory layout ──
-  //    [0 .. head_dim-1]     : per-head data buffer
+  //    [0 .. head_dim-1]     : per-head data buffer (for RMSNorm)
   //    [head_dim .. head_dim + 8] : reduction scratch (≤ 8 warps)
   extern __shared__ float smem[];
   float* head_buf = smem;
@@ -139,10 +156,8 @@ __global__ void fused_kernel(
   __shared__ float s_inv_rms;
 
   // =================================================================
-  //  Helper lambdas (capture everything by reference)
+  //  Helper: RMSNorm – load one head from `src` into smem, normalise
   // =================================================================
-
-  // RMSNorm: load one head → normalise in smem
   auto do_rmsnorm = [&](const scalar_t* src, const scalar_t* weight) {
     float variance = 0.f;
     for (int i = tid; i < head_dim; i += blockDim.x) {
@@ -159,7 +174,9 @@ __global__ void fused_kernel(
     __syncthreads();
   };
 
-  // RoPE: apply in-place in smem.  Reads from smem, writes to `dst`.
+  // =================================================================
+  //  Helper: RoPE from smem → write to model-dtype output (q_out)
+  // =================================================================
   auto do_rope_write_model = [&](scalar_t* dst) {
     for (int i = tid; i < head_dim; i += blockDim.x) {
       float result;
@@ -185,7 +202,9 @@ __global__ void fused_kernel(
     __syncthreads();
   };
 
-  // RoPE + write to KV cache (FP8 or model dtype).
+  // =================================================================
+  //  Helper: RoPE from smem → write to KV cache (FP8 or model dtype)
+  // =================================================================
   auto do_rope_write_cache = [&](void* cache_ptr, float scale) {
     for (int i = tid; i < head_dim; i += blockDim.x) {
       float result;
@@ -206,28 +225,19 @@ __global__ void fused_kernel(
         float y = head_buf[2 * pair + 1];
         result = (i & 1) == 0 ? (x * c - y * s) : (y * c + x * s);
       }
-      if constexpr (IS_FP8) {
-        reinterpret_cast<uint8_t*>(cache_ptr)[i] =
-            float_to_fp8_e4m3(result / scale);
-      } else {
-        reinterpret_cast<scalar_t*>(cache_ptr)[i] =
-            static_cast<scalar_t>(result);
-      }
+      write_cache_elem<scalar_t, IS_FP8>(cache_ptr, i, result, scale);
     }
     __syncthreads();
   };
 
   // =================================================================
-  //  1.  Q heads – RMSNorm + RoPE → q_out (model dtype)
-  // =================================================================
-  scalar_t* q_dst = q_out + (int64_t)token_idx * q_size;
-  for (int h = 0; h < num_heads_q; ++h) {
-    do_rmsnorm(q_in + h * head_dim, q_weight);
-    do_rope_write_model(q_dst + h * head_dim);
-  }
-
-  // =================================================================
-  //  2.  K heads – RMSNorm + RoPE → k_cache (FP8 or model dtype)
+  //  Phase 1:  Interleaved V-store + K-compute  (per KV head)
+  //
+  //  For each KV head h:
+  //    a) Load V[h] from global → FP8 convert → store v_cache
+  //       (fire-and-forget, non-blocking)
+  //    b) Load K[h] → smem → RMSNorm reduction → RoPE → store k_cache
+  //       (V stores complete in background during K's compute)
   // =================================================================
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx >= 0) {
@@ -235,38 +245,44 @@ __global__ void fused_kernel(
     const int64_t blk_off = slot_idx % block_size;
     // NHD layout: [num_blocks, block_size, num_kv_heads, head_dim]
     const int64_t cache_elem_size = IS_FP8 ? 1 : sizeof(scalar_t);
-    const int64_t page_stride = (int64_t)num_heads_kv * head_dim * cache_elem_size;
+    const int64_t page_stride =
+        (int64_t)num_heads_kv * head_dim * cache_elem_size;
     const int64_t blk_stride = (int64_t)block_size * page_stride;
-    char* k_base =
-        reinterpret_cast<char*>(k_cache) + blk_idx * blk_stride + blk_off * page_stride;
+    const int64_t base_offset = blk_idx * blk_stride + blk_off * page_stride;
+
+    char* k_base = reinterpret_cast<char*>(k_cache) + base_offset;
+    char* v_base = reinterpret_cast<char*>(v_cache) + base_offset;
 
     for (int h = 0; h < num_heads_kv; ++h) {
-      do_rmsnorm(k_in + h * head_dim, k_weight);
-      do_rope_write_cache(k_base + (int64_t)h * head_dim * cache_elem_size,
-                          k_scale);
-    }
+      const int64_t head_cache_off = (int64_t)h * head_dim * cache_elem_size;
 
-    // =================================================================
-    //  3.  V heads – just copy (optionally FP8-quantise) to v_cache
-    // =================================================================
-    char* v_base =
-        reinterpret_cast<char*>(v_cache) + blk_idx * blk_stride + blk_off * page_stride;
-
-    for (int h = 0; h < num_heads_kv; ++h) {
+      // ── (a) V store: load → convert → fire-and-forget store ──
       const scalar_t* v_src = v_in + h * head_dim;
+      void* v_dst = v_base + head_cache_off;
       for (int i = tid; i < head_dim; i += blockDim.x) {
         float val = static_cast<float>(v_src[i]);
-        if constexpr (IS_FP8) {
-          reinterpret_cast<uint8_t*>(
-              v_base + (int64_t)h * head_dim * cache_elem_size)[i] =
-              float_to_fp8_e4m3(val / v_scale);
-        } else {
-          reinterpret_cast<scalar_t*>(
-              v_base + (int64_t)h * head_dim * cache_elem_size)[i] =
-              static_cast<scalar_t>(val);
-        }
+        write_cache_elem<scalar_t, IS_FP8>(v_dst, i, val, v_scale);
       }
+      // No __syncthreads here – V stores are in flight, keep going.
+
+      // ── (b) K: RMSNorm + RoPE → k_cache ──
+      // While the memory subsystem drains V stores in the background,
+      // threads load K into shared memory and start the RMSNorm reduction.
+      do_rmsnorm(k_in + h * head_dim, k_weight);
+      do_rope_write_cache(k_base + head_cache_off, k_scale);
     }
+  }
+
+  // =================================================================
+  //  Phase 2:  Q heads – RMSNorm + RoPE → q_out (model dtype)
+  //
+  //  By the time we reach here, all KV cache stores are complete or
+  //  nearly so.  Q output goes to a separate buffer (not paged cache).
+  // =================================================================
+  scalar_t* q_dst = q_out + (int64_t)token_idx * q_size;
+  for (int h = 0; h < num_heads_q; ++h) {
+    do_rmsnorm(q_in + h * head_dim, q_weight);
+    do_rope_write_model(q_dst + h * head_dim);
   }
 }
 

@@ -43,7 +43,6 @@ from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     Attention,
@@ -368,10 +367,6 @@ class QKNormRopeCacheQuantFusionPass(VllmPatternMatcherPass):
           pass_config:
             fuse_qk_norm_rope_cache_quant: true
 
-    The pass is restricted to small-batch decode (≤ max_token_num tokens)
-    because for large prefill batches these kernels are compute-bound and
-    the per-kernel latency is not the bottleneck.
-
     Models that benefit
     -------------------
     Any model with per-head QK norm, e.g. Qwen3, some Gemma3 variants.
@@ -390,11 +385,6 @@ class QKNormRopeCacheQuantFusionPass(VllmPatternMatcherPass):
         super().__init__(config)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="qk_norm_rope_cache_quant_fusion_pass"
-        )
-
-        cc = config.compilation_config
-        self.max_token_num = (
-            cc.pass_config.qk_norm_rope_cache_quant_max_token_num
         )
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
@@ -426,10 +416,6 @@ class QKNormRopeCacheQuantFusionPass(VllmPatternMatcherPass):
             "QKNormRopeCacheQuantFusionPass: replaced %s pattern(s)",
             self.matched_count,
         )
-
-    def is_applicable_for_range(self, compile_range: Range) -> bool:
-        """Only apply during small-batch decode, not large-batch prefill."""
-        return compile_range.end <= self.max_token_num
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, QkNormRopeCacheQuantPattern)
