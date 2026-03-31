@@ -69,7 +69,8 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
             f"But got output={output.size()}, "
             f"used_expert_output={fused_expert_output.size()}"
         )
-        output.copy_(fused_expert_output, non_blocking=True)
+        if output.data_ptr() != fused_expert_output.data_ptr():
+            output.copy_(fused_expert_output, non_blocking=True)
         return output
 
 
