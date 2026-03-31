@@ -241,6 +241,7 @@ from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
+    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -342,7 +343,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
         if (
             self.attn_backend.get_name() == "FLASHMLA_SPARSE"
-            and kv_cache_dtype.startswith("fp8")
+            and is_quantized_kv_cache(kv_cache_dtype)
             and kv_cache_dtype != "fp8_ds_mla"
         ):
             assert cache_config is not None
@@ -356,7 +357,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if (
             self.attn_backend.get_name() == "FLASHINFER_MLA_SPARSE"
-            and kv_cache_dtype.startswith("fp8")
+            and is_quantized_kv_cache(kv_cache_dtype)
         ):
             logger.info_once(
                 "Using standard fp8 KV cache format. To use DeepSeek's fp8_ds_mla "
@@ -571,7 +572,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.impl.dcp_world_size == -1:
             self.impl.dcp_world_size = get_dcp_group().world_size
 
-        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
@@ -1433,7 +1434,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         is enabled, else model dtype.
         """
         use_fp8 = (
-            vllm_config.cache_config.cache_dtype.startswith("fp8")
+            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
             and vllm_config.attention_config.use_prefill_query_quantization
             and backend_supports_prefill_query_quantization()
         )
