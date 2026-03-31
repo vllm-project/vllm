@@ -480,7 +480,10 @@ class VllmConfig:
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}"
                 )
-            quant_config.maybe_update_config(model_config.model)
+            quant_config.maybe_update_config(
+                model_config.model,
+                hf_config=model_config.hf_config,
+            )
             return quant_config
         return None
 
@@ -1276,6 +1279,26 @@ class VllmConfig:
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = (
                     max_num_batched_tokens - scheduled_token_delta
+                )
+
+            if self.scheduler_config.max_num_scheduled_tokens <= 0:
+                raise ValueError(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings, which does not allow"
+                    " any tokens to be scheduled. Increase max_num_batched_tokens"
+                    " to accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs."
+                )
+            if self.scheduler_config.max_num_scheduled_tokens < 8192:
+                logger.warning_once(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings. This may lead to suboptimal"
+                    " performance. Consider increasing max_num_batched_tokens to"
+                    " accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs.",
+                    scope="local",
                 )
 
             max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
