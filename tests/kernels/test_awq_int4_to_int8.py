@@ -24,6 +24,10 @@ from vllm._custom_ops import _supports_cpu_w4a8_int8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_cols,
 )
+from vllm.platforms import current_platform
+
+if not current_platform.is_cpu():
+    pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
 requires_cpu_w4a8_int8 = pytest.mark.skipif(
     not _supports_cpu_w4a8_int8,
