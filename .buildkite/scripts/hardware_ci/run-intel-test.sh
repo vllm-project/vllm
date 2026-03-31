@@ -239,8 +239,6 @@ fi
 # --- Docker housekeeping ---
 cleanup_docker
 
-aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
 aws ecr-public get-login-password \
   --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
 
