@@ -95,8 +95,8 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
-    "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
-    "DeepseekV32MonolithicForCausalLM": (
+    # "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
+    "DeepseekV32ForCausalLM": (
         "deepseek_v3_2_monolithic",
         "DeepseekV32MonolithicForCausalLM",
     ),
