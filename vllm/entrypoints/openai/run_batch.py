@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 import sys
 import tempfile
 from argparse import Namespace
@@ -13,12 +14,14 @@ from urllib.parse import urlparse
 
 import aiohttp
 import pybase64 as base64
+import pydantic
 import torch
 from fastapi import UploadFile
 from prometheus_client import start_http_server
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 from starlette.datastructures import State
+from starlette.responses import JSONResponse
 from tqdm import tqdm
 from urllib3.util import parse_url
 
@@ -180,6 +183,18 @@ class BatchRequestInput(OpenAIBaseModel):
         return TypeAdapter(BatchRequestInputBody).validate_python(value)
 
 
+AllResponse: TypeAlias = (
+    ChatCompletionResponse
+    | EmbeddingResponse
+    | ScoreResponse
+    | RerankResponse
+    | TranscriptionResponse
+    | TranscriptionResponseVerbose
+    | TranslationResponse
+    | TranslationResponseVerbose
+)
+
+
 class BatchResponseData(OpenAIBaseModel):
     # HTTP status code of the response.
     status_code: int = 200
@@ -188,17 +203,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: (
-        ChatCompletionResponse
-        | EmbeddingResponse
-        | ScoreResponse
-        | RerankResponse
-        | TranscriptionResponse
-        | TranscriptionResponseVerbose
-        | TranslationResponse
-        | TranslationResponseVerbose
-        | None
-    ) = None
+    body: AllResponse | None = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -536,19 +541,15 @@ async def run_request(
     except Exception as e:
         response = create_error_response(e)
 
-    if isinstance(
-        response,
-        (
-            ChatCompletionResponse,
-            EmbeddingResponse,
-            ScoreResponse,
-            RerankResponse,
-            TranscriptionResponse,
-            TranscriptionResponseVerbose,
-            TranslationResponse,
-            TranslationResponseVerbose,
-        ),
-    ):
+    if isinstance(response, JSONResponse):
+        try:
+            response = TypeAdapter(AllResponse | ErrorResponse).validate_python(
+                json.loads(response.body)
+            )
+        except pydantic.ValidationError:
+            pass
+
+    if isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
