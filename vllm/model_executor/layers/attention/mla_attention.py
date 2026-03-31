@@ -1744,6 +1744,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             prefill_query_start_loc = (
                 query_start_loc[reqs_start:] - query_start_loc[reqs_start]
             )
+            prefill_query_start_loc_cpu = (
+                query_start_loc_cpu[reqs_start:] - query_start_loc_cpu[reqs_start]
+            )
 
             chunked_context_metadata = None
             if max_context_len_cpu > 0:
@@ -1867,7 +1870,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 )
                 prefill_tokens_with_context = None
                 if num_prefills_with_context_cpu > 0:
-                    prefill_tokens_with_context = prefill_query_start_loc[
+                    prefill_tokens_with_context = prefill_query_start_loc_cpu[
                         num_prefills_with_context_cpu
                     ].item()
                 if self.dcp_world_size > 1:
