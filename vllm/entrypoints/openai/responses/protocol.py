@@ -175,6 +175,8 @@ class ResponsesRequest(OpenAIBaseModel):
     include_stop_str_in_output: bool = False
     presence_penalty: float | None = Field(
         default=None,
+        ge=-2.0,
+        le=2.0,
         description=(
             "The presence penalty that was used to penalize new tokens based on "
             "whether they appear in the text so far."
@@ -182,6 +184,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     frequency_penalty: float | None = Field(
         default=None,
+        ge=-2.0,
+        le=2.0,
         description=(
             "The frequency penalty that was used to penalize new tokens based on "
             "their frequency in the text so far."
@@ -520,6 +524,8 @@ class ResponsesResponse(OpenAIBaseModel):
 
     presence_penalty: float | None = Field(
         default=None,
+        ge=-2.0,
+        le=2.0,
         description=(
             "The presence penalty that was used to penalize new tokens based on "
             "whether they appear in the text so far."
@@ -527,6 +533,8 @@ class ResponsesResponse(OpenAIBaseModel):
     )
     frequency_penalty: float | None = Field(
         default=None,
+        ge=-2.0,
+        le=2.0,
         description=(
             "The frequency penalty that was used to penalize new tokens based on "
             "their frequency in the text so far."
