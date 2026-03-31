@@ -346,6 +346,7 @@ def mark_fwd_mqa_real(
 
 _saved_batch_info: dict | None = None
 _last_num_actual_toks: int = 0
+_current_phase: str = "PREFILL"
 
 
 def report_batch_info(
@@ -373,7 +374,7 @@ def _emit_batch_info(tag: str) -> None:
     b = _saved_batch_info
     f = _get_log()
     msg = (
-        f"[BATCH_{tag}] layer={b['layer_idx']} "
+        f"[BATCH_{tag}] phase={_current_phase} layer={b['layer_idx']} "
         f"num_actual_toks={b['num_actual_toks']} "
         f"padded_size={b['padded_size']} "
         f"num_decode_tokens={b['num_decode_tokens']} "
@@ -413,7 +414,7 @@ def _emit_scales(tag: str) -> None:
     s = _saved_scales
     f = _get_log()
     msg = (
-        f"[SCALES_{tag}] layer={s['layer_idx']} "
+        f"[SCALES_{tag}] phase={_current_phase} layer={s['layer_idx']} "
         f"scale={s['scale']} q_scale={s['q_scale']} k_scale={s['k_scale']} "
         f"bmm1_scale={s['bmm1_scale']} bmm2_scale={s['bmm2_scale']}\n"
     )
@@ -489,7 +490,7 @@ def _emit_report(
     f = _get_log()
 
     msg = (
-        f"[{tag}] at_compute_logits (ALL COUNTS ARE REAL-TOKEN ONLY): "
+        f"[{tag}] phase={_current_phase} at_compute_logits (ALL COUNTS ARE REAL-TOKEN ONLY): "
         f"count={total_count} ({total_count // h} real rows) "
         f"num_actual_toks={num_actual_toks} "
         f"shape={list(hidden_states.shape)} dtype={hidden_states.dtype}\n"
@@ -824,7 +825,7 @@ def _emit_kv_poison(
         first_inf_layer = poison_layers[0].item() if len(poison_layers) > 0 else -1
 
     msg = (
-        f"[KV_POISON_FIRST] kv_c_normed has NaN/Inf for real tokens! "
+        f"[KV_POISON_FIRST] phase={_current_phase} kv_c_normed has NaN/Inf for real tokens! "
         f"first_nan_layer={first_nan_layer} "
         f"first_inf_layer={first_inf_layer} "
         f"num_actual_toks={num_actual_toks} "
@@ -851,7 +852,7 @@ def _emit_kv_poison(
             continue
         nc = nan_cpu[layer_idx] if nan_cpu is not None else None
         msg = (
-            f"[KV_POISON_FIRST] layer={layer_idx} "
+            f"[KV_POISON_FIRST] phase={_current_phase} layer={layer_idx} "
             f"kv_c_normed_nan={kv_c_nan} "
             f"kv_c_normed_inf={kv_c_inf} "
             f"kv_cache_fp8_nan={kv_fp8} "
@@ -894,6 +895,14 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
 
     real_has_nan = real.isnan().any().item()
     real_has_inf = real.isinf().any().item()
+
+    # Determine phase: prefill vs decode
+    global _current_phase
+    if _saved_batch_info and _saved_batch_info.get("num_decode_tokens", 0) > 0:
+        _current_phase = "DECODE"
+    else:
+        _current_phase = "PREFILL"
+    phase = _current_phase
 
     # Check per-layer hidden_states NaN from mark() inside CUDA graph.
     # mark() checks all padded tokens, so distinguish padding vs real NaN.
@@ -954,7 +963,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         for layer_idx in range(kv_write_cpu.shape[0]):
             c = kv_write_cpu[layer_idx].item()
             if c > 0:
-                msg = (f"[KV_CACHE_WRITE_NAN] layer={layer_idx} "
+                msg = (f"[KV_CACHE_WRITE_NAN] phase={phase} layer={layer_idx} "
                        f"nan_count={c}\n")
                 f.write(msg)
                 f.flush()
@@ -1008,7 +1017,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             hs_pad_max = num_padding * hidden_dim
             tok0_hs_nan = "YES" if nan_cpu[layer_idx, 0].item() > hs_pad_max else "NO"
             tok0_fqkv_nan = "YES" if fused_qkv_nan > fqkv_pad_max else "NO"
-            msg = (f"[KV_KERNEL_NAN] layer={layer_idx} "
+            msg = (f"[KV_KERNEL_NAN] phase={phase} layer={layer_idx} "
                    f"bits=0x{bits:02x} flags={','.join(flags)} "
                    f"first_tok={tok_idx} num_actual={n} "
                    f"tok_type={is_padding} "
@@ -1039,7 +1048,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             moe_nan = nan_cpu[layer_idx, 3].item()
             ma = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
             real_nan_elems = hs_nan - hs_pad_max
-            msg = (f"[HS_REAL_NAN] layer={layer_idx} "
+            msg = (f"[HS_REAL_NAN] phase={phase} layer={layer_idx} "
                    f"real_nan_elems={real_nan_elems} "
                    f"input_nan={hs_nan} input_inf={hs_inf} "
                    f"attn_nan={attn_nan} moe_nan={moe_nan} "
@@ -1054,7 +1063,8 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         f = _get_pad_log()
         pad_layers = [i for i in range(nan_cpu.shape[0])
                       if nan_cpu[i, 0].item() > 0]
-        msg = (f"[HS_PAD_NAN] padding-only NaN in {len(pad_layers)} layers "
+        msg = (f"[HS_PAD_NAN] phase={phase} padding-only NaN in "
+               f"{len(pad_layers)} layers "
                f"(first={pad_layers[0] if pad_layers else '?'} "
                f"last={pad_layers[-1] if pad_layers else '?'}) "
                f"padded={padded} actual={n}\n")
