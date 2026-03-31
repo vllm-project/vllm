@@ -348,6 +348,22 @@ _saved_batch_info: dict | None = None
 _last_num_actual_toks: int = 0
 _current_phase: str = "PREFILL"
 
+# Batch info set from OUTSIDE the compiled region (model_runner.py).
+# These are reliable during CUDA graph replay.
+_ext_num_actual: int = 0
+_ext_padded: int = 0
+
+
+def set_batch_info_external(num_actual: int, padded: int) -> None:
+    """Called from model_runner OUTSIDE the compiled region.
+
+    These values are reliable during CUDA graph replay since this
+    function runs as normal Python every step.
+    """
+    global _ext_num_actual, _ext_padded
+    _ext_num_actual = num_actual
+    _ext_padded = padded
+
 
 def report_batch_info(
     layer_idx: int,
@@ -1006,11 +1022,12 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         _current_phase = "PREFILL"
     phase = _current_phase
 
-    # NOTE: _saved_batch_info is Python state set inside the compiled/graph
-    # region, so it may be stale during CUDA graph replay. Use it as a
-    # best-effort estimate; the derived attn_nan_toks in NAN_ORIGIN is
-    # reliable since _nan_counts tensor writes DO replay correctly.
-    if _saved_batch_info:
+    # Prefer external batch info (set from model_runner, outside graph).
+    # Fall back to _saved_batch_info (may be stale during graph replay).
+    if _ext_num_actual > 0:
+        n = _ext_num_actual
+        padded = _ext_padded
+    elif _saved_batch_info:
         padded = _saved_batch_info["padded_size"]
         n = _saved_batch_info["num_actual_toks"]
     else:

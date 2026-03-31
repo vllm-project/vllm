@@ -941,6 +941,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
+        try:
+            from vllm.model_executor.models.nan_check_helper import (
+                set_batch_info_external as _nan_set_ext,
+            )
+            _nan_set_ext(input_batch.num_tokens,
+                         input_batch.num_tokens_after_padding)
+        except Exception:
+            pass
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
