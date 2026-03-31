@@ -17,10 +17,11 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
-    from vllm.inputs import ProcessorInputs
+    from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
@@ -166,6 +167,9 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+
+    def is_zen_cpu(self) -> bool:
+        return False
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
@@ -421,29 +425,11 @@ class Platform:
         pass
 
     @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Ensure block_size is compatible with the attention backend.
-        """
-        from vllm.config.cache import CacheConfig
-
-        cache_config = vllm_config.cache_config
-        if cache_config.user_specified_block_size:
-            # User specified --block-size; keep it.
-            return
-
-        model_config = vllm_config.model_config
-        # model_config may be None during testing.
-        # Skip hybrid models — their block_size is managed by
-        # HybridAttentionMambaModelConfig.
-        if model_config is None or model_config.is_hybrid:
-            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
-            return
-
-        from vllm.config.vllm import (
-            get_layers_from_vllm_config,
-            set_current_vllm_config,
-        )
+    def _find_non_ssm_backend(
+        cls, vllm_config: "VllmConfig"
+    ) -> "type[AttentionBackend] | None":
+        """Find the first non-SSM attention backend from model layers."""
+        from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
@@ -452,23 +438,181 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        if not attn_layers:
-            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+        for layer in attn_layers.values():
+            b = layer.get_attn_backend()
+            if not b.is_ssm():
+                return b
+        return None
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Ensure block_size is compatible with the attention backend.
+        For hybrid models, also aligns block_size with mamba page sizes.
+        """
+        from vllm.config.cache import CacheConfig
+        from vllm.config.vllm import set_current_vllm_config
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+
+        # model_config may be None during testing.
+        if not model_config:
             return
 
-        first_layer = next(iter(attn_layers.values()))
-        backend_cls = first_layer.get_attn_backend()
+        backend_cls = cls._find_non_ssm_backend(vllm_config)
+        if backend_cls is None:
+            return
+
+        # Phase 1: Pick block size from backend (skip if user set --block-size)
+        if not cache_config.user_specified_block_size:
+            with set_current_vllm_config(vllm_config):
+                preferred = backend_cls.get_preferred_block_size(
+                    CacheConfig.DEFAULT_BLOCK_SIZE
+                )
+            if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+                logger.info(
+                    "Setting kv cache block size to %d for %s backend.",
+                    preferred,
+                    backend_cls.get_name(),
+                )
+            cache_config.block_size = preferred
+
+        # Phase 2: Align block/mamba sizes for hybrid models
+        # (may override user settings).
+        if model_config.is_hybrid:
+            cls._align_hybrid_block_size(vllm_config, backend_cls)
+
+    @classmethod
+    def _align_hybrid_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_cls: "type[AttentionBackend]",
+    ) -> None:
+        """
+        For hybrid attention/mamba models, ensure that the attention page
+        size is >= the mamba page size, and pad the mamba page size to match.
+        """
+        from math import lcm
+
+        from vllm.config.vllm import set_current_vllm_config
+        from vllm.model_executor.models import ModelRegistry
+        from vllm.utils.math_utils import cdiv
+        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.v1.attention.backend import MultipleOf
+        from vllm.v1.kv_cache_interface import (
+            FullAttentionSpec,
+            MambaSpec,
+            MLAAttentionSpec,
+        )
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+
+        if cache_config.cache_dtype == "auto":
+            kv_cache_dtype = model_config.dtype
+        else:
+            kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        # Compute attention page size for 1 token
+        if model_config.use_mla:
+            attn_page_size_1_token = MLAAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+            ).page_size_bytes
+        else:
+            attn_page_size_1_token = FullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+            ).page_size_bytes
+
+        # Compute mamba page size
+        model_cls, _ = ModelRegistry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+        mamba_page_size = MambaSpec(
+            shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
+            dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+            block_size=-1,
+        ).page_size_bytes
+
+        if mamba_page_size == 0:
+            return
+
+        # mamba_block_size here should either be user specified value or None
+        mamba_block_size = (
+            cache_config.mamba_block_size
+            if cache_config.user_specified_mamba_block_size
+            else None
+        )
+
+        # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(
-                CacheConfig.DEFAULT_BLOCK_SIZE
+            kernel_block_alignment_size = max(
+                min(
+                    s.base if isinstance(s, MultipleOf) else s
+                    for s in backend_cls.get_supported_kernel_block_sizes()
+                ),
+                cache_config.block_size,
             )
-        if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+
+        if cache_config.mamba_cache_mode == "all":
+            # With prefix caching, align to mamba chunk size for kernel perf
+            # TODO(tdoublep): this constraint can be relaxed fairly
+            # easily by changing the way we layout chunks in the
+            # mamba2 kernels.
+            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
+            assert base_chunk_size is not None
+            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
+            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
+            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
+            cache_config.mamba_block_size = attn_block_size
+        else:
+            # Without prefix caching, use minimum block size that satisfies
+            # both backend alignment and mamba page size compatibility
+            attn_block_size = kernel_block_alignment_size * cdiv(
+                mamba_page_size,
+                kernel_block_alignment_size * attn_page_size_1_token,
+            )
+
+        if cache_config.block_size < attn_block_size:
+            cache_config.block_size = attn_block_size
             logger.info(
-                "Setting kv cache block size to %d for %s backend.",
-                preferred,
-                backend_cls.get_name(),
+                "Setting attention block size to %d tokens "
+                "to ensure that attention page size is >= mamba page size.",
+                attn_block_size,
             )
-        cache_config.block_size = preferred
+
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.mamba_block_size = cache_config.block_size
+
+        # Pad mamba page size to exactly match attention page size
+        attn_page_size = cache_config.block_size * attn_page_size_1_token
+        assert attn_page_size >= mamba_page_size
+
+        if attn_page_size == mamba_page_size:
+            return
+
+        if (
+            cache_config.mamba_page_size_padded is None
+            or cache_config.mamba_page_size_padded != attn_page_size
+        ):
+            cache_config.mamba_page_size_padded = attn_page_size
+            mamba_padding_pct = (
+                100 * (attn_page_size - mamba_page_size) / mamba_page_size
+            )
+            logger.info(
+                "Padding mamba page size by %.2f%% to ensure "
+                "that mamba page size and attention page size are "
+                "exactly equal.",
+                mamba_padding_pct,
+            )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -632,7 +776,7 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        processed_inputs: "ProcessorInputs",
+        processed_inputs: "EngineInput",
         params: "SamplingParams | PoolingParams",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
@@ -706,6 +850,13 @@ class Platform:
     def support_static_graph_mode(cls) -> bool:
         """
         Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """
+        Returns if DeepGEMM is supported by the current platform.
         """
         return False
 

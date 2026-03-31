@@ -3,7 +3,6 @@ depends_on: []
 steps:
 - label: CPU-Kernel Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -23,7 +22,6 @@ steps:
 
 - label: CPU-Compatibility Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -37,7 +35,6 @@ steps:
 
 - label: CPU-Language Generation and Pooling Model Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -53,7 +50,6 @@ steps:
 
 - label: CPU-Quantization Model Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -73,7 +69,6 @@ steps:
       
 - label: CPU-Distributed Tests
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -92,7 +87,6 @@ steps:
 
 - label: CPU-Multi-Modal Model Tests %N
   depends_on: []
-  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -107,7 +101,7 @@ steps:
 
 - label: "Arm CPU Test"
   depends_on: []
-  soft_fail: true
+  soft_fail: false
   device: arm_cpu
   no_plugin: true
   commands: 

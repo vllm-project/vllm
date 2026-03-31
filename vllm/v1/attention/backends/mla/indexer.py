@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
-    is_deep_gemm_supported,
+    has_deep_gemm,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
@@ -63,6 +63,9 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
+            # DeepseekV32Indexer kernels do not support cross-layer
+            # KV cache layout. Identity permutation keeps num_layers
+            # first, signaling incompatibility.
             return (0, 1, 2, 3)
         return (0, 1, 2)
 
@@ -203,6 +206,8 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     reorder_batch_threshold: int = 1
+    natively_supported_next_n: list[int] = [1, 2]
+    # TODO (matt): integrate kernel with next_n = 4 support
 
     @classmethod
     def get_cudagraph_support(
@@ -210,12 +215,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        if not is_deep_gemm_supported():
-            logger.warning_once(
-                "DeepGEMM is not available. Disabling CUDA graph support "
-                "for sparse attention indexer. This may reduce performance.",
-            )
-            return AttentionCGSupport.NEVER
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
@@ -228,7 +227,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
+        next_n = self.num_speculative_tokens + 1
         self.reorder_batch_threshold += self.num_speculative_tokens
+        self.use_flattening = next_n not in self.natively_supported_next_n
 
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
@@ -238,10 +239,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-
-        # Pre-allocated buffers for flattening (spec decode).
+        self.offsets_buffer = torch.arange(
+            next_n, device=self.device, dtype=torch.int32
+        )
         self.arange_buffer = torch.arange(
-            scheduler_config.max_num_seqs * (1 + self.num_speculative_tokens),
+            scheduler_config.max_num_seqs * next_n,
             dtype=torch.int32,
             device=self.device,
         )
@@ -320,7 +322,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=not self.use_flattening,
             )
         )
 
@@ -362,17 +366,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
-            # Padded CUDA graph requests have block_table entries of -1.
-            # Clamp to 0 to prevent OOB access in the DeepGEMM kernel.
-            # This is safe because padded requests have seq_lens=0, so the
-            # kernel produces no meaningful output for those rows.
-            block_table.clamp_(min=0)
-
             max_decode_len = int(decode_lens_cpu.max().item())
-            if max_decode_len > 1:
+            next_n = 1 + self.num_speculative_tokens
+            use_native = not self.use_flattening and max_decode_len == next_n
+
+            if use_native and next_n > 1:
+                offsets = self.offsets_buffer
+                batch_size = num_decodes
+            elif max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
                 # the kernel always sees next_n=1.
+
+                # Also handles the edge case where use_flattening=False
+                # but max_decode_len != next_n (e.g. a batch containing some
+                # short prefills (q_len < next_n) and no true decodes).
 
                 # Assume 4 requests with seq_lens [10, 7, 12, 0] (the final req is
                 # padding) and decode_lens [3, 1, 4, 0] in the below example comments.
@@ -425,17 +433,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 offsets = None
                 batch_size = num_decode_tokens
             else:
-                next_n = 1 + self.num_speculative_tokens
-                if next_n > 1:
-                    offsets = torch.arange(
-                        next_n, device=self.device, dtype=torch.int32
-                    )
-                else:
-                    offsets = None
+                offsets = None
                 batch_size = num_decodes
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
-            if current_platform.is_cuda() and is_deep_gemm_supported():
+            if current_platform.is_cuda() and has_deep_gemm():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.block_size,

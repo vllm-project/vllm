@@ -21,7 +21,6 @@ import regex as re
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -31,9 +30,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -48,8 +49,8 @@ class Glm4MoeModelToolParser(ToolParser):
     rather than waiting for the complete </arg_value> tag.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         # Stateful streaming fields
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict[str, Any]] = []
@@ -122,7 +123,7 @@ class Glm4MoeModelToolParser(ToolParser):
     def _is_string_type(
         tool_name: str,
         arg_name: str,
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
     ) -> bool:
         if tools is None:
             return False
@@ -151,7 +152,9 @@ class Glm4MoeModelToolParser(ToolParser):
             logger.exception("Failed to determine if tools are enabled.")
             return False
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """Adjust request parameters for tool call token handling."""
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
@@ -206,7 +209,12 @@ class Glm4MoeModelToolParser(ToolParser):
             )
         else:
             if len(tool_calls) > 0:
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                content: str | None = model_output[
+                    : model_output.find(self.tool_calls_start_token)
+                ]
+                # Normalize empty/whitespace-only content to None
+                if not content or not content.strip():
+                    content = None
                 return ExtractedToolCallInformation(
                     tools_called=True, tool_calls=tool_calls, content=content
                 )
@@ -337,10 +345,10 @@ class Glm4MoeModelToolParser(ToolParser):
                     key_json = json.dumps(key, ensure_ascii=False)
 
                     if not self._args_started[self.current_tool_id]:
-                        frag = "{" + key_json + ':"'
+                        frag = "{" + key_json + ': "'
                         self._args_started[self.current_tool_id] = True
                     else:
-                        frag = "," + key_json + ':"'
+                        frag = ", " + key_json + ': "'
 
                     self.streamed_args_for_tool[self.current_tool_id] += frag
                     self._streaming_string_value = True
@@ -447,6 +455,10 @@ class Glm4MoeModelToolParser(ToolParser):
         self.current_tool_id -= 1
 
     def _emit_tool_name_delta(self, tool_name: str) -> DeltaMessage:
+        self.prev_tool_call_arr[self.current_tool_id] = {
+            "name": self._current_tool_name,
+            "arguments": {},
+        }
         return DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
@@ -493,10 +505,10 @@ class Glm4MoeModelToolParser(ToolParser):
         val_json = json.dumps(val_obj, ensure_ascii=False)
 
         if not self._args_started[self.current_tool_id]:
-            fragment = "{" + key_json + ":" + val_json
+            fragment = "{" + key_json + ": " + val_json
             self._args_started[self.current_tool_id] = True
         else:
-            fragment = "," + key_json + ":" + val_json
+            fragment = "," + key_json + ": " + val_json
 
         self._seen_keys[self.current_tool_id].add(key)
         self.streamed_args_for_tool[self.current_tool_id] += fragment
