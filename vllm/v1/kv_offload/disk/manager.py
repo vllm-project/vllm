@@ -171,33 +171,49 @@ class TieredOffloadingManager(OffloadingManager):
             "prefetch_reserved": self._prefetch_blocks_reserved,
         }
 
+    _record_count = 0
+
     def record_disk_miss(
         self, request_id: str, block_hashes: list[BlockHash]
     ) -> None:
-        """Record a disk miss for potential prefetch. CHEAP — no allocation.
-
-        Called from get_num_new_matched_tokens for each request with
-        CPU miss. Just counts disk hits for ranking.
-        """
+        """Record a disk miss for potential prefetch. CHEAP — no allocation."""
+        TieredOffloadingManager._record_count += 1
         # Count how many consecutive blocks are on disk
         disk_count = 0
         for bh in block_hashes:
             if bh in self._active_prefetches:
-                return  # Already being prefetched
+                if TieredOffloadingManager._record_count % 50 == 0:
+                    logger.info("DISK_DEBUG record_miss#%d: already prefetching",
+                                TieredOffloadingManager._record_count)
+                return
             if self._disk.contains(bh):
                 disk_count += 1
             else:
                 break
+        if TieredOffloadingManager._record_count % 50 == 0:
+            logger.info(
+                "DISK_DEBUG record_miss#%d: req=%s disk_count=%d "
+                "total_hashes=%d disk_index=%d candidates=%d",
+                TieredOffloadingManager._record_count,
+                request_id, disk_count, len(block_hashes),
+                self._disk.size, len(self._disk_miss_candidates),
+            )
         if disk_count > 0:
             self._disk_miss_candidates.append(
                 (disk_count, request_id, block_hashes[:disk_count])
             )
 
-    def process_top_disk_miss(self) -> None:
-        """Pick the best prefetch candidate and allocate. ONCE per step.
+    _process_count = 0
 
-        Called from build_connector_meta, not from the hot lookup loop.
-        """
+    def process_top_disk_miss(self) -> None:
+        """Pick the best prefetch candidate and allocate. ONCE per step."""
+        TieredOffloadingManager._process_count += 1
+        if TieredOffloadingManager._process_count % 10 == 0:
+            logger.info(
+                "DISK_DEBUG process#%d: candidates=%d",
+                TieredOffloadingManager._process_count,
+                len(self._disk_miss_candidates),
+            )
         if not self._disk_miss_candidates:
             return
 
