@@ -1,0 +1,104 @@
+[
+    {
+        "test_name": "latency_llama8B_tp1",
+        "environment_variables": {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        },
+        "parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy",
+            "num_iters_warmup": 5,
+            "num_iters": 15,
+            "enforce_eager": "",
+            "block_size": 64,
+            "dtype": "bfloat16",
+            "max_model_len": 256
+        }
+    },
+    {
+        "test_name": "latency_llama8B_tp2",
+        "environment_variables": {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        },
+        "parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "tensor_parallel_size": 2,
+            "load_format": "dummy",
+            "num_iters_warmup": 5,
+            "num_iters": 15,
+            "enforce_eager": "",
+            "block_size": 64,
+            "dtype": "bfloat16",
+            "max_model_len": 256
+        }
+    },
+    {
+        "test_name": "latency_qwen3_4b_tp1",
+        "environment_variables": {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        },
+        "parameters": {
+            "model": "Qwen/Qwen3-4B",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy",
+            "num_iters_warmup": 5,
+            "num_iters": 15,
+            "enforce_eager": "",
+            "block_size": 64,
+            "dtype": "bfloat16",
+            "max_model_len": 256
+        }
+    },
+    {
+        "test_name": "latency_gemma3_4b_tp1",
+        "environment_variables": {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        },
+        "parameters": {
+            "model": "google/gemma-3-4b-it",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy",
+            "num_iters_warmup": 5,
+            "num_iters": 15,
+            "enforce_eager": "",
+            "block_size": 64,
+            "dtype": "bfloat16",
+            "max_model_len": 256
+        }
+    },
+    {
+        "test_name": "latency_mixtral8x7B_tp2",
+        "environment_variables": {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        },
+        "parameters": {
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "tensor_parallel_size": 2,
+            "load_format": "dummy",
+            "num_iters_warmup": 5,
+            "num_iters": 15,
+            "enforce_eager": "",
+            "block_size": 64,
+            "dtype": "bfloat16",
+            "max_model_len": 256
+        }
+    },
+    {
+        "test_name": "latency_llama70B_tp4",
+        "environment_variables": {
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        },
+        "parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+            "tensor_parallel_size": 4,
+            "load_format": "dummy",
+            "num_iters_warmup": 5,
+            "num_iters": 15,
+            "enforce_eager": "",
+            "block_size": 64,
+            "dtype": "bfloat16",
+            "max_model_len": 256
+        }
+    }
+]
