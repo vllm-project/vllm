@@ -211,7 +211,11 @@ class ChunkGatedDeltaRule(CustomOp):
         output_final_state: bool,
         cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
+        return_intermediate_states: bool = False,
+        state_dtype: torch.dtype | None = None,
     ):
+        # Note: return_intermediate_states and state_dtype are not used by the FI
+        # kernel as it does not support prefix caching where these are needed.
         return fi_chunk_gated_delta_rule(
             q=q,
             k=k,
