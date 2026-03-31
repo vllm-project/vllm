@@ -10,9 +10,11 @@ from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
 )
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -54,7 +56,14 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
-        self.tools = tools
+        if tools:
+            self.tools: list[ChatCompletionToolsParam | FunctionTool] = [
+                tool
+                for tool in tools
+                if isinstance(tool, (ChatCompletionToolsParam, FunctionTool))
+            ]
+        else:
+            self.tools = []
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -62,7 +71,9 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """
         Static method that used to adjust the request parameters.
         """
