@@ -3350,7 +3350,7 @@ class GPUModelRunner(
     ]:
         num_nans_in_logits: np.ndarray | None = None
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
-            num_nans_in_logits = self._get_nans_in_logits(logits)
+            num_nans_in_logits = self._get_nans_in_logits(logits, spec_decode_metadata)
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -5086,12 +5086,22 @@ class GPUModelRunner(
     def _get_nans_in_logits(
         self,
         logits: torch.Tensor | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> np.ndarray:
         try:
             if logits is None:
                 return np.zeros(len(self.input_batch.req_ids), dtype=np.int64)
 
             num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
+            if spec_decode_metadata is not None:
+                cu_num_sampled_tokens = (
+                    spec_decode_metadata.cu_num_sampled_tokens.cpu().numpy()
+                )
+                starts = np.empty_like(cu_num_sampled_tokens)
+                starts[0] = 0
+                starts[1:] = cu_num_sampled_tokens[:-1]
+                return np.add.reduceat(num_nans_for_index, starts)
+
             num_nans_in_logits = np.zeros(
                 len(self.input_batch.req_ids), dtype=num_nans_for_index.dtype
             )
