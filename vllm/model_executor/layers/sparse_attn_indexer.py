@@ -54,6 +54,7 @@ def sparse_attn_indexer(
         )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
+        # FP8 elements so elements == bytes
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
@@ -138,7 +139,6 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ke,
                 clean_logits=False,
             )
-
             num_rows = logits.shape[0]
 
             topk_indices = topk_indices_buffer[
