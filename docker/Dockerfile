@@ -498,6 +498,14 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
+# OCI Image Annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+LABEL org.opencontainers.image.title="vLLM" \
+      org.opencontainers.image.description="A high-throughput and memory-efficient inference and serving engine for LLMs" \
+      org.opencontainers.image.url="https://vllm.ai" \
+      org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.vendor="vLLM Project" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 

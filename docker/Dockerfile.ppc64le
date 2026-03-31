@@ -277,6 +277,14 @@ RUN git clone --recursive https://github.com/Reference-LAPACK/lapack.git -b v${L
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS vllm-openai
 
+# OCI Image Annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+LABEL org.opencontainers.image.title="vLLM PowerPC" \
+      org.opencontainers.image.description="vLLM inference engine for PowerPC (ppc64le) platforms" \
+      org.opencontainers.image.url="https://vllm.ai" \
+      org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.vendor="vLLM Project" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ARG PYTHON_VERSION=3.12
 ARG OPENBLAS_VERSION=0.3.30
 
