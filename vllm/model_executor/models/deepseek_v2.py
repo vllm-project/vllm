@@ -372,6 +372,11 @@ class DeepseekV2MoE(nn.Module):
         if self.shared_experts is None:
             assert shared_output is None
 
+        # When skip_scale_and_add is set, return raw outputs so the
+        # caller can fuse scale + add with subsequent ops.
+        if getattr(self, "skip_scale_and_add", False):
+            return (shared_output, final_hidden_states)
+
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:

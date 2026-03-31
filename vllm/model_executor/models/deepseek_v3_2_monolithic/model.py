@@ -173,7 +173,13 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
 
         self.use_mha = False
         self.fuse_qkv_a_proj = True
-        return DeepseekV2ForCausalLM.load_weights(self, _remap_weights())
+        loaded = DeepseekV2ForCausalLM.load_weights(self, _remap_weights())
+
+        # Fuse indexer linear weights after loading.
+        for layer in self.model.layers:
+            layer.fuse_indexer_weights()
+
+        return loaded
 
     def _remap(self, name: str) -> str:
         """Remap only names that differ from original model structure."""

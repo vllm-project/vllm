@@ -20,6 +20,16 @@ from .attention import MonolithicMLAAttention
 from .ops import concat_quant_fp8, fused_norm_rope, fused_q, rms_norm
 from .sparse_indexer import sparse_attn_indexer
 
+_side_stream: torch.cuda.Stream | None = None
+
+
+def _get_side_stream() -> torch.cuda.Stream:
+    """Lazily created CUDA stream shared by all decoder layers."""
+    global _side_stream
+    if _side_stream is None:
+        _side_stream = torch.cuda.Stream()
+    return _side_stream
+
 
 class MonolithicDecoderLayer(nn.Module):
     """
@@ -128,6 +138,27 @@ class MonolithicDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
 
+    def fuse_indexer_weights(self) -> None:
+        """Concatenate indexer_wk and indexer_weights_proj into one weight
+        matrix so Step 1 can use a single GEMM (7168 → 192) instead of two
+        separate ones (7168 → 128 and 7168 → 64).
+
+        Call after model weights are loaded.
+        """
+        attn = self.attn
+        wk = attn.indexer_wk.weight.data  # [128, 7168]
+        wp = attn.indexer_weights_proj.weight.data  # [64, 7168]
+        if wk.dtype != wp.dtype:
+            raise ValueError(
+                f"Cannot fuse indexer weights: indexer_wk has dtype "
+                f"{wk.dtype} but indexer_weights_proj has dtype {wp.dtype}"
+            )
+        self._fused_indexer_hidden_w = nn.Parameter(
+            torch.cat([wk, wp], dim=0),  # [192, 7168]
+            requires_grad=False,
+        )
+        self._index_k_dim = wk.shape[0]  # 128
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -154,17 +185,25 @@ class MonolithicDecoderLayer(nn.Module):
                 self._fi_params,
             )
 
-        # Step 1. hidden_states -> q_c, kv_c, k_pe
-        #                          index_k
-        #                          index_weights
+        current_stream = torch.cuda.current_stream()
+        side = _get_side_stream()
+
+        # Step 1. hidden_states -> q_c, kv_c, k_pe, index_k, index_weights
+        #   Main stream: fused_qkv_a_proj (7168 → 2112, dedicated GEMM)
+        #   Side stream: fused indexer_wk + weights_proj (7168 → 192)
+        ev = current_stream.record_event()
         out: torch.Tensor | tuple = self.self_attn.fused_qkv_a_proj(hidden_states)
         if isinstance(out, tuple):
             out: torch.Tensor = out[0]
         q_c, kv_c, k_pe = out.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
-        index_k, _ = self.attn.indexer_wk(hidden_states)
-        index_weights, _ = self.attn.indexer_weights_proj(hidden_states)
+        with torch.cuda.stream(side):
+            side.wait_event(ev)
+            indexer_out = torch.mm(hidden_states, self._fused_indexer_hidden_w.T)
+            index_k = indexer_out[:, : self._index_k_dim]
+            index_weights = indexer_out[:, self._index_k_dim :]
+        current_stream.wait_stream(side)
 
         # Fetch slot_mapping early so fused_norm_rope can write FP8 data
         # directly into the indexer KV cache (saves a separate kernel).
@@ -221,13 +260,17 @@ class MonolithicDecoderLayer(nn.Module):
             mla_k_scale=mla_k_scale,
         )
 
-        # Step 3. q_c -> q
-        #                index_q
-        q = self.attn.q_b_proj(q_c)[0].view(
-            -1, self.attn.num_local_heads, self.attn.qk_head_dim
-        )
+        # Step 3. q_c -> q, index_q
+        #   Main stream: indexer_wq_b (1536 → 8192, Replicated, larger)
+        #   Side stream: q_b_proj (1536 → 6144, ColumnParallel, smaller)
+        ev = current_stream.record_event()
         index_q, _ = self.attn.indexer_wq_b(q_c)
         index_q = index_q.view(-1, self.attn.index_n_heads, self.attn.index_head_dim)
+        with torch.cuda.stream(side):
+            side.wait_event(ev)
+            q, _ = self.attn.q_b_proj(q_c)
+            q = q.view(-1, self.attn.num_local_heads, self.attn.qk_head_dim)
+        current_stream.wait_stream(side)
 
         # Step 4. Q RoPE + Index Q RoPE + Quantize + Index weights
         index_q_fp8, index_weights = fused_q(
