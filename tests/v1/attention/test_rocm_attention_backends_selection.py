@@ -54,7 +54,7 @@ def mock_on_mi3xx():
         (
             {},
             None,
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 2: Explicit TRITON_ATTN backend
         (
@@ -204,7 +204,7 @@ def test_standard_attention_with_sink_backend_selection(
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
@@ -216,7 +216,7 @@ def test_standard_attention_with_sink_backend_selection(
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
-            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
