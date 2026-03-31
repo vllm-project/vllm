@@ -200,7 +200,7 @@ class Internlm2ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         text = model_output
-        tools = request.tools
+        tools = self.tools
         if "<|action_start|><|plugin|>" in text:
             text, action = text.split("<|action_start|><|plugin|>")
             action = action.split("<|action_end|>".strip())[0]
