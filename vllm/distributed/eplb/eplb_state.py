@@ -549,7 +549,7 @@ class EplbState:
                     eplb_model_state.pending_result is not None
                     and self._all_ranks_result_ready(eplb_model_state)
                 ):
-                    self.move_to_workspace(
+                    _move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
                     )
@@ -748,38 +748,6 @@ class EplbState:
         flag = torch.tensor((has_result,), dtype=torch.int32, device=device)
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
-
-    def move_to_workspace(
-        self,
-        model_state: EplbModelState,
-        ep_group: ProcessGroup,
-    ) -> None:
-        result = model_state.pending_result
-        assert result is not None
-        move_from_buffer(
-            expert_weights=model_state.model.expert_weights[result.layer_idx],
-            expert_weights_buffers=model_state.expert_buffer,
-            is_unchanged=result.is_unchanged,
-            is_received_locally=result.is_received_locally,
-            recv_metadata=result.recv_metadata,
-            new_indices=result.new_physical_to_logical_map.numpy(),
-            ep_rank=ep_group.rank(),
-        )
-
-        _commit_eplb_maps_for_layer(
-            model_state,
-            new_physical_to_logical_map=result.new_physical_to_logical_map,
-            layer=result.layer_idx,
-        )
-        logger.debug(
-            "model %s successfully move_to_workspace layer %d",
-            model_state.model_name,
-            ep_group.rank(),
-        )
-
-        # Reset pending_result before ublocking the async worker
-        model_state.pending_result = None
-        result.consumed_event.record()
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """
@@ -1066,3 +1034,35 @@ def _commit_eplb_maps(
     src = new_replica_count
     dst = model_state.logical_replica_count
     dst.copy_(src, non_blocking=True)
+
+
+def _move_to_workspace(
+    model_state: EplbModelState,
+    ep_group: ProcessGroup,
+) -> None:
+    result = model_state.pending_result
+    assert result is not None
+    move_from_buffer(
+        expert_weights=model_state.model.expert_weights[result.layer_idx],
+        expert_weights_buffers=model_state.expert_buffer,
+        is_unchanged=result.is_unchanged,
+        is_received_locally=result.is_received_locally,
+        recv_metadata=result.recv_metadata,
+        new_indices=result.new_physical_to_logical_map.numpy(),
+        ep_rank=ep_group.rank(),
+    )
+
+    _commit_eplb_maps_for_layer(
+        model_state,
+        new_physical_to_logical_map=result.new_physical_to_logical_map,
+        layer=result.layer_idx,
+    )
+    logger.debug(
+        "model %s successfully move_to_workspace layer %d",
+        model_state.model_name,
+        ep_group.rank(),
+    )
+
+    # Reset pending_result before unblocking the async worker
+    model_state.pending_result = None
+    result.consumed_event.record()
