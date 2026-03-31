@@ -14,8 +14,12 @@ import pytest
 import pytest_asyncio
 import soundfile as sf
 
+from tests.entrypoints.openai.conftest import add_attention_backend
 from tests.utils import RemoteOpenAIServer
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 SEED = 42
 TEMPERATURE = 0.0
@@ -23,45 +27,39 @@ SERVER_ARGS = ["--enforce-eager"]
 if current_platform.is_rocm():
     SERVER_ARGS.append("--no-enable-prefix-caching")
 
-IS_ROCM = current_platform.is_rocm()
 
+def _get_rocm_attention_config(model_name):
+    """Return appropriate ROCm attention config for the given model.
 
-def _is_mi3xx() -> bool:
-    if not IS_ROCM:
-        return False
-    from vllm.platforms.rocm import on_mi3xx
-
-    return on_mi3xx()
-
-
-def _attn_backend_params():
-    """Attention backend params for parametrization.
-
-    On non-ROCm: only default (None).
-    On ROCm: TRITON_ATTN, ROCM_ATTN, and ROCM_AITER_FA (mi3xx only).
+    Whisper uses cross-attention (ENCODER_DECODER) which ROCM_AITER_FA does
+    not support. For Whisper we use ROCM_AITER_UNIFIED_ATTN (or TRITON_ATTN
+    as fallback); other models can use ROCM_AITER_FA.
     """
-    if not IS_ROCM:
-        return [pytest.param(None, id="default")]
+    from vllm.platforms import current_platform
 
-    params = [
-        pytest.param("TRITON_ATTN", id="triton"),
-        pytest.param("ROCM_ATTN", id="rocm_attn"),
-    ]
-    if _is_mi3xx():
-        params.append(
-            pytest.param("ROCM_AITER_FA", id="rocm_aiter_fa"),
-        )
-    return params
+    if not current_platform.is_rocm():
+        return None
+
+    if "whisper" in model_name.lower():
+        try:
+            from vllm.platforms.rocm import _ON_MI3XX
+
+            if _ON_MI3XX:
+                return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
+        except ImportError:
+            logger.warning(
+                "Could not import _ON_MI3XX from rocm platform, "
+                "falling back to TRITON_ATTN for Whisper."
+            )
+        return {"backend": "TRITON_ATTN"}
+
+    return {"backend": "ROCM_AITER_FA"}
 
 
-ATTN_BACKENDS = _attn_backend_params()
-
-
-def _get_server_args(attn_backend):
+def _get_server_args(attention_config):
     """Get server args with attention backend if specified."""
     args = SERVER_ARGS.copy()
-    if attn_backend:
-        args.extend(["--attention-backend", attn_backend])
+    add_attention_backend(args, attention_config)
     return args
 
 
@@ -72,16 +70,11 @@ def model_name(request):
     return request.param
 
 
-@pytest.fixture(scope="module", params=ATTN_BACKENDS)
-def attn_backend(request):
-    return request.value if hasattr(request, "value") else request.param
-
-
 @pytest.fixture(scope="module")
-def server(model_name, attn_backend):
-    # Parametrize over model name
+def server(model_name):
+    attention_config = _get_rocm_attention_config(model_name)
     with RemoteOpenAIServer(
-        model_name, _get_server_args(attn_backend)
+        model_name, _get_server_args(attention_config)
     ) as remote_server:
         yield remote_server
 
@@ -94,9 +87,14 @@ async def client(server):
 
 @pytest.mark.asyncio
 async def test_non_asr_model(foscolo):
+    # text to text model
     model_name = "JackFram/llama-68m"
-    with RemoteOpenAIServer(model_name, SERVER_ARGS) as remote_server:
+    attention_config = _get_rocm_attention_config(model_name)
+    with RemoteOpenAIServer(
+        model_name, _get_server_args(attention_config)
+    ) as remote_server:
         client = remote_server.get_async_client()
+
         with pytest.raises(openai.NotFoundError):
             await client.audio.translations.create(
                 model=model_name,
@@ -107,11 +105,13 @@ async def test_non_asr_model(foscolo):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
-async def test_basic_audio_with_lora(mary_had_lamb, attn_backend):
+async def test_basic_audio_with_lora(mary_had_lamb):
+    """Ensure STT (translate) requests can pass LoRA through to generate."""
     # ROCm SPECIFIC CONFIGURATION:
     # To ensure the test passes on ROCm, we modify the max model length to 512.
     # We DO NOT apply this to other platforms to maintain strict upstream parity.
+    from vllm.platforms import current_platform
+
     # NOTE - careful to call this test before the module scoped server
     # fixture, otherwise it'll OOMkill the CI
     model_name = "ibm-granite/granite-speech-3.3-2b"
@@ -124,13 +124,12 @@ async def test_basic_audio_with_lora(mary_had_lamb, attn_backend):
         "--lora-modules",
         f"{lora_model_name}={model_name}",
         "--max-model-len",
-        "512" if IS_ROCM else "2048",
+        "512" if current_platform.is_rocm() else "2048",
         "--max-num-seqs",
         "1",
     ]
 
-    if attn_backend:
-        server_args.extend(["--attention-backend", attn_backend])
+    add_attention_backend(server_args, _get_rocm_attention_config(model_name))
 
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
