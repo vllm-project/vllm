@@ -10,8 +10,6 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
-from vllm.utils.torch_utils import is_quantized_kv_cache as is_quantized_kv_cache
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
