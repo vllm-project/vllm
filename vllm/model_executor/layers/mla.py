@@ -164,10 +164,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             _nan_mark_attn(q, 1, self._nan_layer_idx)  # q_norm (no lora path)
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        _nan_mark_attn(kv_c, 21, self._nan_layer_idx)  # kv_c_pre_norm
         kv_c_normed = self.kv_a_layernorm(kv_c)
         _nan_mark_attn(kv_c_normed, 2, self._nan_layer_idx)  # kv_norm
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
+        _nan_mark_attn(k_pe, 22, self._nan_layer_idx)  # k_pe_pre_rope
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 

@@ -26,7 +26,7 @@ _per_layer_checks_enabled = os.environ.get("VLLM_NAN_CHECK", "1") == "1"
 _nan_counts: torch.Tensor | None = None
 _inf_counts: torch.Tensor | None = None
 
-# Attention detail tensors: shape (num_layers, 21)
+# Attention detail tensors: shape (num_layers, 23)
 # Outer MLA wrapper (mla.py):
 #   0=qkv_proj, 1=q_norm, 2=kv_norm, 3=rope, 4=mla_attn, 5=o_proj
 # Inner MLAAttention (mla_attention.py):
@@ -36,6 +36,7 @@ _inf_counts: torch.Tensor | None = None
 #   17=kv_c_normed_decode_real (bf16, seq_lens-filtered)
 #   18=kv_cache_fp8_nan (FP8 NaN via uint8 bit pattern check)
 #   19=after_kv_b_proj_prefill (new tokens), 20=after_kv_b_proj_context_chunk
+#   21=kv_c_pre_norm (before RMSNorm), 22=k_pe_pre_rope (before RoPE)
 _attn_detail: torch.Tensor | None = None
 _inf_attn_detail: torch.Tensor | None = None
 
@@ -57,9 +58,9 @@ def ensure_flags(num_layers: int, device: torch.device) -> None:
     if _inf_counts is None or _inf_counts.shape[0] < num_layers:
         _inf_counts = torch.zeros(num_layers, 4, dtype=torch.int64, device=device)
     if _attn_detail is None or _attn_detail.shape[0] < num_layers:
-        _attn_detail = torch.zeros(num_layers, 21, dtype=torch.int64, device=device)
+        _attn_detail = torch.zeros(num_layers, 23, dtype=torch.int64, device=device)
     if _inf_attn_detail is None or _inf_attn_detail.shape[0] < num_layers:
-        _inf_attn_detail = torch.zeros(num_layers, 21, dtype=torch.int64, device=device)
+        _inf_attn_detail = torch.zeros(num_layers, 23, dtype=torch.int64, device=device)
     if _fwd_mqa_real_nan is None or _fwd_mqa_real_nan.shape[0] < num_layers:
         _fwd_mqa_real_nan = torch.zeros(num_layers, dtype=torch.int64, device=device)
     if _layer_idx_gpu is None or _layer_idx_gpu.shape[0] < num_layers:
@@ -943,10 +944,25 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                 else "REAL" if tok_idx >= 0
                 else "?"
             )
+            # Include projection stage NaN/Inf counts from attn detail
+            ad = attn_nan_cpu[layer_idx] if attn_nan_cpu is not None else None
+            ai = attn_inf_cpu[layer_idx] if attn_inf_cpu is not None else None
+            kvc_pre_nan = ad[21].item() if ad is not None else 0
+            kvc_pre_inf = ai[21].item() if ai is not None else 0
+            kvc_post_nan = ad[2].item() if ad is not None else 0
+            kvc_post_inf = ai[2].item() if ai is not None else 0
+            kpe_pre_nan = ad[22].item() if ad is not None else 0
+            kpe_pre_inf = ai[22].item() if ai is not None else 0
             msg = (f"[KV_KERNEL_NAN] layer={layer_idx} "
                    f"bits=0x{bits:02x} flags={','.join(flags)} "
                    f"first_tok={tok_idx} num_actual={n} "
-                   f"tok_type={is_padding}\n")
+                   f"tok_type={is_padding} "
+                   f"kvc_pre_norm_nan={kvc_pre_nan} "
+                   f"kvc_pre_norm_inf={kvc_pre_inf} "
+                   f"kvc_post_norm_nan={kvc_post_nan} "
+                   f"kvc_post_norm_inf={kvc_post_inf} "
+                   f"kpe_pre_rope_nan={kpe_pre_nan} "
+                   f"kpe_pre_rope_inf={kpe_pre_inf}\n")
             f.write(msg)
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
