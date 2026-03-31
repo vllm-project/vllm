@@ -221,7 +221,7 @@ Request.decode_steering_config_hash   ◄── deterministic SHA-256 hash
     ▼
 Scheduler ── checks capacity against max_steering_configs
     │         (tracks union of active hashes: prefill for prefill,
-    │          decode for decode; new requests must fit BOTH hashes)
+    │          decode for decode; new requests need only starting phase)
     │         excess requests queued in skipped_waiting
     ▼
 NewRequestData.prefill_steering_config_hash
@@ -335,20 +335,21 @@ scheduler adds its currently-active `(hash, phase)` pair:
 prefill (`num_computed_tokens < num_tokens`),
 `(decode_steering_config_hash, "decode")` for those in decode.
 
-**New request admission:** A new request may need up to two distinct
-`(hash, phase)` pairs over its lifetime (one for prefill, one for
-decode).  Even when `prefill_hash == decode_hash`, the worker allocates
-two separate rows because they are keyed by `(hash, "prefill")` and
-`(hash, "decode")` respectively.  The scheduler counts how many
-genuinely new unique pairs the request would add to the scheduled set.
-If the union would exceed `max_steering_configs`, the request is skipped.
+**New request admission:** A request only occupies one steering row at
+a time.  The prefill row is released before the decode row is registered
+(in `_handle_steering_transition`).  Therefore the scheduler only counts
+the **starting phase** at admission time -- the prefill hash for
+WAITING requests (which always start in prefill before prefix cache
+resolution).
 
-1. Compute `new_hashes = {(prefill_hash, "prefill"), (decode_hash, "decode")}` (excluding zeros)
+1. Compute `new_hashes = {(prefill_hash, "prefill")}` (excluding zeros)
 2. Compute `new_unique = new_hashes - scheduled_steering_configs`
 3. If `len(scheduled) + len(new_unique) > max_configs`, skip
-4. When admitted, add **both** `(hash, phase)` pairs to the scheduled set
-5. Requests without steering (`both hashes == 0`) are never blocked
-6. Requests whose `(hash, phase)` pairs are already in the batch pass through (dedup)
+4. When admitted, add only the **starting phase** `(hash, phase)` pair to
+   the scheduled set (prefill when `num_computed_tokens < num_prompt_tokens`,
+   decode when starting directly in decode due to a full prefix-cache hit)
+5. Requests without steering (`prefill hash == 0`) are never blocked
+6. Requests whose starting `(hash, phase)` pair is already in the batch pass through (dedup)
 
 ## File Reference
 
