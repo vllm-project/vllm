@@ -11,9 +11,7 @@ from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
-from openai.types.responses import (
-    ToolChoiceFunction,
-)
+from openai.types.responses import ToolChoiceFunction
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 from starlette.datastructures import Headers
 
@@ -21,9 +19,7 @@ import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -42,9 +38,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -56,14 +50,6 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingCompletionRequest,
     PoolingResponse,
 )
-from vllm.entrypoints.pooling.score.protocol import (
-    RerankRequest,
-    ScoreDataRequest,
-    ScoreQueriesDocumentsRequest,
-    ScoreRequest,
-    ScoreResponse,
-    ScoreTextRequest,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -72,8 +58,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import create_error_response
-from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EngineInput, PromptType, TokensPrompt
+from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -119,8 +104,6 @@ CompletionLikeRequest: TypeAlias = (
     CompletionRequest
     | TokenizeCompletionRequest
     | DetokenizeRequest
-    | RerankRequest
-    | ScoreRequest
     | PoolingCompletionRequest
 )
 
@@ -148,7 +131,6 @@ AnyResponse: TypeAlias = (
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
-    | ScoreResponse
     | GenerateResponse
 )
 
@@ -691,88 +673,6 @@ class OpenAIServing:
                     if "type" in content_dict:
                         message_types.add(content_dict["type"].split("_")[0])
         return message_types
-
-    def _validate_input(
-        self,
-        request: object,
-        input_ids: list[int],
-        input_text: str,
-    ) -> TokensPrompt:
-        token_num = len(input_ids)
-        max_model_len = self.model_config.max_model_len
-
-        # Note: ScoreRequest doesn't have max_tokens
-        if isinstance(
-            request,
-            (
-                ScoreDataRequest,
-                ScoreTextRequest,
-                ScoreQueriesDocumentsRequest,
-                RerankRequest,
-            ),
-        ):
-            # Note: input length can be up to the entire model context length
-            # since these requests don't generate tokens.
-            if token_num > max_model_len:
-                operations: dict[type[AnyRequest], str] = {
-                    ScoreDataRequest: "score",
-                    ScoreTextRequest: "score",
-                    ScoreQueriesDocumentsRequest: "score",
-                }
-                operation = operations.get(type(request), "embedding generation")
-                raise VLLMValidationError(
-                    f"This model's maximum context length is "
-                    f"{max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input prompt.",
-                    parameter="input_tokens",
-                    value=token_num,
-                )
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
-
-        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
-        # and does not require model context length validation
-        if isinstance(
-            request,
-            (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest),
-        ):
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
-
-        # chat completion endpoint supports max_completion_tokens
-        if isinstance(request, ChatCompletionRequest):
-            # TODO(#9845): remove max_tokens when field dropped from OpenAI API
-            max_tokens = request.max_completion_tokens or request.max_tokens
-        else:
-            max_tokens = getattr(request, "max_tokens", None)
-
-        # Note: input length can be up to model context length - 1 for
-        # completion-like requests.
-        if token_num >= max_model_len:
-            raise VLLMValidationError(
-                f"This model's maximum context length is "
-                f"{max_model_len} tokens. However, your request has "
-                f"{token_num} input tokens. Please reduce the length of "
-                "the input messages.",
-                parameter="input_tokens",
-                value=token_num,
-            )
-
-        if max_tokens is not None and token_num + max_tokens > max_model_len:
-            raise VLLMValidationError(
-                f"This model's maximum context length is "
-                f"{max_model_len} tokens. However, you requested "
-                f"{max_tokens} output tokens and your prompt contains "
-                f"{token_num} input tokens, for a total of "
-                f"{token_num + max_tokens} tokens "
-                f"({token_num} + {max_tokens} = "
-                f"{token_num + max_tokens} > {max_model_len}). "
-                f"Please reduce the length of the input prompt or the "
-                f"number of requested output tokens.",
-                parameter="max_tokens",
-                value=max_tokens,
-            )
-
-        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     def _validate_chat_template(
         self,
