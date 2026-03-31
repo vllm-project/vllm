@@ -6,7 +6,6 @@ from collections.abc import Sequence
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
@@ -42,7 +41,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # Check if platform supports FP8 Marlin
         if not is_fp8_marlin_supported():
             return False, "FP8 Marlin requires compute capability 7.5 or higher"
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             return False, "FP8 Marlin not supported for batch invariant execution."
         if (
             compute_capability is not None
@@ -77,8 +76,25 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, "weight", weight.data)
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
         else:
-            weight = layer.weight.t()
-            replace_parameter(layer, "weight", weight.data)
+            w_q, *_ = self._get_layer_params(layer)
+            # Compressed tensors transposes the weight to (K, N)
+            # for channel and tensor quant strategies.
+            # So we can skip the transpose if the layout is
+            # already (K, N).
+            # TODO: Remove this check once the layouts have been
+            # canonicalized to a standard (N, K) dimension. See issue
+            # #33314 for more details.
+            if w_q.shape != (
+                layer.input_size_per_partition,
+                layer.output_size_per_partition,
+            ):
+                # transpose the weights to (K,N)
+                replace_parameter(
+                    layer,
+                    "weight",
+                    w_q.t(),
+                )
+
         layer.input_scale = None
         prepare_fp8_layer_for_marlin(
             layer, self.size_k_first, input_dtype=self.marlin_input_dtype

@@ -636,6 +636,7 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
+        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
@@ -791,6 +792,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
+        revision="refs/pr/17",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
@@ -810,7 +812,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
-        "ibm-granite/granite-speech-3.3-2b"
+        "ibm-granite/granite-speech-3.3-2b",
+        extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
@@ -1092,6 +1095,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
     ),
+    "Qwen3ASRForcedAlignerForTokenClassification": _HfExamplesInfo(
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B", trust_remote_code=True
@@ -1127,8 +1136,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": _HfExamplesInfo(
-        "/host/engines/vllm/audio/2b-release",
+    "CohereAsrForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/cohere-transcribe-03-2026",
         trust_remote_code=True,
         is_available_online=False,  # TODO (ekagra): revert after asr release
     ),
@@ -1155,6 +1164,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     #     "JackFram/llama-160m",
     #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
     # ),
+    # [DFlash]
+    "DFlashDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.5-4B",
+        speculative_model="z-lab/Qwen3.5-4B-DFlash",
+        use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     # [Eagle]
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",

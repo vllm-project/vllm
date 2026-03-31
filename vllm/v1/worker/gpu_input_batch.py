@@ -219,7 +219,7 @@ class InputBatch:
 
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
@@ -496,6 +496,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
+        self.block_table.clear_row(req_index)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -832,8 +833,13 @@ class InputBatch:
         # step pooling during the sampling/pooling process.
         # Hence copy these tensors only when there are requests which
         # need penalties/step_pooler to be applied.
+        prompt_token_ids_cpu = (
+            self._make_prompt_token_ids_cpu_tensor() if needs_prompt_token_ids else None
+        )
         prompt_token_ids = (
-            self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
+            prompt_token_ids_cpu.to(device=self.device, non_blocking=True)
+            if prompt_token_ids_cpu is not None
+            else None
         )
 
         # Only set output_token_ids if required by the current requests'
@@ -890,15 +896,19 @@ class InputBatch:
     def get_pooling_metadata(self) -> PoolingMetadata:
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
+        prompt_token_ids_cpu = None
+        if any(p.requires_token_ids for p in pooling_params):
+            prompt_token_ids_cpu = self._make_prompt_token_ids_cpu_tensor()
 
         return PoolingMetadata(
             prompt_lens=self.num_prompt_tokens_cpu_tensor[: self.num_reqs].clone(),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
+            prompt_token_ids_cpu=prompt_token_ids_cpu,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
 
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
+    def _make_prompt_token_ids_cpu_tensor(self) -> torch.Tensor:
         num_reqs = self.num_reqs
         max_prompt_len = self.num_prompt_tokens[:num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
@@ -913,7 +923,7 @@ class InputBatch:
         # token_id of this value.
         for i in range(num_reqs):
             prompt_token_ids[i, self.num_prompt_tokens[i] :] = self.vocab_size
-        return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
+        return prompt_token_ids_cpu_tensor
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
@@ -989,13 +999,15 @@ class InputBatch:
                 continue
             num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
             # Also account for case where there may be a smaller number of
-            # output placeholders (tokens can be discarded after a kv-load failure).
+            # output placeholders (tokens can be discarded after kv-load
+            # failure) or a larger number (async spec decode adds optimistic
+            # placeholders that may exceed the actual acceptance count).
             first_placeholder = req_output_token_ids.index(-1)
             num_placeholders = len(req_output_token_ids) - first_placeholder
             num_to_replace = min(num_sampled_ids, num_placeholders)
             del new_ids[num_to_replace:]
-            end_index = first_placeholder + num_to_replace
-            req_output_token_ids[first_placeholder:end_index] = new_ids
+            req_output_token_ids[first_placeholder:] = new_ids
+            # ^ Implicitly resizes to (first_placeholder + num_to_replace)
 
     def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
         """
