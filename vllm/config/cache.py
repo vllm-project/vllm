@@ -20,6 +20,9 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "tq2",
+    "tq3",
+    "pq4",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -242,6 +245,18 @@ class CacheConfig:
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
                 "scaling factor."
+            )
+        elif cache_dtype in ("tq2", "tq3", "pq4"):
+            bits_info = {"tq2": "2+1-bit", "tq3": "3+1-bit", "pq4": "4-bit"}
+            logger.info(
+                "Using TurboQuant (%s, %s) KV cache quantization. "
+                "This uses PolarQuant polar coordinate decomposition%s "
+                "for overhead-free KV compression. No calibration data "
+                "or fine-tuning required.",
+                cache_dtype,
+                bits_info[cache_dtype],
+                " with QJL residual correction"
+                if cache_dtype.startswith("tq") else "",
             )
         return cache_dtype
 

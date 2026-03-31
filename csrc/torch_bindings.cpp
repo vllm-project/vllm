@@ -542,6 +542,48 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.impl("concat_and_cache_mla_rope_fused", torch::kCUDA,
                  &concat_and_cache_mla_rope_fused);
 
+  // TurboQuant: reshape and cache with PolarQuant + QJL quantization.
+  cache_ops.def(
+      "reshape_and_cache_turboquant(Tensor key, Tensor value,"
+      "                             Tensor! key_cache, Tensor! value_cache,"
+      "                             Tensor slot_mapping,"
+      "                             int num_kv_heads, int head_size,"
+      "                             int block_size, str tq_type,"
+      "                             int layer_seed, int qjl_proj_dim) -> ()");
+  cache_ops.impl("reshape_and_cache_turboquant", torch::kCUDA,
+                 &reshape_and_cache_turboquant);
+
+  // TurboQuant: standalone encode (for testing).
+  cache_ops.def(
+      "turboquant_encode(Tensor kv_data, Tensor! angles_out,"
+      "                  Tensor! radii_out, Tensor! qjl_out,"
+      "                  int num_kv_heads, int head_size,"
+      "                  str tq_type, int layer_seed,"
+      "                  int qjl_proj_dim) -> ()");
+  cache_ops.impl("turboquant_encode", torch::kCUDA, &turboquant_encode);
+
+  // TurboQuant: standalone decode (for testing).
+  cache_ops.def(
+      "turboquant_decode(Tensor angles, Tensor radii,"
+      "                  Tensor qjl_bits, Tensor! kv_out,"
+      "                  int num_kv_heads, int head_size,"
+      "                  str tq_type, int layer_seed,"
+      "                  int qjl_proj_dim) -> ()");
+  cache_ops.impl("turboquant_decode", torch::kCUDA, &turboquant_decode);
+
+  // TurboQuant: fused paged attention with on-the-fly dequantization.
+  cache_ops.def(
+      "paged_attention_turboquant(Tensor! output, Tensor query,"
+      "                           Tensor key_cache, Tensor value_cache,"
+      "                           Tensor block_tables, Tensor context_lens,"
+      "                           float scale, int num_heads,"
+      "                           int num_kv_heads, int head_size,"
+      "                           int block_size, int max_blocks_per_seq,"
+      "                           str tq_type, int layer_seed,"
+      "                           int qjl_proj_dim) -> ()");
+  cache_ops.impl("paged_attention_turboquant", torch::kCUDA,
+                 &paged_attention_turboquant);
+
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(
       "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "

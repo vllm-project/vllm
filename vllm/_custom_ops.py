@@ -2534,6 +2534,118 @@ def reshape_and_cache_flash(
     )
 
 
+def reshape_and_cache_turboquant(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    tq_type: str,
+    layer_seed: int,
+    qjl_proj_dim: int,
+) -> None:
+    torch.ops._C_cache_ops.reshape_and_cache_turboquant(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        num_kv_heads,
+        head_size,
+        block_size,
+        tq_type,
+        layer_seed,
+        qjl_proj_dim,
+    )
+
+
+def turboquant_encode(
+    kv_data: torch.Tensor,
+    angles_out: torch.Tensor,
+    radii_out: torch.Tensor,
+    qjl_out: torch.Tensor,
+    num_kv_heads: int,
+    head_size: int,
+    tq_type: str,
+    layer_seed: int,
+    qjl_proj_dim: int,
+) -> None:
+    torch.ops._C_cache_ops.turboquant_encode(
+        kv_data,
+        angles_out,
+        radii_out,
+        qjl_out,
+        num_kv_heads,
+        head_size,
+        tq_type,
+        layer_seed,
+        qjl_proj_dim,
+    )
+
+
+def turboquant_decode(
+    angles: torch.Tensor,
+    radii: torch.Tensor,
+    qjl_bits: torch.Tensor,
+    kv_out: torch.Tensor,
+    num_kv_heads: int,
+    head_size: int,
+    tq_type: str,
+    layer_seed: int,
+    qjl_proj_dim: int,
+) -> None:
+    torch.ops._C_cache_ops.turboquant_decode(
+        angles,
+        radii,
+        qjl_bits,
+        kv_out,
+        num_kv_heads,
+        head_size,
+        tq_type,
+        layer_seed,
+        qjl_proj_dim,
+    )
+
+
+def paged_attention_turboquant(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    scale: float,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    max_blocks_per_seq: int,
+    tq_type: str,
+    layer_seed: int,
+    qjl_proj_dim: int,
+) -> None:
+    torch.ops._C_cache_ops.paged_attention_turboquant(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        context_lens,
+        scale,
+        num_heads,
+        num_kv_heads,
+        head_size,
+        block_size,
+        max_blocks_per_seq,
+        tq_type,
+        layer_seed,
+        qjl_proj_dim,
+    )
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,

@@ -188,6 +188,47 @@ class FullAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class TurboQuantAttentionSpec(FullAttentionSpec):
+    """KV cache spec for TurboQuant (PolarQuant + QJL) quantized cache.
+
+    Overrides page size calculation to account for the compressed polar
+    coordinate representation instead of raw element storage.
+    """
+
+    tq_type: str = "tq3"  # "tq2", "tq3", or "pq4"
+    qjl_proj_dim: int | None = None  # defaults to head_size
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        """Page size for TurboQuant compressed KV cache.
+
+        Each token per KV head stores:
+          - (head_size - 1) quantized angles at angle_bits each
+          - 1 fp16 radius (2 bytes)
+          - ceil(qjl_proj_dim / 8) QJL sign bytes (if tq2/tq3)
+        Multiply by 2 for both K and V caches.
+        """
+        angle_bits_map = {"pq4": 4, "tq3": 3, "tq2": 2}
+        has_qjl = self.tq_type.startswith("tq")
+        bits = angle_bits_map[self.tq_type]
+        qjl_dim = self.qjl_proj_dim or self.head_size
+
+        num_angles = self.head_size - 1
+        angle_bytes = (num_angles * bits + 7) // 8
+        radius_bytes = 2  # fp16
+        qjl_bytes = (qjl_dim + 7) // 8 if has_qjl else 0
+        bytes_per_token_per_head = angle_bytes + radius_bytes + qjl_bytes
+
+        # Factor of 2 for both key and value caches
+        return (
+            2
+            * self.block_size
+            * self.num_kv_heads
+            * bytes_per_token_per_head
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
