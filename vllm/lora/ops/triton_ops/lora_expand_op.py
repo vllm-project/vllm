@@ -9,6 +9,7 @@ https://arxiv.org/abs/2310.18547
 
 import torch
 
+from vllm import envs
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_b_ptr,
@@ -242,7 +243,8 @@ def _lora_expand(
         num_active_loras.item(),
     )
 
-    use_gdc = supports_pdl_linear(inputs.device)
+    # PDL only works when dual-stream is being used.
+    use_gdc = supports_pdl_linear(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
     _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,

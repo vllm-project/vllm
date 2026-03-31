@@ -314,7 +314,6 @@ def supports_pdl_linear(device: torch.device | None = None) -> bool:
         current_platform.is_cuda()
         and current_platform.has_device_capability(90)
         and not envs.VLLM_LORA_DISABLE_PDL
-        and envs.VLLM_LORA_ENABLE_DUAL_STREAM
     )
 
 
