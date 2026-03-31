@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
-from .vllm_inductor_pass import VllmInductorPass
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
     from .fusion.rocm_aiter_fusion import (
@@ -25,7 +25,7 @@ if rocm_aiter_ops.is_enabled():
 
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
-    from .fusion.attn_quant_fusion import AttnFusionPass
+    from .fusion.attn_quant_fusion import AttnQuantFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -108,6 +108,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         self.fix_functionalization(graph)
         VllmInductorPass.dump_prefix = None  # Cleanup index
 
+        VllmPatternMatcherPass.log_match_summary()
+
     def configure(self, config: VllmConfig) -> None:
         self.pass_config = config.compilation_config.pass_config
 
@@ -144,7 +146,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [RopeKVCacheFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
-                self.passes += [AttnFusionPass(config)]
+                self.passes += [AttnQuantFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]
