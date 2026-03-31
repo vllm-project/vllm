@@ -94,6 +94,9 @@ from vllm.model_executor.models.nan_check_helper import (
 from vllm.model_executor.models.nan_check_helper import (
     check_kv_caches as _nan_check_kv_caches,
 )
+from vllm.model_executor.models.nan_check_helper import (
+    scan_weights as _nan_scan_weights,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -1706,6 +1709,8 @@ class DeepseekV2ForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # One-time weight scan for NaN/Inf in KV/Q projection weights
+        _nan_scan_weights(self)
         # Init NaN flags before layers so mark() is captured with flags present
         _nan_ensure_flags(62, positions.device)
         hidden_states = self.model(

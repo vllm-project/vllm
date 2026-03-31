@@ -19,6 +19,7 @@ _nan_reported = False
 _inf_reported = False
 _log_fh = None
 _per_layer_checks_enabled = os.environ.get("VLLM_NAN_CHECK", "1") == "1"
+_weight_scan_done = False
 
 # Count tensors: shape (num_layers, 4)
 # column 0 = input (before layernorm), column 1 = pre_attn (after layernorm),
@@ -422,6 +423,60 @@ def _get_log():
         _log_fh.write(f"=== NaN/Inf check started {datetime.datetime.now()} ===\n")
         _log_fh.flush()
     return _log_fh
+
+
+def scan_weights(model: "torch.nn.Module") -> None:
+    """One-time scan of KV projection weights for NaN/Inf at startup.
+
+    Checks kv_a_proj_with_mqa, kv_a_layernorm, kv_b_proj, q_a_proj,
+    q_a_layernorm, q_b_proj, and q_proj weights across all layers.
+    Emits [WEIGHT_SCAN] lines to log and stderr.
+    """
+    global _weight_scan_done
+    if _weight_scan_done or not _per_layer_checks_enabled:
+        return
+    _weight_scan_done = True
+
+    f = _get_log()
+    targets = [
+        "kv_a_proj_with_mqa",
+        "kv_a_layernorm",
+        "kv_b_proj",
+        "q_a_proj",
+        "q_a_layernorm",
+        "q_b_proj",
+        "q_proj",
+    ]
+    found_bad = False
+    for name, param in model.named_parameters():
+        # Match self_attn.<target>.weight
+        parts = name.split(".")
+        if "self_attn" not in parts:
+            continue
+        attn_idx = parts.index("self_attn")
+        if attn_idx + 1 >= len(parts):
+            continue
+        submod = parts[attn_idx + 1]
+        if submod not in targets:
+            continue
+        data = param.data
+        nan_count = data.isnan().sum().item()
+        inf_count = data.isinf().sum().item()
+        if nan_count > 0 or inf_count > 0:
+            found_bad = True
+            msg = (
+                f"[WEIGHT_SCAN] {name}: NaN={nan_count} Inf={inf_count} "
+                f"shape={list(data.shape)} dtype={data.dtype}\n"
+            )
+            f.write(msg)
+            f.flush()
+            print(msg, file=sys.stderr, end="", flush=True)
+
+    if not found_bad:
+        msg = f"[WEIGHT_SCAN] All KV/Q projection weights clean (no NaN/Inf)\n"
+        f.write(msg)
+        f.flush()
+        print(msg, file=sys.stderr, end="", flush=True)
 
 
 def _zero_all():
