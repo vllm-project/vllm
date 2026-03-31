@@ -130,117 +130,43 @@ class TieredOffloadingManager(OffloadingManager):
 
     # ── Core interface ───────────────────────────────────────────
 
-    _lookup_count = 0
-
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         """Count CPU-ready blocks."""
         self._finalize_completed_prefetches()
-        result = self._cpu.lookup(block_hashes)
-
-        # Debug: log stats every 10 lookups
-        TieredOffloadingManager._lookup_count += 1
-        if TieredOffloadingManager._lookup_count % 10 == 0:
-            stats = self.get_debug_stats()
-            logger.info(
-                "DISK_DEBUG lookup#%d result=%s stats=%s",
-                TieredOffloadingManager._lookup_count, result, stats,
-            )
-        return result
-
-    def get_debug_stats(self) -> dict:
-        """Debug stats for diagnosing stalls."""
-        total_blocks = self._cpu._num_blocks
-        allocated = self._cpu._num_allocated_blocks
-        free_list = len(self._cpu._free_list)
-        # Count blocks by ref_cnt
-        ref_counts = {-1: 0, 0: 0}
-        for bh, block in self._cpu._policy.blocks.items():
-            rc = block.ref_cnt
-            ref_counts[rc] = ref_counts.get(rc, 0) + 1
-        return {
-            "total": total_blocks,
-            "allocated": allocated,
-            "free_list": free_list,
-            "available": free_list + (total_blocks - allocated),
-            "in_policy": len(self._cpu._policy.blocks),
-            "ref_cnt_dist": ref_counts,
-            "active_prefetches": len(self._active_prefetches),
-            "pending_dispatch": len(self._pending_dispatch),
-            "pending_completion": len(self._pending_completion),
-            "disk_index_size": self._disk.size,
-            "prefetch_reserved": self._prefetch_blocks_reserved,
-        }
-
-    _record_count = 0
+        return self._cpu.lookup(block_hashes)
 
     def record_disk_miss(
         self, request_id: str, block_hashes: list[BlockHash]
     ) -> None:
         """Record a disk miss for potential prefetch. CHEAP — no allocation."""
-        TieredOffloadingManager._record_count += 1
-        # Count how many consecutive blocks are on disk
         disk_count = 0
         for bh in block_hashes:
             if bh in self._active_prefetches:
-                if TieredOffloadingManager._record_count % 5 == 0:
-                    logger.info("DISK_DEBUG record_miss#%d: already prefetching",
-                                TieredOffloadingManager._record_count)
                 return
             if self._disk.contains(bh):
                 disk_count += 1
             else:
                 break
-        if TieredOffloadingManager._record_count % 5 == 0:
-            logger.info(
-                "DISK_DEBUG record_miss#%d: req=%s disk_count=%d "
-                "total_hashes=%d disk_index=%d candidates=%d",
-                TieredOffloadingManager._record_count,
-                request_id, disk_count, len(block_hashes),
-                self._disk.size, len(self._disk_miss_candidates),
-            )
         if disk_count > 0:
             self._disk_miss_candidates.append(
                 (disk_count, request_id, block_hashes[:disk_count])
             )
 
-    _process_count = 0
-
     def process_top_disk_miss(self) -> None:
         """Pick the best prefetch candidate and allocate. ONCE per step."""
-        TieredOffloadingManager._process_count += 1
-        if TieredOffloadingManager._process_count % 10 == 0:
-            logger.info(
-                "DISK_DEBUG process#%d: candidates=%d",
-                TieredOffloadingManager._process_count,
-                len(self._disk_miss_candidates),
-            )
         if not self._disk_miss_candidates:
             return
 
-        # Pick the candidate with the most disk blocks (most benefit)
-        num_candidates = len(self._disk_miss_candidates)
         self._disk_miss_candidates.sort(key=lambda x: x[0], reverse=True)
         best = self._disk_miss_candidates[0]
         self._disk_miss_candidates.clear()
-        logger.info(
-            "DISK_DEBUG top_miss: %d candidates, best=%s with %d blocks",
-            num_candidates, best[1], best[0],
-        )
 
         disk_count, request_id, block_hashes = best
 
-        # Only prefetch if enough blocks to be worthwhile
         if disk_count < 4:
             return
-
-        # Budget check
         if self._prefetch_blocks_reserved >= self._max_prefetch_blocks:
             return
-
-        logger.info(
-            "DISK_DEBUG process_top_miss: req=%s disk_blocks=%d reserved=%d",
-            request_id, disk_count, self._prefetch_blocks_reserved,
-        )
 
         self.try_disk_prefetch(block_hashes)
 
@@ -285,15 +211,9 @@ class TieredOffloadingManager(OffloadingManager):
         disk_ids = disk_ids[:budget]
 
         # Use prepare_store to allocate CPU blocks via the normal path.
-        # This handles eviction, block allocation, policy insertion.
-        logger.info(
-            "DISK_DEBUG try_prefetch: %d disk blocks, budget=%d, reserved=%d",
-            len(disk_hashes), budget, self._prefetch_blocks_reserved,
-        )
         result = self._cpu.prepare_store(disk_hashes)
         if result is None:
-            logger.warning("DISK_DEBUG prefetch prepare_store returned None")
-            return False  # Can't allocate, fall back to re-prefill
+            return False
 
         # Get the CPU block IDs that were allocated
         cpu_store_spec = result.store_spec
@@ -366,11 +286,6 @@ class TieredOffloadingManager(OffloadingManager):
             )
             for bh in op.block_hashes:
                 self._active_prefetches.pop(bh, None)
-            logger.info(
-                "DISK_DEBUG prefetch_complete: %d blocks now ready, "
-                "reserved=%d",
-                len(op.block_hashes), self._prefetch_blocks_reserved,
-            )
 
     # ── Standard delegation ──────────────────────────────────────
 

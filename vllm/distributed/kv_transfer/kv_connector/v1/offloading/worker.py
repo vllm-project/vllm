@@ -321,12 +321,6 @@ class OffloadingConnectorWorker:
         if metadata.disk_prefetches:
             handlers = self._get_disk_handlers()
             if handlers:
-                from vllm.logger import init_logger as _il
-                _logger = _il(__name__)
-                _logger.info(
-                    "DISK_DEBUG worker: submitting %d prefetch specs",
-                    len(metadata.disk_prefetches),
-                )
                 handlers.process_prefetch_requests(metadata.disk_prefetches)
 
         # Check if any previously submitted prefetches have completed.
@@ -334,12 +328,6 @@ class OffloadingConnectorWorker:
         if handlers:
             newly_completed = handlers.check_prefetch_completion()
             if newly_completed:
-                from vllm.logger import init_logger as _il
-                _logger = _il(__name__)
-                _logger.info(
-                    "DISK_DEBUG worker: %d prefetches completed",
-                    len(newly_completed),
-                )
                 self._completed_disk_prefetches.extend(newly_completed)
 
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
@@ -365,8 +353,6 @@ class OffloadingConnectorWorker:
             # thereby avoiding delays to token generation due to offloading.
             self._unsubmitted_store_jobs.append((job_id, transfer_spec))
 
-    _gf_count = 0
-
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
         Notifies worker-side connector ids of requests that have
@@ -377,21 +363,9 @@ class OffloadingConnectorWorker:
             ids of requests that have finished asynchronous transfer
             tuple of (sending/saving ids, recving/loading ids).
         """
-        OffloadingConnectorWorker._gf_count += 1
-        c = OffloadingConnectorWorker._gf_count
-
         finished_sending = set()
         finished_recving = set()
-        transfer_results = self.worker.get_finished()
-        if c % 50 == 0:
-            logger.info(
-                "DISK_DEBUG get_finished#%d: transfer_results=%d "
-                "finished_req_ids=%d store_jobs=%d waiting=%d",
-                c, len(transfer_results), len(finished_req_ids),
-                len(self._store_jobs),
-                len(self._finished_reqs_waiting_for_store),
-            )
-        for transfer_result in transfer_results:
+        for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
             assert transfer_result.success
@@ -409,13 +383,6 @@ class OffloadingConnectorWorker:
             if store:
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
-                if c % 50 == 0:
-                    logger.info(
-                        "DISK_DEBUG get_finished#%d: store job done "
-                        "req=%s remaining_jobs=%d in_waiting=%s",
-                        c, req_id, len(req_jobs),
-                        req_id in self._finished_reqs_waiting_for_store,
-                    )
                 if req_jobs:
                     continue
 
@@ -436,12 +403,6 @@ class OffloadingConnectorWorker:
             elif pending_req_jobs is not None:
                 finished_sending.add(req_id)
                 del self._store_jobs[req_id]
-
-        if finished_sending or finished_recving:
-            logger.info(
-                "DISK_DEBUG get_finished#%d: DONE sending=%d recving=%d",
-                c, len(finished_sending), len(finished_recving),
-            )
 
         return finished_sending, finished_recving
 
