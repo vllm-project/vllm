@@ -16,7 +16,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import check_shared_mem, is_nvidia_hopper
+from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -146,7 +146,7 @@ def chunk_fwd_o(
     g: torch.Tensor | None = None,  # cumsum of log decay
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    chunk_size: int = 64,
+    chunk_size: int = FLA_CHUNK_SIZE,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]

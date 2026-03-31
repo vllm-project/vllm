@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fla.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
+from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -599,9 +600,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         num_v_heads = self.num_v_heads // self.tp_size
         _, state_dtype = self.get_state_dtype()
 
-        # All kernels use BT = chunk_size (64), so a single pass with
+        # All kernels use BT = chunk_size (FLA_CHUNK_SIZE4), so a single pass with
         # T = chunk_size is sufficient to populate every autotuner cache.
-        T = 64
+        T = FLA_CHUNK_SIZE
         q = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
         k = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
         v = torch.randn(1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype)
