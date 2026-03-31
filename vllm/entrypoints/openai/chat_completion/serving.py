@@ -66,7 +66,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import ProcessorInputs, TokensPrompt
+from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -1952,10 +1952,9 @@ class OpenAIServingChat(OpenAIServing):
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
+        engine_prompt = token_inputs(
+            prompt_token_ids=prompt_token_ids,
+            cache_salt=request.cache_salt,
+        )
 
         return messages, [engine_prompt]
