@@ -120,7 +120,7 @@ class SharedExperts:
         else:
             return SharedExpertsOrder.NO_OVERLAP
 
-    def maybe_setup_shared_experts_stream(
+    def maybe_sync_shared_experts_stream(
         self,
         shared_experts_input: torch.Tensor,
     ):
@@ -137,25 +137,18 @@ class SharedExperts:
             # because we synch the streams before using shared_output.
             shared_experts_input.record_stream(self._stream)
 
-            # Mark sync start point for the separate shared experts
-            # stream here since we want to run in parallel with the
-            # router/gate (next op below)
+            # Mark sync start point for the aux stream since we will
+            # run in parallel with router/gate.
             self._stream.wait_stream(current_stream())
 
     def _run_in_aux_stream(
         self,
         shared_experts_input: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO: assert that maybe_setup_shared_experts_stream has been called.
+        # TODO: assert that maybe_sync_shared_experts_stream has been called.
 
-        # Run shared experts in parallel on a separate stream
-        # NOTE: We start the separate stream here and mark the
-        # sync end point immediately after it is done. This is
-        # important to avoid excessive stream allocations by the cuda
-        # graph replay later.
+        # Run shared experts in parallel on a separate stream.
         with torch.cuda.stream(self._stream):
-            # Note that hidden_states clone() is necessary here to avoid
-            # conflict with the main stream
             output = self._layer(shared_experts_input)
         current_stream().wait_stream(self._stream)
 
@@ -187,8 +180,12 @@ class SharedExperts:
     ):
         experts_order = self._determine_shared_experts_order(shared_experts_input)
 
+        print(f"ORDER {order} {experts_order}")
+
         if order != experts_order:
             return None
+
+        print("EXECUTING")
 
         assert self._output is None
 
@@ -204,5 +201,3 @@ class SharedExperts:
             self._output = self._maybe_reduce_shared_out(self._output)
 
         assert self._output is not None
-
-        # TODO(bnell): potentially do AFTER reduce here instead of in runner.

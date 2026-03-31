@@ -443,7 +443,7 @@ class DefaultMoERunner(MoERunner):
             )
 
             # Passing shared_experts_input in case SharedExpertsOrder is
-            # NO_OVERLAP or MULTI_STREAM_OVERLAPPED.
+            # NO_OVERLAP or MK_INTERNAL_OVERLAPPED.
             fused_out = self.quant_method.apply(
                 layer=layer,
                 x=hidden_states,
@@ -500,23 +500,16 @@ class DefaultMoERunner(MoERunner):
 
         return final_shared_hidden_states, final_fused_hidden_states
 
-    def _maybe_overlap_gate_with_shared_experts(
+    def _maybe_sync_shared_experts_stream(
         self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
         if self.shared_experts is not None:
-            self.shared_experts.maybe_setup_shared_experts_stream(shared_experts_input)
-
-        if self.gate is not None:
-            router_logits, _ = self.gate(hidden_states)
-
-        return router_logits
+            self.shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
@@ -641,11 +634,14 @@ class DefaultMoERunner(MoERunner):
         # TODO(bnell): this can be removed after MK migration is complete.
         layer.ensure_moe_quant_config_init()
 
-        router_logits = self._maybe_overlap_gate_with_shared_experts(
-            hidden_states,
-            router_logits,
-            shared_experts_input,
-        )
+        # Sync aux and main stream for shared expert multi-stream overlap.
+        self._maybe_sync_shared_experts_stream(shared_experts_input)
+
+        # If the Runner holds the gate, apply it after the stream sync,
+        # so it can run overlapped with the
+        # NOTE: in future PR, MoE runner will always hold the gate.
+        if self.gate is not None:
+            router_logits, _ = self.gate(hidden_states)
 
         self._maybe_apply_shared_experts(
             shared_experts_input,
