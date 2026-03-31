@@ -957,7 +957,7 @@ def reduce_segments(
     GROUP_SIZE: tl.constexpr = 0,  # int
     out_group_scale_ptr=None,  # [num_tokens, num_groups]
     out_group_scale_stride_0: tl.int64 = 0,
-    out_group_scale_stride_1: tl.int64 = 0,
+    out_group_scale_stride_1: tl.constexpr = 1,  # stride for group dim
     NUM_GROUPS_PER_HEAD: tl.constexpr = 1,
 ):
     query_token_idx = tl.program_id(0)
