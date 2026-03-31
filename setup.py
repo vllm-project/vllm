@@ -1033,6 +1033,10 @@ package_data = {
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
+        # DeepGEMM JIT include headers (vendored via cmake)
+        "third_party/deep_gemm/include/**/*.cuh",
+        "third_party/deep_gemm/include/**/*.h",
+        "third_party/deep_gemm/include/**/*.hpp",
     ]
 }
 
