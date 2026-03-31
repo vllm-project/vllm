@@ -55,6 +55,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -126,7 +127,7 @@ class Worker(WorkerBase):
         from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
-
+        self.worker_sentinel: WorkerSentinel | None = None
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
@@ -312,6 +313,13 @@ class Worker(WorkerBase):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.worker_sentinel = WorkerSentinel(
+                vllm_config=self.vllm_config,
+                pause_event=self.model_runner.pause_event,
+                device=self.device,
+            )
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
@@ -1006,6 +1014,8 @@ class Worker(WorkerBase):
             ensure_kv_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
+        if self.worker_sentinel is not None:
+            self.worker_sentinel.shutdown()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
@@ -1050,6 +1060,7 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
+        fault_tolerance_config=vllm_config.fault_tolerance_config,
     )
 
     # Init ec connector here before KV caches init

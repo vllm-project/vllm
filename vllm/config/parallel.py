@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -482,14 +483,20 @@ class ParallelConfig:
 
     @overload
     def stateless_init_dp_group(
-        self, return_store: Literal[False] = ...
+        self,
+        return_store: Literal[False] = False,
+        fault_tolerance_config: "FaultToleranceConfig | None" = None,
     ) -> ProcessGroup: ...
     @overload
     def stateless_init_dp_group(
-        self, return_store: Literal[True] = ...
+        self,
+        return_store: Literal[True] = True,
+        fault_tolerance_config: "FaultToleranceConfig | None" = None,
     ) -> tuple[ProcessGroup, Store]: ...
     def stateless_init_dp_group(
-        self, return_store: bool = False
+        self,
+        return_store: bool = False,
+        fault_tolerance_config: "FaultToleranceConfig | None" = None,
     ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
@@ -518,6 +525,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
+                    fault_tolerance_config=fault_tolerance_config,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.

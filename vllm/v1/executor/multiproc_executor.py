@@ -57,6 +57,7 @@ from vllm.utils.system_utils import (
     set_process_title,
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.engine.exceptions import EngineLoopPausedError
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -377,6 +378,8 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
+                    if "paused" in result:
+                        raise EngineLoopPausedError(result)
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
                         " stack trace above for the root cause"
