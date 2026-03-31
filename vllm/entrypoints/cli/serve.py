@@ -10,18 +10,13 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import (
-    run_server,
-    run_server_worker,
-    setup_server,
-)
+from vllm.entrypoints.openai.api_server import run_server, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
@@ -141,13 +136,6 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
-        serve_parser.add_argument(
-            "--grpc",
-            action="store_true",
-            default=False,
-            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
-            "server. Requires: pip install vllm[grpc].",
-        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
@@ -230,7 +218,7 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        engine_manager.monitor_engine_liveness()
     finally:
         timeout = None
         if shutdown_requested:
@@ -293,7 +281,6 @@ def run_multi_api_server(args: argparse.Namespace):
     ) as (local_engine_manager, coordinator, addresses, tensor_queue):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
-            target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
             sock=sock,
             args=args,
@@ -346,19 +333,3 @@ def run_multi_api_server(args: argparse.Namespace):
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
-
-
-def run_api_server_worker_proc(
-    listen_address, sock, args, client_config=None, **uvicorn_kwargs
-) -> None:
-    """Entrypoint for individual API server worker processes."""
-    client_config = client_config or {}
-    server_index = client_config.get("client_index", 0)
-
-    # Set process title and add process-specific prefix to stdout and stderr.
-    set_process_title("APIServer", str(server_index))
-    decorate_logs()
-
-    uvloop.run(
-        run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
-    )

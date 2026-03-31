@@ -35,6 +35,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -53,9 +54,9 @@ All2AllBackend = Literal[
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
 
-    window_size: int = 1000
+    window_size: int = Field(default=1000, gt=0)
     """Window size for expert load recording."""
-    step_interval: int = 3000
+    step_interval: int = Field(default=3000, gt=0)
     """
     Interval for rearranging experts in expert parallelism.
 
@@ -71,7 +72,7 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
-    log_balancedness_interval: int = 1
+    log_balancedness_interval: int = Field(default=1, gt=0)
     """
     Interval for logging the balancedness.
     """
@@ -82,6 +83,15 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+
+    communicator: EPLBCommunicatorBackend | None = None
+    """
+    Backend for EPLB expert weight communication:
+    - "torch_nccl": Use torch.distributed on the device process group
+    - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "pynccl": Use PyNccl send/recv
+    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -148,10 +158,11 @@ class ParallelConfig:
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
-    """The expert placement strategy for MoE layers:\n
+    """The expert placement strategy for MoE layers:
+
     - "linear": Experts are placed in a contiguous manner. For example, with 4
       experts and 2 ranks, rank 0 will have experts [0, 1] and rank 1 will have
-      experts [2, 3].\n
+      experts [2, 3].
     - "round_robin": Experts are placed in a round-robin manner. For example,
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
@@ -159,11 +170,11 @@ class ParallelConfig:
     all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. Available options:
 
-    - "allgather_reducescatter": All2all based on allgather and reducescatter\n
-    - "deepep_high_throughput": Use deepep high-throughput kernels\n
-    - "deepep_low_latency": Use deepep low-latency kernels\n
-    - "mori": Use mori kernels\n
-    - "nixl_ep": Use nixl-ep kernels\n
+    - "allgather_reducescatter": All2all based on allgather and reducescatter
+    - "deepep_high_throughput": Use deepep high-throughput kernels
+    - "deepep_low_latency": Use deepep low-latency kernels
+    - "mori": Use mori kernels
+    - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
@@ -194,7 +205,7 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
-    disable_nccl_for_dp_synchronization: bool | None = Field(default=None)
+    disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
     to use Gloo instead of NCCL for its all reduce.
 
@@ -213,14 +224,18 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model workers, either "ray" or "mp"
+    """
+    Backend to use for distributed model workers, either "ray" or "mp"
     (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
     is less than or equal to the number of GPUs available, "mp" will be used to
     keep processing on a single host. Otherwise, an error will be raised. To use "mp"
     you must also set nnodes, and to use "ray" you must manually set
     distributed_executor_backend to "ray".
 
-    Note that tpu only support Ray for distributed inference."""
+    Note:
+        [TPU](https://docs.vllm.ai/projects/tpu/en/latest/) platform only supports Ray
+        for distributed inference.
+    """
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -759,16 +774,18 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if (
-            self.all2all_backend in ("allgather_reducescatter")
-            and self.eplb_config.use_async
-        ):
-            logger.warning(
-                "Async EPLB causes hangs with the '%s' all2all backend. "
-                "Forcing synchronous EPLB.",
-                self.all2all_backend,
-            )
-            self.eplb_config.use_async = False
+        if self.enable_eplb and self.eplb_config.communicator is None:
+            if self.enable_elastic_ep:
+                # Elastic EP requires stateless mode
+                # (torch.distributed.batch_isend_irecv doesn't
+                # support stateless mode), so we use PyNCCL backend
+                self.eplb_config.communicator = "pynccl"
+            elif self.eplb_config.use_async:
+                # Torch Gloo is a backend that allows avoiding hangs
+                # due to NCCL multi-thread conflicts in async EPLB
+                self.eplb_config.communicator = "torch_gloo"
+            else:
+                self.eplb_config.communicator = "torch_nccl"
 
     @property
     def use_ray(self) -> bool:
