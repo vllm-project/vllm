@@ -433,7 +433,7 @@ class SpecDecodeBaseProposer:
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 common_attn_metadata=common_attn_metadata, draft_index=0
             )
-            draft_attn_metadata_per_group.append(attn_metadata)
+            per_group_attn_metadata.append(attn_metadata)
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
