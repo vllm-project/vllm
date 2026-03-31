@@ -1088,13 +1088,9 @@ class GPUModelRunner(
                         h_p = req_state.prefill_steering_config_hash
                         h_d = req_state.decode_steering_config_hash
                         if h_p != 0:
-                            self._steering_manager.release_config(
-                                h_p, "prefill"
-                            )
+                            self._steering_manager.release_config(h_p, "prefill")
                         if h_d != 0:
-                            self._steering_manager.release_config(
-                                h_d, "decode"
-                            )
+                            self._steering_manager.release_config(h_d, "decode")
 
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
@@ -3151,19 +3147,37 @@ class GPUModelRunner(
                     ri = self.input_batch.req_id_to_index.get(rid)
                     if ri is None:
                         continue
-                    ph = int(
-                        self.input_batch.request_prefill_steering_hash[ri]
-                    )
-                    if (
-                        ph != 0
-                        and (ph, "prefill")
-                        not in self._steering_manager.config_to_row
-                    ):
-                        eff = rs.sampling_params.effective_prefill_steering
-                        if eff:
-                            self._steering_manager.register_config(
-                                ph, eff, phase="prefill"
-                            )
+
+                    num_computed = int(self.input_batch.num_computed_tokens_cpu[ri])
+                    num_prompt = int(self.input_batch.num_prompt_tokens[ri])
+
+                    if num_computed < num_prompt:
+                        # In prefill — register prefill config
+                        ph = int(self.input_batch.request_prefill_steering_hash[ri])
+                        if (
+                            ph != 0
+                            and (ph, "prefill")
+                            not in self._steering_manager.config_to_row
+                        ):
+                            eff = rs.sampling_params.effective_prefill_steering
+                            if eff:
+                                self._steering_manager.register_config(
+                                    ph, eff, phase="prefill"
+                                )
+                    else:
+                        # In decode (full prefix-cache hit) — register
+                        # decode config
+                        dh = int(self.input_batch.request_decode_steering_hash[ri])
+                        if (
+                            dh != 0
+                            and (dh, "decode")
+                            not in self._steering_manager.config_to_row
+                        ):
+                            eff = rs.sampling_params.effective_decode_steering
+                            if eff:
+                                self._steering_manager.register_config(
+                                    dh, eff, phase="decode"
+                                )
             else:
                 self._steering_manager = None
                 self._steerable_layers = {}
