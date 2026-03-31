@@ -32,9 +32,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
@@ -155,7 +153,9 @@ class Parser:
     @abstractmethod
     def extract_response_outputs(
         self,
+        *,
         model_output: str,
+        model_output_token_ids: Sequence[int],
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
@@ -170,6 +170,7 @@ class Parser:
 
         Args:
             model_output: The complete model-generated string.
+            model_output_token_ids: The token IDs of the model output.
             request: The request object used to generate the output.
             enable_auto_tools: Whether to enable automatic tool call parsing.
             tool_call_id_type: Type of tool call ID generation ("random", etc).
@@ -196,7 +197,7 @@ class Parser:
             request: The request object used to generate the output.
 
         Returns:
-            A tuple of (reasoning_content, response_content).
+            A tuple of (reasoning, response_content).
         """
 
     @abstractmethod
@@ -226,7 +227,9 @@ class Parser:
 
     # ========== Tool Parser Methods ==========
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """
         Adjust the request parameters for tool calling.
 
@@ -313,7 +316,9 @@ class DelegatingParser(Parser):
 
     def extract_response_outputs(
         self,
+        *,
         model_output: str,
+        model_output_token_ids: Sequence[int],
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
