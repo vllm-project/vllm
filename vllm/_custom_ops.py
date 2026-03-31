@@ -2996,7 +2996,7 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
         return torch.empty((x.size(0), N), dtype=x.dtype, device=x.device)
 
 
-_supports_int4_w4a8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
+_supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
 
 
 class CPUDNNLGEMMHandler:

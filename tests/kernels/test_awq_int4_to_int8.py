@@ -20,13 +20,13 @@ import numpy as np
 import pytest
 import torch
 
-from vllm._custom_ops import _supports_int4_w4a8
+from vllm._custom_ops import _supports_cpu_w4a8_int8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_cols,
 )
 
-requires_int4_w4a8 = pytest.mark.skipif(
-    not _supports_int4_w4a8,
+requires_cpu_w4a8_int8 = pytest.mark.skipif(
+    not _supports_cpu_w4a8_int8,
     reason="Requires vLLM CPU build with SGLang INT4 W4A8 kernels",
 )
 
@@ -83,7 +83,7 @@ def make_awq_checkpoint_data(K, N, group_size, seed=42):
 class TestConvertWeightPackedScaleZp:
     """Tests for convert_weight_packed_scale_zp weightpacking."""
 
-    @requires_int4_w4a8
+    @requires_cpu_w4a8_int8
     @pytest.mark.parametrize(
         "K,N,group_size",
         [
@@ -125,7 +125,7 @@ class TestConvertWeightPackedScaleZp:
 class TestInt4ScaledMmCpu:
     """Tests for int4_scaled_mm_cpu GEMM kernel."""
 
-    @requires_int4_w4a8
+    @requires_cpu_w4a8_int8
     @pytest.mark.parametrize(
         "M,K,N,group_size",
         [
@@ -165,7 +165,7 @@ class TestInt4ScaledMmCpu:
         )
         print(f"  [PASS] INT4 GEMM correct: M={M}, K={K}, N={N}")
 
-    @requires_int4_w4a8
+    @requires_cpu_w4a8_int8
     @pytest.mark.parametrize("M", [1, 8, 32])
     def test_gemm_with_bias(self, M):
         """INT4 W4A8 GEMM with bias should match reference."""
@@ -193,7 +193,7 @@ class TestInt4ScaledMmCpu:
         )
         print(f"  [PASS] INT4 GEMM with bias: M={M}")
 
-    @requires_int4_w4a8
+    @requires_cpu_w4a8_int8
     def test_gemm_3d_input(self):
         """apply() reshapes 3D input [B, S, K] -> [B*S, K] -> back to 3D."""
         K, N, group_size = 256, 128, 128
@@ -225,7 +225,7 @@ class TestInt4ScaledMmCpu:
         assert mean_rel < 0.05, f"Mean relative error {mean_rel:.4f} for 3D exceeds 5%"
         print(f"  [PASS] 3D input [{B},{S},{K}] -> output [{B},{S},{N}]")
 
-    @requires_int4_w4a8
+    @requires_cpu_w4a8_int8
     def test_gemm_fp16_input(self):
         """INT4 GEMM should also work with fp16 input."""
         K, N, group_size, M = 256, 256, 128, 8
