@@ -1410,7 +1410,7 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
-                if not request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids
                 ):
                     logger.warning(
