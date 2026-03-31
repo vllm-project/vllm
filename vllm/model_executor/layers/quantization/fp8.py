@@ -415,16 +415,19 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # If using w8a8, torch._scaled_mm needs per tensor, so
             # requantize the logical shards as a single weight.
-            weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
-                weight,
-                weight_scale,
-                layer.logical_widths,
-                getattr(layer, "input_scale", None),
+            weight, weight_scale, input_scale, orig_n = (
+                process_fp8_weight_tensor_strategy(
+                    weight,
+                    weight_scale,
+                    layer.logical_widths,
+                    getattr(layer, "input_scale", None),
+                )
             )
             if self.act_q_static:
                 assert input_scale is not None
                 input_scale = input_scale.max()
             weight = weight.t()
+            layer._orig_output_dim = orig_n
 
             # Update layer with new values.
             replace_parameter(layer, "weight", weight.data)

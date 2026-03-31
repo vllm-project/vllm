@@ -1405,6 +1405,33 @@ def prepare_fp8_moe_layer_for_deepgemm(
     return w13, w2, w13_scale, w2_scale
 
 
+# torch._scaled_mm requires both matrix dimensions divisible by 16.
+# Models where intermediate_size / tp_size is not 16-aligned
+# (e.g. 10944 / tp=8 = 1368) fail CUDA Graph capture without padding.
+FP8_MM_ALIGNMENT = 16
+
+
+def pad_weight_to_fp8_alignment(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, int]:
+    """Pad weight (N, K) so both dims are multiples of FP8_MM_ALIGNMENT.
+
+    Returns (weight_padded, weight_scale_padded, orig_N).
+    weight_scale is padded along dim-0 when per-channel (shape [N, 1]).
+    """
+    import torch.nn.functional as F
+
+    orig_n, orig_k = weight.shape
+    pad_n = (-orig_n) % FP8_MM_ALIGNMENT
+    pad_k = (-orig_k) % FP8_MM_ALIGNMENT
+    if pad_n or pad_k:
+        weight = F.pad(weight, (0, pad_k, 0, pad_n))
+        if weight_scale is not None and weight_scale.shape == (orig_n, 1):
+            weight_scale = F.pad(weight_scale, (0, 0, 0, pad_n))
+    return weight, weight_scale, orig_n
+
+
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
     can benefit from tensors located far enough from one another in memory"""
@@ -1553,8 +1580,12 @@ def process_fp8_weight_tensor_strategy(
     weight_scale: torch.Tensor,
     logical_widths: list[int],
     input_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for tensor-wise quantization strategy."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, int]:
+    """Process weights for tensor-wise quantization strategy.
+
+    Returns (weight, weight_scale, input_scale, orig_N) where orig_N is the
+    original output dimension before alignment padding.
+    """
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
         requantize_with_max_scale,
@@ -1573,15 +1604,20 @@ def process_fp8_weight_tensor_strategy(
     )
 
     weight = _maybe_pad_fp8_weight(weight)
-    return weight, weight_scale, input_scale
+    weight, _, orig_n = pad_weight_to_fp8_alignment(weight)
+    return weight, weight_scale, input_scale, orig_n
 
 
 def process_fp8_weight_channel_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for channel-wise quantization strategy."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, int]:
+    """Process weights for channel-wise quantization strategy.
+
+    Returns (weight, weight_scale, input_scale, orig_N) where orig_N is the
+    original output dimension before alignment padding.
+    """
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1591,7 +1627,10 @@ def process_fp8_weight_channel_strategy(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
 
-    return weight, weight_scale, input_scale
+    weight, weight_scale, orig_n = pad_weight_to_fp8_alignment(
+        weight, weight_scale
+    )
+    return weight, weight_scale, input_scale, orig_n
 
 
 def process_fp8_weight_block_strategy(

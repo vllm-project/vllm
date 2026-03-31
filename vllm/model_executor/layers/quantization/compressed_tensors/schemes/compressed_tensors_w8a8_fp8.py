@@ -148,18 +148,26 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
-            weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
-                layer.weight,
-                layer.weight_scale,
-                layer.logical_widths,
-                getattr(layer, "input_scale", None),
+            weight, weight_scale, input_scale, orig_n = (
+                process_fp8_weight_tensor_strategy(
+                    layer.weight,
+                    layer.weight_scale,
+                    layer.logical_widths,
+                    getattr(layer, "input_scale", None),
+                )
             )
             weight = weight.t()
+            layer._orig_output_dim = orig_n
         elif self.strategy == QuantizationStrategy.CHANNEL:
-            weight, weight_scale, input_scale = process_fp8_weight_channel_strategy(
-                layer.weight, layer.weight_scale, getattr(layer, "input_scale", None)
+            weight, weight_scale, input_scale, orig_n = (
+                process_fp8_weight_channel_strategy(
+                    layer.weight,
+                    layer.weight_scale,
+                    getattr(layer, "input_scale", None),
+                )
             )
             weight = weight.t()
+            layer._orig_output_dim = orig_n
 
         elif self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False

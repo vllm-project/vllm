@@ -9,6 +9,9 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    FP8_MM_ALIGNMENT,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -124,6 +127,8 @@ class FP8ScaledMMLinearKernel(
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        import torch.nn.functional as F
+
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
         w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
@@ -133,6 +138,9 @@ class FP8ScaledMMLinearKernel(
         #   If static, layer.input_scale is scalar and x_s is input_scale.
         # View input as 2D matrix for fp8 methods
         x_2d = x.view(-1, x.shape[-1])
+        orig_out = getattr(layer, "_orig_output_dim", w.shape[1])
+        # output_shape uses the padded N so apply_scaled_mm's internal
+        # narrow/view work correctly; we slice columns back to orig_out after.
         output_shape = [*x.shape[:-1], w.shape[1]]
         out_dtype = x.dtype if maybe_out_dtype is None else maybe_out_dtype
 
@@ -140,12 +148,26 @@ class FP8ScaledMMLinearKernel(
         # TODO(luka) remove this path if not used anymore
         x_2d_q = x_2d
         if x.dtype != fp8_dtype:
+            # Pad input K-dim to match padded weight K-dim before quantizing.
+            pad_k = w.shape[0] - x_2d.shape[-1]
+            if pad_k > 0:
+                x_2d = F.pad(x_2d, (0, pad_k))
             x_2d_q, x_s = self.quant_fp8(
                 x_2d,
                 x_s,
                 x_s_ub,
             )
-        return self.apply_scaled_mm(
+        else:
+            pad_k = w.shape[0] - x_2d.shape[-1]
+            if pad_k > 0:
+                x_2d_q = F.pad(x_2d_q, (0, pad_k))
+
+        # Pad bias to N_padded so the kernel can fuse it before we slice.
+        pad_n = w.shape[1] - orig_out
+        if bias is not None and pad_n > 0:
+            bias = F.pad(bias, (0, pad_n))
+
+        output = self.apply_scaled_mm(
             A=x_2d_q,
             B=w,
             out_dtype=out_dtype,
@@ -154,6 +176,10 @@ class FP8ScaledMMLinearKernel(
             bias=bias,
             output_shape=output_shape,
         )
+        # Slice output columns back to orig_out if N was padded.
+        if pad_n > 0:
+            output = output[..., :orig_out]
+        return output
 
     @abstractmethod
     def apply_scaled_mm(
