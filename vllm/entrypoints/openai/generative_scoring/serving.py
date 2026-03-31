@@ -30,6 +30,7 @@ from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -380,7 +381,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
     async def _build_prompts(
         self,
         request: GenerativeScoringRequest,
-        tokenizer,
+        tokenizer: TokenizerLike,
         max_model_len: int,
     ) -> tuple[list[EngineInput], list[int]]:
         """Build prompts by concatenating query and items.
