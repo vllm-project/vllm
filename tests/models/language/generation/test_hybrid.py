@@ -57,6 +57,8 @@ FP32_STATE_MODELS = [
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
+ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
@@ -82,7 +84,9 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+    ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
@@ -157,6 +161,7 @@ def test_chunked_prefill_with_parallel_sampling(
         # forces prefill chunks with decoding
         max_num_batched_tokens=MAX_NUM_SEQS * 3,
         max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -301,7 +306,9 @@ def test_full_cuda_graph(
             example_prompts, max_tokens, num_logprobs
         )
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+    ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
@@ -370,6 +377,7 @@ def _get_vllm_runner_params(
         "max_model_len": max_model_len,
         "tensor_parallel_size": tensor_parallel_size,
         "gpu_memory_utilization": 0.4,
+        "attention_backend": ATTN_BACKEND,
     }
 
 
@@ -774,6 +782,60 @@ def test_apc_multiple_prompts_partial_cached_outputs(
         )
 
 
+# Test that outputs match whether prefix caching is enabled or not for mamba.
+@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+def test_same_mamba_output_apc_on_vs_off(
+    vllm_runner,
+    model: str,
+) -> None:
+    num_logprobs = 5
+    prompts = [
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+    ]
+    max_tokens = 20
+    max_model_len = max(len(p) for p in prompts) + max_tokens + 64
+
+    base_kwargs = _get_vllm_runner_params(model, max_model_len)
+    base_kwargs.update(
+        enforce_eager=True, block_size=16, seed=42, gpu_memory_utilization=0.8
+    )
+
+    # No prefix caching
+    kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}
+    with vllm_runner(**kwargs_no_apc) as vllm_model:
+        outputs_no_apc, _ = _get_vLLM_output(
+            vllm_runner,
+            kwargs_no_apc,
+            prompts,
+            max_tokens,
+            num_logprobs=num_logprobs,
+            vllm_model=vllm_model,
+        )
+    # With prefix caching
+    kwargs_with_apc = {
+        **base_kwargs,
+        "enable_prefix_caching": True,
+        "mamba_block_size": 16,
+    }
+    with vllm_runner(**kwargs_with_apc) as vllm_model:
+        outputs_with_apc, _ = _get_vLLM_output(
+            vllm_runner,
+            kwargs_with_apc,
+            prompts,
+            max_tokens,
+            num_logprobs=num_logprobs,
+            vllm_model=vllm_model,
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs_no_apc[0],
+        outputs_1_lst=outputs_with_apc[0],
+        name_0="vllm_no_apc",
+        name_1="vllm_with_apc",
+    )
+
+
 # we have to use a real large model to get reasonable results
 # the model can't be a hybrid model as we need block_size 16
 @pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
@@ -790,6 +852,7 @@ def test_apc_common_prefix_same_batch(
         mamba_block_size=16,
         enable_prefix_caching=True,
         seed=42,
+        attention_backend=ATTN_BACKEND,
     )
     prompts = [
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
