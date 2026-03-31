@@ -543,6 +543,19 @@ class Scheduler(SchedulerInterface):
                     if self.ec_connector is not None:
                         self.ec_connector.update_state_after_alloc(request, i)
 
+        # Clear stale spec token placeholders for unscheduled running
+        # requests. In async scheduling, _update_after_schedule sets
+        # spec_token_ids = [-1, ...] which persists if the request is
+        # not scheduled (e.g. budget exhausted). If re-scheduled later,
+        # the stale -1 values leak into token_ids_cpu and reach
+        # F.embedding(), causing CUDA device-side assert. (See #36906)
+        for request in self.running:
+            if (
+                request.request_id not in num_scheduled_tokens
+                and request.spec_token_ids
+            ):
+                request.spec_token_ids = []
+
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
