@@ -582,6 +582,27 @@ ROCM_SMI_TIMEOUT_S = 60
 DOCKER_PULL_RETRIES = 3
 DOCKER_PULL_RETRY_DELAY_S = 30
 
+# ---------------------------------------------------------------------------
+# Local image cache (NVMe).
+#
+# Set by the Buildkite agent hooks when running on K8s nodes with NVMe.
+# The base-tar-updater DaemonSet keeps ci_base.tar and base.tar up to date
+# in this directory. The hooks load them into DinD before this script runs.
+#
+# When set, Phase 7 uses a tiered strategy:
+#   Tier 0: Load per-commit tar from NVMe (zero network, ~10s)
+#   Tier 1: Assemble from ci_base + wheel artifact (~25s, ~50MB download)
+#   Tier 2: docker pull with pre-loaded layers (~40-60s, ~1-3GB delta)
+#   Tier 3: Cold docker pull (~350s, full image)
+#
+# When empty, Phase 7 uses the standard docker pull with retry.
+LOCAL_IMAGE_CACHE = os.environ.get("VLLM_LOCAL_IMAGE_CACHE", "")
+
+# CI base image for local assembly (Tier 1). The hooks pre-load this
+# from NVMe tar into DinD. Must match what Dockerfile.rocm uses as
+# the FROM image for the test stage.
+CI_BASE_IMAGE = os.environ.get("VLLM_CI_BASE_IMAGE", "rocm/vllm-dev:ci_base")
+
 # Maximum number of PIDs allowed inside the test container.
 # Prevents fork-bomb scenarios from killing the K8s node.
 CONTAINER_PIDS_LIMIT = 4096
@@ -604,6 +625,48 @@ CONTAINER_SHM_SIZE = "16gb"
 #
 # Override: VLLM_TEST_TIMEOUT env var (seconds).
 CONTAINER_TIMEOUT_S = int(os.environ.get("VLLM_TEST_TIMEOUT", "10200"))  # 170 min
+
+# --------------------------------------------------------------------------
+# Health watchdog knobs
+#
+# The watchdog is a background thread that samples system health (memory,
+# disk, VRAM, container status) and, when two-tier cache is enabled,
+# incrementally rsyncs new model files from L1 (NVMe) to L2 (NFS) during
+# the test. This means models are available to other nodes before the test
+# finishes, and disk pressure is relieved mid-test rather than only at
+# cleanup.
+#
+# VLLM_ROCM_CI_WATCHDOG_INTERVAL           Sampling interval (seconds).
+#                                           How often the watchdog checks
+#                                           memory, disk, VRAM, and container
+#                                           status. Default: 120.
+#
+# VLLM_ROCM_CI_WATCHDOG_SYNC_INTERVAL      Normal cache sync interval (seconds).
+#                                           How often the watchdog rsyncs new
+#                                           files from L1 to L2 during the test.
+#                                           Only active when CACHE_BACKING_ROOT
+#                                           is set. Default: 300.
+#
+# VLLM_ROCM_CI_WATCHDOG_SYNC_PRESSURE_INTERVAL
+#                                           Pressure cache sync interval (seconds).
+#                                           Used when L1 usage exceeds the
+#                                           pressure threshold. Default: 10.
+#
+# VLLM_ROCM_CI_WATCHDOG_CACHE_PRESSURE_PCT L1 usage threshold (% of max_gb)
+#                                           that triggers pressure mode, causing
+#                                           more frequent syncs. Default: 80.
+# --------------------------------------------------------------------------
+
+WATCHDOG_INTERVAL_S = int(os.environ.get("VLLM_ROCM_CI_WATCHDOG_INTERVAL", "120"))
+WATCHDOG_SYNC_INTERVAL_S = int(
+    os.environ.get("VLLM_ROCM_CI_WATCHDOG_SYNC_INTERVAL", "300")
+)
+WATCHDOG_SYNC_PRESSURE_INTERVAL_S = int(
+    os.environ.get("VLLM_ROCM_CI_WATCHDOG_SYNC_PRESSURE_INTERVAL", "10")
+)
+WATCHDOG_CACHE_PRESSURE_PCT = int(
+    os.environ.get("VLLM_ROCM_CI_WATCHDOG_CACHE_PRESSURE_PCT", "80")
+)
 
 
 # ==========================================================================
@@ -733,6 +796,21 @@ def timed(label):
         elapsed = time.monotonic() - start
         status = "FAILED after" if exc_occurred else "completed in"
         info(f"{label} {status} {elapsed:.1f}s")
+
+
+@contextmanager
+def best_effort(label):
+    # type: (str) -> ...
+    """Run a block that must never crash the script.
+
+    If the block raises, logs a WARNING with the label and exception,
+    then continues. Use this instead of bare ``suppress(Exception)``
+    so failures are visible in the build log.
+    """
+    try:
+        yield
+    except Exception as exc:
+        warn(f"{label} failed: {exc}")
 
 
 # ==========================================================================
@@ -925,6 +1003,15 @@ def log_effective_config():
         f"  Caches registered:         {len(CACHES)} "
         f"({', '.join(c['env_var'] for c in CACHES)})"
     )
+    local_cache = LOCAL_IMAGE_CACHE or "(not set -- no tiered image acquisition)"
+    info(f"  LOCAL_IMAGE_CACHE:         {local_cache}")
+    info(f"  CI_BASE_IMAGE:             {CI_BASE_IMAGE}")
+    info(f"  WATCHDOG_INTERVAL_S:       {WATCHDOG_INTERVAL_S}s")
+    info(f"  WATCHDOG_SYNC_INTERVAL_S:  {WATCHDOG_SYNC_INTERVAL_S}s")
+    info(
+        f"  WATCHDOG_SYNC_PRESSURE_S:  {WATCHDOG_SYNC_PRESSURE_INTERVAL_S}s "
+        f"(at >{WATCHDOG_CACHE_PRESSURE_PCT}% L1 usage)"
+    )
 
     # Log env var overrides so operators can see what was customized.
     overrides = []  # type: list[str]
@@ -953,6 +1040,12 @@ def log_effective_config():
         "VLLM_CI_REGISTRY",
         "VLLM_ROCM_CI_LEGACY_DOCKER_TAG",
         "DOCKER_IMAGE_NAME",
+        "VLLM_LOCAL_IMAGE_CACHE",
+        "VLLM_CI_BASE_IMAGE",
+        "VLLM_ROCM_CI_WATCHDOG_INTERVAL",
+        "VLLM_ROCM_CI_WATCHDOG_SYNC_INTERVAL",
+        "VLLM_ROCM_CI_WATCHDOG_SYNC_PRESSURE_INTERVAL",
+        "VLLM_ROCM_CI_WATCHDOG_CACHE_PRESSURE_PCT",
     ]:
         val = os.environ.get(var)
         if val is not None:
@@ -2415,10 +2508,9 @@ def setup_caches():
     if not _overlay_active:
         sync_caches_from_backing()
 
-    # Show the top-K access frequency table only on nightly builds
-    # to avoid noise on every PR step.
-    if os.environ.get("NIGHTLY") == "1":
-        log_top_k_access_counts()
+    # Show the top-K access frequency table so operators can see which
+    # models are hot across jobs and tune cache budgets accordingly.
+    log_top_k_access_counts()
 
     for cache in CACHES:
         host_dir = _get_cache_host_dir(cache)
@@ -2785,11 +2877,20 @@ def log_top_k_access_counts(k=15):
 
 def update_access_counts_from_atime(cache, counts=None):
     # type: (dict, dict[str, int] | None) -> dict[str, int]
-    """Update access counts by scanning which files were accessed (atime).
+    """Update access counts by scanning which files were recently modified.
 
-    After a test run, files with recent atime were read during the test.
+    After a test run, files with recent mtime were written during the test.
     We increment their access counts. This gives us a frequency signal
     for future seeding decisions.
+
+    IMPORTANT: this tracks *download* frequency, not *read* frequency.
+    We use mtime (modification time) because most filesystems mount with
+    noatime/relatime, making atime unreliable. This means a model that
+    is read from cache 100 times without being re-downloaded will only
+    have count=1. The practical effect: the frequency table reflects
+    which models are downloaded most often (cache misses), not which
+    are used most often. For seeding/eviction this is still useful --
+    frequently downloaded models are the ones most worth keeping warm.
 
     Args:
         cache:  A single CACHES entry.
@@ -3366,10 +3467,6 @@ def evict_all_l2_caches():
     if CACHE_BACKING_ROOT is None:
         return
 
-    if os.environ.get("NIGHTLY") != "1":
-        info("L2 eviction skipped (NIGHTLY!=1)")
-        return
-
     section("L2 cache eviction (time + size)")
     any_evicted = False
     for cache in CACHES:
@@ -3484,11 +3581,21 @@ def check_infra_health():
     registry = os.environ.get("VLLM_CI_REGISTRY", "docker.io")
 
     # -- 1. DNS resolution --
+    # Resolve the hosts that THIS job will actually contact: the Docker
+    # registry (configurable) and huggingface.co (model downloads).
+    # Only test relevant hosts -- hardcoding public endpoints like
+    # ghcr.io is wrong when CI uses a private registry or mirror.
+    # Without this pre-check, a DNS failure surfaces minutes later as
+    # "dial tcp: lookup ...: no such host" after Docker exhausts its
+    # internal retry loop. Catching it here fails in <5s with context.
     try:
         dns_hosts = []  # type: list[str]
+        # Extract hostname from registry (strip port if present).
         registry_host = registry.split(":")[0].split("/")[0]
         dns_hosts.append(registry_host)
+        # HuggingFace is always needed for model downloads.
         dns_hosts.append("huggingface.co")
+        # Deduplicate while preserving order.
         seen = set()  # type: set[str]
         dns_hosts = [h for h in dns_hosts if not (h in seen or seen.add(h))]
         dns_ok = True
@@ -3520,6 +3627,9 @@ def check_infra_health():
         warn(f"DNS check failed unexpectedly: {exc}")
 
     # -- 2. Docker registry reachability --
+    # Try to reach the registry API. We don't need to authenticate --
+    # a TCP connection or HTTP response is enough to confirm the network
+    # path is open.
     try:
         r = sh(
             f"curl -sf --connect-timeout 10 --max-time 15 "
@@ -3540,8 +3650,15 @@ def check_infra_health():
         warn(f"Registry reachability check failed: {exc}")
 
     # -- 2b. Network throughput --
+    # Download 1MB from a real endpoint and measure speed. We try
+    # multiple URLs across different providers so a single repo or
+    # CDN being down doesn't blind us. Each URL is a file that our
+    # test suite actually uses (models downloaded during tests).
+    # Last resort: ping our own GitHub repo (always available if
+    # the network is functional at all).
     try:
         _throughput_probes = [
+            # HF models used by the test suite (1MB range request each).
             (
                 "HF/TitanML-tiny-mixtral",
                 "https://huggingface.co/TitanML/tiny-mixtral"
@@ -3557,6 +3674,7 @@ def check_infra_health():
                 "https://huggingface.co/openai/whisper-tiny"
                 "/resolve/main/model.safetensors",
             ),
+            # GitHub: our own repo (raw file, always available).
             (
                 "GitHub/vllm-project",
                 "https://raw.githubusercontent.com/vllm-project/vllm/main/README.md",
@@ -3581,33 +3699,34 @@ def check_infra_health():
                 speed_bps = float(r.stdout.strip())
             except (ValueError, OverflowError):
                 continue
+            # Skip bogus measurements (empty response, <1KB transferred).
             if speed_bps < 1:
                 continue
             speed_mbps = speed_bps / (1024 * 1024)
             speed_measured = True
-            if speed_bps < 1024 * 100:
+            if speed_bps < 1024 * 100:  # < 100 KB/s
                 warn(
                     f"{_DIAG_PREFIX} Network throughput: "
-                    f"{speed_mbps:.2f} MB/s via "
-                    f"{probe_name} (very slow, <100KB/s). "
-                    f"Docker pull and model downloads will "
-                    f"be severely affected."
+                    f"{speed_mbps:.2f} MB/s via {probe_name} "
+                    f"(very slow, <100KB/s). "
+                    f"Docker pull and model downloads will be "
+                    f"severely affected. Check network bandwidth, "
+                    f"proxy throttling, and NIC health."
                 )
-            elif speed_bps < 1024 * 1024:
+            elif speed_bps < 1024 * 1024:  # < 1 MB/s
                 warn(
-                    f"Network throughput: "
-                    f"{speed_mbps:.2f} MB/s via "
-                    f"{probe_name} (slow, may cause "
-                    f"pull timeouts)"
+                    f"Network throughput: {speed_mbps:.2f} MB/s "
+                    f"via {probe_name} "
+                    f"(slow, may cause pull timeouts)"
                 )
             else:
                 info(f"Network throughput: {speed_mbps:.1f} MB/s via {probe_name} (OK)")
-            break
+            break  # first successful probe is enough
         if not speed_measured:
             warn(
-                f"{_DIAG_PREFIX} Network throughput: could "
-                f"not measure (all "
-                f"{len(_throughput_probes)} probes failed)."
+                f"{_DIAG_PREFIX} Network throughput: could not "
+                f"measure (all {len(_throughput_probes)} probes "
+                f"failed). Network may be unreachable."
             )
     except Exception as exc:
         warn(f"Network throughput check failed: {exc}")
@@ -3623,16 +3742,17 @@ def check_infra_health():
                     info(f"Available memory: {avail_gb:.1f} GB")
                     if avail_gb < 8:
                         warn(
-                            f"{_DIAG_PREFIX} Low available "
-                            f"memory: {avail_gb:.1f} GB. "
-                            f"Tests may OOM or the kubelet "
-                            f"may evict this pod."
+                            f"{_DIAG_PREFIX} Low available memory: {avail_gb:.1f} GB. "
+                            f"Tests may OOM or the kubelet may evict this pod. "
+                            f"Check node memory pressure: kubectl top node"
                         )
                     break
     except Exception as exc:
         warn(f"Memory check failed: {exc}")
 
     # -- 4. Disk I/O latency --
+    # Write a small file and measure time. Healthy disks complete in <50ms.
+    # Degraded NFS or network storage can take seconds.
     try:
         test_file = Path(tempfile.gettempdir()) / ".disk_io_check"
         start = time.monotonic()
@@ -3641,9 +3761,9 @@ def check_infra_health():
         latency_ms = (time.monotonic() - start) * 1000
         if latency_ms > 500:
             warn(
-                f"{_DIAG_PREFIX} Disk I/O latency: "
-                f"{latency_ms:.0f}ms (>500ms). Storage "
-                f"may be degraded."
+                f"{_DIAG_PREFIX} Disk I/O latency: {latency_ms:.0f}ms (>500ms). "
+                f"Storage may be degraded (slow NFS, worn SSD, network storage issue). "
+                f"Test performance will be affected."
             )
         elif latency_ms > 100:
             warn(f"Disk I/O latency: {latency_ms:.0f}ms (elevated but usable)")
@@ -3718,6 +3838,188 @@ def docker_pull_with_retry(image, retries=DOCKER_PULL_RETRIES):
                 f"    - Registry outage (check status page)"
             )
             sys.exit(1)
+
+
+def _load_commit_tar(image, cache_dir):
+    # type: (str, str) -> bool
+    """Tier 0: Load a per-commit image tar from local NVMe.
+
+    A previous test job on this node may have saved the image after pulling
+    it. Loading from NVMe avoids any network traffic.
+
+    Returns True if the image is now available in Docker.
+    """
+    commit = os.environ.get("BUILDKITE_COMMIT", "")
+    if not commit:
+        return False
+
+    tar_path = os.path.join(cache_dir, f"commit-{commit}.tar")
+    if not os.path.isfile(tar_path):
+        return False
+
+    info(f"Tier 0: Loading per-commit tar from NVMe ({tar_path})")
+    r = sh(["docker", "load", "-i", tar_path], capture=True)
+    if r.returncode != 0:
+        warn(f"Failed to load commit tar, removing: {tar_path}")
+        with suppress(OSError):
+            os.remove(tar_path)
+        return False
+
+    # Verify the image is actually present after load
+    r2 = sh(["docker", "image", "inspect", image], capture=True)
+    if r2.returncode == 0:
+        info("Tier 0: Image loaded from NVMe cache")
+        return True
+
+    warn("Commit tar loaded but image not found (tag mismatch?)")
+    return False
+
+
+def _assemble_from_wheel(image, cache_dir):
+    # type: (str, str) -> bool
+    """Tier 1: Assemble a test image locally from ci_base + wheel artifact.
+
+    The build step uploads the vLLM wheel as a Buildkite artifact
+    (artifacts/vllm-wheel/*.whl.zst). If ci_base is already loaded
+    (by the hooks from NVMe tar) and the wheel is available, we build
+    a lightweight image locally -- zero Docker Hub traffic.
+
+    Returns True if the image was assembled successfully.
+    """
+    # Check ci_base is available in Docker (hooks should have loaded it)
+    r = sh(["docker", "image", "inspect", CI_BASE_IMAGE], capture=True)
+    if r.returncode != 0:
+        info("Tier 1: ci_base not available, skipping local assembly")
+        return False
+
+    # Check buildkite-agent is available
+    if not shutil.which("buildkite-agent"):
+        info("Tier 1: buildkite-agent not found, skipping")
+        return False
+
+    info("Tier 1: Attempting local assembly from ci_base + wheel")
+
+    # Download wheel artifact
+    wheel_tmp = tempfile.mkdtemp(prefix="vllm-wheel-")
+    try:
+        r = sh(
+            [
+                "buildkite-agent",
+                "artifact",
+                "download",
+                "artifacts/vllm-wheel/*",
+                wheel_tmp + "/",
+            ],
+            capture=True,
+        )
+        if r.returncode != 0:
+            info("Tier 1: No wheel artifact available (build may not have uploaded it)")
+            return False
+
+        # Decompress .whl.zst files
+        import glob as _glob
+
+        zst_files = _glob.glob(
+            os.path.join(wheel_tmp, "artifacts/vllm-wheel/*.whl.zst")
+        )
+        if not zst_files:
+            info("Tier 1: No .whl.zst files in artifact")
+            return False
+
+        for zst_file in zst_files:
+            whl_name = os.path.basename(zst_file).removesuffix(".zst")
+            sh(
+                ["zstd", "-d", "-f", zst_file, "-o", os.path.join(wheel_tmp, whl_name)],
+                capture=True,
+            )
+
+        # Decompress tests archive if present
+        tests_archive = os.path.join(wheel_tmp, "artifacts/vllm-wheel/tests.tar.zst")
+        if os.path.isfile(tests_archive):
+            sh(
+                f"zstd -d '{tests_archive}' --stdout | tar xf - -C '{wheel_tmp}/'",
+                capture=True,
+            )
+
+        # Find the workspace (Buildkite checkout)
+        workspace = os.environ.get("BUILDKITE_BUILD_CHECKOUT_PATH", "/workspace/build")
+        whl_files = _glob.glob(os.path.join(wheel_tmp, "*.whl"))
+        if not whl_files or not os.path.isdir(workspace):
+            info("Tier 1: Wheel or workspace not found, skipping")
+            return False
+
+        # Copy wheels into workspace for Docker build context
+        dist_dir = os.path.join(workspace, "dist")
+        os.makedirs(dist_dir, exist_ok=True)
+        for whl in whl_files:
+            shutil.copy2(whl, dist_dir)
+
+        # Write a minimal Dockerfile for local assembly
+        dockerfile = os.path.join(wheel_tmp, "Dockerfile.ci-assemble")
+        with open(dockerfile, "w") as f:
+            f.write(
+                f"FROM {CI_BASE_IMAGE}\n"
+                "COPY dist/*.whl /opt/vllm-wheels/\n"
+                "RUN pip install --no-deps /opt/vllm-wheels/*.whl 2>/dev/null || "
+                "pip install /opt/vllm-wheels/*.whl\n"
+                "COPY . /vllm-workspace\n"
+                "WORKDIR /vllm-workspace\n"
+                "RUN pip install -e tests/vllm_test_utils 2>/dev/null || true\n"
+                "RUN mkdir -p src && mv vllm src/vllm 2>/dev/null || true\n"
+            )
+
+        info("Building local image: ci_base + wheel + workspace...")
+        with timed("local image assembly"):
+            r = sh(
+                ["docker", "build", "-t", image, "-f", dockerfile, workspace],
+                capture=True,
+            )
+
+        if r.returncode != 0:
+            warn("Tier 1: Local image build failed, falling back to pull")
+            return False
+
+        # Verify
+        r2 = sh(["docker", "image", "inspect", image], capture=True)
+        if r2.returncode == 0:
+            info("Tier 1: Local assembly succeeded -- zero Docker Hub traffic")
+            return True
+
+        warn("Tier 1: Build succeeded but image not found")
+        return False
+
+    finally:
+        shutil.rmtree(wheel_tmp, ignore_errors=True)
+
+
+def _save_commit_tar(image, cache_dir):
+    # type: (str, str) -> None
+    """Save a pulled/assembled image to NVMe for same-node reuse.
+
+    Other test jobs for the same commit on this node will load it via
+    Tier 0 instead of pulling or assembling again.
+    """
+    commit = os.environ.get("BUILDKITE_COMMIT", "")
+    if not commit:
+        return
+
+    tar_path = os.path.join(cache_dir, f"commit-{commit}.tar")
+    if os.path.isfile(tar_path):
+        return  # already saved by another job
+
+    tmp_path = tar_path + ".tmp"
+    info(f"Saving image to NVMe for same-node reuse: {tar_path}")
+    r = sh(["docker", "save", image, "-o", tmp_path], capture=True)
+    if r.returncode == 0:
+        try:
+            os.rename(tmp_path, tar_path)
+            info("Image saved to NVMe cache")
+        except OSError:
+            with suppress(OSError):
+                os.remove(tmp_path)
+    else:
+        with suppress(OSError):
+            os.remove(tmp_path)
 
 
 def _get_disk_info(path):
@@ -4077,9 +4379,6 @@ def cleanup_docker_disk():
 #   - Stoppable via an Event so cleanup can flush it before uploading.
 # ==========================================================================
 
-# Watchdog sampling interval in seconds.
-WATCHDOG_INTERVAL_S = int(os.environ.get("VLLM_ROCM_CI_WATCHDOG_INTERVAL", "30"))
-
 
 class _HealthWatchdog:
     """Background thread that periodically samples system health.
@@ -4093,6 +4392,13 @@ class _HealthWatchdog:
       - GPU VRAM (via amd-smi/rocm-smi, best-effort)
       - Container status (running, OOMKilled, exited)
 
+    Active duties (when two-tier cache is enabled):
+      - Incremental model sync: rsyncs new files from L1 (NVMe) to L2
+        (NFS) every cycle. This means models downloaded mid-test are
+        available to other nodes before the test finishes.
+      - Disk pressure relief: when L1 cache usage exceeds a threshold,
+        accelerates sync to ensure data reaches L2 before eviction.
+
     All sampling is wrapped in try/except so a single failed read
     (e.g., /proc temporarily unavailable during cgroup migration)
     never kills the watchdog.
@@ -4104,6 +4410,8 @@ class _HealthWatchdog:
         self._container = container_name
         self._stop = threading.Event()
         self._thread = None  # type: threading.Thread | None
+        self._sync_in_progress = False
+        self._last_sync_time = 0.0  # monotonic
 
     def start(self):
         # type: () -> None
@@ -4137,7 +4445,7 @@ class _HealthWatchdog:
             )
             f.flush()
             while not self._stop.is_set():
-                with suppress(Exception):
+                with best_effort("watchdog sample"):
                     self._sample(f)
                 self._stop.wait(timeout=WATCHDOG_INTERVAL_S)
 
@@ -4222,7 +4530,134 @@ class _HealthWatchdog:
         except (OSError, subprocess.SubprocessError):
             pass
 
+        # -- Incremental cache sync (L1 -> L2) --
+        if CACHE_BACKING_ROOT is not None and not self._sync_in_progress:
+            with best_effort("watchdog cache sync"):
+                self._maybe_sync_caches(f, ts)
+
         f.flush()
+
+    def _maybe_sync_caches(self, f, ts):
+        # type: (...) -> None
+        """Incrementally rsync new files from L1 (NVMe) to L2 (NFS).
+
+        Runs at most every WATCHDOG_SYNC_INTERVAL_S seconds. Under L1 disk
+        pressure, runs every WATCHDOG_SYNC_PRESSURE_INTERVAL_S seconds.
+
+        Before rsyncing, checks that L2 has room for the delta. If L2 would
+        overflow its l2_max_gb budget, the rsync is skipped for that cache
+        and L1 LRU eviction is triggered instead (oldest files removed from
+        NVMe to free space for ongoing downloads).
+
+        The rsync uses --update so it only copies files newer on L1 than L2.
+        Safe for concurrent pods writing to the same NFS backing store.
+        """
+        now = time.monotonic()
+
+        # Check if any L1 cache is under disk pressure
+        under_pressure = False
+        for cache in CACHES:
+            max_gb = _get_cache_max_gb(cache)
+            if max_gb <= 0:
+                continue
+            host_dir = _get_cache_host_dir(cache)
+            if not host_dir.exists():
+                continue
+            try:
+                usage = shutil.disk_usage(str(host_dir))
+                used_gb = usage.used / (1024 * 1024 * 1024)
+                if used_gb > max_gb * (WATCHDOG_CACHE_PRESSURE_PCT / 100.0):
+                    under_pressure = True
+                    break
+            except OSError:
+                pass
+
+        interval = (
+            WATCHDOG_SYNC_PRESSURE_INTERVAL_S
+            if under_pressure
+            else WATCHDOG_SYNC_INTERVAL_S
+        )
+        if now - self._last_sync_time < interval:
+            return
+
+        self._sync_in_progress = True
+        try:
+            synced = 0
+            skipped_full = 0
+            evicted = 0
+
+            for cache in CACHES:
+                backing = _get_cache_backing_dir(cache)
+                if backing is None:
+                    continue
+                local = _get_cache_host_dir(cache)
+                if not local.exists():
+                    continue
+
+                backing.mkdir(parents=True, exist_ok=True)
+                env = cache["env_var"]
+                l2_max_gb = int(cache.get("l2_max_gb", 0))
+
+                # Check L2 has room before rsyncing. If L2 is at or over
+                # budget, skip the sync and evict from L1 instead.
+                if l2_max_gb > 0:
+                    l2_bytes = _get_dir_size_bytes(backing)
+                    l2_gb = l2_bytes / (1024 * 1024 * 1024)
+                    if l2_gb >= l2_max_gb:
+                        f.write(
+                            f"{ts} | cache_sync | {env} L2 full "
+                            f"({l2_gb:.1f}/{l2_max_gb}GB) -- "
+                            f"skipping sync, evicting L1 LRU\n"
+                        )
+                        skipped_full += 1
+                        # Evict oldest files from L1 to free space for
+                        # ongoing downloads. Uses the existing LRU eviction
+                        # which respects the cache's max_gb budget.
+                        try:
+                            evict_cache_lru(cache)
+                            evicted += 1
+                        except Exception:
+                            pass
+                        continue
+
+                # --update: only copy files newer on local than backing.
+                # --timeout=30: don't hang if NFS is slow.
+                # --whole-file: skip delta-transfer (NVMe read is faster
+                #   than computing checksums over NFS).
+                r = subprocess.run(
+                    [
+                        "rsync",
+                        "--archive",
+                        "--update",
+                        "--whole-file",
+                        "--timeout=30",
+                        str(local) + "/",
+                        str(backing) + "/",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                )
+                if r.returncode == 0:
+                    synced += 1
+                else:
+                    f.write(
+                        f"{ts} | cache_sync | {env} rsync failed (rc={r.returncode})\n"
+                    )
+
+            parts = []
+            if synced > 0:
+                parts.append(f"synced {synced}")
+            if skipped_full > 0:
+                parts.append(f"L2-full {skipped_full}")
+            if evicted > 0:
+                parts.append(f"L1-evicted {evicted}")
+            if parts:
+                pressure_tag = " [PRESSURE]" if under_pressure else ""
+                f.write(f"{ts} | cache_sync | {', '.join(parts)}{pressure_tag}\n")
+            self._last_sync_time = now
+        finally:
+            self._sync_in_progress = False
 
 
 def run_container(
@@ -5512,8 +5947,7 @@ class _Cleanup:
             for cache in CACHES:
                 counts = update_access_counts_from_atime(cache, counts)
             _save_access_counts(counts)
-            if os.environ.get("NIGHTLY") == "1":
-                log_top_k_access_counts()
+            log_top_k_access_counts()
 
         # 0b. Unmount overlay caches (must happen before rsync to backing,
         # because the upper layer files are only visible after unmount
@@ -5661,13 +6095,13 @@ def main():
 
     # -- Phase 1: Environment + config --
     section("Environment")
-    with suppress(Exception):
+    with best_effort("K8s context logging"):
         log_k8s_context()
-    with suppress(Exception):
+    with best_effort("config logging"):
         log_effective_config()
 
     # -- Phase 1b: Hard resets (destructive, one-shot) --
-    with suppress(Exception):
+    with best_effort("hard resets"):
         execute_hard_resets()
 
     # -- Phase 2: Infrastructure health --
@@ -5740,10 +6174,10 @@ def main():
                 else:
                     warn("Could not determine host ROCm version")
 
-        with suppress(Exception):
+        with best_effort("rocminfo"):
             sh("rocminfo", timeout=ROCM_SMI_TIMEOUT_S)
 
-        # -- Phase 4: GPU health (fatal if GPUs not visible) --
+        # -- Phase 4: GPU health --
         validate_gpu_health()
     else:
         info("GPU pre-flight DISABLED (VLLM_ROCM_CI_GPU_PREFLIGHT=0)")
@@ -5752,17 +6186,17 @@ def main():
     # Housekeeping is best-effort: a crash in stale container cleanup
     # or cache eviction should not prevent the test from running.
     with timed("Docker and cache housekeeping"):
-        with suppress(Exception):
+        with best_effort("stale container cleanup"):
             cleanup_stale_containers()
         if ENABLE_DOCKER_EVICTION:
-            with suppress(Exception):
+            with best_effort("Docker disk eviction"):
                 cleanup_docker_disk()
         else:
             info("Docker eviction DISABLED (VLLM_ROCM_CI_DOCKER_EVICTION=0)")
         if ENABLE_CACHE_EVICTION:
-            with suppress(Exception):
+            with best_effort("L1 cache eviction"):
                 evict_all_caches()
-            with suppress(Exception):
+            with best_effort("L2 cache eviction"):
                 evict_all_l2_caches()
         else:
             info("Cache eviction DISABLED (VLLM_ROCM_CI_CACHE_EVICTION=0)")
@@ -5812,8 +6246,36 @@ def main():
     _cleanup.container = container
     _cleanup.commit = commit
 
-    with timed(f"docker pull {image}"):
-        docker_pull_with_retry(image)
+    # Tiered image acquisition: try local sources first, fall back to pull.
+    # VLLM_LOCAL_IMAGE_CACHE is set by the Buildkite agent hooks on K8s
+    # nodes with NVMe-backed cache (maintained by base-tar-updater DaemonSet).
+    image_ready = False
+
+    # Check if image is already in Docker (e.g., loaded by hooks or a
+    # previous run on the same DinD instance).
+    r = sh(["docker", "image", "inspect", image], capture=True)
+    if r.returncode == 0:
+        info("Image already present in Docker")
+        image_ready = True
+
+    # Tier 0: per-commit tar on local NVMe
+    if not image_ready and LOCAL_IMAGE_CACHE:
+        with timed("Tier 0: NVMe commit tar"):
+            image_ready = _load_commit_tar(image, LOCAL_IMAGE_CACHE)
+
+    # Tier 1: local assembly from ci_base + wheel artifact
+    if not image_ready and LOCAL_IMAGE_CACHE:
+        with timed("Tier 1: local assembly"):
+            image_ready = _assemble_from_wheel(image, LOCAL_IMAGE_CACHE)
+
+    # Tier 2/3: docker pull (with pre-loaded base layers from hooks)
+    if not image_ready:
+        with timed(f"docker pull {image}"):
+            docker_pull_with_retry(image)
+
+    # Save to NVMe for same-node reuse by subsequent jobs
+    if LOCAL_IMAGE_CACHE:
+        _save_commit_tar(image, LOCAL_IMAGE_CACHE)
 
     # -- Phase 8: Commands --
     section("Preparing test commands")
