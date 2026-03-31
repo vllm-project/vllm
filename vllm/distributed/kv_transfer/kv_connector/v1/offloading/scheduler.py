@@ -319,6 +319,8 @@ class OffloadingConnectorScheduler:
 
         return meta
 
+    _uco_count = 0
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
         Update KVConnector state from worker-side connectors output.
@@ -327,9 +329,25 @@ class OffloadingConnectorScheduler:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+        OffloadingConnectorScheduler._uco_count += 1
+        c = OffloadingConnectorScheduler._uco_count
+        if c % 50 == 0 or connector_output.finished_sending:
+            logger.info(
+                "DISK_DEBUG uco#%d: finished_sending=%s "
+                "finished_recving=%s reqs_being_stored=%d",
+                c,
+                connector_output.finished_sending,
+                connector_output.finished_recving,
+                len(self._reqs_being_stored),
+            )
         for req_id in connector_output.finished_sending or []:
             block_hashes = self._reqs_being_stored.pop(req_id, None)
             if block_hashes:
+                logger.info(
+                    "DISK_DEBUG uco#%d: complete_store req=%s "
+                    "block_hashes=%d",
+                    c, req_id, len(block_hashes),
+                )
                 self.manager.complete_store(block_hashes)
 
         for req_id in connector_output.finished_recving or []:
