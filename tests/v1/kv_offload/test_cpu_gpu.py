@@ -6,6 +6,7 @@ import time
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import (
@@ -14,6 +15,7 @@ from vllm.v1.kv_offload.spec import (
     CanonicalKVCacheTensor,
 )
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.worker.cpu_xpu import CpuXpuOffloadingHandlers
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_BLOCKS = [256]
@@ -21,7 +23,7 @@ GPU_PAGE_SIZES = [512, 1024]
 BLOCK_SIZE_FACTORS = [1, 3]
 NUM_TENSORS = [4]
 SEEDS = [0]
-CUDA_DEVICES = ["cuda:0"]
+CUDA_DEVICES = [f"{current_platform.device_type}:0"]
 NUM_MAPPINGS = [3]
 
 
@@ -81,11 +83,18 @@ def test_transfer(
         tensors=kv_cache_tensors,
         group_data_refs=kv_cache_groups_data_refs,
     )
-    handlers = CpuGpuOffloadingHandlers(
-        kv_caches=kv_caches,
-        block_size_factor=block_size_factor,
-        num_cpu_blocks=num_cpu_blocks,
-    )
+    if current_platform.is_xpu():
+        handlers = CpuXpuOffloadingHandlers(
+            kv_caches=kv_caches,
+            block_size_factor=block_size_factor,
+            num_cpu_blocks=num_cpu_blocks,
+        )
+    else:
+        handlers = CpuGpuOffloadingHandlers(
+            kv_caches=kv_caches,
+            block_size_factor=block_size_factor,
+            num_cpu_blocks=num_cpu_blocks,
+        )
 
     # select block mappings
     gpu_blocks = random.sample(range(num_gpu_blocks), num_mappings * block_size_factor)

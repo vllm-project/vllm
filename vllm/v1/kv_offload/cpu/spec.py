@@ -11,6 +11,7 @@ from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import CanonicalKVCaches, OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.worker.cpu_xpu import CpuXpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
@@ -90,16 +91,22 @@ class CPUOffloadingSpec(OffloadingSpec):
         self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handlers:
-            if not current_platform.is_cuda_alike():
+            if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
-
-            self._handlers = CpuGpuOffloadingHandlers(
-                kv_caches=kv_caches,
-                block_size_factor=self.block_size_factor,
-                num_cpu_blocks=self.num_blocks,
-            )
+            if current_platform.is_xpu():
+                self._handlers = CpuXpuOffloadingHandlers(
+                    kv_caches=kv_caches,
+                    block_size_factor=self.block_size_factor,
+                    num_cpu_blocks=self.num_blocks,
+                )
+            else:
+                self._handlers = CpuGpuOffloadingHandlers(
+                    kv_caches=kv_caches,
+                    block_size_factor=self.block_size_factor,
+                    num_cpu_blocks=self.num_blocks,
+                )
 
         assert self._handlers is not None
         yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler

@@ -12,7 +12,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_deq
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
+DEVICE_TYPE = current_platform.device_type
+COPYING_DIRECTION = [
+    (DEVICE_TYPE, "cpu"),
+    (DEVICE_TYPE, DEVICE_TYPE),
+    ("cpu", DEVICE_TYPE),
+]
 DTYPES = [torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
@@ -35,14 +40,15 @@ NUM_BLOCKS = [1024, 10000]
 
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+DEVICES = [
+    f"{DEVICE_TYPE}:{i}"
+    for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
 
 # We assume fp8 is always enabled for testing.
 KV_CACHE_DTYPE = ["auto", "fp8"]
 
-RESHAPE_FLASH_IMPLEMENTATIONS = ["cuda", "triton"]
+RESHAPE_FLASH_IMPLEMENTATIONS = [DEVICE_TYPE, "triton"]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -52,7 +58,7 @@ RESHAPE_FLASH_IMPLEMENTATIONS = ["cuda", "triton"]
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_reshape_and_cache(
@@ -171,7 +177,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @pytest.mark.parametrize("kv_cache_layout", CACHE_LAYOUTS)
 @pytest.mark.parametrize("kv_scale_type", KV_SCALE_TYPES)
@@ -358,7 +364,7 @@ def test_reshape_and_cache_flash(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_swap_blocks(
@@ -381,8 +387,8 @@ def test_swap_blocks(
 
     set_random_seed(seed)
 
-    src_device = device if direction[0] == "cuda" else "cpu"
-    dst_device = device if direction[1] == "cuda" else "cpu"
+    src_device = device if direction[0] == DEVICE_TYPE else "cpu"
+    dst_device = device if direction[1] == DEVICE_TYPE else "cpu"
 
     src_blocks = random.sample(range(num_blocks), num_mappings)
     # For the same device, mapping must not overlap
@@ -479,7 +485,7 @@ def test_swap_blocks(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_fp8_e4m3_conversion(
     num_heads: int,
@@ -539,7 +545,7 @@ def _fill_mla_cache(cache: torch.Tensor, kv_cache_dtype: str):
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_concat_and_cache_mla(
@@ -613,7 +619,7 @@ def test_concat_and_cache_mla(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_concat_and_cache_ds_mla(
     kv_lora_rank: int,
@@ -629,8 +635,6 @@ def test_concat_and_cache_ds_mla(
         pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
-    if kv_lora_rank != 512:
-        pytest.skip("fp8_ds_mla requires kv_lora_rank == 512")
     kv_cache_dtype = "fp8_ds_mla"
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -731,7 +735,7 @@ def test_concat_and_cache_ds_mla(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_swap_blocks_mla(
@@ -797,7 +801,7 @@ def test_swap_blocks_mla(
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_gather_and_maybe_dequant_cache_mla(
     kv_lora_rank,
@@ -910,7 +914,7 @@ def test_gather_and_maybe_dequant_cache_mla(
 @pytest.mark.parametrize(
     "kv_cache_dtype", ["auto"]
 )  # You can also test "fp8" if needed.
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_cp_gather_cache_mla(
     kv_lora_rank,

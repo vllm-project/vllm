@@ -14,13 +14,14 @@ from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
-CPU_BLOCK_SIZES = [48]
+CPU_BLOCK_SIZES = [64] if current_platform.is_xpu() else [48]
 ATTN_BACKENDS = []
-
 if current_platform.is_cuda():
     ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
     ATTN_BACKENDS = ["TRITON_ATTN"]
+elif current_platform.is_xpu():
+    ATTN_BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
 
 # Maximum time (seconds) to wait for the async CPU offload transfer
 # to complete before giving up.
@@ -173,7 +174,6 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
         prompt = ". " + prompt
 
     assert subscriber.get_new_cpu_stored_events()
-
     test_count = 100
     success_count = 0
     for i in range(test_count):
