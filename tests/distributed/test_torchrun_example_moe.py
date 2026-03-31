@@ -36,7 +36,7 @@ llm = LLM(
     pipeline_parallel_size=int(os.getenv("PP_SIZE", "1")),
     enable_expert_parallel=int(os.getenv("ENABLE_EP", "0")) == 1,
     distributed_executor_backend="external_launcher",
-    gpu_memory_utilization=random.uniform(0.75, 0.92),
+    gpu_memory_utilization=random.uniform(0.8, 0.92),
     seed=0,
 )
 
