@@ -225,6 +225,14 @@ class EngineClient(ABC):
         """Get supported tasks"""
         raise NotImplementedError
 
+    async def get_kv_cache_config(self) -> list[dict]:
+        """Return the runtime KV cache configuration."""
+        raise NotImplementedError
+
+    async def get_device_info(self) -> list[dict]:
+        """Return per-rank device properties."""
+        raise NotImplementedError
+
     async def init_weight_transfer_engine(
         self, init_request: WeightTransferInitRequest
     ) -> None:

@@ -285,6 +285,16 @@ class AsyncLLM(EngineClient):
 
         return self._supported_tasks
 
+    async def get_kv_cache_config(self) -> list[dict]:
+        if not hasattr(self, "_kv_cache_config"):
+            self._kv_cache_config = await self.engine_core.get_kv_cache_config_async()
+        return self._kv_cache_config
+
+    async def get_device_info(self) -> list[dict]:
+        if not hasattr(self, "_device_info"):
+            self._device_info = await self.engine_core.get_device_info_async()
+        return self._device_info
+
     async def add_request(
         self,
         request_id: str,

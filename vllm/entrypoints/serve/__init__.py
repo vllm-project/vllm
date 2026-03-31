@@ -55,3 +55,9 @@ def register_vllm_serve_api_routers(app: FastAPI):
     from .instrumentator import register_instrumentator_api_routers
 
     register_instrumentator_api_routers(app)
+
+    from vllm.entrypoints.serve.config.api_router import (
+        attach_router as attach_config_router,
+    )
+
+    attach_config_router(app)
