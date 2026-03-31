@@ -56,6 +56,10 @@ mod = load(
         "-O3",
         "--use_fast_math",
         "-DENABLE_FP8",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",
     ],
     verbose=True,
 )
