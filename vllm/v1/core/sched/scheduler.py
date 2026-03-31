@@ -619,20 +619,21 @@ class Scheduler(SchedulerInterface):
                     step_skipped_waiting.prepend_request(request)
                     continue
 
-                # Check steering config capacity.  A new request may
-                # need *two* distinct (hash, phase) pairs over its
-                # lifetime, so we count how many genuinely new unique
-                # pairs it would add to the scheduled set.
+                # Check steering config capacity.  A new request only
+                # occupies one steering row at a time — the prefill
+                # row is released before the decode row is registered
+                # in _handle_steering_transition.  So we only count
+                # the starting phase (prefill for WAITING requests).
                 if self.steering_config:
                     new_hashes: set[tuple[int, str]] = set()
                     if request.prefill_steering_config_hash != 0:
                         new_hashes.add(
                             (request.prefill_steering_config_hash, "prefill")
                         )
-                    if request.decode_steering_config_hash != 0:
-                        new_hashes.add(
-                            (request.decode_steering_config_hash, "decode")
-                        )
+                    # Decode hash is NOT counted here — the request
+                    # only occupies one row at a time; the prefill row
+                    # is released before the decode row is registered
+                    # in _handle_steering_transition.
                     if new_hashes:
                         new_unique = new_hashes - scheduled_steering_configs
                         if (
@@ -861,14 +862,21 @@ class Scheduler(SchedulerInterface):
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
                 if self.steering_config:
-                    if request.prefill_steering_config_hash != 0:
-                        scheduled_steering_configs.add(
-                            (request.prefill_steering_config_hash, "prefill")
-                        )
-                    if request.decode_steering_config_hash != 0:
-                        scheduled_steering_configs.add(
-                            (request.decode_steering_config_hash, "decode")
-                        )
+                    # Only add the starting phase — the request
+                    # occupies one row at a time (see admission
+                    # check above).
+                    if num_computed_tokens < request.num_prompt_tokens:
+                        # Starting in prefill.
+                        if request.prefill_steering_config_hash != 0:
+                            scheduled_steering_configs.add(
+                                (request.prefill_steering_config_hash, "prefill")
+                            )
+                    else:
+                        # Full prefix-cache hit — starting in decode.
+                        if request.decode_steering_config_hash != 0:
+                            scheduled_steering_configs.add(
+                                (request.decode_steering_config_hash, "decode")
+                            )
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
                     request_id
                 )

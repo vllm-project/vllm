@@ -1,27 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for steering config phase-keyed admission control logic.
+"""Tests for steering config single-phase admission control logic.
 
 The scheduler tracks the union of active steering config (hash, phase)
-pairs — matching the worker's SteeringManager which allocates separate
+pairs -- matching the worker's SteeringManager which allocates separate
 table rows per (hash, phase) key.  Running requests contribute their
-currently-active pair.  New requests being admitted must have capacity
-for BOTH their prefill and decode (hash, phase) pairs (since the
-request will use both over its lifetime).
+currently-active pair.  New WAITING requests only need capacity for their
+starting phase (prefill), because the prefill row is released before the
+decode row is registered in _handle_steering_transition.
 """
 
 
-class TestDualHashAdmission:
-    """Test the phase-keyed steering admission control logic in isolation.
+class TestSinglePhaseAdmission:
+    """Test the single-phase steering admission control logic in isolation.
 
-    The scheduler now checks:
+    The scheduler checks:
     1. Build scheduled_steering_configs from running requests:
        - (prefill_hash, "prefill") for requests still in prefill
        - (decode_hash, "decode") for requests in decode
-    2. For each new request, compute new_hashes as (hash, phase) tuples
-       (excluding 0), then new_unique = new_hashes - scheduled.
-       Skip if len(scheduled) + len(new_unique) > max.
-    3. When admitted, add BOTH (hash, phase) tuples to the scheduled set.
+    2. For each new request, compute new_hashes using only the starting
+       phase (prefill for WAITING requests, decode for full prefix-cache
+       hits).  Skip if len(scheduled) + len(new_unique) > max.
+    3. When admitted, add only the starting phase (hash, phase) tuple to
+       the scheduled set.
     """
 
     @staticmethod
@@ -46,15 +47,18 @@ class TestDualHashAdmission:
     def _should_skip(
         scheduled_configs: set[tuple[int, str]],
         prefill_hash: int,
-        decode_hash: int,
         max_configs: int,
     ) -> bool:
-        """Reproduce the scheduler's new-request admission check."""
+        """Reproduce the scheduler's new-request admission check.
+
+        Only the prefill hash is checked for WAITING requests -- the
+        decode hash is not counted because the request only occupies one
+        row at a time and the prefill row is released before the decode
+        row is registered.
+        """
         new_hashes: set[tuple[int, str]] = set()
         if prefill_hash != 0:
             new_hashes.add((prefill_hash, "prefill"))
-        if decode_hash != 0:
-            new_hashes.add((decode_hash, "decode"))
         if not new_hashes:
             return False
         new_unique = new_hashes - scheduled_configs
@@ -65,12 +69,21 @@ class TestDualHashAdmission:
         scheduled_configs: set[tuple[int, str]],
         prefill_hash: int,
         decode_hash: int,
+        num_computed_tokens: int,
+        num_prompt_tokens: int,
     ) -> None:
-        """Reproduce the scheduler's post-admission hash update."""
-        if prefill_hash != 0:
-            scheduled_configs.add((prefill_hash, "prefill"))
-        if decode_hash != 0:
-            scheduled_configs.add((decode_hash, "decode"))
+        """Reproduce the scheduler's post-admission hash update.
+
+        Only the starting phase is added -- prefill when starting in
+        prefill (num_computed_tokens < num_prompt_tokens), decode when
+        starting in decode (full prefix-cache hit).
+        """
+        if num_computed_tokens < num_prompt_tokens:
+            if prefill_hash != 0:
+                scheduled_configs.add((prefill_hash, "prefill"))
+        else:
+            if decode_hash != 0:
+                scheduled_configs.add((decode_hash, "decode"))
 
     # --- Running request hash collection ---
 
@@ -111,159 +124,161 @@ class TestDualHashAdmission:
         )
         assert configs == set()
 
-    # --- New request admission ---
+    # --- New request admission (single-phase) ---
 
     def test_no_hashes_always_admits(self):
-        """Request with no steering (both hashes=0) always passes."""
-        assert not self._should_skip(
-            {(111, "prefill"), (222, "decode")}, 0, 0, 2
-        )
+        """Request with no steering (prefill hash=0) always passes."""
+        assert not self._should_skip({(111, "prefill"), (222, "decode")}, 0, 2)
 
     def test_admits_when_capacity_available(self):
         """Request admitted when there are open slots."""
-        assert not self._should_skip(
-            {(111, "prefill")}, 222, 333, 3
-        )
+        assert not self._should_skip({(111, "prefill")}, 222, 3)
 
-    def test_request_with_both_hashes_uses_two_slots(self):
-        """A request with distinct prefill and decode hashes needs two
-        new slots if neither is already scheduled."""
-        assert self._should_skip(
-            {(111, "prefill")}, 222, 333, 2
-        )
+    def test_request_with_both_hashes_uses_one_slot(self):
+        """A request with distinct prefill and decode hashes only needs
+        one slot (prefill) at admission time -- the decode row is
+        registered later when the prefill row is released."""
+        # With dual-counting this would skip; with single-phase it fits.
+        assert not self._should_skip({(111, "prefill")}, 222, 2)
 
-    def test_request_with_shared_hash_still_uses_two_slots(self):
-        """If prefill_hash == decode_hash, they still occupy two slots
-        because the worker allocates separate (hash, phase) rows."""
-        assert self._should_skip(
-            {(111, "prefill")}, 222, 222, 2
-        )
+    def test_request_with_same_hash_both_phases_uses_one_slot(self):
+        """If prefill_hash == decode_hash, only the prefill hash is
+        checked so it still uses one slot."""
+        # With dual-counting this would skip; with single-phase it fits.
+        assert not self._should_skip({(111, "prefill")}, 222, 2)
 
     def test_request_prefill_hash_already_scheduled(self):
-        """Prefill hash already in set reduces new slots needed."""
-        assert not self._should_skip(
-            {(111, "prefill")}, 111, 222, 2
-        )
-
-    def test_request_decode_hash_already_scheduled(self):
-        """Decode hash already in set reduces new slots needed."""
-        assert not self._should_skip(
-            {(222, "decode")}, 111, 222, 2
-        )
-
-    def test_request_both_hashes_already_scheduled(self):
-        """Both hashes already in set -> zero new slots."""
-        assert not self._should_skip(
-            {(111, "prefill"), (222, "decode")}, 111, 222, 2
-        )
+        """Prefill hash already in set -> zero new slots needed."""
+        assert not self._should_skip({(111, "prefill")}, 111, 2)
 
     def test_only_prefill_hash_nonzero(self):
         """Request with only prefill hash occupies one slot."""
-        assert not self._should_skip(
-            {(111, "prefill")}, 222, 0, 2
-        )
-        assert self._should_skip(
-            {(111, "prefill"), (333, "decode")}, 222, 0, 2
-        )
+        assert not self._should_skip({(111, "prefill")}, 222, 2)
+        assert self._should_skip({(111, "prefill"), (333, "decode")}, 222, 2)
 
-    def test_only_decode_hash_nonzero(self):
-        """Request with only decode hash occupies one slot."""
-        assert not self._should_skip(
-            {(111, "prefill")}, 0, 222, 2
-        )
-        assert self._should_skip(
-            {(111, "prefill"), (333, "decode")}, 0, 222, 2
-        )
-
-    def test_skips_when_at_capacity_with_two_new_hashes(self):
-        """Two new hashes when only one slot open -> skip."""
-        assert self._should_skip(
-            {(111, "prefill")}, 222, 333, 2
-        )
+    def test_skips_when_at_capacity_with_new_hash(self):
+        """New prefill hash when no slot open -> skip."""
+        assert self._should_skip({(111, "prefill"), (222, "decode")}, 333, 2)
 
     def test_single_slot_capacity(self):
         """Works with max_steering_configs=1."""
         # No hashes -> pass
-        assert not self._should_skip(set(), 0, 0, 1)
-        # One new hash (prefill only) -> pass if no existing
-        assert not self._should_skip(set(), 111, 0, 1)
-        # Two distinct new hashes -> skip (needs 2, only 1 available)
-        assert self._should_skip(set(), 111, 222, 1)
-        # One hash already present + matching -> pass
-        assert not self._should_skip({(111, "prefill")}, 111, 0, 1)
+        assert not self._should_skip(set(), 0, 1)
+        # One new prefill hash -> pass if no existing
+        assert not self._should_skip(set(), 111, 1)
+        # Even with both hashes non-zero (not checked here), single
+        # slot should work since only prefill is counted
+        assert not self._should_skip(set(), 42, 1)
+        # Slot occupied by different hash -> skip
+        assert self._should_skip({(111, "prefill")}, 222, 1)
+        # Slot occupied by same hash -> pass (dedup)
+        assert not self._should_skip({(111, "prefill")}, 111, 1)
 
-    def test_same_hash_prefill_and_decode_counts_two_slots(self):
-        """When prefill_hash == decode_hash, the scheduler must count
-        two slots because the worker allocates separate (hash, phase)
-        rows."""
-        # Same hash for both phases: needs 2 rows, only 1 available
-        assert self._should_skip(set(), 42, 42, 1)
-        # Same hash for both phases: fits in 2
-        assert not self._should_skip(set(), 42, 42, 2)
+    def test_same_hash_prefill_and_decode_uses_one_slot(self):
+        """When prefill_hash == decode_hash, only the prefill hash is
+        checked at admission time, so only one slot is needed."""
+        # With dual-counting this would skip (needs 2); with single-phase
+        # it fits in 1.
+        assert not self._should_skip(set(), 42, 1)
 
-    # --- Post-admission hash tracking ---
+    # --- Post-admission hash tracking (single-phase) ---
 
-    def test_admit_adds_both_hashes(self):
-        """Admitting a request adds both prefill and decode hashes."""
+    def test_admit_adds_only_prefill_hash_when_starting_prefill(self):
+        """Admitting a request starting in prefill adds only the prefill
+        hash, not the decode hash."""
         configs: set[tuple[int, str]] = {(111, "prefill")}
-        self._admit(configs, 222, 333)
-        assert configs == {(111, "prefill"), (222, "prefill"), (333, "decode")}
+        self._admit(configs, 222, 333, num_computed_tokens=0, num_prompt_tokens=100)
+        assert configs == {(111, "prefill"), (222, "prefill")}
+
+    def test_admit_adds_only_decode_hash_when_starting_decode(self):
+        """Admitting a request with full prefix-cache hit (starting in
+        decode) adds only the decode hash."""
+        configs: set[tuple[int, str]] = {(111, "prefill")}
+        self._admit(configs, 222, 333, num_computed_tokens=100, num_prompt_tokens=100)
+        assert configs == {(111, "prefill"), (333, "decode")}
 
     def test_admit_skips_zero_hashes(self):
         """Zero hashes are not added to the set."""
         configs: set[tuple[int, str]] = set()
-        self._admit(configs, 111, 0)
-        assert configs == {(111, "prefill")}
+        self._admit(configs, 0, 0, num_computed_tokens=0, num_prompt_tokens=100)
+        assert configs == set()
 
     def test_admit_idempotent_for_existing(self):
         """Adding already-present hashes is a no-op."""
         configs: set[tuple[int, str]] = {(111, "prefill"), (222, "decode")}
-        self._admit(configs, 111, 222)
+        self._admit(configs, 111, 999, num_computed_tokens=0, num_prompt_tokens=100)
         assert configs == {(111, "prefill"), (222, "decode")}
+
+    def test_admit_decode_start_idempotent(self):
+        """Adding already-present decode hash is a no-op."""
+        configs: set[tuple[int, str]] = {(222, "decode")}
+        self._admit(configs, 999, 222, num_computed_tokens=100, num_prompt_tokens=100)
+        assert configs == {(222, "decode")}
 
     # --- End-to-end scenario ---
 
     def test_full_scenario(self):
         """Simulate a sequence of scheduling decisions."""
-        max_configs = 4
+        max_configs = 2
         configs: set[tuple[int, str]] = set()
 
-        # Request 1: prefill_hash=100, decode_hash=200 -> both new (2 slots)
-        assert not self._should_skip(configs, 100, 200, max_configs)
-        self._admit(configs, 100, 200)
-        assert configs == {(100, "prefill"), (200, "decode")}
+        # Request 1: prefill_hash=100, decode_hash=200, starting prefill
+        # Needs 1 slot (prefill only).
+        assert not self._should_skip(configs, 100, max_configs)
+        self._admit(configs, 100, 200, num_computed_tokens=0, num_prompt_tokens=50)
+        assert configs == {(100, "prefill")}
 
-        # Request 2: prefill_hash=100, decode_hash=300
-        #   -> (100, "prefill") already in set, only (300, "decode") is new
-        assert not self._should_skip(configs, 100, 300, max_configs)
-        self._admit(configs, 100, 300)
-        assert configs == {(100, "prefill"), (200, "decode"), (300, "decode")}
+        # Request 2: prefill_hash=300, decode_hash=400, starting prefill
+        # Needs 1 new slot. Total would be 2 = max. Fits.
+        assert not self._should_skip(configs, 300, max_configs)
+        self._admit(configs, 300, 400, num_computed_tokens=0, num_prompt_tokens=50)
+        assert configs == {(100, "prefill"), (300, "prefill")}
 
-        # Request 3: prefill_hash=400, decode_hash=500 -> 2 new, at cap (5>4)
-        assert self._should_skip(configs, 400, 500, max_configs)
+        # Request 3: prefill_hash=500, decode_hash=600, starting prefill
+        # 1 new slot needed. Total would be 3 > 2. Skip.
+        assert self._should_skip(configs, 500, max_configs)
 
-        # Request 4: prefill_hash=100, decode_hash=200 -> 0 new
-        assert not self._should_skip(configs, 100, 200, max_configs)
+        # Request 4: prefill_hash=100, decode_hash=999, starting prefill
+        # Prefill hash already present -> 0 new slots. Fits.
+        assert not self._should_skip(configs, 100, max_configs)
+
+    def test_full_scenario_with_decode_start(self):
+        """Scenario with full prefix-cache hits (decode start)."""
+        max_configs = 2
+        configs: set[tuple[int, str]] = set()
+
+        # Request 1: full prefix-cache hit, starting in decode
+        # decode_hash=200 needs 1 slot.
+        # Note: _should_skip uses prefill_hash for WAITING requests.
+        # For decode-start, we need to check differently -- but in the
+        # scheduler, the admission check only sees the prefill hash
+        # because it runs before prefix cache resolution. So the prefill
+        # hash is what gets checked at admission time. The post-admission
+        # tracking then uses the actual starting phase.
+        assert not self._should_skip(configs, 100, max_configs)
+        # But the actual starting phase is decode (full cache hit).
+        self._admit(configs, 100, 200, num_computed_tokens=50, num_prompt_tokens=50)
+        assert configs == {(200, "decode")}
 
     def test_freed_capacity_admits(self):
         """After removing a config, new ones can be admitted."""
         max_configs = 2
         configs: set[tuple[int, str]] = {(111, "prefill"), (222, "decode")}
         # At capacity, new hash blocked
-        assert self._should_skip(configs, 333, 0, max_configs)
+        assert self._should_skip(configs, 333, max_configs)
         # Free a slot
         configs.discard((222, "decode"))
         # Now admits
-        assert not self._should_skip(configs, 333, 0, max_configs)
+        assert not self._should_skip(configs, 333, max_configs)
 
 
 class TestSteeringAdmissionLogicLegacy:
     """Legacy single-hash admission tests kept for reference.
 
     These reproduce the simpler check that was in place before dual-hash
-    admission.  They should still pass because the phase-keyed logic
-    degenerates to single-hash behaviour when decode_hash is 0
-    (only (prefill_hash, "prefill") is added).
+    admission.  They should still pass because the single-phase logic
+    checks only the prefill hash, which matches legacy behaviour when
+    decode_hash is 0.
     """
 
     def _should_skip(
@@ -273,7 +288,7 @@ class TestSteeringAdmissionLogicLegacy:
         scheduled_configs: set[tuple[int, str]],
         max_configs: int,
     ) -> bool:
-        """Legacy: single-hash check via the new phase-keyed logic."""
+        """Legacy: single-hash check via the single-phase logic."""
         if not steering_config_exists:
             return False
         new_hashes: set[tuple[int, str]] = set()
@@ -286,27 +301,19 @@ class TestSteeringAdmissionLogicLegacy:
         return len(scheduled_configs) + len(new_unique) > max_configs
 
     def test_no_steering_config_always_admits(self):
-        assert not self._should_skip(
-            False, 123, {(1, "prefill"), (2, "decode")}, 2
-        )
+        assert not self._should_skip(False, 123, {(1, "prefill"), (2, "decode")}, 2)
 
     def test_no_steering_hash_always_admits(self):
-        assert not self._should_skip(
-            True, 0, {(1, "prefill"), (2, "decode")}, 2
-        )
+        assert not self._should_skip(True, 0, {(1, "prefill"), (2, "decode")}, 2)
 
     def test_admits_when_capacity_available(self):
         assert not self._should_skip(True, 333, {(111, "prefill")}, 2)
 
     def test_admits_when_hash_already_scheduled(self):
-        assert not self._should_skip(
-            True, 111, {(111, "prefill"), (222, "decode")}, 2
-        )
+        assert not self._should_skip(True, 111, {(111, "prefill"), (222, "decode")}, 2)
 
     def test_skips_when_at_capacity_with_new_hash(self):
-        assert self._should_skip(
-            True, 333, {(111, "prefill"), (222, "decode")}, 2
-        )
+        assert self._should_skip(True, 333, {(111, "prefill"), (222, "decode")}, 2)
 
     def test_single_slot_capacity(self):
         assert not self._should_skip(True, 111, set(), 1)
