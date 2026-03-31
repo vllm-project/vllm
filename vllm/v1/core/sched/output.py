@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm.v1.spec_decode.metrics import SpecDecodingStats
-
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -234,9 +232,6 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-
-    # Spec Decoding stats for all requests.
-    spec_decoding_stats_all: SpecDecodingStats | None = None
 
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,

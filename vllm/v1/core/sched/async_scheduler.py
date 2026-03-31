@@ -34,9 +34,6 @@ class AsyncScheduler(Scheduler):
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = self._spec_token_placeholders
 
-            if cur_num_spec_tokens > 0:
-                self._in_flight_decode_req_k[req_id] = cur_num_spec_tokens
-
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
     ) -> tuple[list[int], bool]:

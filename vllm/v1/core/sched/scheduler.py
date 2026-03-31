@@ -936,7 +936,6 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            spec_decoding_stats_all=self.spec_decoding_stats_all,
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
@@ -1999,14 +1998,6 @@ class Scheduler(SchedulerInterface):
         if self.dynamic_sd_manager is not None and num_draft_tokens:
             self.dynamic_sd_manager.observe_draft(num_draft_tokens, num_accepted_tokens)
         
-        # Save this so its accessible by scheduler and can
-        # be sent to engine for Dynamic SD.
-        if self.spec_decoding_stats_all is not None:
-            self.spec_decoding_stats_all.observe_draft(
-                num_draft_tokens=num_draft_tokens,
-                num_accepted_tokens=num_accepted_tokens,
-            )
-
         if not self.log_stats or not num_draft_tokens:
             return None
         if spec_decoding_stats is None:
