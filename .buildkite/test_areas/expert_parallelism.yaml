@@ -13,8 +13,8 @@ steps:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
 
-- label: EPLB Execution
-  timeout_in_minutes: 20
+- label: EPLB Execution # 17min
+  timeout_in_minutes: 27
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
