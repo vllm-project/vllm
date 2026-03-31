@@ -95,7 +95,6 @@ def select_unquantized_moe_backend(
     # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
     flashinfer_cutlass_available = (
         has_flashinfer_cutlass_fused_moe()
-        and (not use_dp)
         and current_platform.has_device_capability(90)
     )
     flashinfer_trtllm_moe_enabled = (
@@ -159,16 +158,11 @@ def select_unquantized_moe_backend(
                     "to enable it for better performance.",
                     scope="local",
                 )
-            elif not use_dp and flashinfer_cutlass_available:
+            elif flashinfer_cutlass_available:
                 logger.info_once(
                     "FlashInfer CUTLASS MoE is available"
                     " but not enabled, consider setting"
                     " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
-                    scope="local",
-                )
-            elif use_dp:
-                logger.info_once(
-                    "FlashInfer CUTLASS MoE is currently not available for DP.",
                     scope="local",
                 )
             backend = UnquantizedMoeBackend.TRITON

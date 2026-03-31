@@ -126,6 +126,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
             )
+        elif self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
+            from .flashinfer_cutlass_moe import FlashInferExperts
+
+            logger.debug("FlashInferExperts %s", self.moe)
+            return FlashInferExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+            )
         elif (
             self.unquantized_backend == UnquantizedMoeBackend.AITER
             and rocm_aiter_ops.is_fused_moe_enabled()
