@@ -28,8 +28,8 @@ def step3p5_tokenizer():
 
 
 @pytest.fixture
-def step3p5_tool_parser(step3p5_tokenizer):
-    return Step3p5ToolParser(step3p5_tokenizer)
+def step3p5_tool_parser(step3p5_tokenizer, sample_tools):
+    return Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
 
 
 @pytest.fixture
@@ -386,7 +386,7 @@ TX
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(step3p5_tool_parser):
+def test_extract_tool_calls_type_conversion(step3p5_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -427,10 +427,9 @@ hello world
 </function>
 </tool_call>"""
 
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
@@ -864,7 +863,7 @@ TX
     assert parsed_args["state"] == "TX"
 
 
-def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
+def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -893,10 +892,9 @@ def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
 </function>
 </tool_call>"""
 
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["obj_param"] == {"key": "value"}
