@@ -161,18 +161,14 @@ def _import_deep_gemm():
     # 2. Fall back to the vendored copy bundled in the vLLM wheel.
     try:
         module = importlib.import_module("vllm.third_party.deep_gemm")
-        logger.debug_once(
-            "Imported deep_gemm module from vllm.third_party.deep_gemm"
-        )
+        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
         return module
     except ImportError:
         logger.debug_once("Vendored deep_gemm not found either")
     except Exception as e:
         # The vendored module may raise RuntimeError during _C.init()
         # if JIT include files are missing (e.g. incomplete wheel).
-        logger.warning_once(
-            "Failed to import vendored deep_gemm: %s", e
-        )
+        logger.warning_once("Failed to import vendored deep_gemm: %s", e)
 
     return None
 
