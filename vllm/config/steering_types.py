@@ -38,6 +38,12 @@ def normalize_layer_entry(entry: SteeringLayerEntry) -> tuple[list[float], float
     if isinstance(entry, list):
         return entry, 1.0
     if isinstance(entry, dict):
+        missing = {"vector", "scale"} - set(entry.keys())
+        if missing:
+            raise ValueError(
+                f"Scaled steering entry missing required key(s): "
+                f"{sorted(missing)}; got keys: {sorted(entry.keys())}"
+            )
         return entry["vector"], float(entry["scale"])
     raise TypeError(
         f"SteeringLayerEntry must be a list or dict, got {type(entry).__name__}"
@@ -53,8 +59,7 @@ def _add_vectors(a: list[float], b: list[float]) -> list[float]:
     """Element-wise addition of two equal-length vectors."""
     if len(a) != len(b):
         raise ValueError(
-            f"Cannot add steering vectors of different lengths: "
-            f"{len(a)} vs {len(b)}"
+            f"Cannot add steering vectors of different lengths: {len(a)} vs {len(b)}"
         )
     return [x + y for x, y in zip(a, b)]
 
@@ -135,8 +140,7 @@ def hash_steering_config(
     if not effective_vectors:
         return 0
     canonical = {
-        hp: sorted(vecs.items())
-        for hp, vecs in sorted(effective_vectors.items())
+        hp: sorted(vecs.items()) for hp, vecs in sorted(effective_vectors.items())
     }
     data = str(sorted(canonical.items())).encode()
     return int(hashlib.sha256(data).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF

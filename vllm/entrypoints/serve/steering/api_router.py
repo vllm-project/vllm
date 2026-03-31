@@ -129,12 +129,18 @@ async def set_steering(
     normalized_prefill: dict[str, dict[int, list[float]]] | None = None
     normalized_decode: dict[str, dict[int, list[float]]] | None = None
 
-    if "vectors" in tiers:
-        normalized_base = _normalize_spec(tiers["vectors"])
-    if "prefill_vectors" in tiers:
-        normalized_prefill = _normalize_spec(tiers["prefill_vectors"])
-    if "decode_vectors" in tiers:
-        normalized_decode = _normalize_spec(tiers["decode_vectors"])
+    try:
+        if "vectors" in tiers:
+            normalized_base = _normalize_spec(tiers["vectors"])
+        if "prefill_vectors" in tiers:
+            normalized_prefill = _normalize_spec(tiers["prefill_vectors"])
+        if "decode_vectors" in tiers:
+            normalized_decode = _normalize_spec(tiers["decode_vectors"])
+    except (KeyError, TypeError, ValueError) as err:
+        return JSONResponse(
+            content={"error": f"Malformed steering vector entry: {err}"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
 
     try:
         async with _steering_lock:
@@ -214,9 +220,7 @@ async def set_steering(
                 or request.replace  # replace clears all tiers including prefill
             )
             if affects_prefill:
-                success = await engine.reset_prefix_cache(
-                    reset_running_requests=True
-                )
+                success = await engine.reset_prefix_cache(reset_running_requests=True)
                 if success:
                     logger.info(
                         "Prefix cache invalidated after "
