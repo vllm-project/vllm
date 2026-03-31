@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
-from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache, partial
@@ -59,13 +58,6 @@ else:
     BaseMultiModalProcessorCache = object
 
 logger = init_logger(__name__)
-
-# When set to ``True`` inside a tokenize request, ``apply()`` bypasses the
-# multimodal processor cache entirely so that the SenderCache is never
-# polluted by entries that will not be transmitted to the engine core.
-skip_mm_processor_cache: ContextVar[bool] = ContextVar(
-    "skip_mm_processor_cache", default=False
-)
 
 _S = TypeVar("_S", str, list[int])
 
@@ -990,12 +982,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         dummy_inputs: "BaseDummyInputsBuilder[_I]",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
+        cache_read_only: bool = False,
     ) -> None:
         super().__init__()
 
         self.info = info
         self.dummy_inputs = dummy_inputs
         self.cache = cache
+        self.cache_read_only = cache_read_only
 
         self.data_parser = self.info.get_data_parser()
 
@@ -1360,11 +1354,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
+        read_only = self.cache_read_only
+
         # Need to touch all mm hashes before update to avoid hash in updated
         # list evict during update
-        for hashes in mm_hashes.values():
-            for item_hash in hashes:
-                cache.touch_sender_cache_item(item_hash)
+        if not read_only:
+            for hashes in mm_hashes.values():
+                for item_hash in hashes:
+                    cache.touch_sender_cache_item(item_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
@@ -1383,6 +1380,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_updates_item = missing_prompt_updates[missing_next_idx]
 
                     mm_missing_next_idx[modality] += 1
+
+                    if read_only:
+                        # Don't pollute the cache — just use the
+                        # freshly-processed item directly.
+                        merged_kwargs[modality].append(missing_kwargs_item)
+                        merged_prompt_updates[modality].append(
+                            [
+                                self._recompute_cached_prompt_update(update, item_idx)
+                                for update in missing_updates_item
+                            ]
+                        )
+                        continue
 
                     item = missing_kwargs_item, missing_updates_item
                 else:
@@ -1686,18 +1695,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        if skip_mm_processor_cache.get():
-            (
-                prompt_ids,
-                mm_info,
-                is_update_applied,
-            ) = self._apply_hf_processor(inputs, timing_ctx)
-        else:
-            (
-                prompt_ids,
-                mm_info,
-                is_update_applied,
-            ) = self._cached_apply_hf_processor(inputs, timing_ctx)
+        (
+            prompt_ids,
+            mm_info,
+            is_update_applied,
+        ) = self._cached_apply_hf_processor(inputs, timing_ctx)
 
         # NOTE: tokenization_kwargs are not required to init processor
         with timing_ctx.record("apply_prompt_updates"):

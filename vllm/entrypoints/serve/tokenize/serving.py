@@ -22,7 +22,6 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
-from vllm.multimodal.processing.processor import skip_mm_processor_cache
 from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -66,41 +65,36 @@ class OpenAIServingTokenization(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        # Bypass the multimodal processor cache so that the tokenize
-        # endpoint does not pollute the SenderCache with entries that
-        # will never be transmitted to the engine core via IPC.
-        token = skip_mm_processor_cache.set(True)
-        try:
-            if isinstance(request, TokenizeChatRequest):
-                tool_dicts = (
-                    None
-                    if request.tools is None
-                    else [tool.model_dump() for tool in request.tools]
-                )
-                error_check_ret = self.openai_serving_render.validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
+        if isinstance(request, TokenizeChatRequest):
+            tool_dicts = (
+                None
+                if request.tools is None
+                else [tool.model_dump() for tool in request.tools]
+            )
+            error_check_ret = self.openai_serving_render.validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
 
-                _, engine_inputs = await self.openai_serving_render.preprocess_chat(
-                    request,
-                    request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=self.default_chat_template_kwargs,
-                    tool_dicts=tool_dicts,
-                )
-            else:
-                engine_inputs = await self.openai_serving_render.preprocess_completion(
-                    request,
-                    prompt_input=request.prompt,
-                    prompt_embeds=None,
-                )
-        finally:
-            skip_mm_processor_cache.reset(token)
+            _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=self.default_chat_template_kwargs,
+                tool_dicts=tool_dicts,
+                skip_mm_cache=True,
+            )
+        else:
+            engine_inputs = await self.openai_serving_render.preprocess_completion(
+                request,
+                prompt_input=request.prompt,
+                prompt_embeds=None,
+                skip_mm_cache=True,
+            )
 
         input_ids: list[int] = []
         for engine_input in engine_inputs:

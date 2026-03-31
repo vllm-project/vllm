@@ -451,6 +451,8 @@ class OpenAIServingRender:
         request: Any,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput]:
         """Copied from OpenAIServing._preprocess_completion."""
         prompts = list[SingletonPrompt | bytes]()
@@ -458,12 +460,14 @@ class OpenAIServingRender:
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self.preprocess_cmpl(request, prompts)
+        return await self.preprocess_cmpl(request, prompts, skip_mm_cache=skip_mm_cache)
 
     async def preprocess_cmpl(
         self,
         request: Any,
         prompts: Sequence[PromptType | bytes],
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput]:
         """Copied from OpenAIServing._preprocess_cmpl."""
         renderer = self.renderer
@@ -479,14 +483,18 @@ class OpenAIServingRender:
         ]
         tok_params = request.build_tok_params(model_config)
 
+        prompt_extras: dict[str, Any] = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt")
+            if (v := getattr(request, k, None)) is not None
+        }
+        if skip_mm_cache:
+            prompt_extras["_skip_mm_cache"] = True
+
         return await renderer.render_cmpl_async(
             parsed_prompts,
             tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
+            prompt_extras=prompt_extras,
         )
 
     async def preprocess_chat(
@@ -498,6 +506,8 @@ class OpenAIServingRender:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: type[ToolParser] | None = None,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from OpenAIServing._preprocess_chat."""
         renderer = self.renderer
@@ -520,15 +530,19 @@ class OpenAIServingRender:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
+        prompt_extras: dict[str, Any] = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt")
+            if (v := getattr(request, k, None)) is not None
+        }
+        if skip_mm_cache:
+            prompt_extras["_skip_mm_cache"] = True
+
         (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],
             chat_params,
             tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
+            prompt_extras=prompt_extras,
         )
 
         # tool parsing is done only if a tool_parser has been set and if

@@ -97,6 +97,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
         self.mm_processor: BaseMultiModalProcessor | None = None
+        self._readonly_mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._executor
@@ -123,6 +124,19 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
+
+                # A second processor that shares the same cache but will
+                # never write to it.  Used by the tokenize endpoint so
+                # that tokenize-only requests can benefit from existing
+                # cache entries without polluting the sender cache.
+                ro_tokenizer = copy.deepcopy(tokenizer)
+                with set_default_torch_num_threads():
+                    self._readonly_mm_processor = mm_registry.create_processor(
+                        config.model_config,
+                        tokenizer=ro_tokenizer,
+                        cache=mm_processor_cache,
+                        cache_read_only=True,
+                    )
 
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core
@@ -625,10 +639,15 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
+        *,
+        skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
-        mm_processor = self.get_mm_processor()
+        if skip_mm_cache and self._readonly_mm_processor is not None:
+            mm_processor = self._readonly_mm_processor
+        else:
+            mm_processor = self.get_mm_processor()
 
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
@@ -670,6 +689,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 tokenization_kwargs=None,  # Tokenization already done in Step 2
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                skip_mm_cache=bool(prompt.get("_skip_mm_cache")),
             )
         else:
             engine_input = tokens_input(prompt_token_ids)
@@ -723,6 +743,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 tokenization_kwargs=None,
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                skip_mm_cache=bool(prompt.get("_skip_mm_cache")),
             )
         else:
             engine_input = tokens_input(prompt_token_ids)
