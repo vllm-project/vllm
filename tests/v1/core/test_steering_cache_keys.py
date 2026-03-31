@@ -24,33 +24,91 @@ def _init_hash():
 
 def make_mock_request(
     prefill_hash: int = 0,
-    has_attr: bool = True,
+    decode_hash: int = 0,
+    num_prompt_tokens: int = 10,
+    has_prefill_attr: bool = True,
+    has_decode_attr: bool = True,
 ) -> Mock:
-    """Create a mock request with optional prefill_steering_config_hash."""
+    """Create a mock request with optional steering config hashes."""
     req = Mock()
-    if has_attr:
+    req.num_prompt_tokens = num_prompt_tokens
+    if has_prefill_attr:
         req.prefill_steering_config_hash = prefill_hash
     else:
         del req.prefill_steering_config_hash
+    if has_decode_attr:
+        req.decode_steering_config_hash = decode_hash
+    else:
+        del req.decode_steering_config_hash
     return req
 
 
 class TestGenSteeringExtraHashKeys:
     """Tests for _gen_steering_extra_hash_keys helper."""
 
-    def test_returns_empty_list_when_hash_is_zero(self):
-        req = make_mock_request(prefill_hash=0)
-        result = _gen_steering_extra_hash_keys(req)
+    # --- Prompt block tests (start_token_idx < num_prompt_tokens) ---
+
+    def test_prompt_block_returns_empty_list_when_prefill_hash_is_zero(self):
+        req = make_mock_request(prefill_hash=0, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=0)
         assert result == []
 
-    def test_returns_hash_when_nonzero(self):
-        req = make_mock_request(prefill_hash=12345)
-        result = _gen_steering_extra_hash_keys(req)
+    def test_prompt_block_returns_prefill_hash_when_nonzero(self):
+        req = make_mock_request(prefill_hash=12345, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=0)
         assert result == [12345]
 
-    def test_getattr_fallback_when_attribute_missing(self):
-        req = make_mock_request(has_attr=False)
-        result = _gen_steering_extra_hash_keys(req)
+    def test_prompt_block_getattr_fallback_when_attribute_missing(self):
+        req = make_mock_request(has_prefill_attr=False, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=0)
+        assert result == []
+
+    def test_prompt_block_ignores_decode_hash(self):
+        """Prompt blocks should use prefill hash, not decode hash."""
+        req = make_mock_request(prefill_hash=0, decode_hash=99999, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=5)
+        assert result == []
+
+    # --- Generated block tests (start_token_idx >= num_prompt_tokens) ---
+
+    def test_generated_block_returns_decode_hash_when_nonzero(self):
+        req = make_mock_request(decode_hash=67890, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=10)
+        assert result == [67890]
+
+    def test_generated_block_returns_empty_when_decode_hash_is_zero(self):
+        req = make_mock_request(decode_hash=0, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=15)
+        assert result == []
+
+    def test_generated_block_ignores_prefill_hash(self):
+        """Generated blocks should use decode hash, not prefill hash.
+        The prefill hash is already embedded in the parent hash chain."""
+        req = make_mock_request(prefill_hash=12345, decode_hash=0, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=10)
+        assert result == []
+
+    def test_generated_block_getattr_fallback_when_decode_attr_missing(self):
+        req = make_mock_request(has_decode_attr=False, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=10)
+        assert result == []
+
+    # --- Boundary and non-steered tests ---
+
+    def test_boundary_exact_prompt_length_is_generated(self):
+        """start_token_idx == num_prompt_tokens means generated block."""
+        req = make_mock_request(prefill_hash=111, decode_hash=222, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=10)
+        assert result == [222]
+
+    def test_non_steered_request_returns_empty_for_prompt_block(self):
+        req = make_mock_request(prefill_hash=0, decode_hash=0, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=0)
+        assert result == []
+
+    def test_non_steered_request_returns_empty_for_generated_block(self):
+        req = make_mock_request(prefill_hash=0, decode_hash=0, num_prompt_tokens=10)
+        result = _gen_steering_extra_hash_keys(req, start_token_idx=15)
         assert result == []
 
 
@@ -74,17 +132,14 @@ class TestSteeringBlockHashes:
         )
         assert hash_no_steering != hash_with_steering
 
-    def test_block_hashes_identical_when_only_decode_steering_differs(self):
-        """Decode steering is not included in extra keys, so block hashes
+    def test_prompt_block_hashes_differ_when_decode_steering_differs(self):
+        """For prompt blocks, decode steering is irrelevant, so hashes
         should be identical when only decode steering differs."""
-        req_a = make_mock_request(prefill_hash=0)
-        req_a.decode_steering_config_hash = 111
+        req_a = make_mock_request(prefill_hash=0, decode_hash=111, num_prompt_tokens=10)
+        req_b = make_mock_request(prefill_hash=0, decode_hash=222, num_prompt_tokens=10)
 
-        req_b = make_mock_request(prefill_hash=0)
-        req_b.decode_steering_config_hash = 222
-
-        keys_a = _gen_steering_extra_hash_keys(req_a)
-        keys_b = _gen_steering_extra_hash_keys(req_b)
+        keys_a = _gen_steering_extra_hash_keys(req_a, start_token_idx=0)
+        keys_b = _gen_steering_extra_hash_keys(req_b, start_token_idx=0)
 
         assert keys_a == keys_b == []
 
@@ -96,15 +151,36 @@ class TestSteeringBlockHashes:
         hash_b = hash_block_tokens(sha256_cbor, None, tokens, extra_keys=extra_b)
         assert hash_a == hash_b
 
+    def test_generated_block_hashes_differ_with_different_decode_steering(self):
+        """For generated blocks, different decode steering should produce
+        different block hashes."""
+        req_a = make_mock_request(decode_hash=111, num_prompt_tokens=5)
+        req_b = make_mock_request(decode_hash=222, num_prompt_tokens=5)
+
+        keys_a = _gen_steering_extra_hash_keys(req_a, start_token_idx=5)
+        keys_b = _gen_steering_extra_hash_keys(req_b, start_token_idx=5)
+
+        assert keys_a == [111]
+        assert keys_b == [222]
+
+        tokens = [10, 20, 30, 40]
+        hash_a = hash_block_tokens(sha256_cbor, None, tokens, extra_keys=tuple(keys_a))
+        hash_b = hash_block_tokens(sha256_cbor, None, tokens, extra_keys=tuple(keys_b))
+        assert hash_a != hash_b
+
     def test_block_hashes_identical_when_no_steering(self):
         """A request with no steering attributes should produce the same
-        block hash as a request with explicit prefill_steering_config_hash=0."""
-        req_no_attr = make_mock_request(has_attr=False)
-        req_zero = make_mock_request(prefill_hash=0)
+        block hash as a request with explicit hashes=0."""
+        req_no_attr = make_mock_request(
+            has_prefill_attr=False, has_decode_attr=False, num_prompt_tokens=10
+        )
+        req_zero = make_mock_request(
+            prefill_hash=0, decode_hash=0, num_prompt_tokens=10
+        )
 
-        keys_no_attr = _gen_steering_extra_hash_keys(req_no_attr)
-        keys_zero = _gen_steering_extra_hash_keys(req_zero)
-
+        # Prompt blocks
+        keys_no_attr = _gen_steering_extra_hash_keys(req_no_attr, start_token_idx=0)
+        keys_zero = _gen_steering_extra_hash_keys(req_zero, start_token_idx=0)
         assert keys_no_attr == keys_zero == []
 
         tokens = [100, 200, 300]
@@ -116,3 +192,10 @@ class TestSteeringBlockHashes:
         )
         hash_zero = hash_block_tokens(sha256_cbor, None, tokens, extra_keys=extra_zero)
         assert hash_no_attr == hash_zero
+
+        # Generated blocks
+        keys_no_attr_gen = _gen_steering_extra_hash_keys(
+            req_no_attr, start_token_idx=15
+        )
+        keys_zero_gen = _gen_steering_extra_hash_keys(req_zero, start_token_idx=15)
+        assert keys_no_attr_gen == keys_zero_gen == []
