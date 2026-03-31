@@ -796,6 +796,119 @@ def _dump_repro(
         print(msg, file=sys.stderr, end="", flush=True)
 
 
+_nan_origin_reported = False
+
+
+def _emit_nan_origin(
+    nan_cpu: torch.Tensor,
+    inf_cpu: torch.Tensor,
+    attn_nan_cpu: torch.Tensor | None,
+    attn_inf_cpu: torch.Tensor | None,
+    maxabs_cpu: torch.Tensor | None,
+    num_actual: int,
+    padded: int,
+    phase: str,
+) -> None:
+    """Find and log the first layer where NaN is CREATED.
+
+    Scans for the first layer where col0 (input) is clean but col1/2/3
+    (post_ln/attn/moe) has NaN. That layer is where NaN originates.
+    Also logs full attn_detail for that layer.
+    """
+    global _nan_origin_reported
+    if _nan_origin_reported:
+        return
+
+    num_layers = nan_cpu.shape[0]
+    for layer_idx in range(num_layers):
+        input_nan = nan_cpu[layer_idx, 0].item()
+        postln_nan = nan_cpu[layer_idx, 1].item()
+        attn_nan = nan_cpu[layer_idx, 2].item()
+        moe_nan = nan_cpu[layer_idx, 3].item()
+
+        # Skip layers where input already has NaN (cascade, not origin)
+        if input_nan > 0:
+            continue
+
+        # Check if any later stage introduces NaN
+        if postln_nan + attn_nan + moe_nan == 0:
+            continue
+
+        # Found the origin layer!
+        _nan_origin_reported = True
+        f = _get_log()
+
+        input_inf = inf_cpu[layer_idx, 0].item()
+        postln_inf = inf_cpu[layer_idx, 1].item()
+        attn_inf = inf_cpu[layer_idx, 2].item()
+        moe_inf = inf_cpu[layer_idx, 3].item()
+        ma = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
+
+        # Determine which stage first introduces NaN
+        if postln_nan > 0:
+            origin_stage = "POST_LN"
+        elif attn_nan > 0:
+            origin_stage = "ATTN"
+        else:
+            origin_stage = "MOE"
+
+        msg = (f"[NAN_ORIGIN] phase={phase} layer={layer_idx} "
+               f"origin_stage={origin_stage} "
+               f"input_nan={input_nan} input_inf={input_inf} "
+               f"postln_nan={postln_nan} postln_inf={postln_inf} "
+               f"attn_nan={attn_nan} attn_inf={attn_inf} "
+               f"moe_nan={moe_nan} moe_inf={moe_inf} "
+               f"hs_maxabs={ma:.4g} "
+               f"padded={padded} actual={num_actual}\n")
+        f.write(msg)
+        f.flush()
+        print(msg, file=sys.stderr, end="", flush=True)
+
+        # Dump full attn_detail for the origin layer
+        if attn_nan_cpu is not None:
+            ad = attn_nan_cpu[layer_idx]
+            ai = attn_inf_cpu[layer_idx] if attn_inf_cpu is not None else None
+            msg = (f"[NAN_ORIGIN] phase={phase} layer={layer_idx} attn_detail: "
+                   f"fused_qkv_nan={ad[0].item()} "
+                   f"q_norm_nan={ad[1].item()} "
+                   f"kv_norm_nan={ad[2].item()} "
+                   f"rope_nan={ad[3].item()} "
+                   f"mla_attn_nan={ad[4].item()} "
+                   f"o_proj_nan={ad[5].item()} "
+                   f"kv_cache_upd_nan={ad[6].item()} "
+                   f"W_UK_bmm_nan={ad[7].item()} "
+                   f"fwd_mqa_nan={ad[8].item()} "
+                   f"v_up_proj_nan={ad[9].item()} "
+                   f"fwd_mha_nan={ad[10].item()} "
+                   f"kv_cache_bf16_nan={ad[11].item()} "
+                   f"mqa_q_pre_nan={ad[12].item()} "
+                   f"lse_nan={ad[13].item()} "
+                   f"mha_q_nan={ad[14].item()} "
+                   f"mha_kv_c_nan={ad[15].item()} "
+                   f"mha_k_pe_nan={ad[16].item()} "
+                   f"kv_c_normed_real_nan={ad[17].item()} "
+                   f"kv_fp8_nan={ad[18].item()} "
+                   f"kv_c_pre_norm_nan={ad[21].item() if ad.shape[0] > 21 else '?'} "
+                   f"k_pe_pre_rope_nan={ad[22].item() if ad.shape[0] > 22 else '?'}\n")
+            f.write(msg)
+            f.flush()
+            print(msg, file=sys.stderr, end="", flush=True)
+
+            if ai is not None:
+                msg = (f"[NAN_ORIGIN] phase={phase} layer={layer_idx} attn_inf: "
+                       f"fused_qkv_inf={ai[0].item()} "
+                       f"W_UK_bmm_inf={ai[7].item()} "
+                       f"fwd_mqa_inf={ai[8].item()} "
+                       f"kv_cache_bf16_inf={ai[11].item()} "
+                       f"kv_c_normed_real_inf={ai[17].item()} "
+                       f"kv_fp8_inf={ai[18].item()}\n")
+                f.write(msg)
+                f.flush()
+                print(msg, file=sys.stderr, end="", flush=True)
+
+        return  # Only report the first origin
+
+
 _kv_poison_reported = False
 
 
@@ -1070,6 +1183,11 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         f.write(msg)
         f.flush()
         print(msg, file=sys.stderr, end="", flush=True)
+
+    # Find the NaN origin: first layer where input (col0) is clean but
+    # a later stage (post_ln/attn/moe) has NaN. This is where NaN is BORN.
+    _emit_nan_origin(nan_cpu, inf_cpu, attn_nan_cpu, attn_inf_cpu,
+                     maxabs_cpu, n, padded, phase)
 
     if kv_poison:
         _emit_kv_poison(hidden_states, nan_cpu, attn_nan_cpu, attn_inf_cpu, n)
