@@ -73,7 +73,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
-        usage_policy: "UsagePolicy | None" = None,
+        usage_policy: UsagePolicy | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__(

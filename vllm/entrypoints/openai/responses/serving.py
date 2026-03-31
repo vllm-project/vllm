@@ -182,7 +182,7 @@ class OpenAIServingResponses(OpenAIServing):
         tool_parser: str | None = None,
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
-        usage_policy: "UsagePolicy | None" = None,
+        usage_policy: UsagePolicy | None = None,
         enable_log_outputs: bool = False,
     ) -> None:
         super().__init__(
