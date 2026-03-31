@@ -27,7 +27,7 @@ def test_colmodernvbert_text_token_embed(vllm_runner):
     """Text query produces per-token embeddings with shape (seq_len, 128)."""
     with vllm_runner(
         MODEL_NAME,
-        revision=revision,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
