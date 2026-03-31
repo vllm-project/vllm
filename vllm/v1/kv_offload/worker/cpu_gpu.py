@@ -336,6 +336,8 @@ class CpuGpuOffloadingHandlers:
             self.gpu_to_cpu_handler._on_write_complete = (
                 self._disk_write_through
             )
+        # Inflight prefetch tracking: list of (DiskPrefetchSpec, [futures])
+        self._inflight_prefetches: list[tuple] = []
 
     def _disk_write_through(self, cpu_block_ids: "np.ndarray") -> None:
         """Background write-through: copy completed CPU blocks to disk."""
@@ -349,17 +351,35 @@ class CpuGpuOffloadingHandlers:
     def process_prefetch_requests(self, requests: list) -> None:
         """Submit disk→CPU prefetch requests (non-blocking).
 
-        Each request has .cpu_block_ids and .disk_block_ids.
-        Submits reads to the DiskIOWorker thread pool and returns
-        immediately. The reads complete in the background — blocks
-        become available by the next engine step when the scheduler
-        processes the completion signal.
-
-        This does NOT block the engine step, keeping GPU utilization high.
+        Submits reads to background threads and returns immediately.
+        Does NOT block the engine step. Call check_prefetch_completion()
+        to see which prefetches have finished.
         """
         if self._disk_io is None:
             return
         for req in requests:
-            self._disk_io.submit_async_reads(
+            futs = self._disk_io.submit_async_reads_tracked(
                 req.cpu_block_ids, req.disk_block_ids
             )
+            self._inflight_prefetches.append((req, futs))
+
+    def check_prefetch_completion(self) -> list:
+        """Check which async prefetch reads have completed.
+
+        Returns the DiskPrefetchSpec objects whose reads are done.
+        Called each engine step — non-blocking check.
+        """
+        completed = []
+        still_inflight = []
+        for req, futs in self._inflight_prefetches:
+            if all(f.done() for f in futs):
+                # Check for errors
+                for f in futs:
+                    exc = f.exception()
+                    if exc is not None:
+                        logger.warning("Disk prefetch read failed: %s", exc)
+                completed.append(req)
+            else:
+                still_inflight.append((req, futs))
+        self._inflight_prefetches = still_inflight
+        return completed

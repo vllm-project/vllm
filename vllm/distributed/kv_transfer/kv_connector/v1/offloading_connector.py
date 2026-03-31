@@ -132,18 +132,13 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
-        # Process completed disk prefetches — mark blocks as ready in CPU
+        # Process completed disk prefetches
         if connector_output.completed_disk_prefetches:
-            from vllm.v1.kv_offload.disk.manager import (
-                PendingPrefetch,
-                TieredOffloadingManager,
-            )
+            from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
             mgr = self.connector_scheduler.manager
             if isinstance(mgr, TieredOffloadingManager):
-                for cpu_ids, disk_ids in connector_output.completed_disk_prefetches:
-                    # We don't have block_hashes here — reconstruct from
-                    # the manager's inflight tracking
-                    mgr.mark_prefetches_by_cpu_ids(cpu_ids)
+                for cpu_ids, _ in connector_output.completed_disk_prefetches:
+                    mgr.mark_completed_by_cpu_ids(cpu_ids)
 
     def request_finished(
         self,

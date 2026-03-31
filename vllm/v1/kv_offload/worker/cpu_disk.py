@@ -117,16 +117,29 @@ class DiskIOWorker:
         self, cpu_block_ids: list[int], disk_block_ids: list[int]
     ) -> None:
         """
-        Queue reads without waiting (non-blocking).
-        Reads complete in background. The data lands in the CPU
-        tensors asynchronously — caller should not assume data is
-        ready until the next engine step.
+        Queue reads without waiting (non-blocking, fire-and-forget).
         """
         for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
             for tidx in range(len(self.cpu_tensors)):
                 self._pool.submit(
                     self._read_block, tidx, cpu_bid, disk_bid
                 )
+
+    def submit_async_reads_tracked(
+        self, cpu_block_ids: list[int], disk_block_ids: list[int]
+    ) -> list[Future]:
+        """
+        Queue reads without waiting, return futures for completion tracking.
+        Caller can check futures to know when data is ready.
+        """
+        futures: list[Future] = []
+        for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
+            for tidx in range(len(self.cpu_tensors)):
+                fut = self._pool.submit(
+                    self._read_block, tidx, cpu_bid, disk_bid
+                )
+                futures.append(fut)
+        return futures
 
     def drain_completed_writes(self) -> int:
         """Drain completed write futures. Returns count drained."""

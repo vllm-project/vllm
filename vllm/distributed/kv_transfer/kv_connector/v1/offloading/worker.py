@@ -318,13 +318,19 @@ class OffloadingConnectorWorker:
                 self.worker.wait(job_ids)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
-        # Process disk→CPU prefetches BEFORE GPU transfers.
+        # Submit disk→CPU prefetches (non-blocking, async reads).
         if metadata.disk_prefetches:
             handlers = self._get_disk_handlers()
             if handlers:
                 handlers.process_prefetch_requests(metadata.disk_prefetches)
-                # Track completed prefetches to report back to scheduler
-                self._completed_disk_prefetches.extend(metadata.disk_prefetches)
+
+        # Check if any previously submitted prefetches have completed.
+        # Only report completion when data is physically in CPU.
+        handlers = self._get_disk_handlers()
+        if handlers:
+            newly_completed = handlers.check_prefetch_completion()
+            if newly_completed:
+                self._completed_disk_prefetches.extend(newly_completed)
 
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)

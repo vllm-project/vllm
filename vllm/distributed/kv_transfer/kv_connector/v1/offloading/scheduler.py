@@ -110,6 +110,15 @@ class OffloadingConnectorScheduler:
             # indicates a lookup that should be tried later
             return None, False
         if hits == 0:
+            # CPU miss — check if disk has blocks and start prefetch
+            from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
+            if isinstance(self.manager, TieredOffloadingManager):
+                remaining_hashes = list(
+                    self._get_block_hashes(request, start_idx=start_block_idx)
+                )
+                if self.manager.try_disk_prefetch(remaining_hashes):
+                    # Prefetch initiated — tell scheduler to retry later
+                    return None, False
             return 0, False
 
         num_hit_tokens = (
@@ -270,17 +279,14 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        # Collect disk prefetch requests if using tiered offloading.
-        # First trigger prefetch selection (picks top requests by disk hits),
-        # then drain the outbound queue.
+        # Dispatch pending disk prefetches to worker
         disk_prefetches: list[DiskPrefetchSpec] = []
         from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
         if isinstance(self.manager, TieredOffloadingManager):
-            self.manager.maybe_prefetch_top_requests()
-            for p in self.manager.take_outbound_prefetches():
+            for op in self.manager.take_pending_dispatches():
                 disk_prefetches.append(DiskPrefetchSpec(
-                    cpu_block_ids=p.cpu_block_ids,
-                    disk_block_ids=p.disk_block_ids,
+                    cpu_block_ids=op.cpu_block_ids,
+                    disk_block_ids=op.disk_block_ids,
                 ))
 
         meta = OffloadingConnectorMetadata(
