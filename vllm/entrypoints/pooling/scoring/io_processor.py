@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import time
 from collections.abc import Sequence
 from typing import Any, TypeAlias, cast
@@ -96,6 +97,33 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ctx.engine_inputs = engine_inputs
         ctx.intermediates = len(scoring_data.data_1)
 
+    async def pre_process_online_async(self, ctx: ScoringServeContext):
+        request = ctx.request
+
+        if isinstance(request, ScoreRequest):
+            data_1 = request.data_1
+            data_2 = request.data_2
+        elif isinstance(request, RerankRequest):
+            data_1 = request.query
+            data_2 = request.documents
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        scoring_data = self.valid_inputs(data_1, data_2)
+        tok_params = request.build_tok_params(self.model_config)
+        engine_inputs = await self._pre_process_async(
+            scoring_data,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
+
+        ctx.engine_inputs = engine_inputs
+        ctx.intermediates = len(scoring_data.data_1)
+
     def post_process_online(
         self,
         ctx: ScoringServeContext,
@@ -142,6 +170,21 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         )
 
         return self._preprocess_completion_offline(
+            prompts=data_1 + data_2, tok_params=tok_params, prompt_extras=prompt_extras
+        )
+
+    async def _pre_process_async(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        data_2 = score_data_to_prompts(
+            scoring_data.data_2, "document", self.model_config
+        )
+
+        return await self._preprocess_completion_offline_async(
             prompts=data_1 + data_2, tok_params=tok_params, prompt_extras=prompt_extras
         )
 
@@ -269,6 +312,37 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         ctx.engine_inputs = engine_inputs
         ctx.pooling_params = pooling_params_list
 
+    async def pre_process_online_async(self, ctx: ScoringServeContext):
+        request = ctx.request
+
+        if isinstance(request, ScoreRequest):
+            data_1 = request.data_1
+            data_2 = request.data_2
+        elif isinstance(request, RerankRequest):
+            data_1 = request.query
+            data_2 = request.documents
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        scoring_data = self.valid_inputs(data_1, data_2)
+        tok_params = request.build_tok_params(self.model_config)
+        pooling_params = self.create_pooling_params(request)
+
+        engine_inputs, pooling_params_list = await self._pre_process_async(
+            scoring_data,
+            tok_params,
+            pooling_params,
+            chat_template=self.chat_template,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
+
+        ctx.engine_inputs = engine_inputs
+        ctx.pooling_params = pooling_params_list
+
     #######################################
     # offline APIs
 
@@ -331,6 +405,55 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.renderer.process_for_engine(engine_prompt, arrival_time)
             )
         return engine_inputs, pooling_params_list
+
+    async def _pre_process_async(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        pooling_params: PoolingParams | None,
+        chat_template: str | None = None,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
+        # todo: support prompt_extras
+        arrival_time = time.time()
+
+        data_1 = scoring_data.data_1
+        data_2 = scoring_data.data_2
+
+        if len(data_1) == 1:
+            data_1 = data_1 * len(data_2)
+
+        if pooling_params is None:
+            pooling_params = PoolingParams(task="classify")
+
+        pooling_params_list = list[PoolingParams]()
+        engine_prompts = list[TokensPrompt]()
+        for q, d in zip(data_1, data_2):
+            _, engine_prompt = self.get_score_prompt(
+                data_1=q,
+                data_2=d,
+                encode_kwargs=tok_params.get_encode_kwargs(),
+                chat_template=chat_template,
+            )
+
+            if token_type_ids := engine_prompt.pop("token_type_ids", None):
+                params = pooling_params.clone()
+                compressed = compress_token_type_ids(token_type_ids)
+                params.extra_kwargs = {"compressed_token_type_ids": compressed}
+                pooling_params_list.append(params)
+            else:
+                pooling_params_list.append(pooling_params)
+
+            tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+            engine_prompts.append(engine_prompt)
+
+        engine_inputs = await asyncio.gather(
+            *(
+                self.renderer.process_for_engine_async(prompt, arrival_time)
+                for prompt in engine_prompts
+            )
+        )
+        return list(engine_inputs), pooling_params_list
 
     def get_score_prompt(
         self,

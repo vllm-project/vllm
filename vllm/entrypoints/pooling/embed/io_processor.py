@@ -65,6 +65,15 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if self.enable_chunked_processing:
             self._pre_process_chunked(ctx)
 
+    async def pre_process_online_async(self, ctx: PoolingServeContext):
+        if isinstance(ctx.request, CohereEmbedRequest):
+            await self._pre_process_cohere_online_async(ctx)
+        else:
+            await super().pre_process_online_async(ctx)
+
+        if self.enable_chunked_processing:
+            self._pre_process_chunked(ctx)
+
     def post_process_online(
         self,
         ctx: PoolingServeContext,
@@ -438,6 +447,82 @@ class EmbedIOProcessor(PoolingIOProcessor):
             request, all_messages, truncate_prompt_tokens, truncation_side
         )
 
+    async def _pre_process_cohere_online_async(self, ctx: PoolingServeContext) -> None:
+        """Async version of ``_pre_process_cohere_online``.
+
+        Uses the async renderer path so that CPU-bound multimodal
+        preprocessing runs in a thread pool instead of blocking the
+        asyncio event loop.
+        """
+        request = ctx.request
+        assert isinstance(request, CohereEmbedRequest)
+
+        if request.texts is None and request.images is None and request.inputs is None:
+            raise ValueError("One of texts, images, or inputs must be provided")
+
+        truncate_prompt_tokens, truncation_side = self._resolve_cohere_truncation(
+            request
+        )
+        input_type = request.input_type
+        self._validate_input_type(input_type)
+
+        if request.images is not None:
+            input: list[CohereEmbedInput] = [
+                CohereEmbedInput(
+                    content=[
+                        CohereEmbedContent(type="image_url", image_url={"url": uri})
+                    ]
+                )
+                for uri in request.images
+            ]
+        elif request.inputs is not None:
+            input = request.inputs
+        else:
+            texts = request.texts or []
+            task_prefix = self._get_task_instruction_prefix(input_type)
+
+            if task_prefix is None:
+                ctx.engine_inputs = await self._preprocess_cohere_text_completion_async(
+                    request,
+                    texts,
+                    truncate_prompt_tokens,
+                    truncation_side,
+                )
+                return
+
+            all_messages = [
+                self._mixed_input_to_messages(
+                    CohereEmbedInput(
+                        content=[CohereEmbedContent(type="text", text=text)]
+                    ),
+                    task_prefix=task_prefix,
+                )
+                for text in texts
+            ]
+            if self._has_chat_template():
+                ctx.engine_inputs = await self._batch_render_chat_async(
+                    request,
+                    all_messages,
+                    truncate_prompt_tokens,
+                    truncation_side,
+                )
+            else:
+                ctx.engine_inputs = await self._preprocess_cohere_text_completion_async(
+                    request,
+                    self._apply_task_instruction(texts, input_type),
+                    truncate_prompt_tokens,
+                    truncation_side,
+                )
+            return
+
+        task_prefix = self._get_task_instruction_prefix(input_type)
+        all_messages = [
+            self._mixed_input_to_messages(inp, task_prefix=task_prefix) for inp in input
+        ]
+        ctx.engine_inputs = await self._batch_render_chat_async(
+            request, all_messages, truncate_prompt_tokens, truncation_side
+        )
+
     def _has_chat_template(self) -> bool:
         return (
             resolve_chat_template(
@@ -508,6 +593,69 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
         _, engine_inputs = renderer.render_chat(all_messages, chat_params, tok_params)
         return engine_inputs
+
+    async def _batch_render_chat_async(
+        self,
+        request: CohereEmbedRequest,
+        all_messages: Sequence[list[ChatCompletionMessageParam]],
+        truncate_prompt_tokens: int | None,
+        truncation_side: Literal["left", "right"] | None,
+    ) -> list[EngineInput]:
+        """Async version of ``_batch_render_chat``."""
+        if not all_messages:
+            return []
+
+        proxy = EmbeddingChatRequest(
+            model=request.model,
+            messages=list(all_messages[0]),
+            dimensions=request.output_dimension,
+            encoding_format="float",
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            truncation_side=truncation_side,
+        )
+
+        renderer = self.renderer
+        mm_config = self.model_config.multimodal_config
+
+        tok_params = proxy.build_tok_params(self.model_config)
+        chat_params = proxy.build_chat_params(
+            self.chat_template,
+            self.chat_template_content_format,
+        ).with_defaults(
+            merge_kwargs(
+                None,
+                dict(
+                    tools=None,
+                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                ),
+            ),
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
+
+        _, engine_inputs = await renderer.render_chat_async(
+            all_messages, chat_params, tok_params
+        )
+        return engine_inputs
+
+    async def _preprocess_cohere_text_completion_async(
+        self,
+        request: CohereEmbedRequest,
+        texts: list[str],
+        truncate_prompt_tokens: int | None,
+        truncation_side: Literal["left", "right"] | None,
+    ) -> list[EngineInput]:
+        """Async version of ``_preprocess_cohere_text_completion``."""
+        proxy = EmbeddingCompletionRequest(
+            model=request.model,
+            input=texts,
+            dimensions=request.output_dimension,
+            encoding_format="float",
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            truncation_side=truncation_side,
+        )
+        return await self._preprocess_completion_online_async(
+            proxy, prompt_input=proxy.input, prompt_embeds=None
+        )
 
     def _validate_input_type(self, input_type: str | None) -> None:
         """Raise if *input_type* is not supported by this model."""

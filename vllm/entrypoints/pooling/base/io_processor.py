@@ -82,7 +82,31 @@ class PoolingIOProcessor:
         ctx.engine_inputs = engine_inputs
 
     async def pre_process_online_async(self, ctx: PoolingServeContext):
-        self.pre_process_online(ctx)
+        request = ctx.request
+
+        if isinstance(ctx.request, PoolingChatLikeRequest):
+            self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            _, engine_inputs = await self._preprocess_chat_online_async(
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=None,
+            )
+        elif isinstance(request, PoolingCompletionLikeRequest):
+            engine_inputs = await self._preprocess_completion_online_async(
+                request,
+                prompt_input=request.input,
+                prompt_embeds=None,
+            )
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        ctx.engine_inputs = engine_inputs
 
     def post_process_online(
         self,
@@ -109,7 +133,13 @@ class PoolingIOProcessor:
         )
 
     async def pre_process_offline_async(self, ctx: OfflineInputsContext):
-        return self.pre_process_offline(ctx)
+        assert not isinstance(ctx.prompts, ScoringData)
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
+        return await self._preprocess_completion_offline_async(
+            prompts=ctx.prompts, tok_params=tok_params
+        )
 
     def post_process_offline(
         self,
@@ -125,6 +155,104 @@ class PoolingIOProcessor:
 
     #######################################
     # helpers
+
+    async def _preprocess_completion_online_async(
+        self,
+        request: RendererRequest,
+        prompt_input: str | list[str] | list[int] | list[list[int]] | None,
+        prompt_embeds: bytes | list[bytes] | None,
+    ) -> list[EngineInput]:
+        renderer = self.renderer
+        model_config = self.model_config
+
+        prompts = list[SingletonPrompt | bytes]()
+        if prompt_embeds is not None:  # embeds take higher priority
+            prompts.extend(prompt_to_seq(prompt_embeds))
+        if prompt_input is not None:
+            prompts.extend(prompt_to_seq(prompt_input))
+
+        parsed_prompts = [
+            (
+                prompt
+                if isinstance(prompt, bytes)
+                else parse_model_prompt(model_config, prompt)
+            )
+            for prompt in prompts
+        ]
+        tok_params = request.build_tok_params(model_config)
+
+        return await renderer.render_cmpl_async(
+            parsed_prompts,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
+
+    async def _preprocess_chat_online_async(
+        self,
+        request: RendererChatRequest,
+        messages: list[ChatCompletionMessageParam],
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+        default_template_kwargs: dict[str, Any] | None,
+        tool_dicts: list[dict[str, Any]] | None = None,
+        tool_parser: type[ToolParser] | None = None,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]]:
+        renderer = self.renderer
+
+        default_template_kwargs = merge_kwargs(
+            default_template_kwargs,
+            dict(
+                tools=tool_dicts,
+                tokenize=is_mistral_tokenizer(renderer.tokenizer),
+            ),
+        )
+
+        mm_config = self.model_config.multimodal_config
+
+        tok_params = request.build_tok_params(self.model_config)
+        chat_params = request.build_chat_params(
+            default_template, default_template_content_format
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
+
+        (conversation,), (engine_input,) = await renderer.render_chat_async(
+            [messages],
+            chat_params,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
+
+        return conversation, [engine_input]
+
+    async def _preprocess_completion_offline_async(
+        self,
+        prompts: "PromptType | Sequence[PromptType]",
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        prompts = prompt_to_seq(prompts)
+        parsed_prompts = [
+            (
+                prompt
+                if isinstance(prompt, bytes)
+                else parse_model_prompt(self.model_config, prompt)
+            )
+            for prompt in prompts
+        ]
+
+        return await self.renderer.render_cmpl_async(
+            parsed_prompts, tok_params, prompt_extras=prompt_extras
+        )
 
     def _preprocess_completion_online(
         self,
