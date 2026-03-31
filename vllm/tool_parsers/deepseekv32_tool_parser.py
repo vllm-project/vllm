@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -78,7 +79,9 @@ class DeepSeekV32ToolParser(ToolParser):
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 
-    def adjust_request(self, request):
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens

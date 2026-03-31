@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -151,7 +152,9 @@ class Glm4MoeModelToolParser(ToolParser):
             logger.exception("Failed to determine if tools are enabled.")
             return False
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """Adjust request parameters for tool call token handling."""
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
