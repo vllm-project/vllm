@@ -5,17 +5,14 @@ import importlib
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import TypeAlias
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
 )
-from openai.types.responses.tool import Tool as ResponsesTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -29,13 +26,13 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.utils import get_json_schema_from_tools
+from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
-logger = init_logger(__name__)
+__all__ = ["Tool"]
 
-Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
+logger = init_logger(__name__)
 
 
 class ToolParser:
