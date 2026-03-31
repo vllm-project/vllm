@@ -221,6 +221,8 @@ def check_marlin_supported(
     device_capability: int | None = None,
 ) -> bool:
     cond, _ = _check_marlin_supported(quant_type, group_size, has_zp, device_capability)
+    if cond and current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
     return cond
 
 
@@ -297,12 +299,15 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
         getattr(layer, "input_size_per_partition", None) or layer.input_size
     )
 
-    return check_marlin_supports_shape(
+    supported = check_marlin_supports_shape(
         output_size_per_partition=output_size_per_partition,
         input_size_per_partition=input_size_per_partition,
         input_size=layer.input_size,
         group_size=group_size,
     )[0]
+    if supported and current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
+    return supported
 
 
 def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
