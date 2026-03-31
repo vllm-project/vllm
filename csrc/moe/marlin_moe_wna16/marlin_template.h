@@ -359,9 +359,10 @@ __global__ void Marlin(
   constexpr bool is_int_type = b_type == vllm::kU4 || b_type == vllm::kU8 ||
                                b_type == vllm::kS4 || b_type == vllm::kS8 ||
                                b_type == vllm::kU4B8 || b_type == vllm::kU8B128;
+  constexpr bool is_8bit_scale = s_type.size_bits() == 8;
   // see comments of dequant.h for more details
   constexpr bool dequant_skip_flop =
-      is_a_8bit || b_type == vllm::kFE4M3fn ||
+      is_a_8bit || (b_type == vllm::kFE4M3fn && !(s_type == vllm::kFE8M0fnu)) ||
       b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn ||
       has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
       has_zp && !is_zp_float && !(b_type == vllm::kU8);
@@ -375,7 +376,7 @@ __global__ void Marlin(
   const int group_size =
       (!has_act_order && group_blocks == -1) ? prob_k : prob_k / num_groups;
   const int scales_expert_stride =
-      prob_n * prob_k / group_size / (b_type == vllm::kFE2M1f ? 16 : 8);
+      prob_n * prob_k / group_size / (is_8bit_scale ? 16 : 8);
   const int zp_expert_stride =
       is_zp_float ? prob_n * prob_k / group_size / 8
                   : prob_n * prob_k / group_size / (pack_factor * 4);
@@ -694,9 +695,8 @@ __global__ void Marlin(
   constexpr int b_sh_wr_iters = b_sh_stage / b_sh_wr_delta;
 
   // Scale sizes/strides without act_order
-  int s_gl_stride = prob_n / (b_type == vllm::kFE2M1f ? 16 : 8);
-  constexpr int s_sh_stride =
-      16 * thread_n_blocks / (b_type == vllm::kFE2M1f ? 16 : 8);
+  int s_gl_stride = prob_n / (is_8bit_scale ? 16 : 8);
+  constexpr int s_sh_stride = 16 * thread_n_blocks / (is_8bit_scale ? 16 : 8);
   constexpr int s_tb_groups =
       !has_act_order && group_blocks != -1 && group_blocks < thread_k_blocks
           ? thread_k_blocks / group_blocks
@@ -1133,7 +1133,7 @@ __global__ void Marlin(
 
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
-          if constexpr (b_type_id != vllm::kFE2M1f.id()) {
+          if constexpr (!is_8bit_scale) {
             reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
                 sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
           } else {
@@ -1142,7 +1142,7 @@ __global__ void Marlin(
                     sh_s_stage)[s_sh_rd + cur_group_id * (2 * s_sh_stride)];
           }
         } else if (group_blocks >= b_sh_wr_iters) {
-          if constexpr (b_type_id != vllm::kFE2M1f.id()) {
+          if constexpr (!is_8bit_scale) {
             reinterpret_cast<int4*>(&frag_s[1])[0] =
                 reinterpret_cast<int4*>(&frag_s[0])[0];
           } else {
@@ -1343,7 +1343,7 @@ __global__ void Marlin(
       }
     }
 
-    if constexpr (b_type == vllm::kFE2M1f) {
+    if constexpr (s_type == vllm::kFE4M3fn || s_type == vllm::kFE8M0fnu) {
       int s_quant_0 = reinterpret_cast<int*>(frag_s[k2])[0];
       int s_quant_1 = reinterpret_cast<int*>(frag_s[k2])[1];
 

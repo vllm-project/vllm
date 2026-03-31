@@ -279,6 +279,8 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
         """Batch quantization: bf16/fp16 weights -> MXFP8 (fp8 + uint8 scales)."""
         E = weight.size(0)
         first_q, first_s = mxfp8_e4m3_quantize(weight[0], is_sf_swizzled_layout=False)
+        # Pre-allocate the output tensors rather than stacking.
+        # This is important for consistent memory layout.
         w_quant = torch.empty(
             (E, *first_q.shape), dtype=first_q.dtype, device=weight.device
         )
