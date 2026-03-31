@@ -110,15 +110,20 @@ class OffloadingConnectorScheduler:
             # indicates a lookup that should be tried later
             return None, False
         if hits == 0:
-            # CPU miss — check if disk has blocks and start prefetch
+            # CPU miss — try disk prefetch as best-effort optimization.
+            # Fire-and-forget: initiate prefetch but DON'T defer the request.
+            # If the prefetch completes before this request is scheduled again,
+            # the blocks will be in CPU and lookup() will find them.
+            # If not, the request proceeds with normal re-prefill.
             from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
             if isinstance(self.manager, TieredOffloadingManager):
                 remaining_hashes = list(
                     self._get_block_hashes(request, start_idx=start_block_idx)
                 )
-                if self.manager.try_disk_prefetch(remaining_hashes):
-                    # Prefetch initiated — tell scheduler to retry later
-                    return None, False
+                self.manager.try_disk_prefetch(remaining_hashes)
+                # Don't return None — let the request proceed normally.
+                # The prefetch runs in the background and may benefit
+                # this request on the NEXT scheduling cycle.
             return 0, False
 
         num_hit_tokens = (
