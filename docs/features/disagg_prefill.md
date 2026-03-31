@@ -146,7 +146,7 @@ This design enables finer-grained control over latency and resource utilization,
     --gpu-memory-utilization 0.8 \
     --trust-remote-code \
     --kv-transfer-config \
-    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":"1e10","kv_port":"$KV_DECODE_PORT","kv_connector_extra_config":{"proxy_ip":"'"$ZMQ_DISCOVERY_IP"'","proxy_port":"$ZMQ_DISCOVERY_PORT","http_ip":"'"$PREFILL_DECODE_IP_1"'","http_port":"$PREFILL_DECODE_PORT","send_type":"PUT_ASYNC"}}' &
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":"1e10","kv_port":"'"$KV_DECODE_PORT"'","kv_connector_extra_config":{"proxy_ip":"'"$ZMQ_DISCOVERY_IP"'","proxy_port":"'"$ZMQ_DISCOVERY_PORT"'","http_ip":"'"$PREFILL_DECODE_IP_1"'","http_port":"'"$PREFILL_DECODE_PORT"'","send_type":"PUT_ASYNC"}}' &
 
   # Step 4: Send a Test Request
   # Please replace localhost with your correct Router ip
