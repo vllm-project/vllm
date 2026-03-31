@@ -19,10 +19,7 @@ from vllm.v1.attention.ops.triton_hadamard_turboquant import (
 # Skip if no CUDA
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
-# Test parameters
-NUM_TOKENS = 4
-NUM_KV_HEADS = 4
-HEAD_SIZE = 128
+# Default test parameters
 OUTLIER_FRACTION = 0.15
 BIT_WIDTH = 4
 BLOCK_SIZE = 16
@@ -35,10 +32,10 @@ def _next_power_of_2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
-def _setup_turboquant_state(device):
+def _setup_turboquant_state(device, head_size=128):
     """Create TurboQuant parameters for testing."""
-    n_outliers = max(1, int(HEAD_SIZE * OUTLIER_FRACTION))
-    normal_size = HEAD_SIZE - n_outliers
+    n_outliers = max(1, int(head_size * OUTLIER_FRACTION))
+    normal_size = head_size - n_outliers
     padded_d = _next_power_of_2(normal_size)
 
     # Sign flips
@@ -56,7 +53,7 @@ def _setup_turboquant_state(device):
 
     # Outlier/normal indices
     outlier_idx = torch.arange(n_outliers, dtype=torch.long, device=device)
-    normal_idx = torch.arange(n_outliers, HEAD_SIZE, dtype=torch.long, device=device)
+    normal_idx = torch.arange(n_outliers, head_size, dtype=torch.long, device=device)
 
     return {
         "sign_flips": sign_flips,
@@ -67,6 +64,7 @@ def _setup_turboquant_state(device):
         "normal_size": normal_size,
         "n_outliers": n_outliers,
         "padded_d": padded_d,
+        "head_size": head_size,
     }
 
 
@@ -91,15 +89,18 @@ def _python_unpack_4bit(packed, normal_size):
 class TestFusedEncode:
     """Test fused encode kernel against non-fused reference."""
 
-    def test_fused_encode_matches_reference(self):
+    @pytest.mark.parametrize("num_tokens", [1, 4, 16, 64])
+    @pytest.mark.parametrize("num_kv_heads", [1, 4, 8])
+    @pytest.mark.parametrize("head_size", [128])
+    def test_fused_encode_matches_reference(self, num_tokens, num_kv_heads, head_size):
         device = torch.device("cuda")
-        state = _setup_turboquant_state(device)
+        state = _setup_turboquant_state(device, head_size)
 
         # Create input
         x = torch.randn(
-            NUM_TOKENS,
-            NUM_KV_HEADS,
-            HEAD_SIZE,
+            num_tokens,
+            num_kv_heads,
+            head_size,
             device=device,
             dtype=torch.bfloat16,
         )
@@ -123,7 +124,7 @@ class TestFusedEncode:
         slot_bytes = outlier_bytes_count + packed_bytes + 2
 
         # Build reference slot
-        N = NUM_TOKENS * NUM_KV_HEADS
+        N = num_tokens * num_kv_heads
         ref_parts = []
         ob = (
             outlier_x.reshape(N, n_outliers)
@@ -147,13 +148,13 @@ class TestFusedEncode:
         cache = torch.zeros(
             NUM_BLOCKS,
             BLOCK_SIZE,
-            NUM_KV_HEADS,
+            num_kv_heads,
             slot_bytes,
             dtype=torch.uint8,
             device=device,
         )
         # Simple slot mapping: token i → slot i
-        slot_mapping = torch.arange(NUM_TOKENS, device=device)
+        slot_mapping = torch.arange(num_tokens, device=device)
         block_indices = slot_mapping // BLOCK_SIZE
         block_offsets = slot_mapping % BLOCK_SIZE
 
@@ -170,17 +171,14 @@ class TestFusedEncode:
 
         # Read back from cache
         fused_slots = []
-        for t in range(NUM_TOKENS):
+        for t in range(num_tokens):
             bi = block_indices[t].item()
             bo = block_offsets[t].item()
-            for h in range(NUM_KV_HEADS):
+            for h in range(num_kv_heads):
                 fused_slots.append(cache[bi, bo, h])
         fused_slot = torch.stack(fused_slots)
 
         # Compare: outlier bytes and norm bytes must match exactly.
-        # Packed indices may have ±1 level differences at quantization
-        # boundaries due to float32 non-determinism between kernel
-        # compilations — this is expected and acceptable.
         outlier_match = torch.equal(
             ref_slot[:, :outlier_bytes_count],
             fused_slot[:, :outlier_bytes_count],
@@ -205,9 +203,12 @@ class TestFusedEncode:
 class TestFusedDecode:
     """Test fused decode kernel against non-fused reference."""
 
-    def test_fused_decode_matches_reference(self):
+    @pytest.mark.parametrize("num_tokens", [1, 4, 16])
+    @pytest.mark.parametrize("num_kv_heads", [1, 4, 8])
+    def test_fused_decode_matches_reference(self, num_tokens, num_kv_heads):
         device = torch.device("cuda")
-        state = _setup_turboquant_state(device)
+        head_size = 128
+        state = _setup_turboquant_state(device, head_size)
         normal_size = state["normal_size"]
         n_outliers = state["n_outliers"]
         packed_bytes = math.ceil(normal_size * BIT_WIDTH / 8)
@@ -215,9 +216,9 @@ class TestFusedDecode:
 
         # Create random input and encode it
         x = torch.randn(
-            NUM_TOKENS,
-            NUM_KV_HEADS,
-            HEAD_SIZE,
+            num_tokens,
+            num_kv_heads,
+            head_size,
             device=device,
             dtype=torch.bfloat16,
         )
@@ -232,7 +233,7 @@ class TestFusedDecode:
         )
 
         # Build slot data
-        N = NUM_TOKENS * NUM_KV_HEADS
+        N = num_tokens * num_kv_heads
         packed = _python_pack_4bit(indices.reshape(-1, normal_size), normal_size)
         parts = []
         ob = (
@@ -259,7 +260,7 @@ class TestFusedDecode:
             output_dtype=torch.bfloat16,
         ).reshape(N, normal_size)
 
-        ref_full = torch.empty(N, HEAD_SIZE, dtype=torch.bfloat16, device=device)
+        ref_full = torch.empty(N, head_size, dtype=torch.bfloat16, device=device)
         ref_full[:, state["normal_idx"]] = ref_normal
         outlier_vals = outlier_x.reshape(N, n_outliers).to(torch.bfloat16)
         ref_full[:, state["outlier_idx"]] = outlier_vals
@@ -275,20 +276,18 @@ class TestFusedDecode:
             codebook=state["codebook"],
             normal_idx=state["normal_idx"],
             outlier_idx=state["outlier_idx"],
-            head_size=HEAD_SIZE,
+            head_size=head_size,
             normal_size=normal_size,
             n_outliers=n_outliers,
             packed_bytes=packed_bytes,
         )
 
         # Compare
-        # Normal channels should match exactly (same quantized values)
         normal_close = torch.allclose(
             fused_full[:, state["normal_idx"]],
             ref_full[:, state["normal_idx"]],
             atol=1e-3,
         )
-        # Outlier channels should match exactly (just byte copy)
         outlier_close = torch.allclose(
             fused_full[:, state["outlier_idx"]],
             ref_full[:, state["outlier_idx"]],
@@ -310,10 +309,13 @@ class TestFusedDecode:
 class TestRoundTrip:
     """Test fused round-trip matches non-fused round-trip quality."""
 
-    def test_roundtrip_matches_reference(self):
+    @pytest.mark.parametrize("num_tokens", [1, 4, 16])
+    @pytest.mark.parametrize("head_size", [128, 96])
+    def test_roundtrip_matches_reference(self, num_tokens, head_size):
         """Fused encode→decode should have similar quality to non-fused."""
         device = torch.device("cuda")
-        state = _setup_turboquant_state(device)
+        num_kv_heads = 4
+        state = _setup_turboquant_state(device, head_size)
         normal_size = state["normal_size"]
         n_outliers = state["n_outliers"]
         packed_bytes = math.ceil(normal_size * BIT_WIDTH / 8)
@@ -321,15 +323,15 @@ class TestRoundTrip:
         slot_bytes = outlier_bytes_count + packed_bytes + 2
 
         x = torch.randn(
-            NUM_TOKENS,
-            NUM_KV_HEADS,
-            HEAD_SIZE,
+            num_tokens,
+            num_kv_heads,
+            head_size,
             device=device,
             dtype=torch.bfloat16,
         )
         normal_x = x[..., state["normal_idx"]].contiguous()
         outlier_x = x[..., state["outlier_idx"]]
-        N = NUM_TOKENS * NUM_KV_HEADS
+        N = num_tokens * num_kv_heads
 
         # --- Reference round-trip (non-fused) ---
         ref_indices, ref_norms = hadamard_turboquant_encode(
@@ -345,7 +347,7 @@ class TestRoundTrip:
             state["codebook"],
             output_dtype=torch.bfloat16,
         ).reshape(N, normal_size)
-        ref_full = torch.empty(N, HEAD_SIZE, dtype=torch.bfloat16, device=device)
+        ref_full = torch.empty(N, head_size, dtype=torch.bfloat16, device=device)
         ref_full[:, state["normal_idx"]] = ref_normal
         ref_full[:, state["outlier_idx"]] = outlier_x.reshape(N, n_outliers).to(
             torch.bfloat16
@@ -360,12 +362,12 @@ class TestRoundTrip:
         cache = torch.zeros(
             NUM_BLOCKS,
             BLOCK_SIZE,
-            NUM_KV_HEADS,
+            num_kv_heads,
             slot_bytes,
             dtype=torch.uint8,
             device=device,
         )
-        slot_mapping = torch.arange(NUM_TOKENS, device=device)
+        slot_mapping = torch.arange(num_tokens, device=device)
         block_indices = slot_mapping // BLOCK_SIZE
         block_offsets = slot_mapping % BLOCK_SIZE
 
@@ -381,10 +383,10 @@ class TestRoundTrip:
         )
 
         flat_slots = []
-        for t in range(NUM_TOKENS):
+        for t in range(num_tokens):
             bi = block_indices[t].item()
             bo = block_offsets[t].item()
-            for h in range(NUM_KV_HEADS):
+            for h in range(num_kv_heads):
                 flat_slots.append(cache[bi, bo, h])
         flat_slots = torch.stack(flat_slots)
 
@@ -394,14 +396,14 @@ class TestRoundTrip:
             codebook=state["codebook"],
             normal_idx=state["normal_idx"],
             outlier_idx=state["outlier_idx"],
-            head_size=HEAD_SIZE,
+            head_size=head_size,
             normal_size=normal_size,
             n_outliers=n_outliers,
             packed_bytes=packed_bytes,
         )
 
         # Compare: fused quality should be within 5% of reference quality
-        original = x.reshape(N, HEAD_SIZE).float()
+        original = x.reshape(N, head_size).float()
         ref_cos = (
             torch.nn.functional.cosine_similarity(original, ref_full.float(), dim=1)
             .mean()
@@ -417,3 +419,159 @@ class TestRoundTrip:
             f"Fused quality differs too much from reference: "
             f"ref={ref_cos:.4f}, fused={fused_cos:.4f}"
         )
+
+
+class TestFusedPagedDecode:
+    """Test fused_paged_decode (the production decode path)."""
+
+    @pytest.mark.parametrize("num_tokens", [4, 16])
+    def test_paged_decode_matches_slot_decode(self, num_tokens):
+        """fused_paged_decode should produce same output as slot-based decode."""
+        device = torch.device("cuda")
+        num_kv_heads = 4
+        head_size = 128
+        state = _setup_turboquant_state(device, head_size)
+        normal_size = state["normal_size"]
+        n_outliers = state["n_outliers"]
+        packed_bytes = math.ceil(normal_size * BIT_WIDTH / 8)
+        outlier_bytes_count = n_outliers * 2
+        slot_bytes = outlier_bytes_count + packed_bytes + 2
+
+        from vllm.v1.attention.ops.triton_fused_turboquant import (
+            fused_hadamard_decode_from_slots,
+            fused_hadamard_encode_and_store,
+            fused_paged_decode,
+        )
+
+        x = torch.randn(
+            num_tokens,
+            num_kv_heads,
+            head_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        normal_x = x[..., state["normal_idx"]].contiguous()
+        outlier_x = x[..., state["outlier_idx"]]
+
+        cache = torch.zeros(
+            NUM_BLOCKS,
+            BLOCK_SIZE,
+            num_kv_heads,
+            slot_bytes,
+            dtype=torch.uint8,
+            device=device,
+        )
+        slot_mapping = torch.arange(num_tokens, device=device)
+        block_indices = slot_mapping // BLOCK_SIZE
+        block_offsets = slot_mapping % BLOCK_SIZE
+
+        fused_hadamard_encode_and_store(
+            normal_x=normal_x,
+            outlier_x=outlier_x,
+            sign_flips=state["sign_flips"],
+            boundaries=state["boundaries"],
+            cache=cache,
+            block_indices=block_indices,
+            block_offsets=block_offsets,
+            bit_width=BIT_WIDTH,
+        )
+
+        # Path 1: slot-based decode
+        flat_slots = []
+        for t in range(num_tokens):
+            bi = block_indices[t].item()
+            bo = block_offsets[t].item()
+            for h in range(num_kv_heads):
+                flat_slots.append(cache[bi, bo, h])
+        flat_slots = torch.stack(flat_slots)
+
+        slot_decoded = fused_hadamard_decode_from_slots(
+            flat_slots=flat_slots,
+            sign_flips=state["sign_flips"],
+            codebook=state["codebook"],
+            normal_idx=state["normal_idx"],
+            outlier_idx=state["outlier_idx"],
+            head_size=head_size,
+            normal_size=normal_size,
+            n_outliers=n_outliers,
+            packed_bytes=packed_bytes,
+        )
+
+        # Path 2: fused paged decode
+        # Determine which blocks are used
+        max_block = (num_tokens - 1) // BLOCK_SIZE + 1
+        flat_bt = torch.arange(max_block, device=device, dtype=torch.long)
+
+        paged_decoded = fused_paged_decode(
+            cache=cache,
+            flat_bt=flat_bt,
+            sign_flips=state["sign_flips"],
+            codebook=state["codebook"],
+            normal_idx=state["normal_idx"],
+            outlier_idx=state["outlier_idx"],
+            head_size=head_size,
+            normal_size=normal_size,
+            n_outliers=n_outliers,
+            packed_bytes=packed_bytes,
+        )
+
+        # Extract the tokens we wrote from paged output
+        # paged shape: [max_block, BLOCK_SIZE, num_kv_heads, head_size]
+        paged_flat = paged_decoded.reshape(-1, num_kv_heads, head_size)
+        paged_tokens = paged_flat[:num_tokens].reshape(
+            num_tokens * num_kv_heads, head_size
+        )
+
+        assert torch.allclose(slot_decoded, paged_tokens, atol=1e-3), (
+            f"Paged decode mismatch! max diff: "
+            f"{(slot_decoded - paged_tokens).abs().max()}"
+        )
+
+
+class TestNoOutliers:
+    """Test fused path when outlier_fraction=0 (no outlier channels)."""
+
+    def test_encode_decode_no_outliers(self):
+        device = torch.device("cuda")
+        num_tokens = 4
+        num_kv_heads = 4
+        head_size = 128
+        padded_d = _next_power_of_2(head_size)
+
+        gen = torch.Generator(device="cpu").manual_seed(42)
+        sign_flips = torch.where(
+            torch.rand(padded_d, generator=gen) > 0.5,
+            torch.ones(padded_d),
+            -torch.ones(padded_d),
+        ).to(device=device, dtype=torch.float32)
+
+        num_centroids = 2**BIT_WIDTH
+        codebook = torch.linspace(-1.5, 1.5, num_centroids, device=device)
+        boundaries = (codebook[:-1] + codebook[1:]) / 2
+
+        x = torch.randn(
+            num_tokens,
+            num_kv_heads,
+            head_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+
+        # Encode with no outliers
+        indices, norms = hadamard_turboquant_encode(x, sign_flips, codebook, boundaries)
+
+        # Decode
+        decoded = hadamard_turboquant_decode(
+            indices, norms, sign_flips, codebook, output_dtype=torch.bfloat16
+        )
+
+        N = num_tokens * num_kv_heads
+        original = x.reshape(N, head_size).float()
+        reconstructed = decoded.reshape(N, head_size).float()
+        cos_sim = (
+            torch.nn.functional.cosine_similarity(original, reconstructed, dim=1)
+            .mean()
+            .item()
+        )
+
+        assert cos_sim > 0.98, f"No-outlier cos_sim={cos_sim:.4f} too low"
