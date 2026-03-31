@@ -37,6 +37,7 @@ except ImportError:
 
 import uvloop
 
+from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.logger import init_logger
@@ -113,6 +114,18 @@ async def serve_grpc(args: argparse.Namespace):
         logger.info("vLLM gRPC server started on %s", address)
         logger.info("Server is ready to accept requests")
 
+        # Start periodic stats logging (mirrors the HTTP server's lifespan task)
+        if not args.disable_log_stats:
+
+            async def _force_log():
+                while True:
+                    await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+                    await async_llm.do_log_stats()
+
+            stats_task = asyncio.create_task(_force_log())
+        else:
+            stats_task = None
+
         # Handle shutdown signals
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
@@ -130,6 +143,8 @@ async def serve_grpc(args: argparse.Namespace):
             logger.info("Interrupted by user")
     finally:
         logger.info("Shutting down vLLM gRPC server...")
+        if stats_task is not None:
+            stats_task.cancel()
         await server.stop(grace=5.0)
         logger.info("gRPC server stopped")
         async_llm.shutdown()
