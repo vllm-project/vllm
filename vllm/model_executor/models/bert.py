@@ -128,12 +128,14 @@ class BertEncoder(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
         self.layer = nn.ModuleList(
             [
                 BertLayer(
                     config=config,
                     cache_config=cache_config,
                     quant_config=quant_config,
+                    model_config=model_config,
                     prefix=f"{prefix}.layer.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -155,6 +157,7 @@ class BertLayer(nn.Module):
         config: BertConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -165,6 +168,7 @@ class BertLayer(nn.Module):
             layer_norm_eps=config.layer_norm_eps,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attention",
         )
 
@@ -199,6 +203,7 @@ class BertAttention(nn.Module):
         layer_norm_eps: float,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -208,6 +213,7 @@ class BertAttention(nn.Module):
             num_attention_heads=num_attention_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.output",
         )
 
@@ -233,6 +239,7 @@ class BertSelfAttention(nn.Module):
         num_attention_heads: int,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -269,6 +276,7 @@ class BertSelfAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 

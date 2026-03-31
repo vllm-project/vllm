@@ -29,7 +29,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -64,6 +64,7 @@ class MiniCPM3Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -131,6 +132,7 @@ class MiniCPM3Attention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(
@@ -201,6 +203,7 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             cache_config=self.cache_config,
             quant_config=self.quant_config,
             prefix=f"{self.prefix}.self_attn",
+            model_config=self.model_config,
         )
 
 
@@ -211,11 +214,16 @@ class MiniCPM3Model(MiniCPMModel):
         config: PretrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
+        model_config: ModelConfig | None = None,
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniCPM3DecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

@@ -288,6 +288,7 @@ class GraniteMoeHybridAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(

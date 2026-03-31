@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -180,6 +180,7 @@ class AfmoeAttention(nn.Module):
         max_position_embeddings: int = 131072,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-05,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -259,6 +260,7 @@ class AfmoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             per_layer_sliding_window=self.sliding_window,
@@ -297,6 +299,7 @@ class AfmoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config,  # AfmoeConfig
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -319,6 +322,7 @@ class AfmoeDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -405,10 +409,12 @@ class AfmoeModel(nn.Module, EagleModelMixin):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: AfmoeDecoderLayer(
                 config=config,
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,

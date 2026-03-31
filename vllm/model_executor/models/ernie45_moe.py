@@ -33,7 +33,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -239,6 +239,7 @@ class Ernie4_5_MoeAttention(nn.Module):
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -298,6 +299,7 @@ class Ernie4_5_MoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -324,6 +326,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -342,6 +345,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "use_bias", False),
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -439,10 +443,12 @@ class Ernie4_5_MoeModel(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Ernie4_5_MoeDecoderLayer(
                 config=config,
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,

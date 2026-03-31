@@ -28,7 +28,7 @@ from torch import nn
 from transformers import OPTConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -78,6 +78,7 @@ class OPTAttention(nn.Module):
         bias: bool = True,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -110,6 +111,7 @@ class OPTAttention(nn.Module):
             scale=self.scaling,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -130,6 +132,7 @@ class OPTDecoderLayer(nn.Module):
         config: OPTConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -141,6 +144,7 @@ class OPTDecoderLayer(nn.Module):
             bias=config.enable_bias,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
         )
         self.do_layer_norm_before = config.do_layer_norm_before
@@ -203,6 +207,7 @@ class OPTDecoder(nn.Module):
         config: OPTConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -257,7 +262,11 @@ class OPTDecoder(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: OPTDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                model_config=model_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -303,9 +312,14 @@ class OPTModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.decoder = OPTDecoder(
-            config, cache_config, quant_config, prefix=f"{prefix}.decoder"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.decoder",
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.hidden_size

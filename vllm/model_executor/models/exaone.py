@@ -33,7 +33,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -117,6 +117,7 @@ class ExaoneAttention(nn.Module):
         bias: bool = False,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -179,6 +180,7 @@ class ExaoneAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(
@@ -206,6 +208,7 @@ class ExaoneBlockAttention(nn.Module):
         bias: bool = False,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.attention = ExaoneAttention(
@@ -218,6 +221,7 @@ class ExaoneBlockAttention(nn.Module):
             bias=bias,
             cache_config=cache_config,
             prefix=f"{prefix}.attention",
+            model_config=model_config,
         )
 
     def forward(
@@ -238,6 +242,7 @@ class ExaoneDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -259,6 +264,7 @@ class ExaoneDecoderLayer(nn.Module):
             bias=attention_bias,
             cache_config=cache_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
         self.mlp = ExaoneGatedMLP(
             hidden_size=self.hidden_size,
@@ -318,6 +324,7 @@ class ExaoneModel(nn.Module):
             )
         else:
             self.wte = PPMissingLayer()
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: ExaoneDecoderLayer(
@@ -325,6 +332,7 @@ class ExaoneModel(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.h",
         )

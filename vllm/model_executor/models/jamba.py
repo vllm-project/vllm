@@ -239,6 +239,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
         num_experts = config.layers_num_experts[layer_idx]

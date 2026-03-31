@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    TORCH_DTYPE_TO_KV_CACHE_STR,
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
@@ -193,6 +194,7 @@ class Attention(nn.Module, AttentionLayerBase):
         alibi_slopes: list[float] | None = None,
         use_alibi_sqrt: bool | None = None,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
@@ -217,12 +219,14 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             sliding_window = None
 
-        vllm_config = get_current_vllm_config()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
-            kv_cache_dtype = "auto"
+            assert model_config is not None, (
+                "model_config is required when cache_config is not provided"
+            )
+            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
             calculate_kv_scales = False
 
         # llm-compressor mdls need to set cache_dtype to "fp8" manually.
@@ -256,7 +260,10 @@ class Attention(nn.Module, AttentionLayerBase):
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
                 skip = True
             if skip:
-                kv_cache_dtype = "auto"
+                assert model_config is not None, (
+                    "model_config is required for kv_cache_dtype_skip_layers"
+                )
+                kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
                 calculate_kv_scales = False
             logger.info(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
@@ -266,7 +273,7 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
-            kv_cache_dtype, vllm_config.model_config
+            kv_cache_dtype, model_config
         )
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
@@ -285,8 +292,6 @@ class Attention(nn.Module, AttentionLayerBase):
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
-        # NOTE: model_config may be None during certain tests
-        model_config = vllm_config.model_config
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
 
         # During model initialization, the default dtype is set as the model
@@ -357,7 +362,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         self.use_output = self.attn_backend.accept_output_buffer
-        compilation_config = vllm_config.compilation_config
+        compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self

@@ -30,7 +30,7 @@ from torch import nn
 from transformers import Glm4Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -69,6 +69,7 @@ class Glm4Attention(nn.Module):
         qkv_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -130,6 +131,7 @@ class Glm4Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
         )
@@ -159,6 +161,7 @@ class Glm4DecoderLayer(nn.Module):
         config = config or vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.hidden_size = config.hidden_size
 
@@ -172,6 +175,7 @@ class Glm4DecoderLayer(nn.Module):
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
             attn_type=AttentionType.DECODER,
         )

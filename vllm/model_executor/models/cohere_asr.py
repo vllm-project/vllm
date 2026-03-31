@@ -96,6 +96,7 @@ class CohereASRAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -148,6 +149,7 @@ class CohereASRAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 attn_type=self.attn_type,
+                model_config=model_config,
             )
         else:  # AttentionType.DECODER (regular decoder self-attention)
             self.attn = Attention(
@@ -159,6 +161,7 @@ class CohereASRAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 attn_type=self.attn_type,
+                model_config=model_config,
             )
 
     def _init_qkv(
@@ -201,6 +204,7 @@ class CohereASRCrossAttention(CohereASRAttention):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ):
         super().__init__(
             embed_dim=embed_dim,
@@ -210,6 +214,7 @@ class CohereASRCrossAttention(CohereASRAttention):
             quant_config=quant_config,
             prefix=prefix,
             attn_type=AttentionType.ENCODER_DECODER,
+            model_config=model_config,
         )
 
     def _init_qkv(
@@ -347,6 +352,7 @@ class CohereASRDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.first_sub_layer",
+            model_config=vllm_config.model_config,
         )
 
         # cross attn to attend to encoder
@@ -357,6 +363,7 @@ class CohereASRDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.second_sub_layer",
+            model_config=vllm_config.model_config,
         )
 
         self.layer_norm_3 = nn.LayerNorm(self.hidden_dim)

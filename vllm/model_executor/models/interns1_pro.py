@@ -32,7 +32,7 @@ import torch
 from torch import nn
 from transformers import AutoProcessor, PretrainedConfig
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_tensor_model_parallel_world_size,
@@ -272,6 +272,7 @@ class InternS1ProMoeAttention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -331,6 +332,7 @@ class InternS1ProMoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -371,6 +373,7 @@ class InternS1ProMoeDecoderLayer(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -403,6 +406,7 @@ class InternS1ProMoeDecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",

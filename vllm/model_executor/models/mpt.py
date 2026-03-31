@@ -11,7 +11,7 @@ import torch.nn as nn
 from transformers import MptConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -59,6 +59,7 @@ class MPTAttention(nn.Module):
         config: MptConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -128,6 +129,7 @@ class MPTAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -189,13 +191,18 @@ class MPTBlock(nn.Module):
         config: MptConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.d_model
         self.norm_1 = nn.LayerNorm(hidden_size)
         self.attn = MPTAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attn"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.attn",
         )
         self.norm_2 = nn.LayerNorm(hidden_size)
         self.ffn = MPTMLP(config, quant_config, prefix=f"{prefix}.ffn")
@@ -225,6 +232,7 @@ class MPTModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
@@ -235,7 +243,13 @@ class MPTModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
-            lambda prefix: MPTBlock(config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: MPTBlock(
+                config,
+                cache_config,
+                quant_config,
+                model_config=model_config,
+                prefix=prefix,
+            ),
             prefix=f"{prefix}.blocks",
         )
         self.norm_f = nn.LayerNorm(config.d_model)

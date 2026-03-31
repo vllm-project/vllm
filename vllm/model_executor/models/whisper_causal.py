@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
+from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -277,6 +278,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
@@ -293,7 +295,10 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
-            kv_cache_dtype = "auto"
+            assert model_config is not None, (
+                "model_config is required when cache_config is not provided"
+            )
+            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
 
         underlying_attn_backend = get_attn_backend(
             head_size,

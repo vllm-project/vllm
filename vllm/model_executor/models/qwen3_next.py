@@ -266,6 +266,7 @@ class Qwen3NextAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
             **{
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": self.dual_chunk_attention_config,

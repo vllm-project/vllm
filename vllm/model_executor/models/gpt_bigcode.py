@@ -29,7 +29,7 @@ from torch import nn
 from transformers import GPTBigCodeConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -63,6 +63,7 @@ class GPTBigCodeAttention(nn.Module):
         config: GPTBigCodeConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -106,6 +107,7 @@ class GPTBigCodeAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -166,6 +168,7 @@ class GPTBigCodeBlock(nn.Module):
         config: GPTBigCodeConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -174,7 +177,11 @@ class GPTBigCodeBlock(nn.Module):
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPTBigCodeAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attn"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.attn",
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPTBigMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
@@ -207,6 +214,7 @@ class GPTBigCodeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.config = config
         assert not config.add_cross_attention
@@ -221,7 +229,11 @@ class GPTBigCodeModel(nn.Module):
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: GPTBigCodeBlock(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                model_config=model_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.h",
         )

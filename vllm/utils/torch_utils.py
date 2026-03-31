@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.config.cache import CacheDType
     from vllm.sequence import IntermediateTensors
 else:
     ModelConfig = object
@@ -56,6 +57,12 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
     # mappings here when it supported by some attention backend
     # (for example supports nvfp4).
     "fp8": "fp8_e4m3",
+}
+
+TORCH_DTYPE_TO_KV_CACHE_STR: dict[torch.dtype, "CacheDType"] = {
+    torch.float32: "float32",
+    torch.float16: "float16",
+    torch.bfloat16: "bfloat16",
 }
 
 T = TypeVar("T")

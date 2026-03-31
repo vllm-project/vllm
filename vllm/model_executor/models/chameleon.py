@@ -16,7 +16,7 @@ from transformers import (
     ChameleonVQVAEConfig,
 )
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
@@ -269,6 +269,7 @@ class ChameleonAttention(nn.Module):
         max_position_embeddings: int = 4096,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -323,6 +324,7 @@ class ChameleonAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -359,6 +361,7 @@ class ChameleonDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ChameleonConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -377,6 +380,7 @@ class ChameleonDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=False,
+            model_config=model_config,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -420,6 +424,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ChameleonConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -438,6 +443,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=False,
+            model_config=model_config,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -846,10 +852,12 @@ class ChameleonModel(nn.Module):
             else ChameleonSwinDecoderLayer
         )
 
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer(
                 config=config,
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
