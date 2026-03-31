@@ -10,7 +10,7 @@ import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
@@ -418,22 +418,11 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         and gathering tensors across TP ranks outweighs the benefits.
 
         Returns False (SP disabled) when:
-        - Using pure piecewise cudagraph compilation
         - min_token_num is None (SP disabled for this device/config)
         - The compile range starts below the minimum token threshold
         """
-        # Pure piecewise cudagraph mode runs through split subgraphs only, so
-        # keep SP disabled there. Hybrid FULL_AND_PIECEWISE still retains the
-        # existing SP behavior on its full-graph path.
-        if (
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
-            and not self.compilation_config.use_inductor_graph_partition
-            and self.compilation_config.splitting_ops
-        ):
-            return False
-
-        # For other piecewise compilation setups, we still need concrete sizes
-        # that are divisible by TP for correct splitting.
+        # For piecewise compilation setups, we need concrete sizes that are
+        # divisible by TP for correct splitting.
         if (
             not self.compilation_config.use_inductor_graph_partition
             and self.compilation_config.splitting_ops

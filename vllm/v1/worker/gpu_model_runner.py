@@ -6187,11 +6187,22 @@ class GPUModelRunner(
             kv_cache_tensors=[],
             kv_cache_groups=kv_cache_groups,
         )
-        self.maybe_add_kv_sharing_layers_to_kv_cache_groups(temp_kv_cache_config)
-        _, attention_backends = self._collect_attention_backend_info(kv_cache_groups)
+        old_kv_cache_config = getattr(self, "kv_cache_config", None)
+        self.kv_cache_config = temp_kv_cache_config
+        try:
+            self.may_add_encoder_only_layers_to_kv_cache_config()
+            self.maybe_add_kv_sharing_layers_to_kv_cache_groups(temp_kv_cache_config)
+        finally:
+            if old_kv_cache_config is None:
+                del self.kv_cache_config
+            else:
+                self.kv_cache_config = old_kv_cache_config
+        _, attention_backends = self._collect_attention_backend_info(
+            temp_kv_cache_config.kv_cache_groups
+        )
         self._check_and_update_cudagraph_mode(
             attention_backends,
-            kv_cache_groups,
+            temp_kv_cache_config.kv_cache_groups,
             is_profiling=True,
         )
 
@@ -6444,12 +6455,6 @@ class GPUModelRunner(
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
         self.compilation_config.cudagraph_mode = cudagraph_mode
-        # Attention backend checks may downgrade full cudagraphs to pure
-        # piecewise mode after VllmConfig.post_init(); keep runtime SP state
-        # aligned with the final cudagraph mode before any dispatch decisions.
-        self.vllm_config.reconcile_sequence_parallelism_for_cudagraph_mode(
-            refresh_derived_state=True
-        )
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )

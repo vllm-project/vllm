@@ -69,10 +69,6 @@ def test_copy_pass():
     inductor_pass = FixFunctionalizationPass(vllm_config)
     copied_inductor_pass = copy.deepcopy(inductor_pass)
     assert (
-        copied_inductor_pass.compilation_config.cudagraph_mode
-        == vllm_config.compilation_config.cudagraph_mode
-    )
-    assert (
         copied_inductor_pass.compilation_config.use_inductor_graph_partition
         == vllm_config.compilation_config.use_inductor_graph_partition
     )
@@ -391,8 +387,8 @@ def test_should_split():
         (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         # max from list
         ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # FULL_AND_PIECEWISE keeps the existing hybrid SP behavior
-        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        # piecewise compilation disables SP regardless of cudagraph mode
+        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
         # limited by the max_tokens
         ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # the list should contain at least 1 element when use cudagraph
@@ -453,10 +449,24 @@ def test_cudagraph_sizes_post_init(
     not current_platform.support_static_graph_mode(),
     reason="Skip if not cudagraph mode supported",
 )
-def test_disable_sp_for_pure_piecewise_compilation():
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "use_inductor_graph_partition", "expect_sp_enabled"),
+    [
+        (CUDAGraphMode.PIECEWISE, False, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, False, False),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, False, False),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, True, True),
+    ],
+)
+def test_sequence_parallelism_depends_on_compilation_topology(
+    cudagraph_mode: CUDAGraphMode,
+    use_inductor_graph_partition: bool,
+    expect_sp_enabled: bool,
+):
     with patch("vllm.config.parallel.cuda_device_count_stateless", return_value=2):
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=[1, 2, 4, 15],
+            use_inductor_graph_partition=use_inductor_graph_partition,
             pass_config=PassConfig(
                 enable_sp=True,
                 fuse_gemm_comms=True,
@@ -476,13 +486,23 @@ def test_disable_sp_for_pure_piecewise_compilation():
         )
         vllm_config = engine_args.create_engine_config()
 
-    assert not vllm_config.compilation_config.use_inductor_graph_partition
-    assert vllm_config.compilation_config.splitting_ops
-    assert not vllm_config.compilation_config.pass_config.enable_sp
-    assert not vllm_config.compilation_config.pass_config.fuse_gemm_comms
-    assert vllm_config.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 15]
-    assert vllm_config.compilation_config.max_cudagraph_capture_size == 15
-    assert 511 not in vllm_config.compilation_config.compile_ranges_endpoints
+    assert (
+        vllm_config.compilation_config.use_inductor_graph_partition
+        == use_inductor_graph_partition
+    )
+    assert bool(vllm_config.compilation_config.splitting_ops)
+    assert vllm_config.compilation_config.pass_config.enable_sp == expect_sp_enabled
+    assert (
+        vllm_config.compilation_config.pass_config.fuse_gemm_comms == expect_sp_enabled
+    )
+    if expect_sp_enabled:
+        assert vllm_config.compilation_config.cudagraph_capture_sizes == [2, 4]
+        assert vllm_config.compilation_config.max_cudagraph_capture_size == 4
+        assert 511 in vllm_config.compilation_config.compile_ranges_endpoints
+    else:
+        assert vllm_config.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 15]
+        assert vllm_config.compilation_config.max_cudagraph_capture_size == 15
+        assert 511 not in vllm_config.compilation_config.compile_ranges_endpoints
 
 
 def test_cached_compilation_config(default_vllm_config):

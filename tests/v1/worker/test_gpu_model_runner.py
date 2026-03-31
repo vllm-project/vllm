@@ -211,7 +211,7 @@ def _make_kv_cache_spec() -> FullAttentionSpec:
     return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
 
 
-def test_check_and_update_cudagraph_mode_disables_sp_for_piecewise_downgrade():
+def test_check_and_update_cudagraph_mode_does_not_mutate_sp_state():
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
@@ -241,15 +241,18 @@ def test_check_and_update_cudagraph_mode_disables_sp_for_piecewise_downgrade():
     runner.speculative_config = None
     runner.kv_cache_config = None
     runner.vllm_config.model_config = Mock(enforce_eager=False)
+    runner.compilation_config.max_cudagraph_capture_size = None
+    runner.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 15]
+    runner.compilation_config.compile_sizes = ["cudagraph_capture_sizes"]
+    runner.vllm_config._set_compile_ranges()
     runner.vllm_config._set_cudagraph_sizes()
-
     assert runner.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-    assert runner.compilation_config.pass_config.enable_sp
-    assert runner.compilation_config.pass_config.fuse_gemm_comms
-    assert runner.compilation_config.cudagraph_capture_sizes == [2, 4]
-    assert runner.compilation_config.max_cudagraph_capture_size == 4
-    assert runner.compilation_config.compile_sizes == [2, 4]
-    assert 511 in runner.compilation_config.compile_ranges_endpoints
+    assert not runner.compilation_config.pass_config.enable_sp
+    assert not runner.compilation_config.pass_config.fuse_gemm_comms
+    assert runner.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 15]
+    assert runner.compilation_config.max_cudagraph_capture_size == 15
+    assert runner.compilation_config.compile_sizes == [1, 2, 4, 15]
+    assert 511 not in runner.compilation_config.compile_ranges_endpoints
 
     class MockBuilder:
         @classmethod
@@ -283,7 +286,9 @@ def test_check_and_update_cudagraph_mode_disables_sp_for_piecewise_downgrade():
     )
 
 
-def test_profile_run_reconciles_sp_before_first_dummy_compile(monkeypatch):
+def test_profile_run_resolves_cudagraph_mode_before_first_dummy_compile(
+    monkeypatch,
+):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
@@ -324,12 +329,18 @@ def test_profile_run_reconciles_sp_before_first_dummy_compile(monkeypatch):
     runner.supports_mm_inputs = False
     runner.max_num_tokens = 2048
     runner.encoder_cache = {}
+    runner.load_config = Mock()
+    runner.load_config.use_tqdm_on_load = False
     runner.vllm_config.model_config = Mock(enforce_eager=False)
+    runner.compilation_config.max_cudagraph_capture_size = None
+    runner.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 15]
+    runner.compilation_config.compile_sizes = ["cudagraph_capture_sizes"]
+    runner.vllm_config._set_compile_ranges()
     runner.vllm_config._set_cudagraph_sizes()
 
     assert runner.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-    assert runner.compilation_config.pass_config.enable_sp
-    assert runner.compilation_config.compile_sizes == [2, 4]
+    assert not runner.compilation_config.pass_config.enable_sp
+    assert runner.compilation_config.compile_sizes == [1, 2, 4, 15]
 
     class MockBuilder:
         @classmethod
@@ -346,13 +357,29 @@ def test_profile_run_reconciles_sp_before_first_dummy_compile(monkeypatch):
     kv_cache_group = KVCacheGroupSpec(
         layer_names=["layer.0"], kv_cache_spec=_make_kv_cache_spec()
     )
+    encoder_only_group = KVCacheGroupSpec(
+        layer_names=["encoder.layer.0"], kv_cache_spec=_make_kv_cache_spec()
+    )
 
     monkeypatch.setattr(
         "vllm.v1.core.kv_cache_utils.get_kv_cache_groups",
         Mock(return_value=[kv_cache_group]),
     )
     runner.get_kv_cache_spec = Mock(return_value={"layer.0": _make_kv_cache_spec()})
-    runner._collect_attention_backend_info = Mock(return_value=([], [{MockBackend}]))
+    runner.may_add_encoder_only_layers_to_kv_cache_config = Mock(
+        side_effect=lambda: runner.kv_cache_config.kv_cache_groups.append(
+            encoder_only_group
+        )
+    )
+    runner.maybe_add_kv_sharing_layers_to_kv_cache_groups = Mock()
+
+    def _collect_attention_backend_info(kv_cache_groups):
+        assert kv_cache_groups == [kv_cache_group, encoder_only_group]
+        return [], [{MockBackend}, {MockBackend}]
+
+    runner._collect_attention_backend_info = Mock(
+        side_effect=_collect_attention_backend_info
+    )
 
     def _stop_after_config_check(*args, **kwargs):
         assert runner.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE

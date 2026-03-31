@@ -12,7 +12,7 @@ import torch
 from torch._dynamo.utils import lazy_format_graph_code
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from .inductor_pass import InductorPass
@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 class InductorCompilationConfig:
     splitting_ops: list[str] | None = None
     use_inductor_graph_partition: bool = False
-    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE
 
 
 class VllmInductorPass(InductorPass):
@@ -42,7 +41,6 @@ class VllmInductorPass(InductorPass):
         self.compilation_config = InductorCompilationConfig(
             splitting_ops=config.compilation_config.splitting_ops,
             use_inductor_graph_partition=config.compilation_config.use_inductor_graph_partition,
-            cudagraph_mode=config.compilation_config.cudagraph_mode,
         )
         self.pass_config = config.compilation_config.pass_config
         self.model_dtype = config.model_config.dtype if config.model_config else None
