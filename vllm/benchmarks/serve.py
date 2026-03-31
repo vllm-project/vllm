@@ -51,6 +51,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.power import fill_and_print_power_summary, get_power_recorder
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
@@ -630,6 +631,7 @@ async def benchmark(
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
+    record_power: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -812,6 +814,11 @@ async def benchmark(
             }
         )
 
+    # Start power recording.
+    power_recorder = get_power_recorder() if record_power else None
+    if power_recorder is not None:
+        power_recorder.start()
+
     async for request, current_request_rate in get_request(
         input_requests,
         request_rate,
@@ -866,6 +873,12 @@ async def benchmark(
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
+
+    # Stop power recording
+    power_stats = None
+    if power_recorder is not None:
+        power_recorder.stop()
+        power_stats = power_recorder.get_stats()
 
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
     spec_decode_stats: dict[str, Any] | None = None
@@ -979,6 +992,11 @@ async def benchmark(
             )
         )
 
+    if power_stats is not None:
+        power_stats = fill_and_print_power_summary(
+            power_stats, metrics.total_input, metrics.total_output, benchmark_duration
+        )
+
     if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
@@ -1026,6 +1044,9 @@ async def benchmark(
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
+
+    if power_stats is not None:
+        result.update(power_stats)
 
     def process_one_metric(
         # E.g., "ttft"
@@ -1385,6 +1406,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--profile",
         action="store_true",
         help="Use vLLM Profiling. --profiler-config must be provided on the server.",
+    )
+    parser.add_argument(
+        "--record-power",
+        action="store_true",
+        help="Record GPU power usage during benchmark (excluding warmup). The "
+        "environment variable `CUDA_VISIBLE_DEVICES` must be set to record the "
+        "power from the used devices only (e.g. for TP=4 on an 8 devices node). "
+        "Samples every 5s and reports P25/mean/median/P75 stats.",
     )
     parser.add_argument(
         "--save-result",
@@ -1818,6 +1847,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
+        record_power=args.record_power,
     )
 
     # Save config and results to json
