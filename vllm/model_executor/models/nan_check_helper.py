@@ -884,17 +884,10 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         _zero_all()
         return
 
-    n = _last_num_actual_toks
-    total = hidden_states.shape[0]
-
-    if n > 0 and n < total:
-        real = hidden_states[:n]
-    else:
-        real = hidden_states
-        n = total
-
-    real_has_nan = real.isnan().any().item()
-    real_has_inf = real.isinf().any().item()
+    # hidden_states here is the SAMPLED subset (logits_indices), not the
+    # full padded batch that mark() operated on. Check it directly for NaN/Inf.
+    real_has_nan = hidden_states.isnan().any().item()
+    real_has_inf = hidden_states.isinf().any().item()
 
     # Determine phase: prefill vs decode
     global _current_phase
@@ -904,12 +897,18 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         _current_phase = "PREFILL"
     phase = _current_phase
 
-    # Check per-layer hidden_states NaN from mark() inside CUDA graph.
-    # mark() checks all padded tokens, so distinguish padding vs real NaN.
-    # tok0 has NaN only if count > num_padding * hidden_dim.
+    # For per-layer count thresholds, use batch info from the PADDED batch
+    # that mark() ran on, not hidden_states.shape[0] (sampled subset).
+    if _saved_batch_info:
+        padded = _saved_batch_info["padded_size"]
+        n = _saved_batch_info["num_actual_toks"]
+    else:
+        # Fallback: no batch info (first prefill). mark() checked the full
+        # tensor, and hidden_states IS the full tensor, so no padding.
+        padded = hidden_states.shape[0]
+        n = hidden_states.shape[0]
+
     hidden_dim = hidden_states.shape[-1]
-    padded = (_saved_batch_info["padded_size"]
-              if _saved_batch_info else total)
     num_padding = padded - n
     hs_pad_max = num_padding * hidden_dim
     per_layer_real_nan = (_nan_counts[:, 0] > hs_pad_max).any().item()
@@ -1076,7 +1075,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         _emit_kv_poison(hidden_states, nan_cpu, attn_nan_cpu, attn_inf_cpu, n)
 
     if real_has_nan:
-        rc = real.isnan().sum().item()
+        rc = hidden_states.isnan().sum().item()
         _emit_report(
             "NAN_FIRST", hidden_states, nan_cpu, attn_nan_cpu, rc, num_actual_toks=n
         )
@@ -1085,7 +1084,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         _dump_repro(hidden_states, nan_cpu, attn_nan_cpu)
 
     if real_has_inf:
-        rc = real.isinf().sum().item()
+        rc = hidden_states.isinf().sum().item()
         _emit_report(
             "INF_FIRST", hidden_states, inf_cpu, attn_inf_cpu, rc, num_actual_toks=n
         )
