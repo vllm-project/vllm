@@ -44,6 +44,12 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 
 @pytest.fixture
+def enable_lora_dual_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_LORA_ENABLE_DUAL_STREAM", "1")
+    yield
+
+
+@pytest.fixture
 def dist_init():
     from tests.utils import ensure_current_vllm_config
 
