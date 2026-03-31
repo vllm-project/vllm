@@ -21,70 +21,87 @@ def test_nan_contamination():
     weight = torch.randn(output_size, hidden_size, dtype=torch.bfloat16,
                          device=device)
 
-    for batch_size in [1, 2, 4, 7, 8, 16]:
-        for nan_pattern in ["none", "all_but_first", "all_but_last", "even"]:
-            # Clean input
-            hidden = torch.randn(batch_size, hidden_size, dtype=torch.bfloat16,
-                                 device=device)
+    # Build test patterns
+    patterns = []
 
-            # Reference output from clean input
-            ref_output = torch.empty(batch_size, output_size,
-                                     dtype=torch.bfloat16, device=device)
-            _gemm(ref_output, hidden, weight.T)
+    # CUDA graph scenario: fixed batch, first N tokens real, rest NaN padding
+    for batch_size in [8, 16]:
+        for num_real in [1, 2, 3]:
+            patterns.append((batch_size, f"first_{num_real}_real"))
+        patterns.append((batch_size, "none"))
 
-            # Now poison some tokens with NaN
-            poisoned = hidden.clone()
-            if nan_pattern == "none":
-                pass  # control: no NaN
-            elif nan_pattern == "all_but_first":
-                if batch_size > 1:
-                    poisoned[1:] = float("nan")
-            elif nan_pattern == "all_but_last":
-                if batch_size > 1:
-                    poisoned[:-1] = float("nan")
-            elif nan_pattern == "even":
-                poisoned[::2] = float("nan")
+    # Original patterns
+    for batch_size in [1, 2, 4, 7, 8, 16, 1024]:
+        for p in ["none", "all_but_first", "all_but_last", "even"]:
+            patterns.append((batch_size, p))
 
-            # Run GEMM with poisoned input
-            test_output = torch.empty(batch_size, output_size,
-                                      dtype=torch.bfloat16, device=device)
-            _gemm(test_output, poisoned, weight.T)
+    for batch_size, nan_pattern in patterns:
+        # Clean input
+        hidden = torch.randn(batch_size, hidden_size, dtype=torch.bfloat16,
+                             device=device)
 
-            # Check: clean tokens should produce the same output
-            for tok in range(batch_size):
-                is_poisoned = poisoned[tok].isnan().any().item()
-                out_has_nan = test_output[tok].isnan().any().item()
+        # Reference output from clean input
+        ref_output = torch.empty(batch_size, output_size,
+                                 dtype=torch.bfloat16, device=device)
+        _gemm(ref_output, hidden, weight.T)
 
-                if is_poisoned:
-                    # Poisoned input should produce NaN output
-                    assert out_has_nan, (
-                        f"batch={batch_size} pattern={nan_pattern} tok={tok}: "
-                        f"NaN input but clean output!"
-                    )
+        # Now poison some tokens with NaN
+        poisoned = hidden.clone()
+        if nan_pattern == "none":
+            pass  # control: no NaN
+        elif nan_pattern.startswith("first_"):
+            # CUDA graph scenario: first N real, rest all NaN
+            num_real = int(nan_pattern.split("_")[1])
+            poisoned[num_real:] = float("nan")
+        elif nan_pattern == "all_but_first":
+            if batch_size > 1:
+                poisoned[1:] = float("nan")
+        elif nan_pattern == "all_but_last":
+            if batch_size > 1:
+                poisoned[:-1] = float("nan")
+        elif nan_pattern == "even":
+            poisoned[::2] = float("nan")
+
+        # Run GEMM with poisoned input
+        test_output = torch.empty(batch_size, output_size,
+                                  dtype=torch.bfloat16, device=device)
+        _gemm(test_output, poisoned, weight.T)
+
+        # Check: clean tokens should produce the same output
+        for tok in range(batch_size):
+            is_poisoned = poisoned[tok].isnan().any().item()
+            out_has_nan = test_output[tok].isnan().any().item()
+
+            if is_poisoned:
+                # Poisoned input should produce NaN output
+                assert out_has_nan, (
+                    f"batch={batch_size} pattern={nan_pattern} tok={tok}: "
+                    f"NaN input but clean output!"
+                )
+            else:
+                # Clean input should produce clean output
+                if out_has_nan:
+                    print(f"FAIL batch={batch_size} pattern={nan_pattern} "
+                          f"tok={tok}: clean input but NaN output! "
+                          f"CROSS-CONTAMINATION DETECTED")
+                    # Compare with reference
+                    max_diff = (test_output[tok].float()
+                                - ref_output[tok].float()).abs().max()
+                    print(f"  max_diff from ref: {max_diff}")
+                    return False
                 else:
-                    # Clean input should produce clean output
-                    if out_has_nan:
-                        print(f"FAIL batch={batch_size} pattern={nan_pattern} "
-                              f"tok={tok}: clean input but NaN output! "
-                              f"CROSS-CONTAMINATION DETECTED")
-                        # Compare with reference
+                    # Verify output matches reference
+                    match = torch.allclose(test_output[tok],
+                                           ref_output[tok])
+                    if not match:
                         max_diff = (test_output[tok].float()
                                     - ref_output[tok].float()).abs().max()
-                        print(f"  max_diff from ref: {max_diff}")
-                        return False
-                    else:
-                        # Verify output matches reference
-                        match = torch.allclose(test_output[tok],
-                                               ref_output[tok])
-                        if not match:
-                            max_diff = (test_output[tok].float()
-                                        - ref_output[tok].float()).abs().max()
-                            print(f"WARN batch={batch_size} "
-                                  f"pattern={nan_pattern} tok={tok}: "
-                                  f"output differs from ref, "
-                                  f"max_diff={max_diff}")
+                        print(f"WARN batch={batch_size} "
+                              f"pattern={nan_pattern} tok={tok}: "
+                              f"output differs from ref, "
+                              f"max_diff={max_diff}")
 
-            print(f"OK batch={batch_size} pattern={nan_pattern}")
+        print(f"OK batch={batch_size} pattern={nan_pattern}")
 
     print("\nAll tests passed — no cross-token NaN contamination")
     return True
