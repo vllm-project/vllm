@@ -68,28 +68,14 @@ class OffloadingConnectorScheduler:
             self.block_size_factor,
         )
 
+    _gnmt_count = 0
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded beyond the
-        num_computed_tokens.
+        OffloadingConnectorScheduler._gnmt_count += 1
+        c = OffloadingConnectorScheduler._gnmt_count
 
-        Args:
-            request (Request): the request object.
-            num_computed_tokens (int): the number of locally
-                computed tokens for this request
-
-        Returns:
-            A tuple with the following elements:
-                - The number of tokens that can be loaded beyond what is
-                  already computed.
-                  If None, it means that the connector needs more time to
-                  determine the number of matched tokens, and the scheduler
-                  should query for this request again later.
-                - `True` if tokens will be loaded asynchronously
-                  (between scheduler steps).
-        """
         num_blocks = request.num_tokens // self.offloaded_block_size
 
         assert len(request.block_hashes) // self.block_size_factor == num_blocks
@@ -99,29 +85,48 @@ class OffloadingConnectorScheduler:
 
         full_block_tokens = self.offloaded_block_size * num_blocks
         if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
-            # we can load less than a block, skip
+            if c % 50 == 0:
+                logger.info(
+                    "DISK_DEBUG gnmt#%d EARLY_RETURN: req=%s "
+                    "num_tokens=%d computed=%d full_block=%d block_size=%d",
+                    c, request.request_id, request.num_tokens,
+                    num_computed_tokens, full_block_tokens,
+                    self.offloaded_block_size,
+                )
             return 0, False
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         hits = self.manager.lookup(
             self._get_block_hashes(request, start_idx=start_block_idx)
         )
+
+        if c % 50 == 0:
+            logger.info(
+                "DISK_DEBUG gnmt#%d: req=%s hits=%s computed=%d "
+                "start_block=%d manager_type=%s",
+                c, request.request_id, hits, num_computed_tokens,
+                start_block_idx, type(self.manager).__name__,
+            )
+
         if hits is None:
-            # indicates a lookup that should be tried later
             return None, False
         if hits == 0:
-            # CPU miss — record for potential disk prefetch.
-            # Don't allocate anything here (hot loop). The actual
-            # prefetch allocation happens once per step in
-            # build_connector_meta for the top candidates only.
             from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
-            if isinstance(self.manager, TieredOffloadingManager):
+            is_tiered = isinstance(self.manager, TieredOffloadingManager)
+            if is_tiered:
                 remaining_hashes = list(
                     self._get_block_hashes(request, start_idx=start_block_idx)
                 )
                 self.manager.record_disk_miss(
                     request.request_id, remaining_hashes
                 )
+                if c % 50 == 0:
+                    logger.info(
+                        "DISK_DEBUG gnmt#%d DISK_MISS: req=%s "
+                        "remaining=%d is_tiered=%s",
+                        c, request.request_id, len(remaining_hashes),
+                        is_tiered,
+                    )
             return 0, False
 
         num_hit_tokens = (

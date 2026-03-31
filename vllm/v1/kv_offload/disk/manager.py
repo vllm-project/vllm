@@ -137,9 +137,9 @@ class TieredOffloadingManager(OffloadingManager):
         self._finalize_completed_prefetches()
         result = self._cpu.lookup(block_hashes)
 
-        # Debug: log stats every 100 lookups
+        # Debug: log stats every 10 lookups
         TieredOffloadingManager._lookup_count += 1
-        if TieredOffloadingManager._lookup_count % 100 == 0:
+        if TieredOffloadingManager._lookup_count % 10 == 0:
             stats = self.get_debug_stats()
             logger.info(
                 "DISK_DEBUG lookup#%d result=%s stats=%s",
@@ -182,7 +182,7 @@ class TieredOffloadingManager(OffloadingManager):
         disk_count = 0
         for bh in block_hashes:
             if bh in self._active_prefetches:
-                if TieredOffloadingManager._record_count % 50 == 0:
+                if TieredOffloadingManager._record_count % 5 == 0:
                     logger.info("DISK_DEBUG record_miss#%d: already prefetching",
                                 TieredOffloadingManager._record_count)
                 return
@@ -190,7 +190,7 @@ class TieredOffloadingManager(OffloadingManager):
                 disk_count += 1
             else:
                 break
-        if TieredOffloadingManager._record_count % 50 == 0:
+        if TieredOffloadingManager._record_count % 5 == 0:
             logger.info(
                 "DISK_DEBUG record_miss#%d: req=%s disk_count=%d "
                 "total_hashes=%d disk_index=%d candidates=%d",
