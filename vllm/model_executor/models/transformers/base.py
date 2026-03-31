@@ -120,6 +120,7 @@ class Base(
         self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
         self.device_config = vllm_config.device_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -164,9 +165,7 @@ class Base(
             dtype=self.model_config.dtype,
             trust_remote_code=self.model_config.trust_remote_code,
         )
-        # Decorate the language model class to support torch compile
-        decoder_cls = self._get_decoder_cls(**from_config_kwargs)
-        self._decorate_for_torch_compile(cls=decoder_cls)
+        self._decorate_for_torch_compile(**from_config_kwargs)
         # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
@@ -206,6 +205,25 @@ class Base(
             ["hidden_states"], self.text_config.hidden_size
         )
 
+    def _patch_config(self):
+        """
+        Patch the config to ensure that the model is created correctly:
+
+        - Sets the attention implementation to "vllm" so the attention instances from
+        `create_attention_instances` are used
+        - Sets the dtype to the default torch dtype set by vLLM because Transformers
+        uses the config dtype when creating the model
+        - Propagates this dtype to any sub-configs because Transformers model
+        implementations do not support/use different dtypes in sub-models
+        """
+        self.text_config._attn_implementation = "vllm"
+        self.config.dtype = torch.get_default_dtype()
+        # TODO(hmellor): Remove this when Transformers v4 support is dropped
+        for sub_config_name in getattr(self.config, "sub_configs", {}):
+            sub_config = getattr(self.config, sub_config_name)
+            if sub_config.dtype != (dtype := self.config.dtype):
+                sub_config.dtype = dtype
+
     def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
         """
         Get the decoder class from the model.
@@ -223,11 +241,12 @@ class Base(
         del model
         return decoder_cls
 
-    def _decorate_for_torch_compile(
+    def _decorate_cls_for_torch_compile(
         self,
         cls: type[PreTrainedModel],
         dynamic_arg_dims: dict[str, int] | None = None,
         enable_if: Callable[["VllmConfig"], bool] | None = None,
+        is_encoder: bool = False,
     ):
         """
         Decorate `cls` to indicate to vLLM that it supports torch compile.
@@ -250,34 +269,27 @@ class Base(
         if enable_if is None:
             enable_if = can_enable_torch_compile
 
-        logger.debug("Decorating `%s` for torch compile", cls.__name__)
+        logger.debug(
+            "Decorating `%s` as %s for torch compile",
+            cls.__name__,
+            "encoder" if is_encoder else "decoder",
+        )
 
         # Decorate the cls for torch compile
-        @support_torch_compile(dynamic_arg_dims=dynamic_arg_dims, enable_if=enable_if)
+        @support_torch_compile(
+            dynamic_arg_dims=dynamic_arg_dims,
+            enable_if=enable_if,
+            is_encoder=is_encoder,
+        )
         class SupportTorchCompileWrapper(cls): ...
 
         # Patch the class in its module
         module = sys.modules[cls.__module__]
         setattr(module, cls.__name__, SupportTorchCompileWrapper)
 
-    def _patch_config(self):
-        """
-        Patch the config to ensure that the model is created correctly:
-
-        - Sets the attention implementation to "vllm" so the attention instances from
-        `create_attention_instances` are used
-        - Sets the dtype to the default torch dtype set by vLLM because Transformers
-        uses the config dtype when creating the model
-        - Propagates this dtype to any sub-configs because Transformers model
-        implementations do not support/use different dtypes in sub-models
-        """
-        self.text_config._attn_implementation = "vllm"
-        self.config.dtype = torch.get_default_dtype()
-        # TODO(hmellor): Remove this when Transformers v4 support is dropped
-        for sub_config_name in getattr(self.config, "sub_configs", {}):
-            sub_config = getattr(self.config, sub_config_name)
-            if sub_config.dtype != (dtype := self.config.dtype):
-                sub_config.dtype = dtype
+    def _decorate_for_torch_compile(self, **kwargs: dict):
+        decoder_cls = self._get_decoder_cls(**kwargs)
+        self._decorate_cls_for_torch_compile(cls=decoder_cls)
 
     def _create_hf_to_vllm_mapper(self):
         """

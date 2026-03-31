@@ -267,19 +267,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
-        # Decorate the vision encoder model class to support torch compile if needed
-        if should_torch_compile_mm_encoder(vllm_config):
-            self.check_version("5.0.0", "multimodal encoder compilation support")
-            encoder_cls = self._get_encoder_cls(
-                config=self.config,
-                dtype=self.model_config.dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
-            self._decorate_for_torch_compile(
-                cls=encoder_cls,
-                dynamic_arg_dims={"hidden_states": 1},
-                enable_if=should_torch_compile_mm_encoder,
-            )
 
     def _get_encoder_cls(
         self, modality: str = "image", **kwargs: dict
@@ -308,15 +295,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         del model
         return encoder_cls
 
-    def _decorate_for_torch_compile(
+    def _decorate_cls_for_torch_compile(
         self,
         cls: type["PreTrainedModel"],
         dynamic_arg_dims: dict[str, int] | None = None,
         enable_if: Callable[["VllmConfig"], bool] | None = None,
+        is_encoder: bool = False,
     ):
         """
         Like
-        [`_decorate_for_torch_compile`][vllm.model_executor.models.transformers.base.Base._decorate_for_torch_compile]
+        [`_decorate_cls_for_torch_compile`][vllm.model_executor.models.transformers.base.Base._decorate_cls_for_torch_compile]
         but with different default `dynamic_arg_dims` for MRoPE models.
         """
         if dynamic_arg_dims is None and self.model_config.uses_mrope:
@@ -327,9 +315,25 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 position_ids=2,  # shape: [3, 1, seq_len]
             )
             logger.debug("Using MRoPE default dynamic arg dims: %s", dynamic_arg_dims)
-        super()._decorate_for_torch_compile(
-            cls=cls, dynamic_arg_dims=dynamic_arg_dims, enable_if=enable_if
+        super()._decorate_cls_for_torch_compile(
+            cls=cls,
+            dynamic_arg_dims=dynamic_arg_dims,
+            enable_if=enable_if,
+            is_encoder=is_encoder,
         )
+
+    def _decorate_for_torch_compile(self, **kwargs: dict):
+        super()._decorate_for_torch_compile(**kwargs)
+        # Decorate the vision encoder model class to support torch compile if needed
+        if self.compilation_config.compile_mm_encoder:
+            self.check_version("5.0.0", "multimodal encoder compilation support")
+            encoder_cls = self._get_encoder_cls(**kwargs)
+            self._decorate_cls_for_torch_compile(
+                cls=encoder_cls,
+                dynamic_arg_dims={"hidden_states": 1},
+                enable_if=should_torch_compile_mm_encoder,
+                is_encoder=True,
+            )
 
     def forward(
         self,
