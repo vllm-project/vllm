@@ -10,7 +10,19 @@ Usage (from /opt/vllm-source):
 import os
 import textwrap
 
+import torch.utils.cpp_extension as cpp_ext
 from torch.utils.cpp_extension import load
+
+# Remove conversion-blocking flags that torch adds by default.
+# cmake does the same for CUDA >= 12.0 (see cmake/utils.cmake).
+for flag in [
+    "-D__CUDA_NO_HALF_OPERATORS__",
+    "-D__CUDA_NO_HALF_CONVERSIONS__",
+    "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
+    "-D__CUDA_NO_HALF2_OPERATORS__",
+]:
+    while flag in cpp_ext.COMMON_NVCC_FLAGS:
+        cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
 
 SRC_DIR = "/opt/vllm-source/csrc"
 BUILD_DIR = "/tmp/jit_build/cache_nan"
@@ -56,10 +68,6 @@ mod = load(
         "-O3",
         "--use_fast_math",
         "-DENABLE_FP8",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
     ],
     verbose=True,
 )
