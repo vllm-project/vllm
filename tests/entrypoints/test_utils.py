@@ -3,7 +3,6 @@
 
 import pytest
 
-from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.utils import (
     get_max_tokens,
     sanitize_message,
@@ -17,21 +16,6 @@ def test_sanitize_message():
     )
 
 
-@pytest.mark.parametrize(
-    ("stream_options", "expected"),
-    [
-        (None, (True, True)),
-        (StreamOptions(include_usage=False), (True, True)),
-        (
-            StreamOptions(include_usage=False, continuous_usage_stats=False),
-            (True, True),
-        ),
-        (
-            StreamOptions(include_usage=True, continuous_usage_stats=False),
-            (True, True),
-        ),
-    ],
-)
 class TestGetMaxTokens:
     """Tests for get_max_tokens() to ensure generation_config's max_tokens
     acts as a default when from model author, and as a ceiling when
