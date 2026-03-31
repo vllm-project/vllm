@@ -331,7 +331,7 @@ class MiniMaxM2Model(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
             )
         else:
@@ -439,6 +439,17 @@ class MiniMaxM2Model(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                # Remap qkv_proj.[kv]_scale to attn.[kv]_scale
+                if name.endswith((".k_scale", ".v_scale")):
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is not None and remapped_name in params_dict:
+                        param = params_dict[remapped_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                        break
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -507,7 +518,10 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                config.vocab_size, config.hidden_size, quant_config=None
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
             self.lm_head = PPMissingLayer()
