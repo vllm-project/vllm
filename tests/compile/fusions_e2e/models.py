@@ -22,6 +22,10 @@ FLASHINFER_ATTN = pytest.param(
     ),
 )
 
+FLASH_ATTN = pytest.param(
+    AttentionBackendCase(backend=AttentionBackendEnum.TRITON_ATTN), id="FLASH_ATTN"
+)
+
 TRITON_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.TRITON_ATTN), id="TRITON_ATTN"
 )

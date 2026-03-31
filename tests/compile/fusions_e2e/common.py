@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import pytest
@@ -42,11 +42,15 @@ is_blackwell = lambda: current_platform.is_device_capability_family(100)
 """Are we running on Blackwell, a lot of tests depend on it"""
 
 
-def custom_ops_combos(*custom_ops: str) -> Iterable[str]:
-    """Generate all combinations of custom ops for parametrization."""
+def custom_ops_combos(*custom_ops: str) -> list[str]:
+    """Generate all combinations of custom ops for parametrization.
+
+    Returns a list (not a generator) so the result is picklable, which is
+    required when pytest parametrize values are sent to forked workers
+    (e.g. ``@multi_gpu_test``).
+    """
     custom_ops_lists = [[f"-{op}", f"+{op}"] for op in custom_ops]
-    for op_list in itertools.product(*custom_ops_lists):
-        yield ",".join(op_list)
+    return [",".join(op_list) for op_list in itertools.product(*custom_ops_lists)]
 
 
 # Quick inline validation

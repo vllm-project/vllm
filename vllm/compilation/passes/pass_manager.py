@@ -38,9 +38,11 @@ if current_platform.is_cuda_alike():
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
     from .utility.split_coalescing import SplitCoalescingPass
 
+if current_platform.is_cuda() or current_platform.is_xpu():
+    from .fusion.collective_fusion import AsyncTPPass
+
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
     from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
 from .inductor_pass import (
