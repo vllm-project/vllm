@@ -10,7 +10,6 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -33,7 +32,6 @@ from .decoder_layer import MonolithicDecoderLayer
 logger = init_logger(__name__)
 
 
-@support_torch_compile
 class MonolithicDeepseekV32Model(nn.Module):
     """Transformer backbone."""
 
