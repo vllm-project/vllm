@@ -81,6 +81,7 @@ class CompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    prompt_logprobs_temperature: float | None = None
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -310,6 +311,7 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
+            prompt_logprobs_temperature=self.prompt_logprobs_temperature,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,

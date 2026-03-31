@@ -8,15 +8,19 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 
 
 class PromptLogprobsWorker:
     def __init__(self, max_num_reqs: int):
         self.max_num_reqs = max_num_reqs
-
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
+        self.prompt_logprob_temperature = UvaBackedTensor(
+            max_num_reqs, dtype=torch.float32
+        )
         # req_idx -> list of in-progress LogprobsTensors
         self.in_progress_prompt_logprobs: dict[str, list[LogprobsTensors]] = {}
 
@@ -26,6 +30,12 @@ class PromptLogprobsWorker:
         self.uses_prompt_logprobs[req_idx] = uses_prompt_logprobs
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
+
+        temp = sampling_params.prompt_logprobs_temperature
+        self.prompt_logprob_temperature.np[req_idx] = temp if temp is not None else 1.0
+
+    def apply_staged_writes(self) -> None:
+        self.prompt_logprob_temperature.copy_to_uva()
 
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
@@ -72,11 +82,34 @@ class PromptLogprobsWorker:
             num_computed_tokens,
             all_token_ids,
         )
+
+        # Check if any request needs temperature scaling.
+        temp_np = self.prompt_logprob_temperature.np[idx_mapping_np]
+        needs_temp = needs_prompt_logprobs & ~((temp_np == 1.0) | (temp_np == 0.0))
+        use_temp = np.any(needs_temp)
+
+        # Build a per-token temperature tensor and token->req_state_idx mapping
+        # for the Triton kernel.
+        if use_temp:
+            num_tokens = input_batch.num_tokens
+            token_idx_mapping = input_batch.idx_mapping.new_empty(num_tokens)
+            query_start_loc_np = input_batch.query_start_loc_np
+            for i in range(len(input_batch.req_ids)):
+                start = query_start_loc_np[i]
+                end = query_start_loc_np[i + 1]
+                token_idx_mapping[start:end] = input_batch.idx_mapping[i]
+            temperature_gpu = self.prompt_logprob_temperature.gpu
+        else:
+            temperature_gpu = None
+            token_idx_mapping = None
+
         # Compute the prompt logprobs.
         prompt_logprobs, prompt_ranks = compute_prompt_logprobs_with_chunking(
             prompt_logprobs_token_ids,
             hidden_states[: input_batch.num_tokens],
             logits_fn,
+            temperature_gpu=temperature_gpu,
+            expanded_idx_mapping=token_idx_mapping,
         )
 
         pos_after_step = computed_prefill + input_batch.num_scheduled_tokens
@@ -184,6 +217,8 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids: torch.Tensor,
     prompt_hidden_states: torch.Tensor,
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
+    temperature_gpu: torch.Tensor | None = None,
+    expanded_idx_mapping: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -195,6 +230,16 @@ def compute_prompt_logprobs_with_chunking(
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
         prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+
+        # Apply temperature scaling before computing logprobs.
+        if temperature_gpu is not None and expanded_idx_mapping is not None:
+            prompt_logits = prompt_logits.clone()
+            apply_temperature(
+                prompt_logits,
+                expanded_idx_mapping[start_idx:end_idx],
+                temperature_gpu,
+            )
+
         prompt_logprobs = compute_topk_logprobs(
             prompt_logits,
             0,  # num_logprobs

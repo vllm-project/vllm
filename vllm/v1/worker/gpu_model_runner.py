@@ -5073,6 +5073,14 @@ class GPUModelRunner(
             # to gather the logprob for.
             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
 
+            # Apply prompt logprobs temperature scaling if requested.
+            if request.sampling_params:
+                prompt_logprobs_temp = (
+                    request.sampling_params.prompt_logprobs_temperature
+                )
+                if prompt_logprobs_temp not in [None, 0.0, 1.0]:
+                    logits = logits.to(torch.float32).div(prompt_logprobs_temp)
+
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
             token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(

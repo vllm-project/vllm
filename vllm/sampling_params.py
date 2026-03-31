@@ -232,6 +232,10 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    prompt_logprobs_temperature: float | None = None
+    """Temperature to apply to logits before computing prompt log
+    probabilities. When ``None``, prompt logprobs are computed on the raw
+    (unscaled) logits. A value of ``1.0`` is equivalent to no scaling."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -317,6 +321,7 @@ class SamplingParams(
         min_tokens: int = 0,
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
+        prompt_logprobs_temperature: float | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -358,6 +363,7 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            prompt_logprobs_temperature=prompt_logprobs_temperature,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
@@ -503,6 +509,16 @@ class SamplingParams(
                 f"{self.prompt_logprobs}.",
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
+            )
+        if (
+            self.prompt_logprobs_temperature is not None
+            and self.prompt_logprobs_temperature < 0
+        ):
+            raise VLLMValidationError(
+                f"prompt_logprobs_temperature must be non-negative, got "
+                f"{self.prompt_logprobs_temperature}.",
+                parameter="prompt_logprobs_temperature",
+                value=self.prompt_logprobs_temperature,
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
@@ -880,6 +896,7 @@ class SamplingParams(
             f"min_tokens={self.min_tokens}, "
             f"logprobs={self.logprobs}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_logprobs_temperature={self.prompt_logprobs_temperature}, "
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
