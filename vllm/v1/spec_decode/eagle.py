@@ -428,7 +428,7 @@ class SpecDecodeBaseProposer:
         )
 
         per_layer_attn_metadata: dict[str, object] = {}
-        draft_attn_metadata_per_group: list[object] = []
+        per_group_attn_metadata: list[object] = []
         for attn_group in self.draft_attn_groups:
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 common_attn_metadata=common_attn_metadata, draft_index=0
@@ -494,7 +494,7 @@ class SpecDecodeBaseProposer:
             positions = self.positions[token_indices_to_sample]
         hidden_states = hidden_states[token_indices_to_sample]
 
-        if any(isinstance(md, TreeAttentionMetadata) for md in draft_attn_metadata_per_group):
+        if any(isinstance(md, TreeAttentionMetadata) for md in per_group_attn_metadata):
             # Draft using tree attention - requires full logits for top-k
             logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
@@ -511,7 +511,7 @@ class SpecDecodeBaseProposer:
         draft_token_ids = self._greedy_sample(sample_hidden_states)
 
         if self.allowed_attn_types is not None:
-            for group_md in draft_attn_metadata_per_group:
+            for group_md in per_group_attn_metadata:
                 if not isinstance(group_md, self.allowed_attn_types):
                     raise ValueError(
                         f"Unsupported attention metadata type for speculative "
