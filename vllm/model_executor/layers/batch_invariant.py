@@ -177,7 +177,7 @@ def matmul_persistent(
         },
         torch.float16: {
             "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_N": 128, # match the block size n of bfloat16
             "BLOCK_SIZE_K": 64,
             "GROUP_SIZE_M": 8,
             "num_stages": 3,
@@ -752,7 +752,8 @@ def addmm_batch_invariant(bias, a, b):
 
 
 def _log_softmax_batch_invariant(input, dim, _half_to_float):
-    assert not _half_to_float, "not implemented"
+    if _half_to_float:
+        return log_softmax(input.float(), dim=dim)
     return log_softmax(input, dim=dim)
 
 
