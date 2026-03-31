@@ -56,6 +56,8 @@ pub(super) async fn completions(
         "completion"
     );
 
+    // TODO: as optimization consider passing streaming flag so that underlying stream
+    //       doesn't need to produce delta strings
     let text_stream = match state.chat.text().generate(prepared.text_request).await {
         Ok(stream) => stream,
         Err(error) => {
@@ -116,6 +118,9 @@ async fn collect_completion(
         .await
         .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
     let finish_reason = collected.finish_reason.clone();
+    let matched_stop = finish_reason
+        .as_stop_reason()
+        .map(|sr| serde_json::to_value(sr).expect("StopReason must serialize to JSON"));
 
     let prompt_char_count = echo
         .as_ref()
@@ -156,7 +161,7 @@ async fn collect_completion(
             index: 0,
             logprobs,
             finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
-            matched_stop: None,
+            matched_stop,
             prompt_logprobs,
         }],
         usage: Some(Usage::from_counts(
@@ -196,7 +201,12 @@ async fn completion_chunk_stream(
                     ));
                 }
             }
-            Ok(DecodedTextEvent::TextDelta { delta, logprobs }) => {
+            Ok(DecodedTextEvent::TextDelta {
+                delta,
+                logprobs,
+                finished,
+                ..
+            }) => {
                 let delta_text_len = text_len(&delta);
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
@@ -219,27 +229,26 @@ async fn completion_chunk_stream(
                     logprobs,
                 ));
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
-            }
-            Ok(DecodedTextEvent::Done {
-                prompt_token_count,
-                finish_reason,
-                token_ids,
-                ..
-            }) => {
-                yield CompletionSseChunk::Chunk(final_chunk(
-                    &response_id,
-                    &response_model,
-                    created,
-                    finish_reason,
-                )?);
 
-                if include_usage {
-                    yield CompletionSseChunk::Usage(usage_chunk(
+                if let Some(finished) = finished {
+                    yield CompletionSseChunk::Chunk(final_chunk(
                         &response_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count as u32, token_ids.len() as u32),
-                    ));
+                        finished.finish_reason,
+                    )?);
+
+                    if include_usage {
+                        yield CompletionSseChunk::Usage(usage_chunk(
+                            &response_id,
+                            &response_model,
+                            created,
+                            Usage::from_counts(
+                                finished.prompt_token_count as u32,
+                                finished.output_token_count as u32,
+                            ),
+                        ));
+                    }
                 }
             }
             Err(error) => {
@@ -375,7 +384,7 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
-        FinishReason,
+        FinishReason, Finished,
     };
 
     use super::{CompletionSseChunk, completion_chunk_stream, final_chunk};
@@ -410,6 +419,7 @@ mod tests {
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "h".to_string(),
+                token_ids: vec![b'h' as u32],
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![
@@ -426,9 +436,11 @@ mod tests {
                         ],
                     }],
                 }),
+                finished: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: String::new(),
+                token_ids: vec![b'!' as u32],
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![
@@ -445,12 +457,11 @@ mod tests {
                         ],
                     }],
                 }),
-            }),
-            Ok(DecodedTextEvent::Done {
-                text: "h".to_string(),
-                prompt_token_count: 5,
-                token_ids: vec![b'h' as u32, b'!' as u32],
-                finish_reason: FinishReason::stop_eos(),
+                finished: Some(Finished {
+                    prompt_token_count: 5,
+                    output_token_count: 2,
+                    finish_reason: FinishReason::stop_eos(),
+                }),
             }),
         ]);
 

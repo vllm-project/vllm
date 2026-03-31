@@ -128,7 +128,7 @@ impl StructuredEventState {
     fn finish(
         &mut self,
         prompt_token_count: usize,
-        token_ids: Vec<u32>,
+        output_token_count: usize,
         finish_reason: FinishReason,
     ) -> Vec<ChatEvent> {
         let mut events = Vec::new();
@@ -137,7 +137,7 @@ impl StructuredEventState {
         events.push(ChatEvent::Done {
             message: self.message.clone(),
             prompt_token_count,
-            token_ids,
+            output_token_count,
             finish_reason,
         });
         events
@@ -266,10 +266,10 @@ pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStre
             }
             AssistantEvent::Done {
                 prompt_token_count,
-                token_ids,
+                output_token_count,
                 finish_reason,
             } => {
-                for next in state.finish(prompt_token_count, token_ids, finish_reason) {
+                for next in state.finish(prompt_token_count, output_token_count, finish_reason) {
                     yield next;
                 }
             }

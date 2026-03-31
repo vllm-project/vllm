@@ -34,7 +34,6 @@ impl Llm {
     /// Submit one tokenized generate request and return a per-request output stream.
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
         let prepared = req.prepare()?;
-        let output_kind = prepared.output_kind();
         let prompt_token_ids = prepared.prompt_token_ids().into();
 
         let request_metrics = RequestMetricsTracker::new(
@@ -47,7 +46,6 @@ impl Llm {
         let stream = self.client.call(prepared.engine_request).await?;
 
         Ok(GenerateOutputStream::new(
-            output_kind,
             prompt_token_ids,
             stream,
             request_metrics,

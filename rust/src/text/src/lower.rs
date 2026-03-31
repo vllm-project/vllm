@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, RequestOutputKind};
+use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
 use vllm_llm::GenerateRequest;
 
 use crate::backend::SamplingHints;
@@ -24,7 +24,6 @@ pub fn lower_text_request(
     sampling_hints: SamplingHints,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
-    let intermediate = request.intermediate;
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
         prompt_token_ids,
@@ -33,12 +32,6 @@ pub fn lower_text_request(
             sampling_hints,
             prompt_len,
         )?,
-        // Only request intermediate deltas if the caller explicitly opts in.
-        output_kind: if intermediate {
-            RequestOutputKind::Delta
-        } else {
-            RequestOutputKind::FinalOnly
-        },
         // Fields below are currently placeholders.
         arrival_time: None,
         cache_salt: None,
@@ -242,10 +235,6 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
-        assert_eq!(
-            prepared.generate_request.output_kind,
-            RequestOutputKind::Delta
-        );
     }
 
     #[test]
@@ -279,10 +268,6 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
-        assert_eq!(
-            prepared.generate_request.output_kind,
-            RequestOutputKind::Delta
-        );
     }
 
     #[tokio::test]
@@ -355,10 +340,6 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
-        assert_eq!(
-            prepared.generate_request.output_kind,
-            RequestOutputKind::Delta
-        );
     }
 
     #[test]
@@ -545,16 +526,14 @@ mod tests {
     }
 
     #[test]
-    fn lower_text_request_uses_final_only_when_intermediate_is_false() {
+    fn lower_text_request_preserves_non_streaming_request_metadata() {
         let mut request = sample_request();
         request.intermediate = false;
 
         let prepared = lower_text_request(request, vec![1, 2, 3], sample_sampling_hints()).unwrap();
 
-        assert_eq!(
-            prepared.generate_request.output_kind,
-            RequestOutputKind::FinalOnly
-        );
+        assert!(!prepared.text_request.intermediate);
+        assert_eq!(prepared.generate_request.request_id, "text-1");
     }
 
     #[test]

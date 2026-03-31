@@ -5,7 +5,7 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, RequestOutputKind};
+use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::{FinishReason, GenerateOutputStream, GenerateRequest, Llm};
 
@@ -50,7 +50,6 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
             max_tokens,
             ..EngineCoreSamplingParams::for_test()
         },
-        output_kind: RequestOutputKind::FinalOnly,
         arrival_time: None,
         cache_salt: None,
         trace_headers: None,
@@ -129,7 +128,6 @@ async fn main() -> Result<()> {
     let request = build_request(request_id.clone(), args.max_tokens);
     println!("request_id={request_id}");
     println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
-    println!("output_kind={:?}", request.output_kind);
 
     let stream = llm
         .generate(request)

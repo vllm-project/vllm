@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use openai_protocol::chat::{ChatMessage, MessageContent};
-use openai_protocol::common::{ContentPart, ToolChoice, ToolChoiceValue};
+use openai_protocol::common::{ContentPart, StringOrArray, ToolChoice, ToolChoiceValue};
 use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -82,6 +82,10 @@ pub fn prepare_chat_request(
         decode_options: vllm_text::output::TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: false,
+            stop_strings: request.stop.as_ref().map(|stop| match stop {
+                StringOrArray::String(string) => vec![string.clone()],
+                StringOrArray::Array(arr) => arr.clone(),
+            }),
         },
         intermediate: request.stream,
     };
@@ -314,6 +318,7 @@ mod tests {
                 decode_options: TextDecodeOptions {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
+                    stop_strings: None,
                 },
                 intermediate: true,
             }
@@ -364,6 +369,7 @@ mod tests {
                 decode_options: TextDecodeOptions {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
+                    stop_strings: None,
                 },
                 intermediate: true,
             }
@@ -431,6 +437,7 @@ mod tests {
                 decode_options: TextDecodeOptions {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
+                    stop_strings: None,
                 },
                 intermediate: true,
             }
@@ -526,6 +533,7 @@ mod tests {
                 decode_options: TextDecodeOptions {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
+                    stop_strings: None,
                 },
                 intermediate: true,
             }
@@ -640,6 +648,7 @@ mod tests {
                 decode_options: TextDecodeOptions {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
+                    stop_strings: None,
                 },
                 intermediate: true,
             }

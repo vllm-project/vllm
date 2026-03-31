@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
     let output = tokio::time::timeout(output_timeout, async {
         let mut final_reasoning = String::new();
         let mut final_text = String::new();
-        let mut final_token_ids = Vec::new();
+        let mut final_output_token_count = 0usize;
         let mut finish_reason = None;
         let mut saw_start = false;
         let mut saw_stream_output = false;
@@ -141,13 +141,13 @@ async fn main() -> Result<()> {
                 ChatEvent::LogprobsDelta { .. } => {}
                 ChatEvent::Done {
                     message,
-                    token_ids,
+                    output_token_count,
                     finish_reason: reason,
                     ..
                 } => {
                     final_reasoning = message.reasoning().unwrap_or_default();
                     final_text = message.text();
-                    final_token_ids = token_ids;
+                    final_output_token_count = output_token_count;
                     finish_reason = Some(reason);
                     break;
                 }
@@ -167,7 +167,12 @@ async fn main() -> Result<()> {
         if !saw_start {
             bail!("chat stream ended without a start event");
         }
-        Ok::<_, anyhow::Error>((final_reasoning, final_text, final_token_ids, finish_reason))
+        Ok::<_, anyhow::Error>((
+            final_reasoning,
+            final_text,
+            final_output_token_count,
+            finish_reason,
+        ))
     })
     .await
     .context("timed out waiting for chat output")??;
@@ -178,7 +183,7 @@ async fn main() -> Result<()> {
 
     println!("final_reasoning={:?}", output.0);
     println!("final_text={:?}", output.1);
-    println!("final_token_ids={:?}", output.2);
+    println!("final_output_token_count={:?}", output.2);
     println!("finish_reason={:?}", output.3);
 
     Ok(())

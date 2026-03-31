@@ -1,4 +1,5 @@
 use thiserror::Error;
+use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
 
 #[derive(Debug, Error)]
@@ -16,6 +17,8 @@ pub enum Error {
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
     Llm(#[from] LlmError),
+    #[error(transparent)]
+    EngineCore(#[from] EngineCoreError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

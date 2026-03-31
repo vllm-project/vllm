@@ -1,3 +1,4 @@
+use openai_protocol::common::StringOrArray;
 use uuid::Uuid;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
@@ -77,6 +78,10 @@ pub fn prepare_completion_request(
             // `no_stop_trim=true` is the closest existing toggle for keeping the terminal stop
             // token visible in decoded output.
             include_stop_str_in_output: request.no_stop_trim,
+            stop_strings: request.stop.as_ref().map(|stop| match stop {
+                StringOrArray::String(string) => vec![string.clone()],
+                StringOrArray::Array(arr) => arr.clone(),
+            }),
         },
         intermediate: request.stream,
     };

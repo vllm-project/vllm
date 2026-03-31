@@ -100,7 +100,10 @@ pub struct TextRequest {
     pub sampling_params: SamplingParams,
     /// Incremental detokenization options for the response path.
     pub decode_options: TextDecodeOptions,
-    /// Whether to surface intermediate northbound outputs before the terminal result.
+    /// Whether to emit intermediate northbound deltas before the terminal result.
+    ///
+    /// If `false`, callers only observe the terminal accumulated output. If `true`, callers may
+    /// receive zero or more incremental decoded updates before the final terminal event.
     pub intermediate: bool,
 }
 

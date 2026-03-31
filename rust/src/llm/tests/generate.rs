@@ -9,7 +9,7 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, Logprobs, MaybeWireLogprobs,
-    PositionLogprobs, RequestOutputKind, TokenLogprob,
+    PositionLogprobs, TokenLogprob,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
@@ -137,11 +137,7 @@ fn prompt_logprobs() -> Logprobs {
     }
 }
 
-fn sample_generate_request(
-    request_id: &str,
-    output_kind: RequestOutputKind,
-    max_tokens: u32,
-) -> GenerateRequest {
+fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest {
     GenerateRequest {
         request_id: request_id.to_string(),
         prompt_token_ids: vec![11, 22],
@@ -149,7 +145,6 @@ fn sample_generate_request(
             max_tokens,
             ..EngineCoreSamplingParams::for_test()
         },
-        output_kind,
         arrival_time: Some(42.5),
         cache_salt: None,
         trace_headers: None,
@@ -210,7 +205,7 @@ fn init_tracing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn generate_streams_delta_outputs() {
+async fn generate_streams_outputs() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -258,11 +253,7 @@ async fn generate_streams_delta_outputs() {
 
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
     let mut stream = llm
-        .generate(sample_generate_request(
-            "req-delta",
-            RequestOutputKind::Delta,
-            3,
-        ))
+        .generate(sample_generate_request("req-delta", 3))
         .await
         .unwrap();
 
@@ -298,92 +289,6 @@ async fn generate_streams_delta_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn generate_streams_final_only_outputs() {
-    let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-final".to_vec();
-
-    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
-        handshake_address.clone(),
-        engine_id.clone(),
-        |dealer, push| {
-            Box::pin(async move {
-                let add = recv_engine_message(dealer).await;
-                assert_eq!(add[0].as_ref(), &[0x00]);
-
-                send_outputs(
-                    push,
-                    EngineCoreOutputs {
-                        outputs: vec![
-                            request_output_with_logprobs(
-                                "req-final",
-                                vec![4],
-                                None,
-                                Some(logprobs_for_position(4, -0.11, 2, 14, -0.09)),
-                                Some(prompt_logprobs()),
-                            ),
-                            request_output_with_logprobs(
-                                "req-final",
-                                vec![5, 6],
-                                Some(EngineCoreFinishReason::Length),
-                                Some(logprobs_for_position(5, -0.22, 3, 15, -0.12)),
-                                None,
-                            ),
-                        ],
-                        finished_requests: Some(BTreeSet::from(["req-final".to_string()])),
-                        ..Default::default()
-                    },
-                )
-                .await;
-            })
-        },
-    );
-
-    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
-    let mut stream = llm
-        .generate(sample_generate_request(
-            "req-final",
-            RequestOutputKind::FinalOnly,
-            3,
-        ))
-        .await
-        .unwrap();
-
-    let final_output = stream.next().await.unwrap().unwrap();
-    assert_eq!(
-        final_output.prompt_info,
-        Some(GeneratePromptInfo {
-            prompt_token_ids: vec![11, 22].into(),
-            prompt_logprobs: Some(prompt_logprobs()),
-        })
-    );
-    assert_eq!(final_output.token_ids, vec![4, 5, 6]);
-    assert_eq!(
-        final_output.logprobs,
-        Some(Logprobs {
-            positions: vec![
-                logprobs_for_position(4, -0.11, 2, 14, -0.09)
-                    .positions
-                    .into_iter()
-                    .next()
-                    .unwrap(),
-                logprobs_for_position(5, -0.22, 3, 15, -0.12)
-                    .positions
-                    .into_iter()
-                    .next()
-                    .unwrap(),
-            ],
-        })
-    );
-    assert_eq!(final_output.finish_reason(), Some(FinishReason::Length));
-    assert!(stream.next().await.is_none());
-
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
-    llm.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_propagates_unexpected_close_errors() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -411,11 +316,7 @@ async fn generate_propagates_unexpected_close_errors() {
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
     let mut stream = llm
-        .generate(sample_generate_request(
-            "req-close",
-            RequestOutputKind::Delta,
-            1,
-        ))
+        .generate(sample_generate_request("req-close", 1))
         .await
         .unwrap();
 
@@ -460,11 +361,7 @@ async fn abort_forwards_to_engine_core_client() {
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
     let stream = llm
-        .generate(sample_generate_request(
-            "req-abort",
-            RequestOutputKind::Delta,
-            4,
-        ))
+        .generate(sample_generate_request("req-abort", 4))
         .await
         .unwrap();
     drop(stream);
@@ -510,11 +407,7 @@ async fn dropping_a_live_generate_stream_triggers_abort() {
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
     let mut stream = llm
-        .generate(sample_generate_request(
-            "req-drop",
-            RequestOutputKind::Delta,
-            4,
-        ))
+        .generate(sample_generate_request("req-drop", 4))
         .await
         .unwrap();
 
@@ -566,21 +459,10 @@ async fn duplicate_request_ids_bubble_up_from_engine_core_client() {
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
     let stream_1 = llm
-        .generate(sample_generate_request(
-            "req-dup",
-            RequestOutputKind::FinalOnly,
-            1,
-        ))
+        .generate(sample_generate_request("req-dup", 1))
         .await
         .unwrap();
-    let error = match llm
-        .generate(sample_generate_request(
-            "req-dup",
-            RequestOutputKind::FinalOnly,
-            1,
-        ))
-        .await
-    {
+    let error = match llm.generate(sample_generate_request("req-dup", 1)).await {
         Ok(_) => panic!("expected duplicate request id error"),
         Err(error) => error,
     };
@@ -660,7 +542,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
-    let mut request = sample_generate_request("req-metrics", RequestOutputKind::Delta, 8);
+    let mut request = sample_generate_request("req-metrics", 8);
     request.arrival_time = None;
     let mut stream = llm.generate(request).await.unwrap();
 
@@ -771,7 +653,7 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
     );
 
     let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
-    let mut request = sample_generate_request("req-metrics-drop", RequestOutputKind::Delta, 8);
+    let mut request = sample_generate_request("req-metrics-drop", 8);
     request.arrival_time = None;
     let mut stream = llm.generate(request).await.unwrap();
     assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![99]);

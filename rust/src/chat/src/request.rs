@@ -271,7 +271,10 @@ pub struct ChatRequest {
     pub tool_choice: ChatToolChoice,
     /// Text decode options for incremental detokenization.
     pub decode_options: TextDecodeOptions,
-    /// Whether to surface intermediate northbound outputs before the terminal result.
+    /// Whether to emit intermediate northbound content deltas before the terminal result.
+    ///
+    /// If `false`, callers only observe the terminal accumulated assistant output. If `true`,
+    /// callers may receive zero or more incremental content events before the final terminal one.
     pub intermediate: bool,
 }
 

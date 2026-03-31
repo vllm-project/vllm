@@ -111,25 +111,25 @@ pub(crate) async fn reasoning_event_stream(
                     prompt_logprobs,
                 }
             }
-            DecodedTextEvent::TextDelta { delta, logprobs } => {
+            DecodedTextEvent::TextDelta {
+                delta,
+                logprobs,
+                finished,
+                ..
+            } => {
                 for next in state.process_delta(delta) {
                     yield next;
                 }
                 if let Some(logprobs) = logprobs {
                     yield ContentEvent::LogprobsDelta { logprobs };
                 }
-            }
-            DecodedTextEvent::Done {
-                prompt_token_count,
-                token_ids,
-                finish_reason,
-                ..
-            } => {
-                yield ContentEvent::Done {
-                    prompt_token_count,
-                    token_ids,
-                    finish_reason,
-                };
+                if let Some(finished) = finished {
+                    yield ContentEvent::Done {
+                        prompt_token_count: finished.prompt_token_count,
+                        output_token_count: finished.output_token_count,
+                        finish_reason: finished.finish_reason,
+                    };
+                }
             }
         }
     }
@@ -191,17 +191,19 @@ mod tests {
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "abc".to_string(),
+                token_ids: vec![],
                 logprobs: None,
+                finished: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "def".to_string(),
-                logprobs: None,
-            }),
-            Ok(DecodedTextEvent::Done {
-                text: "abcdef".to_string(),
-                prompt_token_count: 3,
                 token_ids: vec![],
-                finish_reason: FinishReason::stop_eos(),
+                logprobs: None,
+                finished: Some(vllm_text::Finished {
+                    prompt_token_count: 3,
+                    output_token_count: 0,
+                    finish_reason: FinishReason::stop_eos(),
+                }),
             }),
         ]);
 
@@ -234,7 +236,7 @@ mod tests {
                 },
                 ContentEvent::Done {
                     prompt_token_count: 3,
-                    token_ids: vec![],
+                    output_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                 },
             ]
@@ -250,6 +252,7 @@ mod tests {
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "abc".to_string(),
+                token_ids: vec![],
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -259,6 +262,7 @@ mod tests {
                         }],
                     }],
                 }),
+                finished: None,
             }),
         ]);
 

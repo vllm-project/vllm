@@ -1,4 +1,3 @@
-use openai_protocol::common::StringOrArray;
 use vllm_text::Prompt;
 
 use super::types::CompletionRequest;
@@ -43,13 +42,6 @@ pub(super) fn validate_request_compat(
 
     if request.best_of.is_some() {
         bail_invalid_request!(param = "best_of", "best_of is not supported.");
-    }
-
-    if has_non_empty_stop(request.stop.as_ref()) {
-        bail_invalid_request!(
-            param = "stop",
-            "Stop strings are not supported by the minimal Rust frontend."
-        );
     }
 
     if let Some(logprobs) = request.logprobs
@@ -119,14 +111,6 @@ pub(super) fn validate_request_compat(
     }
 
     Ok(())
-}
-
-fn has_non_empty_stop(stop: Option<&StringOrArray>) -> bool {
-    match stop {
-        None => false,
-        Some(StringOrArray::String(value)) => !value.is_empty(),
-        Some(StringOrArray::Array(values)) => values.iter().any(|value| !value.is_empty()),
-    }
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ use futures::StreamExt as _;
 use rmpv::Value;
 use serde_json::json;
 use serial_test::serial;
-use tower::Service as _;
+use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatTextBackend,
     ChatToolChoice, SamplingParams,
@@ -1796,10 +1796,10 @@ async fn non_stream_completions_include_prompt_logprobs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn non_stream_chat_uses_final_only_output_kind() {
+async fn non_stream_chat_completions_still_succeed() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-openai-chat-final-only".to_vec();
+    let engine_id = b"engine-openai-chat-non-stream".to_vec();
 
     let engine_task = MockEngineTask::new(spawn_mock_engine_task(
         handshake_address.clone(),
@@ -1861,10 +1861,10 @@ async fn non_stream_chat_uses_final_only_output_kind() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn non_stream_completions_use_final_only_output_kind() {
+async fn non_stream_completions_still_succeed() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-openai-completion-final-only".to_vec();
+    let engine_id = b"engine-openai-completion-non-stream".to_vec();
 
     let engine_task = MockEngineTask::new(spawn_mock_engine_task(
         handshake_address.clone(),
@@ -2707,4 +2707,348 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+// ========================= Stop string tests =========================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_stop_string_excluded_from_output() {
+    // Engine generates "say world" but stop string "wor" truncates output to "say ".
+    let output_specs = vec![
+        (bytes_to_token_ids(b"say"), None),
+        (
+            bytes_to_token_ids(b" world"),
+            Some(EngineCoreFinishReason::Length),
+        ),
+    ];
+    let (app, engine_task) = test_app_with_stream_output_specs(output_specs).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "stop": ["wor"]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "say ");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["choices"][0]["matched_stop"], "wor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_stop_string_included_in_output() {
+    // Same tokens but no_stop_trim=true includes the stop string in the output.
+    let output_specs = vec![
+        (bytes_to_token_ids(b"say"), None),
+        (
+            bytes_to_token_ids(b" world"),
+            Some(EngineCoreFinishReason::Length),
+        ),
+    ];
+    let (app, engine_task) = test_app_with_stream_output_specs(output_specs).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "stop": ["wor"],
+                        "no_stop_trim": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "say wor");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["choices"][0]["matched_stop"], "wor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_completions_stop_string_excluded_from_output() {
+    let output_specs = vec![
+        (bytes_to_token_ids(b"say"), None),
+        (
+            bytes_to_token_ids(b" world"),
+            Some(EngineCoreFinishReason::Length),
+        ),
+    ];
+    let (app, engine_task) = test_app_with_stream_output_specs(output_specs).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": true,
+                        "stop": ["wor"]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+
+    // Collect all text deltas from the SSE chunks.
+    let mut full_text = String::new();
+    for payload in &payloads {
+        if *payload == "[DONE]" {
+            continue;
+        }
+        let chunk: serde_json::Value = serde_json::from_str(payload).expect("json chunk");
+        if let Some(text) = chunk["choices"][0]["text"].as_str() {
+            full_text.push_str(text);
+        }
+    }
+
+    // The concatenated text deltas should equal "say " (stop string excluded).
+    assert_eq!(full_text, "say ", "full streamed text: {text}");
+
+    // The final chunk should have finish_reason "stop".
+    assert!(
+        payloads
+            .iter()
+            .any(|p| p.contains("\"finish_reason\":\"stop\"")),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_completions_stop_string_included_in_output() {
+    let output_specs = vec![
+        (bytes_to_token_ids(b"say"), None),
+        (
+            bytes_to_token_ids(b" world"),
+            Some(EngineCoreFinishReason::Length),
+        ),
+    ];
+    let (app, engine_task) = test_app_with_stream_output_specs(output_specs).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": true,
+                        "stop": ["wor"],
+                        "no_stop_trim": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+
+    let mut full_text = String::new();
+    for payload in &payloads {
+        if *payload == "[DONE]" {
+            continue;
+        }
+        let chunk: serde_json::Value = serde_json::from_str(payload).expect("json chunk");
+        if let Some(text) = chunk["choices"][0]["text"].as_str() {
+            full_text.push_str(text);
+        }
+    }
+
+    // With no_stop_trim, the stop string "wor" should be included.
+    assert_eq!(full_text, "say wor", "full streamed text: {text}");
+
+    assert!(
+        payloads
+            .iter()
+            .any(|p| p.contains("\"finish_reason\":\"stop\"")),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_no_stop_string_match_preserves_original_finish_reason() {
+    // Stop string "xyz" does not appear in "hi!" so the original finish reason is preserved.
+    let (app, engine_task) = test_app_with_engine_handle().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "stop": ["xyz"]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    // Default output is "hi" (stop token '!' suppressed), finish_reason remains "stop" from EOS.
+    assert_eq!(json["choices"][0]["text"], "hi");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    // No text stop string matched — matched_stop should be absent.
+    assert!(json["choices"][0]["matched_stop"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_stop_string_array_matches_first_occurrence() {
+    // Multiple stop strings: "rl" appears in "world" but " wo" appears earlier.
+    let output_specs = vec![(
+        bytes_to_token_ids(b"say world"),
+        Some(EngineCoreFinishReason::Length),
+    )];
+    let (app, engine_task) = test_app_with_stream_output_specs(output_specs).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "stop": [" wo", "rl"]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    // " wo" is detected first (at byte 3), so output is truncated to "say".
+    assert_eq!(json["choices"][0]["text"], "say");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["choices"][0]["matched_stop"], " wo");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_empty_stop_string_returns_validation_error() {
+    let (app, _engine_task) = test_app_with_engine_handle().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "stop": [""]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

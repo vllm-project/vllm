@@ -18,7 +18,7 @@ pub use lower::{
 };
 pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
-    DecodedTextEvent, DecodedTokenLogprob, TextDecodeOptions, TextOutputStreamExt,
+    DecodedTextEvent, DecodedTokenLogprob, Finished, TextDecodeOptions, TextOutputStreamExt,
 };
 pub use request::{Prompt, SamplingParams, TextRequest};
 use vllm_engine_core_client::EngineCoreClient;
@@ -28,6 +28,7 @@ use vllm_llm::Llm;
 mod backend;
 pub mod backends;
 mod error;
+mod incremental;
 mod lower;
 pub mod output;
 mod request;
@@ -96,6 +97,7 @@ impl TextLlm {
             self.backend.clone(),
             raw_stream,
             prepared.text_request.decode_options,
+            prepared.text_request.intermediate,
         );
 
         Ok(decoded_stream)

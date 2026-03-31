@@ -16,7 +16,7 @@ pub struct CollectedAssistantMessage {
     pub prompt_token_count: usize,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
-    pub token_ids: Vec<u32>,
+    pub output_token_count: usize,
     pub finish_reason: FinishReason,
 }
 
@@ -61,7 +61,7 @@ impl ChatEventStream {
                 ChatEvent::Done {
                     message: done,
                     prompt_token_count,
-                    token_ids,
+                    output_token_count,
                     finish_reason,
                 } => {
                     return Ok(CollectedAssistantMessage {
@@ -71,7 +71,7 @@ impl ChatEventStream {
                         logprobs: (!logprob_positions.is_empty()).then_some(DecodedLogprobs {
                             positions: logprob_positions,
                         }),
-                        token_ids,
+                        output_token_count,
                         finish_reason,
                     });
                 }
@@ -165,7 +165,7 @@ mod tests {
                 Ok(ChatEvent::Done {
                     message: Default::default(),
                     prompt_token_count: 2,
-                    token_ids: vec![1],
+                    output_token_count: 1,
                     finish_reason: FinishReason::stop_eos(),
                 }),
             ]),
@@ -196,7 +196,7 @@ mod tests {
                         }],
                     }],
                 }),
-                token_ids: vec![1],
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
             }
         );

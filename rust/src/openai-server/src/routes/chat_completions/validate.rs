@@ -1,4 +1,4 @@
-use openai_protocol::common::{StringOrArray, ToolChoice, ToolChoiceValue};
+use openai_protocol::common::{ToolChoice, ToolChoiceValue};
 
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
@@ -21,13 +21,6 @@ pub(super) fn validate_request_compat(
 
     if request.n.unwrap_or(1) > 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
-    }
-
-    if has_non_empty_stop(request.stop.as_ref()) {
-        bail_invalid_request!(
-            param = "stop",
-            "Stop strings are not supported by the minimal Rust frontend."
-        );
     }
 
     reject_non_zero(
@@ -181,15 +174,6 @@ pub(super) fn validate_request_compat(
     Ok(())
 }
 
-/// Return whether the request asks for any non-empty stop string behavior.
-fn has_non_empty_stop(stop: Option<&StringOrArray>) -> bool {
-    match stop {
-        None => false,
-        Some(StringOrArray::String(value)) => !value.is_empty(),
-        Some(StringOrArray::Array(values)) => values.iter().any(|value| !value.is_empty()),
-    }
-}
-
 /// Reject one numeric option unless it is absent or exactly zero.
 fn reject_non_zero(value: Option<f32>, param: &'static str, message: &str) -> Result<(), ApiError> {
     if value.unwrap_or(0.0) != 0.0 {
@@ -234,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_non_empty_stop() {
+    fn validate_request_compat_accepts_stop() {
         let request = ChatCompletionRequest {
             stop: Some(openai_protocol::common::StringOrArray::String(
                 "stop".to_string(),
@@ -242,7 +226,8 @@ mod tests {
             ..base_request()
         };
 
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("stop strings should be accepted");
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub(crate) enum AssistantEvent {
     #[subenum(ContentEvent)]
     Done {
         prompt_token_count: usize,
-        token_ids: Vec<u32>,
+        output_token_count: usize,
         finish_reason: FinishReason,
     },
 }
@@ -69,7 +69,12 @@ impl ContentEvent {
                 prompt_token_count,
                 prompt_logprobs,
             }],
-            DecodedTextEvent::TextDelta { delta, logprobs } => {
+            DecodedTextEvent::TextDelta {
+                delta,
+                logprobs,
+                finished,
+                ..
+            } => {
                 let mut events = Vec::new();
                 if !delta.is_empty() {
                     events.push(Self::TextDelta {
@@ -80,18 +85,15 @@ impl ContentEvent {
                 if let Some(logprobs) = logprobs {
                     events.push(Self::LogprobsDelta { logprobs });
                 }
+                if let Some(finished) = finished {
+                    events.push(Self::Done {
+                        prompt_token_count: finished.prompt_token_count,
+                        output_token_count: finished.output_token_count,
+                        finish_reason: finished.finish_reason,
+                    });
+                }
                 events
             }
-            DecodedTextEvent::Done {
-                prompt_token_count,
-                token_ids,
-                finish_reason,
-                ..
-            } => vec![Self::Done {
-                prompt_token_count,
-                token_ids,
-                finish_reason,
-            }],
         }
     }
 }

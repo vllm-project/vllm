@@ -121,7 +121,7 @@ async fn collect_chat_completion(
         prompt_token_count,
         prompt_logprobs,
         logprobs,
-        token_ids,
+        output_token_count,
         finish_reason,
     } = collected;
     let matched_stop = finish_reason.as_stop_reason().map(stop_reason_to_json);
@@ -158,7 +158,7 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_counts(prompt_token_count as u32, token_ids.len() as u32);
+    let usage = Usage::from_counts(prompt_token_count as u32, output_token_count as u32);
 
     Ok(ChatCompletionResponse {
         id: response_id,
@@ -278,7 +278,7 @@ async fn chat_completion_chunk_stream(
             Ok(ChatEvent::Done {
                 prompt_token_count,
                 finish_reason,
-                token_ids,
+                output_token_count,
                 ..
             }) => {
                 if let Some(pending_chunk) = pending_chunk.as_mut()
@@ -307,12 +307,11 @@ async fn chat_completion_chunk_stream(
                 }
 
                 if include_usage {
-                    let completion_tokens = token_ids.len() as u32;
                     yield usage_chunk(
                         &response_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count as u32, completion_tokens),
+                        Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
                     );
                 }
 
@@ -867,7 +866,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 prompt_token_count: 1,
-                token_ids: vec![1],
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
             }),
         ]);
@@ -928,7 +927,7 @@ mod tests {
             Ok(ChatEvent::Done {
                 message: Default::default(),
                 prompt_token_count: 1,
-                token_ids: vec![1],
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
             }),
         ]);

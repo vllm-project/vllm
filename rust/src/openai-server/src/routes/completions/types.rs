@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use openai_protocol::common::{LogProbs, StreamOptions, StringOrArray, Usage, default_true};
+use openai_protocol::common::{
+    LogProbs, StreamOptions, StringOrArray, Usage, default_true, validate_stop,
+};
 use openai_protocol::validated::Normalizable;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -53,6 +55,7 @@ pub struct CompletionRequest {
     pub echo: bool,
 
     /// Up to 4 sequences where the API will stop generating further tokens
+    #[validate(custom(function = "validate_stop"))]
     pub stop: Option<StringOrArray>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they

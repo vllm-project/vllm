@@ -234,7 +234,7 @@ async fn final_only_tool_event_stream(
             }
             ContentEvent::Done {
                 prompt_token_count,
-                token_ids,
+                output_token_count,
                 finish_reason,
             } => {
                 match parser.parse_complete(&final_text).await {
@@ -272,7 +272,7 @@ async fn final_only_tool_event_stream(
 
                 yield AssistantEvent::Done {
                     prompt_token_count,
-                    token_ids,
+                    output_token_count,
                     finish_reason,
                 };
                 return Ok(());
@@ -332,7 +332,7 @@ pub(crate) async fn tool_event_stream(
             }
             ContentEvent::Done {
                 prompt_token_count,
-                token_ids,
+                output_token_count,
                 finish_reason,
             } => {
                 let mut flush_events = Vec::new();
@@ -350,7 +350,7 @@ pub(crate) async fn tool_event_stream(
 
                 yield AssistantEvent::Done {
                     prompt_token_count,
-                    token_ids,
+                    output_token_count,
                     finish_reason,
                 };
             }
@@ -449,7 +449,7 @@ mod tests {
             }),
             Ok(ContentEvent::Done {
                 prompt_token_count: 3,
-                token_ids: vec![],
+                output_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
             }),
         ]);
@@ -484,7 +484,7 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     prompt_token_count: 3,
-                    token_ids: vec![],
+                    output_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                 },
             ]
@@ -523,7 +523,7 @@ mod tests {
             }),
             Ok(ContentEvent::Done {
                 prompt_token_count: 1,
-                token_ids: vec![],
+                output_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
             }),
         ]);
@@ -561,7 +561,7 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     prompt_token_count: 1,
-                    token_ids: vec![],
+                    output_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                 },
             ]

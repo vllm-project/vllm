@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, EngineCoreSamplingParams, OpaqueValue, RequestOutputKind,
-};
+use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams, OpaqueValue};
 
 use crate::error::{Error, Result};
 
@@ -23,9 +21,6 @@ pub struct GenerateRequest {
     pub prompt_token_ids: Vec<u32>,
     /// Sampling parameters forwarded to engine-core.
     pub sampling_params: EngineCoreSamplingParams,
-    /// Controls whether higher-level Rust outputs are emitted per-step as deltas or once as the
-    /// final accumulated completion.
-    pub output_kind: RequestOutputKind,
 
     // Fields below are currently likely unused by callers.
     pub arrival_time: Option<f64>,
@@ -40,7 +35,6 @@ pub struct GenerateRequest {
 #[derive(Debug)]
 pub(crate) struct PreparedGenerateRequest {
     pub engine_request: EngineCoreRequest,
-    pub output_kind: RequestOutputKind,
 }
 
 impl GenerateRequest {
@@ -55,7 +49,6 @@ impl GenerateRequest {
             request_id,
             prompt_token_ids,
             sampling_params,
-            output_kind,
             arrival_time,
             cache_salt,
             trace_headers,
@@ -85,17 +78,11 @@ impl GenerateRequest {
                 external_req_id: None,
                 reasoning_ended,
             },
-            output_kind,
         })
     }
 }
 
 impl PreparedGenerateRequest {
-    /// Return the requested output aggregation mode.
-    pub fn output_kind(&self) -> RequestOutputKind {
-        self.output_kind
-    }
-
     /// Return the original prompt token IDs copied into the raw engine request.
     pub fn prompt_token_ids(&self) -> &[u32] {
         self.engine_request
@@ -116,7 +103,7 @@ fn current_unix_timestamp_secs() -> f64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, RequestOutputKind};
+    use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
 
     use super::GenerateRequest;
     use crate::error::Error;
@@ -126,7 +113,6 @@ mod tests {
             request_id: "req-1".to_string(),
             prompt_token_ids: vec![11, 22, 33],
             sampling_params: EngineCoreSamplingParams::for_test(),
-            output_kind: RequestOutputKind::Delta,
             arrival_time: Some(42.5),
             cache_salt: Some("salt".to_string()),
             trace_headers: Some(BTreeMap::from([(
@@ -144,7 +130,6 @@ mod tests {
     fn prepare_builds_engine_core_request() {
         let prepared = sample_request().prepare().unwrap();
 
-        assert_eq!(prepared.output_kind(), RequestOutputKind::Delta);
         assert_eq!(prepared.prompt_token_ids(), &[11, 22, 33]);
 
         let request = prepared.engine_request;
@@ -204,8 +189,6 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&request);
-
-        assert_eq!(prepared.output_kind, RequestOutputKind::Delta);
     }
 
     #[test]

@@ -158,9 +158,8 @@ pub enum ChatEvent {
         /// Number of prompt tokens actually sent to the engine after chat
         /// template rendering and tokenization.
         prompt_token_count: usize,
-        /// Raw cumulative output token IDs, including a terminal stop token when
-        /// the engine emitted one.
-        token_ids: Vec<u32>,
+        /// Number of output tokens generated.
+        output_token_count: usize,
         finish_reason: FinishReason,
     },
 }
