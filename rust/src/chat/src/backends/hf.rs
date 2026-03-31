@@ -1,62 +1,62 @@
-use std::fmt;
 use std::sync::Arc;
 
 use tracing::info;
-use vllm_text::TextBackend;
-use vllm_text::backends::hf::HfTextBackend;
+use vllm_text::DynTextBackend;
+use vllm_text::backends::hf::{HfTextBackend, ResolvedModelFiles};
 
-use crate::backend::ChatBackend;
+use crate::backend::{ChatBackend, DynChatBackend};
+use crate::backends::LoadedModelBackends;
 use crate::error::Result;
 use crate::request::ChatRequest;
 use crate::template::ChatTemplate;
 
-/// Chat-facing backend built from the text backend plus chat-template rendering.
-#[derive(Clone)]
+/// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
-    inner: Arc<HfChatBackendInner>,
-}
-
-struct HfChatBackendInner {
     chat_template: ChatTemplate,
 }
 
-impl fmt::Debug for HfChatBackend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HfChatBackend").finish_non_exhaustive()
-    }
-}
-
 impl HfChatBackend {
-    /// Load one Hugging Face model plus its chat template and wrap the text backend.
+    /// Load the chat backend with the given model id.
     pub async fn from_model(model_id: &str) -> Result<Self> {
-        let text_backend = HfTextBackend::from_model(model_id).await?;
-        Self::from_text_backend(&text_backend)
+        let files = ResolvedModelFiles::new(model_id).await?;
+        Self::from_resolved_model_files(files, model_id.to_string())
     }
 
-    /// Build the chat wrapper around an already loaded text backend.
-    ///
-    /// The text backend stays responsible for tokenizer/model loading; this wrapper only adds
-    /// chat-template rendering and chat-specific request semantics.
-    pub fn from_text_backend(text_backend: &HfTextBackend) -> Result<Self> {
-        let files = text_backend.resolved_model_files();
+    /// Load the chat backend from resolved Hugging Face model files.
+    pub fn from_resolved_model_files(files: ResolvedModelFiles, model_id: String) -> Result<Self> {
         let chat_template = ChatTemplate::load(
             files.tokenizer_config_path.as_deref(),
             files.chat_template_path.as_deref(),
         )?;
 
         info!(
-            model_id = text_backend.model_id(),
-            "loaded chat backend from text backend"
+            model_id,
+            "loaded chat backend with Hugging Face model files"
         );
-
-        Ok(Self {
-            inner: Arc::new(HfChatBackendInner { chat_template }),
-        })
+        Ok(Self { chat_template })
     }
 }
 
 impl ChatBackend for HfChatBackend {
     fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
-        self.inner.chat_template.apply_chat_template(request)
+        self.chat_template.apply_chat_template(request)
     }
+}
+
+/// Load the Hugging Face text and chat backends for the given model id.
+pub(super) async fn load_model_backends(model_id: &str) -> Result<LoadedModelBackends> {
+    let files = ResolvedModelFiles::new(model_id).await?;
+    let text_backend: DynTextBackend = Arc::new(HfTextBackend::from_resolved_model_files(
+        files.clone(),
+        model_id.to_string(),
+    )?);
+    let chat_backend: DynChatBackend = Arc::new(HfChatBackend::from_resolved_model_files(
+        files,
+        model_id.to_string(),
+    )?);
+
+    Ok(LoadedModelBackends {
+        text_backend,
+        chat_backend,
+    })
 }

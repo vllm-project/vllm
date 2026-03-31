@@ -17,28 +17,22 @@ pub use config::Config;
 use futures::FutureExt as _;
 use tokio::net::TcpListener;
 use tracing::info;
-use vllm_chat::ChatLlm;
-use vllm_chat::backends::hf::HfChatBackend;
+use vllm_chat::{ChatLlm, load_model_backends};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
-use vllm_text::backends::hf::HfTextBackend;
-use vllm_text::{TextBackend, TextLlm};
+use vllm_text::TextLlm;
 
 use crate::routes::build_router;
 use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
-    // Build chat on top of the already loaded text backend so tokenizer/model metadata stay
-    // shared between raw completions and chat requests.
-    let text_backend = Arc::new(
-        HfTextBackend::from_model(&config.model)
-            .await
-            .context("failed to create text backend")?,
-    );
-    let chat_backend = Arc::new(
-        HfChatBackend::from_text_backend(&text_backend).context("failed to create chat backend")?,
-    );
+    // Load both backends from the same model metadata so they stay in sync.
+    let loaded = load_model_backends(&config.model)
+        .await
+        .context("failed to create chat/text backends")?;
+    let text_backend = loaded.text_backend;
+    let chat_backend = loaded.chat_backend;
 
     let enable_inproc_coordinator = config.engine_count > 1 && text_backend.is_moe();
     info!(

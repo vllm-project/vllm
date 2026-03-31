@@ -1,19 +1,16 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures::StreamExt as _;
 use tracing_subscriber::EnvFilter;
-use vllm_chat::backends::hf::HfChatBackend;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatLlm, ChatMessage, ChatOptions,
-    ChatRequest, ChatRole, ChatToolChoice, SamplingParams,
+    ChatRequest, ChatRole, ChatToolChoice, SamplingParams, load_model_backends,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
-use vllm_text::backends::hf::HfTextBackend;
 
 #[derive(Debug, Parser)]
 #[command(about = "Smoke-test the Rust chat facade against an external Qwen vLLM engine.")]
@@ -49,15 +46,11 @@ fn init_tracing() {
 async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
-    let text_backend = Arc::new(
-        HfTextBackend::from_model(&args.model)
-            .await
-            .with_context(|| format!("failed to load text backend for {}", args.model))?,
-    );
-    let chat_backend = Arc::new(
-        HfChatBackend::from_text_backend(&text_backend)
-            .with_context(|| format!("failed to load chat backend for {}", args.model))?,
-    );
+    let loaded = load_model_backends(&args.model)
+        .await
+        .with_context(|| format!("failed to load backends for {}", args.model))?;
+    let text_backend = loaded.text_backend;
+    let chat_backend = loaded.chat_backend;
 
     let ready_timeout = Duration::from_secs(args.ready_timeout_secs);
     let output_timeout = Duration::from_secs(OUTPUT_TIMEOUT_SECS);

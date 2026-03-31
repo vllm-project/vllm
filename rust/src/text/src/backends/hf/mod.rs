@@ -39,16 +39,14 @@ pub struct HfTextBackend {
 }
 
 impl HfTextBackend {
-    /// Load one Hugging Face model tokenizer plus adjacent model metadata.
+    /// Load the text backend with the given model id.
     pub async fn from_model(model_id: &str) -> Result<Self> {
         let files = ResolvedModelFiles::new(model_id).await?;
         Self::from_resolved_model_files(files, model_id.to_string())
     }
 
-    pub(crate) fn from_resolved_model_files(
-        files: ResolvedModelFiles,
-        model_id: String,
-    ) -> Result<Self> {
+    /// Load the text backend from resolved Hugging Face model files.
+    pub fn from_resolved_model_files(files: ResolvedModelFiles, model_id: String) -> Result<Self> {
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
         let tokenizer = load_tokenizer(&files.tokenizer)?;
         let primary_eos_token_id = tokenizer_config
