@@ -207,11 +207,12 @@ class QuantFP8(CustomOp):
         else:
             scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
 
-        # Even for dynamic per-token scales,
-        # reciprocal performs slightly better than division
+        # Use division instead of reciprocal to avoid Triton int32 literal
+        # codegen bug on SM100 (torch 2.11): reciprocal emits
+        # tl.full([1], 1, tl.int32) / x which causes 3x slowdown on B200.
         out = (
             x.to(torch.float32)
-            * group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
+            / group_broadcast(scale.to(torch.float32), x.shape[-2:])
         )
         out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
 
