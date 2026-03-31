@@ -48,6 +48,128 @@ def mock_on_mi3xx():
         (
             {},
             "FLEX_ATTENTION",
+            ValueError,
+        ),
+        # Test Case 1: Default (no env vars, no explicit backend)
+        (
+            {},
+            None,
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
+        ),
+        # Test Case 2: Explicit TRITON_ATTN backend
+        (
+            {},
+            "TRITON_ATTN",
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
+        ),
+        # Test Case 3: Explicit ROCM_ATTN backend
+        (
+            {},
+            "ROCM_ATTN",
+            ValueError,
+        ),
+        # Test Case 4: Explicit ROCM_AITER_FA backend
+        (
+            {},
+            "ROCM_AITER_FA",
+            ValueError,
+        ),
+        # Test Case 5: Explicit ROCM_AITER_UNIFIED_ATTN backend
+        (
+            {},
+            "ROCM_AITER_UNIFIED_ATTN",
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
+        ),
+        # Test Case 6: VLLM_ROCM_USE_AITER=1
+        (
+            {"VLLM_ROCM_USE_AITER": "1"},
+            None,
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
+        ),
+        # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
+        (
+            {"VLLM_ROCM_USE_AITER": "1"},
+            "TRITON_ATTN",
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
+        ),
+        # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
+        (
+            {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
+            None,
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
+        ),
+        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
+        (
+            {"VLLM_ROCM_USE_AITER": "1"},
+            "ROCM_ATTN",
+            ValueError,
+        ),
+    ],
+)
+def test_standard_attention_with_sink_backend_selection(
+    env_vars,
+    selected_backend,
+    expected_backend_path,
+    mock_vllm_config,
+    mock_on_gfx9,
+    mock_on_mi3xx,
+    monkeypatch,
+):
+    """Test standard attention backend selection with various configurations."""
+    # Set environment variables
+    for key, value in env_vars.items():
+        monkeypatch.setenv(key, value)
+
+    # Import after setting env vars to ensure they're picked up
+    # Reload envs to pick up new environment variables
+    import importlib
+
+    import vllm.envs as envs
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    importlib.reload(envs)
+    rocm_aiter_ops.refresh_env_variables()
+
+    # Convert string backend to enum if provided
+    backend_enum = None
+    if selected_backend:
+        backend_enum = getattr(AttentionBackendEnum, selected_backend)
+
+    # Get the backend class path
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=True,
+        use_sparse=False,
+    )
+
+    # If we expect a ValueError, wrap the call in pytest.raises
+    if isinstance(
+        expected_backend_path, ValueError
+    ):  # or however you signal this in your test params
+        with pytest.raises(ValueError, match="is not valid for this configuration"):
+            RocmPlatform.get_attn_backend_cls(
+                selected_backend=backend_enum, attn_selector_config=attn_selector_config
+            )
+    else:
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=backend_enum, attn_selector_config=attn_selector_config
+        )
+        assert backend_path == expected_backend_path
+
+
+@pytest.mark.parametrize(
+    "env_vars, selected_backend, expected_backend_path",
+    [
+        # Test Case: Explicit FLEX_ATTENTION backend
+        (
+            {},
+            "FLEX_ATTENTION",
             AttentionBackendEnum.FLEX_ATTENTION.get_path(),
         ),
         # Test Case 1: Default (no env vars, no explicit backend)
@@ -84,7 +206,7 @@ def mock_on_mi3xx():
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
@@ -96,7 +218,7 @@ def mock_on_mi3xx():
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
@@ -125,8 +247,10 @@ def test_standard_attention_backend_selection(
     import importlib
 
     import vllm.envs as envs
+    from vllm._aiter_ops import rocm_aiter_ops
 
     importlib.reload(envs)
+    rocm_aiter_ops.refresh_env_variables()
 
     # Convert string backend to enum if provided
     backend_enum = None
@@ -214,6 +338,14 @@ def test_standard_attention_backend_selection(
             False,
         ),
         # Test Case 8: Explicit ROCM_AITER_TRITON_MLA
+        (
+            {},
+            "ROCM_AITER_TRITON_MLA",
+            16,
+            AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path(),
+            False,
+        ),
+        # Test Case 9: Explicit ROCM_AITER_TRITON_MLA
         (
             {},
             "ROCM_AITER_TRITON_MLA",

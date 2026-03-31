@@ -309,7 +309,7 @@ def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
 ) -> list[AttentionBackendEnum]:
-    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm._aiter_ops import rocm_aiter_ops
 
     if use_sparse:
         return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
@@ -327,9 +327,9 @@ def _get_backend_priorities(
             ]
 
     backends = []
-    if rocm_aiter_ops.is_mha_enabled():
+    if rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
-    if is_aiter_found_and_supported():
+    if rocm_aiter_ops.is_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.ROCM_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
@@ -396,6 +396,7 @@ class RocmPlatform(Platform):
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
         )
+
         for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()
