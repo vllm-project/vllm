@@ -48,6 +48,7 @@ class CpuGpuEvent:
         Should only be called by the main thread.
         """
         assert not self._recorded.is_set()
+        self._event = torch.cuda.Event()
         self._event.record(stream)
         self._recorded.set()
 
