@@ -465,6 +465,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Plamo2ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-2-1b",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "Custom model code uses `_tied_weight_keys: list[str]` but "
+                "Transformers v5 now expects `_tied_weight_keys: dict[str, str]`"
+            )
+        },
     ),
     "Plamo3ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-3-nict-2b-base",
@@ -749,10 +756,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
+        "nvidia/audio-flamingo-3-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
+        "nvidia/music-flamingo-2601-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
@@ -854,7 +869,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
-        "internlm/Intern-S1", trust_remote_code=True
+        "internlm/Intern-S1",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom tokenizer code is not compatible with Transformers v5."
+        },
     ),
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
@@ -943,13 +963,27 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
-    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6", trust_remote_code=True),
+    "MiniCPMO": _HfExamplesInfo(
+        "openbmb/MiniCPM-o-2_6",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
         extras={
             "2.6": "openbmb/MiniCPM-V-2_6",
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
+        },
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "MiniCPMVBatchFeature is incompatible with its base class in "
+                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
+            )
         },
         trust_remote_code=True,
     ),
@@ -987,13 +1021,25 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nano_vl_dummy", is_available_online=False, trust_remote_code=True
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
-        "xlangai/OpenCUA-7B", trust_remote_code=True
+        "xlangai/OpenCUA-7B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Tokenizer cannot be initialised in Transformers v5."
+        },
     ),
     "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-VL-7B",
         trust_remote_code=True,
         max_model_len=4096,
         enforce_eager=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
+                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
+            )
+        },
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
@@ -1005,12 +1051,24 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B",
         },
     ),
-    "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "Ovis2_5": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.5-2B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "Ovis2_6ForCausalLM": _HfExamplesInfo(
         "AIDC-AI/Ovis2.6-2B", is_available_online=False, trust_remote_code=True
     ),
     "Ovis2_6_MoeForCausalLM": _HfExamplesInfo(
-        "AIDC-AI/Ovis2.6-30B-A3B", trust_remote_code=True
+        "AIDC-AI/Ovis2.6-30B-A3B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom processor code is not compatible with Transformers v5."
+        },
     ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
         "PaddlePaddle/PaddleOCR-VL",
