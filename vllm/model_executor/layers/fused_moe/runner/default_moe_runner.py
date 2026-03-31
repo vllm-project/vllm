@@ -248,7 +248,7 @@ class DefaultMoERunner(MoERunner):
     # TODO(bnell): temporary hack, do not call this method.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         if self.shared_experts is not None:
-            self.shared_experts.quant_method = quant_method
+            self.shared_experts._quant_method = quant_method
         self.quant_method = quant_method
 
     def is_internal_router(self) -> bool:
