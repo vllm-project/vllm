@@ -927,7 +927,9 @@ except ImportError:
     # so we don't attempt the fallback there.
     if current_platform.is_rocm():
         try:
-            from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+            from aiter.ops.triton.mha import flash_attn_varlen_func
+            #from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef] 
+
         except ImportError:
             logger.debug(
                 "flash_attn not available on ROCm; "

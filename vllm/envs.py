@@ -112,6 +112,11 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4: bool = False
+    # Require at least this many MoE tokens to attempt Triton moe_gemm_a4w4 (0 = no minimum).
+    VLLM_ROCM_AITER_TRITON_MOE_MIN_TOKENS: int = 0
+    # HIP rejects Triton reduce_grouped when grid dim (token groups) exceeds this; chunk launches.
+    VLLM_ROCM_AITER_MOE_REDUCE_MAX_GROUPS: int = 65536
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -976,6 +981,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # ROCm AITER fused MoE: use Triton moe_gemm_a4w4 (MXFP4) instead of aiter.fused_moe.
+    "VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4": lambda: (
+        os.getenv("VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4", "False").lower()
+        in ("true", "1")
+    ),
+    "VLLM_ROCM_AITER_TRITON_MOE_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_TRITON_MOE_MIN_TOKENS", "0")
+    ),
+    "VLLM_ROCM_AITER_MOE_REDUCE_MAX_GROUPS": lambda: max(
+        1,
+        int(os.getenv("VLLM_ROCM_AITER_MOE_REDUCE_MAX_GROUPS", "65536")),
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (

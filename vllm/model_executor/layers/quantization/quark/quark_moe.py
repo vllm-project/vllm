@@ -957,15 +957,30 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 layer.w2_weight.view(self.fp4_dtype),
                 requires_grad=layer.w2_weight.requires_grad,
             )
-        # Pre-shuffle weight
-        shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-            layer.w13_weight.data, layer.w2_weight.data
-        )
-
-        layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
-        layer.w13_weight.is_shuffled = True
-        layer.w2_weight.is_shuffled = True
+        # CK/cktile MoE expects block-shuffled weights (is_shuffled=True). Triton MXFP4
+        # MoE in AITER uses logical layout; set VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4=1
+        # to skip shuffle_weights. Kernel routing inside aiter.fused_moe is unchanged
+        # (see AITER tuning envs, e.g. AITER_BYPASS_TUNE_CONFIG).
+        if envs.VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4:
+            logger.warning_once(
+                "Quark MXFP4 MoE: VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4 is set; "
+                "skipping shuffle_weights. Use only with an AITER MoE path that expects "
+                "unshuffled expert weights (e.g. Triton MXFP4 MoE), not CK preshuffle."
+            )
+            #layer.w13_weight = torch.nn.Parameter(
+            #    layer.w13_weight.data, requires_grad=False
+           # )
+            #layer.w2_weight = torch.nn.Parameter(layer.w2_weight.data, requires_grad=False)
+            #layer.w13_weight.is_shuffled = False
+            #layer.w2_weight.is_shuffled = False
+        else:
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data
+            )
+            layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
+            layer.w13_weight.is_shuffled = True
+            layer.w2_weight.is_shuffled = True
         torch.cuda.empty_cache()
 
     def get_fused_moe_quant_config(
