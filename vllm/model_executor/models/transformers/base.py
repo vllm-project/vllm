@@ -244,38 +244,30 @@ class Base(
     def _decorate_cls_for_torch_compile(
         self,
         cls: type[PreTrainedModel],
-        dynamic_arg_dims: dict[str, int] | None = None,
-        enable_if: Callable[["VllmConfig"], bool] | None = None,
-        is_encoder: bool = False,
+        dynamic_arg_dims: dict[str, int] | None,
+        enable_if: Callable[["VllmConfig"], bool],
+        is_encoder: bool,
     ):
         """
         Decorate `cls` to indicate to vLLM that it supports torch compile.
 
         Args:
             cls: The PreTrainedModel class to decorate.
-            dynamic_arg_dims: A mapping from argument name to the dunamic dimensions
+            dynamic_arg_dims: A mapping from argument name to the dynamic dimensions
                 of the argument. If None, default dynamic arg dims will be used. See
                 [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
                 for more details.
+            enable_if: A function which takes in the vLLM config and returns whether
+                torch compile should be enabled for this class.
+            is_encoder: Whether the class being decorated is an encoder.
         """
-        if dynamic_arg_dims is None:
-            # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims = dict[str, int](
-                input_ids=1,  # shape: [1, seq_len]
-                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
-                position_ids=1,  # shape: [1, seq_len]
-            )
-            logger.debug("Using default dynamic arg dims: %s", dynamic_arg_dims)
-        if enable_if is None:
-            enable_if = can_enable_torch_compile
-
         logger.debug(
-            "Decorating `%s` as %s for torch compile",
+            "Decorating `%s` as %s for torch compile with dynamic_arg_dims of %s",
             cls.__name__,
             "encoder" if is_encoder else "decoder",
+            dynamic_arg_dims,
         )
 
-        # Decorate the cls for torch compile
         @support_torch_compile(
             dynamic_arg_dims=dynamic_arg_dims,
             enable_if=enable_if,
@@ -288,8 +280,17 @@ class Base(
         setattr(module, cls.__name__, SupportTorchCompileWrapper)
 
     def _decorate_for_torch_compile(self, **kwargs: dict):
-        decoder_cls = self._get_decoder_cls(**kwargs)
-        self._decorate_cls_for_torch_compile(cls=decoder_cls)
+        self._decorate_cls_for_torch_compile(
+            cls=self._get_decoder_cls(**kwargs),
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            dynamic_arg_dims=dict[str, int](
+                input_ids=1,  # shape: [1, seq_len]
+                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+            ),
+            enable_if=can_enable_torch_compile,
+            is_encoder=False,
+        )
 
     def _create_hf_to_vllm_mapper(self):
         """

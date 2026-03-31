@@ -16,7 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import torch
@@ -295,42 +295,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         del model
         return encoder_cls
 
-    def _decorate_cls_for_torch_compile(
-        self,
-        cls: type["PreTrainedModel"],
-        dynamic_arg_dims: dict[str, int] | None = None,
-        enable_if: Callable[["VllmConfig"], bool] | None = None,
-        is_encoder: bool = False,
-    ):
-        """
-        Like
-        [`_decorate_cls_for_torch_compile`][vllm.model_executor.models.transformers.base.Base._decorate_cls_for_torch_compile]
-        but with different default `dynamic_arg_dims` for MRoPE models.
-        """
-        if dynamic_arg_dims is None and self.model_config.uses_mrope:
-            # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims = dict[str, int](
-                input_ids=1,  # shape: [1, seq_len]
-                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
-                position_ids=2,  # shape: [3, 1, seq_len]
-            )
-            logger.debug("Using MRoPE default dynamic arg dims: %s", dynamic_arg_dims)
-        super()._decorate_cls_for_torch_compile(
-            cls=cls,
-            dynamic_arg_dims=dynamic_arg_dims,
-            enable_if=enable_if,
-            is_encoder=is_encoder,
-        )
-
     def _decorate_for_torch_compile(self, **kwargs: dict):
         super()._decorate_for_torch_compile(**kwargs)
         # Decorate the vision encoder model class to support torch compile if needed
         if self.compilation_config.compile_mm_encoder:
             self.check_version("5.0.0", "multimodal encoder compilation support")
-            encoder_cls = self._get_encoder_cls(**kwargs)
             self._decorate_cls_for_torch_compile(
-                cls=encoder_cls,
-                dynamic_arg_dims={"hidden_states": 1},
+                cls=self._get_encoder_cls(**kwargs),
+                # TODO: properly infer dynamic_arg_dims based
+                # on the encoder's forward method signature
+                dynamic_arg_dims=None,
                 enable_if=should_torch_compile_mm_encoder,
                 is_encoder=True,
             )
