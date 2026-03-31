@@ -35,3 +35,10 @@ class DummyModelLoader(BaseModelLoader):
         # NOTE(woosuk): For accurate performance evaluation, we assign
         # random values to the weights.
         initialize_dummy_weights(model, model_config)
+
+        # Some models build derived weights from loaded parameters instead of
+        # storing them in checkpoints. Rebuild those tensors for dummy load.
+        for layer in model.modules():
+            fuse_indexer_weights = getattr(layer, "fuse_indexer_weights", None)
+            if callable(fuse_indexer_weights):
+                fuse_indexer_weights()
