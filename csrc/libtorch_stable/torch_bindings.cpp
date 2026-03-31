@@ -227,6 +227,21 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // conditionally compiled so impl registration is in source file
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+
+  // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
+  ops.def(
+      "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
+      "Tensor? b_zeros, "
+      "bool has_zp, Tensor! b_qweight_reorder, Tensor! b_scales_reorder, "
+      "Tensor!? b_zeros_reorder, "
+      "int K, int N, int N_32align) -> ()");
+
+  // AllSpark quantization ops
+  ops.def(
+      "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
+      "Tensor? b_qzeros, "
+      "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
+      "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
 #endif
 
   // Hadamard transforms
@@ -275,6 +290,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // DSV3 fused A GEMM: conditionally compiled so impl registration is in
   // source file (dsv3_fused_a_gemm.cu)
+
+  // AllSpark ops: conditionally compiled so impl registrations are in source
+  // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
 }
 
