@@ -263,7 +263,7 @@ class PersimmonModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

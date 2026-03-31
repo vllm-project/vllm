@@ -170,7 +170,7 @@ class GPTNeoXLayer(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.attention",
         )
         self.mlp = GPTNeoXMLP(config, quant_config, prefix=f"{prefix}.mlp")
@@ -225,7 +225,7 @@ class GPTNeoXModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

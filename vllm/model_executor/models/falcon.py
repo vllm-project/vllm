@@ -284,7 +284,7 @@ class FalconDecoderLayer(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.self_attention",
         )
         self.mlp = FalconMLP(config, quant_config, prefix=f"{prefix}.mlp")
@@ -399,7 +399,7 @@ class FalconModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",

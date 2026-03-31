@@ -219,7 +219,7 @@ class JAISBlock(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.attn",
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)

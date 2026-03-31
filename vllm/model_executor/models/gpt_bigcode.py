@@ -180,7 +180,7 @@ class GPTBigCodeBlock(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.attn",
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
@@ -232,7 +232,7 @@ class GPTBigCodeModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",

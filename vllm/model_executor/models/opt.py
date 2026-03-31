@@ -265,7 +265,7 @@ class OPTDecoder(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
@@ -318,7 +318,7 @@ class OPTModel(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.decoder",
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
