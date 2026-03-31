@@ -5,7 +5,8 @@ Run on a GPU with SM >= 90 (Hopper/Blackwell):
     python tools/test_fused_a_gemm_nan.py
 """
 import torch
-import vllm._custom_ops as ops
+import vllm._C  # noqa: F401  — loads the _C extension
+_gemm = torch.ops._C.dsv3_fused_a_gemm
 
 
 def test_nan_contamination():
@@ -29,7 +30,7 @@ def test_nan_contamination():
             # Reference output from clean input
             ref_output = torch.empty(batch_size, output_size,
                                      dtype=torch.bfloat16, device=device)
-            ops.dsv3_fused_a_gemm(ref_output, hidden, weight.T)
+            _gemm(ref_output, hidden, weight.T)
 
             # Now poison some tokens with NaN
             poisoned = hidden.clone()
@@ -47,7 +48,7 @@ def test_nan_contamination():
             # Run GEMM with poisoned input
             test_output = torch.empty(batch_size, output_size,
                                       dtype=torch.bfloat16, device=device)
-            ops.dsv3_fused_a_gemm(test_output, poisoned, weight.T)
+            _gemm(test_output, poisoned, weight.T)
 
             # Check: clean tokens should produce the same output
             for tok in range(batch_size):
