@@ -1106,7 +1106,13 @@ class OpenAIServingChat(OpenAIServing):
                         )
                         # only check if there are any tool calls
                         # detected by partial parsing
-                        if should_check and tool_parser and auto_tools_called:
+                        if (
+                            should_check
+                            and tool_parser
+                            and auto_tools_called
+                            and index < len(tool_parser.prev_tool_call_arr)
+                            and index < len(tool_parser.streamed_args_for_tool)
+                        ):
                             latest_delta_len = 0
                             if (
                                 isinstance(
@@ -1140,17 +1146,25 @@ class OpenAIServingChat(OpenAIServing):
                                 expected_call = json.dumps(args, ensure_ascii=False)
 
                             # get what we've streamed so far for arguments
-                            # for the current tool
-                            actual_call = tool_parser.streamed_args_for_tool[index]
-                            if latest_delta_len > 0:
-                                actual_call = actual_call[:-latest_delta_len]
+                            # for the current tool. Some tool parsers
+                            # (e.g. Mistral) manage their own streaming
+                            # state and may not populate
+                            # streamed_args_for_tool, so we guard against
+                            # IndexError here.
+                            if index < len(tool_parser.streamed_args_for_tool):
+                                actual_call = tool_parser.streamed_args_for_tool[index]
+                                if latest_delta_len > 0:
+                                    actual_call = actual_call[:-latest_delta_len]
 
-                            # check to see if there's anything left to stream
-                            remaining_call = expected_call.replace(actual_call, "", 1)
-                            # set that as a delta message
-                            delta_message = self._create_remaining_args_delta(
-                                delta_message, remaining_call, index
-                            )
+                                # check to see if there's anything left
+                                # to stream
+                                remaining_call = expected_call.replace(
+                                    actual_call, "", 1
+                                )
+                                # set that as a delta message
+                                delta_message = self._create_remaining_args_delta(
+                                    delta_message, remaining_call, index
+                                )
 
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
