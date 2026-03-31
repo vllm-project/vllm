@@ -433,6 +433,88 @@ def _fp8_quant_and_cache_write(
 
 
 @triton.jit
+def _concat_quant_fp8_kernel(
+    ql_nope_ptr,  # [B, N, L]
+    q_pe_ptr,  # [B, N, P]
+    out_ptr,  # [B, N, L+P], fp8
+    scale_ptr,  # [1], float32 (static per-tensor scale)
+    nope_stride_b,
+    nope_stride_n,
+    pe_stride_b,
+    pe_stride_n,
+    out_stride_b,
+    out_stride_n,
+    L: tl.constexpr,  # kv_lora_rank (512)
+    P: tl.constexpr,  # qk_rope_head_dim (64)
+    L_BLOCK: tl.constexpr,
+    P_BLOCK: tl.constexpr,
+):
+    """Concatenate ql_nope and q_pe, then quantize to FP8 with a static scale.
+
+    Grid: (N, B) where N = num_heads, B = num_tokens.
+    """
+    head_idx = tl.program_id(0)
+    tok_idx = tl.program_id(1)
+    scale = tl.load(scale_ptr)
+
+    # Load ql_nope [L] and quantize
+    l_off = tl.arange(0, L_BLOCK)
+    l_mask = l_off < L
+    nope = tl.load(
+        ql_nope_ptr + tok_idx * nope_stride_b + head_idx * nope_stride_n + l_off,
+        mask=l_mask,
+    ).to(tl.float32)
+    nope_fp8 = (nope / scale).to(tl.float8e4nv)
+    tl.store(
+        out_ptr + tok_idx * out_stride_b + head_idx * out_stride_n + l_off,
+        nope_fp8,
+        mask=l_mask,
+    )
+
+    # Load q_pe [P] and quantize
+    p_off = tl.arange(0, P_BLOCK)
+    p_mask = p_off < P
+    pe = tl.load(
+        q_pe_ptr + tok_idx * pe_stride_b + head_idx * pe_stride_n + p_off,
+        mask=p_mask,
+    ).to(tl.float32)
+    pe_fp8 = (pe / scale).to(tl.float8e4nv)
+    tl.store(
+        out_ptr + tok_idx * out_stride_b + head_idx * out_stride_n + L + p_off,
+        pe_fp8,
+        mask=p_mask,
+    )
+
+
+def concat_quant_fp8(
+    ql_nope: torch.Tensor,  # [B, N, L]
+    q_pe: torch.Tensor,  # [B, N, P]
+    scale: torch.Tensor,  # [1]
+) -> torch.Tensor:
+    """Fused concat + per-tensor FP8 quantization for MLA decode query."""
+    B, N, L = ql_nope.shape
+    P = q_pe.shape[2]
+    out = torch.empty(B, N, L + P, dtype=torch.float8_e4m3fn, device=ql_nope.device)
+    _concat_quant_fp8_kernel[(N, B)](
+        ql_nope,
+        q_pe,
+        out,
+        scale,
+        ql_nope.stride(0),
+        ql_nope.stride(1),
+        q_pe.stride(0),
+        q_pe.stride(1),
+        out.stride(0),
+        out.stride(1),
+        L=L,
+        P=P,
+        L_BLOCK=triton.next_power_of_2(L),
+        P_BLOCK=triton.next_power_of_2(P),
+    )
+    return out
+
+
+@triton.jit
 def _fused_norm_rope_kernel(
     pos_ptr,
     # Q RMS norm

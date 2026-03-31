@@ -410,3 +410,134 @@ def test_fused_norm_rope_indexer_equivalence(
     ref_bytes = kv_cache_ref.view(torch.uint8)
     fused_bytes = kv_cache_fused.view(torch.uint8)
     assert (ref_bytes.int() - fused_bytes.int()).abs().float().mean() < 0.5
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_fused_norm_rope_mla_cache_equivalence(
+    num_tokens: int,
+    kv_cache_dtype: str,
+    seed: int,
+):
+    """Verify that the fused KV-norm + KV-RoPE + MLA-concat-and-cache path
+    produces the same MLA KV cache as the standalone ops."""
+    from vllm.model_executor.models.deepseek_v3_2_monolithic.ops import (
+        fused_norm_rope,
+        qk_rope,
+        rms_norm_small,
+    )
+    from vllm.v1.attention.ops.concat_and_cache_mla import (
+        concat_and_cache_mla,
+    )
+
+    set_random_seed(seed)
+    device = "cuda"
+    dtype = torch.bfloat16
+
+    # DeepSeek V3 dimensions
+    q_dim = 1536
+    kv_dim = 512
+    kpe_dim = 64
+    index_k_dim = 128
+    rot_dim = 64
+    topk = 8
+    mla_entry_size = kv_dim + kpe_dim  # 576
+    cache_block_size = 16
+    num_blocks = 32
+    idx_cache_stride = index_k_dim + 4
+
+    # Inputs
+    positions = torch.randint(0, 1024, (num_tokens,), device=device)
+    q_c = torch.randn(num_tokens, q_dim, dtype=dtype, device=device)
+    q_rms_w = torch.randn(q_dim, dtype=dtype, device=device)
+    kv_c = torch.randn(num_tokens, kv_dim, dtype=dtype, device=device)
+    kv_rms_w = torch.randn(kv_dim, dtype=dtype, device=device)
+    k_pe = torch.randn(num_tokens, kpe_dim, dtype=dtype, device=device)
+    kpe_cos_sin = torch.randn(4096, kpe_dim, dtype=dtype, device=device)
+    index_k = torch.randn(num_tokens, index_k_dim, dtype=dtype, device=device)
+    index_k_w = torch.randn(index_k_dim, dtype=dtype, device=device)
+    index_k_b = torch.randn(index_k_dim, dtype=dtype, device=device)
+    ik_cos_sin = torch.randn(4096, rot_dim, dtype=dtype, device=device)
+    topk_buf = torch.zeros(num_tokens, topk, dtype=torch.int32, device=device)
+    scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    eps = 1e-6
+
+    total_slots = num_blocks * cache_block_size
+    # Single slot_mapping shared by indexer and MLA caches.
+    slot_mapping = torch.tensor(
+        random.sample(range(total_slots), num_tokens),
+        dtype=torch.long,
+        device=device,
+    )
+
+    mla_cache_dtype = torch.uint8 if kv_cache_dtype == "fp8_e4m3" else dtype
+    mla_cache_ref = torch.zeros(
+        num_blocks,
+        cache_block_size,
+        mla_entry_size,
+        dtype=mla_cache_dtype,
+        device=device,
+    )
+    mla_cache_fused = mla_cache_ref.clone()
+
+    # --- Reference: standalone KV norm + KV RoPE + concat_and_cache_mla ---
+    kv_c_normed_ref = rms_norm_small(kv_c, kv_rms_w, eps)
+    k_pe_ref = k_pe.clone()
+    dummy_q = torch.empty_like(k_pe_ref.unsqueeze(1))
+    qk_rope(
+        positions,
+        dummy_q,
+        k_pe_ref.unsqueeze(1),
+        kpe_cos_sin,
+        q_start_offset=0,
+        interleaved=True,
+    )
+    concat_and_cache_mla(
+        kv_c_normed_ref,
+        k_pe_ref,
+        mla_cache_ref,
+        slot_mapping,
+        kv_cache_dtype,
+        scale,
+    )
+
+    # --- Fused: everything in one kernel ---
+    fused_norm_rope(
+        positions,
+        q_c.clone(),
+        q_rms_w,
+        eps,
+        kv_c.clone(),
+        kv_rms_w,
+        eps,
+        k_pe.clone(),
+        kpe_cos_sin,
+        index_k.clone(),
+        index_k_w,
+        index_k_b,
+        eps,
+        ik_cos_sin,
+        topk_buf.clone(),
+        slot_mapping=slot_mapping,
+        indexer_k_cache=torch.zeros(
+            num_blocks,
+            cache_block_size,
+            idx_cache_stride,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        ),
+        mla_kv_cache=mla_cache_fused,
+        mla_kv_cache_dtype=kv_cache_dtype,
+        mla_k_scale=scale,
+    )
+
+    ref_bytes = mla_cache_ref.view(torch.uint8)
+    fused_bytes = mla_cache_fused.view(torch.uint8)
+    if kv_cache_dtype == "auto":
+        # bf16 direct copy — must be bitwise identical.
+        torch.testing.assert_close(fused_bytes, ref_bytes, atol=0, rtol=0)
+    else:
+        # FP8 quantization may differ by 1 ULP due to division rounding.
+        torch.testing.assert_close(fused_bytes, ref_bytes, atol=1, rtol=0)

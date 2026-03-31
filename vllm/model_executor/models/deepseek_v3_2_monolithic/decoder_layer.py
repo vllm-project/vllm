@@ -17,7 +17,7 @@ from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
 from .allreduce_rms import AllReduceRMSParams, allreduce_add_rms_norm
 from .attention import MonolithicMLAAttention
-from .ops import fused_norm_rope, fused_q, rms_norm
+from .ops import concat_quant_fp8, fused_norm_rope, fused_q, rms_norm
 from .sparse_indexer import sparse_attn_indexer
 
 
@@ -322,7 +322,7 @@ class MonolithicDecoderLayer(nn.Module):
 
         # 2. FP8 query quantization (if needed)
         if fp8_attention and impl.supports_quant_query_input:
-            mqa_q = mla._decode_concat_quant_fp8_op(ql_nope, q_pe, mla._q_scale)
+            mqa_q = concat_quant_fp8(ql_nope, q_pe, mla._q_scale)
         else:
             mqa_q = (ql_nope, q_pe)
 
