@@ -63,6 +63,7 @@ from vllm.config import (
     get_attr_docs,
 )
 from vllm.config.cache import (
+    CacheDType,
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
@@ -391,7 +392,7 @@ class EngineArgs:
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
-    kv_cache_dtype: str = "auto"
+    kv_cache_dtype: CacheDType | Literal["auto"] = "auto"
     seed: int = ModelConfig.seed
     max_model_len: int = ModelConfig.max_model_len
     cudagraph_capture_sizes: list[int] | None = (
