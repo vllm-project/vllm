@@ -24,8 +24,15 @@ else:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
 @pytest.mark.xfail(
+    not current_platform.is_rocm(),
+    reason="EAGLE + DP > 1 produces wrong outputs when async spec decode "
+    "correction is active. Root cause under investigation. "
+    "See: https://github.com/vllm-project/vllm/issues/31913",
+    strict=False,
+)
+@pytest.mark.xfail(
     current_platform.is_rocm(),
-    reason="Test may fail on ROCm until batch invariance is enabled."
+    reason="Test may fail on ROCm until batch invariance is enabled. "
     "See: https://github.com/vllm-project/vllm/issues/27433",
     strict=False,
 )
