@@ -202,9 +202,14 @@ class TieredOffloadingManager(OffloadingManager):
             return
 
         # Pick the candidate with the most disk blocks (most benefit)
+        num_candidates = len(self._disk_miss_candidates)
         self._disk_miss_candidates.sort(key=lambda x: x[0], reverse=True)
         best = self._disk_miss_candidates[0]
         self._disk_miss_candidates.clear()
+        logger.info(
+            "DISK_DEBUG top_miss: %d candidates, best=%s with %d blocks",
+            num_candidates, best[1], best[0],
+        )
 
         disk_count, request_id, block_hashes = best
 
@@ -345,6 +350,11 @@ class TieredOffloadingManager(OffloadingManager):
             )
             for bh in op.block_hashes:
                 self._active_prefetches.pop(bh, None)
+            logger.info(
+                "DISK_DEBUG prefetch_complete: %d blocks now ready, "
+                "reserved=%d",
+                len(op.block_hashes), self._prefetch_blocks_reserved,
+            )
 
     # ── Standard delegation ──────────────────────────────────────
 

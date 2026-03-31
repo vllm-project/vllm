@@ -321,14 +321,25 @@ class OffloadingConnectorWorker:
         if metadata.disk_prefetches:
             handlers = self._get_disk_handlers()
             if handlers:
+                from vllm.logger import init_logger as _il
+                _logger = _il(__name__)
+                _logger.info(
+                    "DISK_DEBUG worker: submitting %d prefetch specs",
+                    len(metadata.disk_prefetches),
+                )
                 handlers.process_prefetch_requests(metadata.disk_prefetches)
 
         # Check if any previously submitted prefetches have completed.
-        # Only report completion when data is physically in CPU.
         handlers = self._get_disk_handlers()
         if handlers:
             newly_completed = handlers.check_prefetch_completion()
             if newly_completed:
+                from vllm.logger import init_logger as _il
+                _logger = _il(__name__)
+                _logger.info(
+                    "DISK_DEBUG worker: %d prefetches completed",
+                    len(newly_completed),
+                )
                 self._completed_disk_prefetches.extend(newly_completed)
 
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
