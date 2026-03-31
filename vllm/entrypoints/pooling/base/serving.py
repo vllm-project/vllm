@@ -117,8 +117,16 @@ class PoolingServing:
             else await self._get_trace_headers(ctx.raw_request.headers)
         )
 
-        pooling_params = self.io_processor.create_pooling_params(ctx.request)
-        pooling_params.verify(self.model_config)
+        if ctx.pooling_params is None:
+            pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        else:
+            pooling_params = ctx.pooling_params
+
+        if isinstance(pooling_params, list):
+            for params in pooling_params:
+                params.verify(self.model_config)
+        else:
+            pooling_params.verify(self.model_config)
 
         for i, engine_input in enumerate(ctx.engine_inputs):
             prompt_request_id = (
@@ -127,16 +135,22 @@ class PoolingServing:
                 else ctx.prompt_request_ids[i]
             )
 
+            params = (
+                pooling_params[i]
+                if isinstance(pooling_params, list)
+                else pooling_params
+            )
+
             self._log_inputs(
                 prompt_request_id,
                 engine_input,
-                params=pooling_params,
+                params=params,
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
                 engine_input,
-                pooling_params,
+                params,
                 prompt_request_id,
                 lora_request=ctx.lora_request,
                 trace_headers=trace_headers,
@@ -224,7 +238,7 @@ class PoolingServing:
             raise ValueError(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
-                " Please, select a smaller truncation size."
+                " Please request a smaller truncation size."
             )
         return None
 
