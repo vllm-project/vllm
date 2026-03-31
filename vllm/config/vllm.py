@@ -152,13 +152,11 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if using AITER RMSNorm and AITER Triton GEMMs
-    and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+    """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     return (
         rocm_aiter_ops.is_rmsnorm_enabled()
-        and not rocm_aiter_ops.is_triton_gemm_enabled()
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -528,7 +526,10 @@ class VllmConfig:
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}"
                 )
-            quant_config.maybe_update_config(model_config.model)
+            quant_config.maybe_update_config(
+                model_config.model,
+                hf_config=model_config.hf_config,
+            )
             return quant_config
         return None
 
@@ -1328,6 +1329,26 @@ class VllmConfig:
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = (
                     max_num_batched_tokens - scheduled_token_delta
+                )
+
+            if self.scheduler_config.max_num_scheduled_tokens <= 0:
+                raise ValueError(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings, which does not allow"
+                    " any tokens to be scheduled. Increase max_num_batched_tokens"
+                    " to accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs."
+                )
+            if self.scheduler_config.max_num_scheduled_tokens < 8192:
+                logger.warning_once(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings. This may lead to suboptimal"
+                    " performance. Consider increasing max_num_batched_tokens to"
+                    " accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs.",
+                    scope="local",
                 )
 
             max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens

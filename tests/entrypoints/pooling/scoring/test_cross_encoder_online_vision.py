@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
-from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
+from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
 
