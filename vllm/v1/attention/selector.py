@@ -30,6 +30,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_per_head_quant_scales: bool = False
     attn_type: str = AttentionType.DECODER
     model_architectures: tuple[str, ...] = ()
+    use_non_causal: bool = False
 
     def __repr__(self):
         return (
@@ -43,7 +44,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_mm_prefix={self.use_mm_prefix}, "
             f"use_per_head_quant_scales={self.use_per_head_quant_scales}, "
             f"attn_type={self.attn_type}, "
-            f"model_architectures={self.model_architectures})"
+            f"model_architectures={self.model_architectures}, "
+            f"use_non_causal={self.use_non_causal})"
         )
 
     def validation_kwargs(self) -> dict[str, object]:
@@ -94,6 +96,11 @@ def get_attn_backend(
         ):
             model_architectures.append(resolved_architecture)
 
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    use_non_causal = (
+        speculative_config is not None and speculative_config.method == "dflash"
+    )
+
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,
@@ -106,6 +113,7 @@ def get_attn_backend(
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
         model_architectures=tuple(model_architectures),
+        use_non_causal=use_non_causal,
     )
 
     return _cached_get_attn_backend(
@@ -168,8 +176,8 @@ def _cached_get_mamba_attn_backend(
         selected_backend = MambaAttentionBackendEnum[backend_name]
     except KeyError as e:
         raise ValueError(
-            f"Invalid mamba attention backend type: '{backend_name}'. Valid "
-            f"backends are: {list(MambaAttentionBackendEnum.__members__.keys())}"
+            f"Invalid mamba attention backend type: '{mamba_type}'. Valid "
+            f"types are: {list(MAMBA_TYPE_TO_BACKEND_MAP.keys())}"
         ) from e
 
     mamba_attn_backend = selected_backend.get_class()

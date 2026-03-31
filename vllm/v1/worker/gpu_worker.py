@@ -367,30 +367,12 @@ class Worker(WorkerBase):
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
-    def load_model(self) -> None:
-        dummy_weights = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        if dummy_weights:
-            (
-                expanded_physical_to_logical,
-                num_logical_experts,
-                old_num_physical_experts,
-            ) = self.elastic_ep_executor.receive_expert_mapping()
-            num_physical_experts = expanded_physical_to_logical.shape[1]
-            self.parallel_config.eplb_config.num_redundant_experts = (
-                num_physical_experts - num_logical_experts
-            )
-
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
         ):
-            self.model_runner.load_model(load_dummy_weights=dummy_weights)
-
-        if dummy_weights:
-            self.model_runner.setup_eplb_from_mapping(
-                expanded_physical_to_logical, old_num_physical_experts
-            )
-            self.model_runner.eep_eplb_suppressed = True
+            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -469,9 +451,7 @@ class Worker(WorkerBase):
         )
 
         self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = (
-            profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
-        )
+        self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -690,6 +670,7 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
+
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory

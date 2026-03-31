@@ -145,11 +145,37 @@ class ElasticEPScalingExecutor:
             raise ValueError(f"Unknown execute method: {execute_method}")
         return method(*args, **kwargs)
 
+    def _set_eplb_suppressed(self, suppressed: bool) -> None:
+        self.worker.model_runner.eep_eplb_suppressed = suppressed
+        ep_group = get_standby_ep_group() or get_ep_group()
+        if ep_group.rank == 0:
+            logger.info(
+                "[Elastic EP] EPLB %s elastic scaling transition",
+                "disabled during" if suppressed else "re-enabled after",
+            )
+
+    def load_model(self) -> None:
+        (
+            expanded_physical_to_logical,
+            num_logical_experts,
+            old_num_physical_experts,
+        ) = self.receive_expert_mapping()
+        num_physical_experts = expanded_physical_to_logical.shape[1]
+        self.worker.parallel_config.eplb_config.num_redundant_experts = (
+            num_physical_experts - num_logical_experts
+        )
+        self.worker.load_model(load_dummy_weights=True)
+        self.worker.model_runner.setup_eplb_from_mapping(
+            expanded_physical_to_logical, old_num_physical_experts
+        )
+        self._set_eplb_suppressed(True)
+
     def create_standby_groups(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
+        old_dp_size = get_dp_group().world_size
         world_size = self.worker.vllm_config.parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
         updated_config = copy.copy(self.worker.vllm_config)
@@ -165,11 +191,8 @@ class ElasticEPScalingExecutor:
                 coord_store_port=reconfig_request.coord_store_port,
                 enable_eplb=updated_config.parallel_config.enable_eplb,
             )
-        self.worker.model_runner.eep_eplb_suppressed = True
-        standby_ep_group = get_standby_ep_group()
-        assert standby_ep_group is not None
-        if standby_ep_group.rank == 0:
-            logger.info("[Elastic EP] EPLB disabled during elastic scaling transition")
+        if new_dp_size > old_dp_size:
+            self._set_eplb_suppressed(True)
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
         standby_dp_group = get_standby_dp_group()
@@ -237,13 +260,31 @@ class ElasticEPScalingExecutor:
             device=self.worker.device,
         )
 
+    def _release_cuda_graphs(self) -> None:
+        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
+            wrapper = self.worker.model_runner.model
+            wrapper.concrete_cudagraph_entries = {}
+
+        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
+            raise RuntimeError("DBO is not yet supported in elastic EP")
+
+        torch.compiler.reset()
+        with set_current_vllm_config(self.worker.vllm_config):
+            reset_compile_wrapper(self.worker.model_runner.get_model())
+
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+
     def switch_and_remove(self) -> None:
+        self._release_cuda_graphs()
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
 
     def switch_and_prepare(self) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
+        self._release_cuda_graphs()
         _replace_active_groups(**pop_standby_groups())
 
         parallel_config = self.worker.vllm_config.parallel_config
@@ -358,6 +399,7 @@ class ElasticEPScalingExecutor:
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
+            eplb_state._init_should_record_tensor(model)
             model.update_physical_experts_metadata(
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
@@ -384,13 +426,6 @@ class ElasticEPScalingExecutor:
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
-        # release all previously captured CUDA graphs
-        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            raise RuntimeError("DBO is not yet supported in elastic EP")
-
         multi_block_table = self.worker.model_runner.input_batch.block_table
         saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
         for bt in multi_block_table.block_tables:
@@ -399,14 +434,6 @@ class ElasticEPScalingExecutor:
             )
         multi_block_table.clear()
 
-        # reset the compile wrapper
-        torch.compiler.reset()
-        with set_current_vllm_config(self.worker.vllm_config):
-            reset_compile_wrapper(self.worker.model_runner.get_model())
-
-        gc.collect()
-        torch.accelerator.synchronize()
-        torch.accelerator.empty_cache()
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
         lock_workspace()
@@ -416,8 +443,12 @@ class ElasticEPScalingExecutor:
         ):
             bt.block_table.gpu.copy_(saved_gpu)
             bt.block_table.cpu.copy_(saved_cpu)
+        if new_dp_size < old_dp_size:
+            self._set_eplb_suppressed(False)
 
-    def perform_eplb_reshuffle(self, new_dp_size: int | None = None) -> None:
+    def _perform_eplb_reshuffle(
+        self, rank_mapping: dict[int, int] | None = None
+    ) -> None:
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
 
@@ -428,20 +459,9 @@ class ElasticEPScalingExecutor:
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         is_async_enabled = eplb_state.is_async
         eplb_state.is_async = False
-        if new_dp_size is None:
+        if rank_mapping is None:
             eplb_state.rearrange()
         else:
-            # scale down
-            parallel_config = self.worker.vllm_config.parallel_config
-            tp_size = parallel_config.tensor_parallel_size
-            old_ep_size = parallel_config.data_parallel_size * tp_size
-            new_ep_size = new_dp_size * tp_size
-
-            rank_mapping = {
-                old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
-                for old_ep_rank in range(old_ep_size)
-            }
-
             eplb_state.rearrange(rank_mapping=rank_mapping)
         # NOTE(yongji): check whether we need to synchronize here
         torch.accelerator.synchronize()
@@ -451,9 +471,24 @@ class ElasticEPScalingExecutor:
             eplb_model_state.physical_to_logical_map.shape[1]
         )
         eplb_state.is_async = is_async_enabled
-        self.worker.model_runner.eep_eplb_suppressed = False
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
+
+    def perform_eplb_reshuffle(self) -> None:
+        self._perform_eplb_reshuffle()
+        self._set_eplb_suppressed(False)
+
+    def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
+        self._set_eplb_suppressed(True)
+        parallel_config = self.worker.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        old_ep_size = parallel_config.data_parallel_size * tp_size
+        new_ep_size = new_dp_size * tp_size
+        rank_mapping = {
+            old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
+            for old_ep_rank in range(old_ep_size)
+        }
+        self._perform_eplb_reshuffle(rank_mapping=rank_mapping)
 
     def receive_weights(self) -> None:
         dp_group = get_dp_group()

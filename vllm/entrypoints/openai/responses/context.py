@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from typing import TYPE_CHECKING, Final, Union
+from typing import TYPE_CHECKING, Any, Final, Union
 
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -184,6 +184,7 @@ class SimpleContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
+        self.kv_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -192,6 +193,8 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        if output.kv_transfer_params is not None:
+            self.kv_transfer_params = output.kv_transfer_params
 
         # Accumulate text, token_ids, and logprobs for streaming mode
         delta_output = output.outputs[0]
@@ -275,7 +278,7 @@ class ParsableContext(ConversationContext):
         reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
-        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
@@ -310,11 +313,14 @@ class ParsableContext(ConversationContext):
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
+        self.kv_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        if output.kv_transfer_params is not None:
+            self.kv_transfer_params = output.kv_transfer_params
         self.parser.process(output.outputs[0])
         output_token_ids = output.outputs[0].token_ids or []
         self._accumulated_token_ids.extend(output_token_ids)
@@ -540,6 +546,7 @@ class HarmonyContext(ConversationContext):
         self.all_turn_metrics: list[TurnMetrics] = []
         self.is_first_turn = True
         self.first_tok_of_message = True  # For streaming support
+        self.kv_transfer_params: dict[str, Any] | None = None
 
     def _update_num_reasoning_tokens(self):
         channel = self.parser.current_channel
@@ -559,6 +566,8 @@ class HarmonyContext(ConversationContext):
             self._update_num_reasoning_tokens()
         self._update_prefill_token_usage(output)
         self._update_decode_token_usage(output)
+        if output.kv_transfer_params is not None:
+            self.kv_transfer_params = output.kv_transfer_params
         # Append current turn to all turn list for next turn's calculations
         self.all_turn_metrics.append(self.current_turn_metrics.copy())
         self.current_turn_metrics.reset()
@@ -892,6 +901,8 @@ class StreamingHarmonyContext(HarmonyContext):
         if last_delta_text:
             self.last_content_delta = last_delta_text
         self._update_decode_token_usage(output)
+        if output.kv_transfer_params is not None:
+            self.kv_transfer_params = output.kv_transfer_params
 
         # For streaming, update previous turn when message is complete
         if output.finished:
