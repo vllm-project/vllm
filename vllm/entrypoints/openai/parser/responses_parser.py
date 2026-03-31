@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.entrypoints.openai.responses.utils import should_continue_final_message
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
@@ -61,9 +62,16 @@ class ResponsesParser:
         # Store the finish_reason from the output
         self.finish_reason = output.finish_reason
 
-        reasoning, content = self.reasoning_parser_instance.extract_reasoning(
-            output.text, request=self.request
-        )
+        # When continuing a final message, skip extract_reasoning —
+        # all generated tokens are content.
+        skip_reasoning_parse = should_continue_final_message(self.request.input)
+
+        if skip_reasoning_parse:
+            reasoning, content = None, output.text
+        else:
+            reasoning, content = self.reasoning_parser_instance.extract_reasoning(
+                output.text, request=self.request
+            )
         if reasoning:
             self.response_messages.append(
                 ResponseReasoningItem(

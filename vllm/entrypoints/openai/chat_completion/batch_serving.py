@@ -261,7 +261,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else:
                     logprobs = None
 
-                if reasoning_parser:
+                # When continuing a final message, skip extract_reasoning —
+                # all generated tokens are content.
+                skip_reasoning_parse = request.continue_final_message
+                if reasoning_parser and not skip_reasoning_parse:
                     reasoning, content = reasoning_parser.extract_reasoning(
                         output.text,
                         request=request,  # type: ignore[arg-type]
