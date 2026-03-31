@@ -44,6 +44,7 @@ from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
@@ -674,7 +675,10 @@ class WorkerProc:
             daemon=True,
         )
 
-        proc.start()
+        # Apply NUMA binding if configured
+        with numa_utils.configure_subprocess(vllm_config, local_rank):
+            proc.start()
+
         # Close child ends of pipes here in the parent
         ready_writer.close()
         death_reader.close()
@@ -825,6 +829,8 @@ class WorkerProc:
 
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
+            if worker.vllm_config.parallel_config.numa_bind:
+                numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
 
             worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
