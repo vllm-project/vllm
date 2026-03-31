@@ -70,7 +70,7 @@ class ServingScores(PoolingServing):
         raw_request: Request | None = None,
     ) -> Response:
         if not self.use_gpu_for_late_interaction_scoring:
-            await super().__call__(request, raw_request)
+            return await super().__call__(request, raw_request)
 
         return await self.gpu_for_late_interaction_scoring(request, raw_request)
 
@@ -218,6 +218,8 @@ class ServingScores(PoolingServing):
         # stage 2: encode docs and return scalar scores from workers.
         doc_ctx = await self._late_interaction_encode_docs(ctx)
 
+        ctx.final_res_batch = doc_ctx.final_res_batch
+
         # await self.io_processor.post_process_online_async(ctx)
         return await self._build_response(doc_ctx)
 
@@ -265,7 +267,7 @@ class ServingScores(PoolingServing):
         default_pooling_params = ctx.request.to_pooling_params("token_embed")
 
         query_keys = [f"{ctx.request_id}-query-{i}" for i in range(offset)]
-        doc_keys = [f"{ctx.request_id}-query-{i}" for i in range(offset)]
+        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(offset)]
 
         doc_pooling_params_list = []
         for i in range(len(doc_engine_inputs)):
