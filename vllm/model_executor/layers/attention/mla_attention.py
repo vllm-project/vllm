@@ -731,6 +731,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=output[num_mqa_tokens:],
             )
+            _nan_mark_mla(
+                output[num_mqa_tokens:], 10, self._nan_layer_idx
+            )  # after fwd_mha
 
         if num_mqa_tokens > 0:
             mqa_q = q[:num_mqa_tokens]
@@ -855,13 +858,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 bmm1_scale=getattr(self.impl, "bmm1_scale", None),
                 bmm2_scale=getattr(self.impl, "bmm2_scale", None),
             )
-            _nan_report_batch(
-                self._nan_layer_idx,
-                num_actual_toks=num_actual_toks,
-                padded_size=output_padded.shape[0],
-                num_decode_tokens=num_mqa_tokens,
-                num_mha_tokens=num_mha_tokens,
-            )
             _nan_stash_if_nan(
                 self._nan_layer_idx,
                 q_input=_nan_q_input,
@@ -901,6 +897,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             _nan_mark_mla(
                 mqa_output_slice, 9, self._nan_layer_idx, seq_lens=_decode_seq_lens
             )  # after v_up_proj
+        _nan_report_batch(
+            self._nan_layer_idx,
+            num_actual_toks=num_actual_toks,
+            padded_size=output_padded.shape[0],
+            num_decode_tokens=num_mqa_tokens,
+            num_mha_tokens=num_mha_tokens,
+        )
 
         if quant_key is not None:
             # Quantize the BF16 computation result into the quantized output
