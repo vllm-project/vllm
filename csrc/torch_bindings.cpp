@@ -557,6 +557,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.def(
       "turboquant_encode(Tensor kv_data, Tensor! angles_out,"
       "                  Tensor! radii_out, Tensor! qjl_out,"
+      "                  Tensor! residual_norms_out,"
       "                  int num_kv_heads, int head_size,"
       "                  str tq_type, int layer_seed,"
       "                  int qjl_proj_dim) -> ()");
@@ -565,7 +566,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // TurboQuant: standalone decode (for testing).
   cache_ops.def(
       "turboquant_decode(Tensor angles, Tensor radii,"
-      "                  Tensor qjl_bits, Tensor! kv_out,"
+      "                  Tensor qjl_bits, Tensor residual_norms,"
+      "                  Tensor! kv_out,"
       "                  int num_kv_heads, int head_size,"
       "                  str tq_type, int layer_seed,"
       "                  int qjl_proj_dim) -> ()");

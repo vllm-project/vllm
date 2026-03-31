@@ -30,6 +30,10 @@ __host__ __device__ constexpr bool has_qjl(TQDataType dt) {
   return dt != TQDataType::kPQ4;
 }
 
+// Maximum supported head dimension. All stack buffers use this size.
+// head_size must be a power of 2 and <= MAX_HEAD_SIZE.
+constexpr int MAX_HEAD_SIZE = 256;
+
 // ============================================================================
 // Fast Walsh-Hadamard Transform (WHT)
 // ============================================================================
@@ -169,8 +173,7 @@ template <int BITS>
 __device__ float polar_encode(const float* __restrict__ vec, int d,
                               uint8_t* __restrict__ angles_out) {
   // Working buffer for radii at current level
-  // Max head_size is typically 128 or 256
-  float radii[256];
+  float radii[MAX_HEAD_SIZE];
 
   int angle_idx = 0;
   int n = d;
@@ -239,9 +242,11 @@ __device__ void polar_decode(const uint8_t* __restrict__ angles,
     }
   }
 
-  // Start with the single radius at the top
-  float radii_current[1] = {radius};
-  float radii_next[256];
+  // Start with the single radius at the top. Buffer must be large enough to
+  // hold the fully expanded d-dimensional vector at the leaf level.
+  float radii_current[MAX_HEAD_SIZE];
+  float radii_next[MAX_HEAD_SIZE];
+  radii_current[0] = radius;
 
   // Reconstruct from top level down
   for (int lvl = num_levels - 1; lvl >= 0; lvl--) {
@@ -314,9 +319,16 @@ __device__ void qjl_encode(const float* __restrict__ residual, int d,
 }
 
 // Reconstruct the bias correction vector from sign bits.
-// correction[i] = (1/num_proj) * sum_j(sign_bit_j * random_vector_j[i])
-// where sign_bit_j is +1 or -1 based on stored sign.
+//
+// Per the QJL estimator (Zandieh et al., AAAI 2025), the unbiased
+// reconstruction is:
+//   correction[i] = (||r|| * sqrt(pi/2) / m) * sum_j(sign_j * g_j[i])
+//
+// where ||r|| is the L2 norm of the quantization residual (stored as fp16
+// alongside the sign bits), m is the number of projections, and g_j is the
+// j-th random sign vector.
 __device__ void qjl_decode_correction(const uint8_t* __restrict__ sign_bits,
+                                      float residual_norm,
                                       int d, uint32_t seed, int num_proj,
                                       float* __restrict__ correction_out) {
   // Initialize correction to zero
@@ -324,7 +336,10 @@ __device__ void qjl_decode_correction(const uint8_t* __restrict__ sign_bits,
     correction_out[i] = 0.0f;
   }
 
-  float scale = 1.0f / static_cast<float>(num_proj);
+  // sqrt(pi/2) ≈ 1.2533141
+  constexpr float SQRT_PI_OVER_2 = 1.2533141f;
+  float scale = residual_norm * SQRT_PI_OVER_2 / static_cast<float>(num_proj);
+
   for (int proj_idx = 0; proj_idx < num_proj; proj_idx++) {
     // Read the sign bit
     int byte_idx = proj_idx / 8;
@@ -347,6 +362,11 @@ __device__ void qjl_decode_correction(const uint8_t* __restrict__ sign_bits,
 // Full TurboQuant encode for one KV head vector.
 // Input: vec[head_size] (fp16/bf16/fp32)
 // Output: packed angles, radius, and optionally QJL sign bits
+//
+// IMPORTANT: head_size must be a power of 2 and <= MAX_HEAD_SIZE (256).
+// This is required by the Walsh-Hadamard Transform and the fixed-size stack
+// buffers used throughout the encode/decode pipeline.
+
 template <TQDataType DT>
 __device__ void turboquant_encode_head(
     const float* __restrict__ vec, int head_size,
@@ -354,11 +374,16 @@ __device__ void turboquant_encode_head(
     uint8_t* __restrict__ angles_out,  // (head_size - 1) angle entries
     half* __restrict__ radius_out,     // 1 fp16 radius
     uint8_t* __restrict__ qjl_out,     // QJL sign bits (if enabled)
+    half* __restrict__ residual_norm_out,  // QJL residual L2 norm (if enabled)
     int qjl_proj_dim) {
   constexpr int BITS = angle_bits(DT);
 
+  // Validate head_size at runtime (power of 2 and within buffer limits)
+  assert(head_size <= MAX_HEAD_SIZE && "head_size exceeds MAX_HEAD_SIZE");
+  assert((head_size & (head_size - 1)) == 0 && "head_size must be power of 2");
+
   // Working buffer
-  float buf[256];
+  float buf[MAX_HEAD_SIZE];
   for (int i = 0; i < head_size; i++) {
     buf[i] = vec[i];
   }
@@ -373,13 +398,20 @@ __device__ void turboquant_encode_head(
   // Step 3: QJL residual correction (for tq2/tq3 modes)
   if constexpr (has_qjl(DT)) {
     // Compute residual = original_rotated - dequantized
-    float decoded[256];
+    float decoded[MAX_HEAD_SIZE];
     polar_decode<BITS>(angles_out, radius, head_size, decoded);
 
-    float residual[256];
+    float residual[MAX_HEAD_SIZE];
     for (int i = 0; i < head_size; i++) {
       residual[i] = buf[i] - decoded[i];
     }
+
+    // Compute and store residual L2 norm (needed for unbiased QJL decode)
+    float norm_sq = 0.0f;
+    for (int i = 0; i < head_size; i++) {
+      norm_sq += residual[i] * residual[i];
+    }
+    *residual_norm_out = __float2half(sqrtf(norm_sq));
 
     // Encode residual as sign bits
     qjl_encode(residual, head_size, qjl_seed, qjl_proj_dim, qjl_out);
@@ -390,7 +422,7 @@ __device__ void turboquant_encode_head(
 template <TQDataType DT>
 __device__ void turboquant_decode_head(
     const uint8_t* __restrict__ angles, half radius_fp16,
-    const uint8_t* __restrict__ qjl_bits,
+    const uint8_t* __restrict__ qjl_bits, half residual_norm_fp16,
     int head_size, uint32_t rotation_seed, uint32_t qjl_seed,
     int qjl_proj_dim,
     float* __restrict__ vec_out) {
@@ -403,10 +435,10 @@ __device__ void turboquant_decode_head(
 
   // Step 2: Add QJL correction (for tq2/tq3 modes)
   if constexpr (has_qjl(DT)) {
-    float correction[256];
-    qjl_decode_correction(qjl_bits, head_size, qjl_seed, qjl_proj_dim,
-                          correction);
-    // Scale correction by norm of residual (approximated by norm * scale_factor)
+    float residual_norm = __half2float(residual_norm_fp16);
+    float correction[MAX_HEAD_SIZE];
+    qjl_decode_correction(qjl_bits, residual_norm, head_size, qjl_seed,
+                          qjl_proj_dim, correction);
     for (int i = 0; i < head_size; i++) {
       vec_out[i] += correction[i];
     }
@@ -420,38 +452,40 @@ __device__ void turboquant_decode_head(
 // Block layout utilities
 // ============================================================================
 
-// For a block of `block_size` tokens with `num_heads` KV heads of `head_size`:
+// Per-token-per-head layout (contiguous in memory):
 //
-// PQ4 storage per block:
-//   angles: num_heads * block_size * (head_size - 1) * 4 bits
-//   radii:  num_heads * block_size * 2 bytes (fp16)
+//   [angles: padded_angle_bytes] [radius: 2B fp16] [qjl_bits: qjl_bytes]
+//   [residual_norm: 2B fp16 (QJL modes only)]
 //
-// TQ3 storage per block:
-//   angles: num_heads * block_size * (head_size - 1) * 3 bits
-//   qjl:    num_heads * block_size * ceil(head_size / 8) bytes
-//   radii:  num_heads * block_size * 2 bytes (fp16)
+// The angle bytes are padded to the next even number to ensure the radius
+// fp16 is always 2-byte aligned.
 //
-// TQ2 storage per block:
-//   angles: num_heads * block_size * (head_size - 1) * 2 bits
-//   qjl:    num_heads * block_size * ceil(head_size / 8) bytes
-//   radii:  num_heads * block_size * 2 bytes (fp16)
+// PQ4: angles(padded) + radius(2)
+// TQ3: angles(padded) + radius(2) + qjl_bits + residual_norm(2)
+// TQ2: angles(padded) + radius(2) + qjl_bits + residual_norm(2)
+
+// Compute the padded angle byte count (rounded up to even for alignment).
+__host__ __device__ inline int padded_angle_bytes(int head_size, int bits) {
+  int raw = ((head_size - 1) * bits + 7) / 8;
+  return (raw + 1) & ~1;  // Round up to next even number
+}
+
+// Calculate total bytes per token per head for a TurboQuant mode.
+__host__ __device__ int turboquant_bytes_per_token_per_head(
+    TQDataType dt, int head_size) {
+  int bits = angle_bits(dt);
+  int angle_bytes = padded_angle_bytes(head_size, bits);
+  int radius_bytes = 2;  // fp16
+  int qjl_bytes = has_qjl(dt) ? (head_size + 7) / 8 : 0;
+  int residual_norm_bytes = has_qjl(dt) ? 2 : 0;  // fp16
+  return angle_bytes + radius_bytes + qjl_bytes + residual_norm_bytes;
+}
 
 // Calculate total bytes per block for a TurboQuant mode.
 __host__ __device__ int turboquant_block_bytes(TQDataType dt, int num_kv_heads,
                                                int head_size, int block_size) {
-  int bits = angle_bits(dt);
-  int num_angles = head_size - 1;
-  // Packed angle bytes per token per head
-  int angle_bytes_per_token = (num_angles * bits + 7) / 8;
-  // QJL bytes per token per head
-  int qjl_bytes_per_token = has_qjl(dt) ? (head_size + 7) / 8 : 0;
-  // Radius: 2 bytes (fp16) per head per token
-  int radius_bytes_per_token = 2;
-
-  int bytes_per_token_per_head =
-      angle_bytes_per_token + qjl_bytes_per_token + radius_bytes_per_token;
-
-  return num_kv_heads * block_size * bytes_per_token_per_head;
+  return num_kv_heads * block_size *
+         turboquant_bytes_per_token_per_head(dt, head_size);
 }
 
 // Per-head seed derivation from layer-level seed

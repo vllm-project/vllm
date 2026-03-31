@@ -60,22 +60,22 @@ __global__ void paged_attention_turboquant_kernel(
   int num_blocks = (context_len + block_size - 1) / block_size;
 
   // Load query vector into registers
-  float q[256];
+  float q[MAX_HEAD_SIZE];
   const float* q_ptr =
       query + (seq_idx * num_heads + head_idx) * head_size;
   for (int i = 0; i < head_size; i++) {
     q[i] = q_ptr[i];
   }
 
-  // Block layout sizes
+  // Block layout sizes (using padded alignment from turboquant_utils.cuh)
   constexpr int BITS = angle_bits(DT);
-  int num_angles = head_size - 1;
-  int angle_bytes_per_head = (num_angles * BITS + 7) / 8;
-  int qjl_bytes_per_head = has_qjl(DT) ? (qjl_proj_dim + 7) / 8 : 0;
+  int angle_bytes = padded_angle_bytes(head_size, BITS);
   int radius_bytes = 2;
-  int bytes_per_token_per_head =
-      angle_bytes_per_head + qjl_bytes_per_head + radius_bytes;
-  int bytes_per_token = num_kv_heads * bytes_per_token_per_head;
+  int qjl_bytes = has_qjl(DT) ? (qjl_proj_dim + 7) / 8 : 0;
+  int residual_norm_bytes = has_qjl(DT) ? 2 : 0;
+  int bpt_per_head = angle_bytes + radius_bytes + qjl_bytes +
+                     residual_norm_bytes;
+  int bytes_per_token = num_kv_heads * bpt_per_head;
   int block_total_bytes = block_size * bytes_per_token;
 
   // Per-head seeds
@@ -85,7 +85,7 @@ __global__ void paged_attention_turboquant_kernel(
   // Softmax tracking
   float max_logit = -1e20f;
   float sum_exp = 0.0f;
-  float acc[256];
+  float acc[MAX_HEAD_SIZE];
   for (int i = 0; i < head_size; i++) {
     acc[i] = 0.0f;
   }
@@ -105,21 +105,26 @@ __global__ void paged_attention_turboquant_kernel(
       // --- Decode key ---
       int token_head_offset =
           token_i * bytes_per_token +
-          kv_head_idx * bytes_per_token_per_head;
+          kv_head_idx * bpt_per_head;
       const uint8_t* k_block_ptr =
           key_cache + physical_block_idx * block_total_bytes;
       const uint8_t* k_angles_ptr = k_block_ptr + token_head_offset;
       half k_radius = *reinterpret_cast<const half*>(
-          k_angles_ptr + angle_bytes_per_head);
+          k_angles_ptr + angle_bytes);
       const uint8_t* k_qjl_ptr =
           has_qjl(DT)
-              ? (k_angles_ptr + angle_bytes_per_head + radius_bytes)
+              ? (k_angles_ptr + angle_bytes + radius_bytes)
               : nullptr;
+      half k_residual_norm =
+          has_qjl(DT)
+              ? *reinterpret_cast<const half*>(
+                    k_angles_ptr + angle_bytes + radius_bytes + qjl_bytes)
+              : __float2half(0.0f);
 
-      float k_vec[256];
+      float k_vec[MAX_HEAD_SIZE];
       turboquant_decode_head<DT>(k_angles_ptr, k_radius, k_qjl_ptr,
-                                 head_size, rotation_seed, qjl_seed,
-                                 qjl_proj_dim, k_vec);
+                                 k_residual_norm, head_size, rotation_seed,
+                                 qjl_seed, qjl_proj_dim, k_vec);
 
       // Compute QK dot product
       float logit = 0.0f;
@@ -144,16 +149,21 @@ __global__ void paged_attention_turboquant_kernel(
           value_cache + physical_block_idx * block_total_bytes;
       const uint8_t* v_angles_ptr = v_block_ptr + token_head_offset;
       half v_radius = *reinterpret_cast<const half*>(
-          v_angles_ptr + angle_bytes_per_head);
+          v_angles_ptr + angle_bytes);
       const uint8_t* v_qjl_ptr =
           has_qjl(DT)
-              ? (v_angles_ptr + angle_bytes_per_head + radius_bytes)
+              ? (v_angles_ptr + angle_bytes + radius_bytes)
               : nullptr;
+      half v_residual_norm =
+          has_qjl(DT)
+              ? *reinterpret_cast<const half*>(
+                    v_angles_ptr + angle_bytes + radius_bytes + qjl_bytes)
+              : __float2half(0.0f);
 
-      float v_vec[256];
+      float v_vec[MAX_HEAD_SIZE];
       turboquant_decode_head<DT>(v_angles_ptr, v_radius, v_qjl_ptr,
-                                 head_size, rotation_seed, qjl_seed,
-                                 qjl_proj_dim, v_vec);
+                                 v_residual_norm, head_size, rotation_seed,
+                                 qjl_seed, qjl_proj_dim, v_vec);
 
       float weight = expf(logit - max_logit);
       for (int i = 0; i < head_size; i++) {

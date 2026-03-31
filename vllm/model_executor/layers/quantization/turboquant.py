@@ -114,15 +114,20 @@ class TurboQuantConfig:
         total_bits = angle_total + radius_total + qjl_total
         return total_bits / d
 
+    def _padded_angle_bytes(self, head_size: int) -> int:
+        """Angle bytes padded to next even number for fp16 alignment."""
+        raw = ((head_size - 1) * self.angle_bits + 7) // 8
+        return (raw + 1) & ~1  # Round up to even
+
     def bytes_per_token_per_head(self, head_size: int) -> int:
         """Calculate storage bytes per token per KV head."""
         d = head_size
         qjl_dim = self.qjl_projection_dim or d
-        num_angles = d - 1
-        angle_bytes = (num_angles * self.angle_bits + 7) // 8
+        angle_bytes = self._padded_angle_bytes(d)
         radius_bytes = 2  # fp16
         qjl_bytes = (qjl_dim + 7) // 8 if self.qjl_residual else 0
-        return angle_bytes + radius_bytes + qjl_bytes
+        residual_norm_bytes = 2 if self.qjl_residual else 0  # fp16
+        return angle_bytes + radius_bytes + qjl_bytes + residual_norm_bytes
 
     def block_bytes(
         self, num_kv_heads: int, head_size: int, block_size: int

@@ -83,12 +83,14 @@ void reshape_and_cache_turboquant(
 
 void turboquant_encode(torch::Tensor kv_data, torch::Tensor angles_out,
                        torch::Tensor radii_out, torch::Tensor qjl_out,
+                       torch::Tensor residual_norms_out,
                        int64_t num_kv_heads, int64_t head_size,
                        const std::string& tq_type, int64_t layer_seed,
                        int64_t qjl_proj_dim);
 
 void turboquant_decode(torch::Tensor angles, torch::Tensor radii,
-                       torch::Tensor qjl_bits, torch::Tensor kv_out,
+                       torch::Tensor qjl_bits, torch::Tensor residual_norms,
+                       torch::Tensor kv_out,
                        int64_t num_kv_heads, int64_t head_size,
                        const std::string& tq_type, int64_t layer_seed,
                        int64_t qjl_proj_dim);

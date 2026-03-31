@@ -203,9 +203,10 @@ class TurboQuantAttentionSpec(FullAttentionSpec):
         """Page size for TurboQuant compressed KV cache.
 
         Each token per KV head stores:
-          - (head_size - 1) quantized angles at angle_bits each
+          - (head_size - 1) quantized angles (padded to even bytes)
           - 1 fp16 radius (2 bytes)
           - ceil(qjl_proj_dim / 8) QJL sign bytes (if tq2/tq3)
+          - 1 fp16 residual norm (2 bytes, if tq2/tq3)
         Multiply by 2 for both K and V caches.
         """
         angle_bits_map = {"pq4": 4, "tq3": 3, "tq2": 2}
@@ -213,11 +214,15 @@ class TurboQuantAttentionSpec(FullAttentionSpec):
         bits = angle_bits_map[self.tq_type]
         qjl_dim = self.qjl_proj_dim or self.head_size
 
-        num_angles = self.head_size - 1
-        angle_bytes = (num_angles * bits + 7) // 8
+        # Pad angle bytes to even for fp16 alignment
+        raw_angle_bytes = ((self.head_size - 1) * bits + 7) // 8
+        angle_bytes = (raw_angle_bytes + 1) & ~1
         radius_bytes = 2  # fp16
         qjl_bytes = (qjl_dim + 7) // 8 if has_qjl else 0
-        bytes_per_token_per_head = angle_bytes + radius_bytes + qjl_bytes
+        residual_norm_bytes = 2 if has_qjl else 0  # fp16
+        bytes_per_token_per_head = (
+            angle_bytes + radius_bytes + qjl_bytes + residual_norm_bytes
+        )
 
         # Factor of 2 for both key and value caches
         return (

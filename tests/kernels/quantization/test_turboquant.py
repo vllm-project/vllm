@@ -65,16 +65,18 @@ class TestTurboQuantConfig:
 
     def test_bytes_per_token_per_head(self):
         cfg = TurboQuantConfig.from_kv_cache_dtype("tq3")
-        # For head_size=128: angle_bytes=48 (127*3=381 bits -> 48 bytes),
-        # radius=2, qjl=16 (128/8) -> total=66
+        # For head_size=128: angle_bytes=48 (127*3=381 bits -> 48 bytes,
+        # padded to 48 which is already even), radius=2, qjl=16 (128/8),
+        # residual_norm=2 -> total=68
         bpt = cfg.bytes_per_token_per_head(128)
-        assert bpt == 48 + 2 + 16  # 66 bytes
+        assert bpt == 48 + 2 + 16 + 2  # 68 bytes
 
     def test_block_bytes(self):
         cfg = TurboQuantConfig.from_kv_cache_dtype("tq3")
         # 8 kv heads, head_size=128, block_size=16
+        bpt = cfg.bytes_per_token_per_head(128)
         bb = cfg.block_bytes(num_kv_heads=8, head_size=128, block_size=16)
-        assert bb == 8 * 16 * 66  # 8448 bytes
+        assert bb == 8 * 16 * bpt
 
     def test_derive_layer_seed_deterministic(self):
         cfg = TurboQuantConfig.from_kv_cache_dtype("tq3", rotation_seed=42)
@@ -158,17 +160,21 @@ class TestTurboQuantKernels:
             num_tokens * num_kv_heads, max(qjl_bytes, 1),
             device="cuda", dtype=torch.uint8,
         )
+        residual_norms = torch.zeros(
+            num_tokens * num_kv_heads,
+            device="cuda", dtype=torch.float16,
+        )
         kv_out = torch.zeros_like(kv_data)
 
         # Encode
         ops.turboquant_encode(
-            kv_data, angles, radii, qjl_out,
+            kv_data, angles, radii, qjl_out, residual_norms,
             num_kv_heads, head_size, tq_type, layer_seed, qjl_proj_dim,
         )
 
         # Decode
         ops.turboquant_decode(
-            angles, radii, qjl_out, kv_out,
+            angles, radii, qjl_out, residual_norms, kv_out,
             num_kv_heads, head_size, tq_type, layer_seed, qjl_proj_dim,
         )
 
@@ -231,14 +237,18 @@ class TestTurboQuantKernels:
             num_tokens * num_kv_heads, qjl_bytes,
             device="cuda", dtype=torch.uint8,
         )
+        residual_norms = torch.zeros(
+            num_tokens * num_kv_heads,
+            device="cuda", dtype=torch.float16,
+        )
         kv_out = torch.zeros_like(kv_data)
 
         ops.turboquant_encode(
-            kv_data, angles, radii, qjl_out,
+            kv_data, angles, radii, qjl_out, residual_norms,
             num_kv_heads, head_size, tq_type, layer_seed, qjl_proj_dim,
         )
         ops.turboquant_decode(
-            angles, radii, qjl_out, kv_out,
+            angles, radii, qjl_out, residual_norms, kv_out,
             num_kv_heads, head_size, tq_type, layer_seed, qjl_proj_dim,
         )
 
@@ -284,14 +294,18 @@ class TestTurboQuantKernels:
                 num_tokens * num_kv_heads, max(qjl_bytes, 1),
                 device="cuda", dtype=torch.uint8,
             )
+            residual_norms = torch.zeros(
+                num_tokens * num_kv_heads,
+                device="cuda", dtype=torch.float16,
+            )
             kv_out = torch.zeros_like(kv_data)
 
             ops.turboquant_encode(
-                kv_data, angles, radii, qjl_out,
+                kv_data, angles, radii, qjl_out, residual_norms,
                 num_kv_heads, head_size, tq_type, layer_seed, qjl_proj_dim,
             )
             ops.turboquant_decode(
-                angles, radii, qjl_out, kv_out,
+                angles, radii, qjl_out, residual_norms, kv_out,
                 num_kv_heads, head_size, tq_type, layer_seed, qjl_proj_dim,
             )
             return kv_out
