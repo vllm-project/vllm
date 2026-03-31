@@ -9,6 +9,10 @@ from vllm.model_executor.kernels.linear import (  # noqa: E501
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 
 
@@ -23,6 +27,12 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if c.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
+            return (
+                False,
+                "XPUFP8ScaledMM only support per-channel and per-tensor quantization",
+            )
+
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
             return False, "XPUFP8ScaledMM only support FP8 weight dtype"
         return True, None

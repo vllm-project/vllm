@@ -128,6 +128,21 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     ],
 }
 
+_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        MarlinFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        # To be added
+    ],
+    PlatformEnum.CPU: [
+        # To be added
+    ],
+    PlatformEnum.XPU: [
+        XPUFP8ScaledMMLinearKernel,
+    ],
+}
+
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CUDA: [
@@ -170,7 +185,6 @@ def is_supported_and_can_implement_kernel(
     is_supported, failure_reason = kernel.is_supported(compute_capability)
     if not is_supported:
         return False, f"{kernel.__name__} {failure_reason}."
-
     can_implement, failure_reason = kernel.can_implement(config)
     if not can_implement:
         return (
@@ -367,10 +381,43 @@ def choose_mp_linear_kernel(
     )
 
 
+def choose_wfp8_a16_linear_kernel(
+    config: FP8ScaledMMLinearLayerConfig, compute_capability: int | None = None
+) -> type[FP8ScaledMMLinearKernel]:
+    if compute_capability is None:
+        if current_platform is None:
+            raise ValueError("Cannot determine compute capability")
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+
+    failure_reasons = []
+    for kernel in _POSSIBLE_WFP8A16_KERNELS[current_platform._enum]:
+        if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel.__name__} disabled by environment variable"
+            )
+            continue
+
+        can_implement, failure_reason = kernel.can_implement(config)
+        if can_implement:
+            return kernel
+        else:
+            failure_reasons.append(
+                f" {kernel.__name__} cannot implement due to: {failure_reason}"
+            )
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "WFP8A16 linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
+
+
 __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "choose_mp_linear_kernel",
+    "choose_wfp8_a16_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
     "ScaledMMLinearKernel",
