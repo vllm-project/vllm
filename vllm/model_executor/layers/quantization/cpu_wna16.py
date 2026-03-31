@@ -229,7 +229,8 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if envs.VLLM_CPU_INT4_W4A8 and torch.cpu._is_amx_tile_supported():
+        layer.use_w4a8 = envs.VLLM_CPU_INT4_W4A8 and torch.cpu._is_amx_tile_supported()
+        if layer.use_w4a8:
             self._process_weights_sglang_int4(layer)
         else:
             self._process_weights_woq(layer)
@@ -303,7 +304,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if envs.VLLM_CPU_INT4_W4A8 and torch.cpu._is_amx_tile_supported():
+        if layer.use_w4a8:
             return self._apply_sglang_int4(layer, x, bias)
         return self._apply_woq(layer, x, bias)
 
