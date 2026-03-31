@@ -326,7 +326,9 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
             ]
 
-    backends = [AttentionBackendEnum.ROCM_ATTN]
+    backends = [
+        AttentionBackendEnum.ROCM_ATTN,
+    ]
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
