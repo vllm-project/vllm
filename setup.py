@@ -699,6 +699,10 @@ class precompiled_wheel_utils:
                 flashmla_regex = re.compile(
                     r"vllm/third_party/flashmla/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
+                deep_gemm_regex = re.compile(
+                    r"vllm/third_party/deep_gemm/.*"
+                )
                 file_members = list(
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
@@ -712,6 +716,9 @@ class precompiled_wheel_utils:
                 )
                 file_members += list(
                     filter(lambda x: flashmla_regex.match(x.filename), wheel.filelist)
+                )
+                file_members += list(
+                    filter(lambda x: deep_gemm_regex.match(x.filename), wheel.filelist)
                 )
 
                 for file in file_members:
