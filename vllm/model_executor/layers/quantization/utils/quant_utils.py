@@ -318,28 +318,31 @@ def scaled_quantize(
 
 
 def scaled_quantize_experts(
-    expert_weights: torch.Tensor,
+    weights: torch.Tensor,
     group_shape: GroupShape,
     quant_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Block-quantize a 3D (num_experts, out, in) weight tensor per expert.
+    """Block-quantize a 3D (num_experts, out, in) weight tensor.
 
-    Applies ``scaled_quantize`` to each expert slice independently and
-    stacks the results back into 3D tensors.
+    Flattens the expert dimension into the row dimension so that the
+    entire tensor is quantized in a single ``scaled_quantize`` call,
+    then reshapes back to 3D.  This is valid because each expert's
+    output dimension is already required to be divisible by
+    ``group_shape.row``, so no quantization block spans two experts.
 
     Returns:
-        (quantized_weights, quantized_scales_inv) each with leading expert dim.
+        (qweights, scales_inv) each with leading expert dim.
     """
-    assert expert_weights.ndim == 3
-    num_experts = expert_weights.shape[0]
-    quantized_weights, quantized_scales_inv = [], []
-    for expert_idx in range(num_experts):
-        quantized_weight, quantized_scale_inv = scaled_quantize(
-            expert_weights[expert_idx], group_shape, quant_dtype
-        )
-        quantized_weights.append(quantized_weight)
-        quantized_scales_inv.append(quantized_scale_inv)
-    return torch.stack(quantized_weights), torch.stack(quantized_scales_inv)
+    assert weights.ndim == 3
+    num_experts, out_dim, in_dim = weights.shape
+    flatten_weights = weights.reshape(num_experts * out_dim, in_dim)
+    qweights, scales_inv = scaled_quantize(flatten_weights, group_shape, quant_dtype)
+    return (
+        qweights.reshape(num_experts, out_dim, in_dim),
+        scales_inv.reshape(
+            num_experts, out_dim // group_shape.row, in_dim // group_shape.col
+        ),
+    )
 
 
 # inverses `scaled_quantize`

@@ -1075,10 +1075,10 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
             group_shape = GroupShape(*self.weight_block_size)
             w13, w13_scale = scaled_quantize_experts(
-                layer.w13_weight, group_shape, fp8_dtype
+                layer.w13_weight, group_shape, torch.float8_e4m3fn
             )
             w2, w2_scale = scaled_quantize_experts(
-                layer.w2_weight, group_shape, fp8_dtype
+                layer.w2_weight, group_shape, torch.float8_e4m3fn
             )
 
             if current_platform.is_fp8_fnuz():
