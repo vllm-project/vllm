@@ -143,11 +143,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
 
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            _nan_mark_attn(qkv_lora, 0, self._nan_layer_idx)  # full fused qkv_a output
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            _nan_mark_attn(q_c, 0, self._nan_layer_idx)  # qkv_proj
             q_c = self.q_a_layernorm(q_c)
             _nan_mark_attn(q_c, 1, self._nan_layer_idx)  # q_norm
             q = self.q_b_proj(q_c)[0]

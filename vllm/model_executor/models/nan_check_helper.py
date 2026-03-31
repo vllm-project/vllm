@@ -28,7 +28,7 @@ _inf_counts: torch.Tensor | None = None
 
 # Attention detail tensors: shape (num_layers, 23)
 # Outer MLA wrapper (mla.py):
-#   0=qkv_proj, 1=q_norm, 2=kv_norm, 3=rope, 4=mla_attn, 5=o_proj
+#   0=fused_qkv_a_proj_output (full), 1=q_norm, 2=kv_norm, 3=rope, 4=mla_attn, 5=o_proj
 # Inner MLAAttention (mla_attention.py):
 #   6=after_kv_cache_update, 7=after_W_UK_bmm, 8=after_fwd_mqa, 9=after_v_up
 #   10=after_fwd_mha, 11=kv_cache, 12=mqa_q_pre_fwd, 13=lse_post_fwd_mqa
@@ -962,11 +962,15 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             kpe_pre_nan = ad[22].item() if ad is not None else 0
             kpe_pre_inf = ai[22].item() if ai is not None else 0
             hs_maxabs = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
+            fused_qkv_nan = ad[0].item() if ad is not None else 0
+            fused_qkv_inf = ai[0].item() if ai is not None else 0
             msg = (f"[KV_KERNEL_NAN] layer={layer_idx} "
                    f"bits=0x{bits:02x} flags={','.join(flags)} "
                    f"first_tok={tok_idx} num_actual={n} "
                    f"tok_type={is_padding} "
                    f"hs_maxabs={hs_maxabs:.4g} "
+                   f"fused_qkv_nan={fused_qkv_nan} "
+                   f"fused_qkv_inf={fused_qkv_inf} "
                    f"kvc_pre_norm_nan={kvc_pre_nan} "
                    f"kvc_pre_norm_inf={kvc_pre_inf} "
                    f"kvc_post_norm_nan={kvc_post_nan} "
