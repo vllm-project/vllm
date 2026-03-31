@@ -228,6 +228,13 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    # Skip non-2D weights (e.g., Conv layers with 3D/4D/5D weights)
+    # These are not compatible with the optimized GEMM kernels which expect
+    # 2D weight tensors (N, K)
+    if layer.weight.dim() != 2:
+        layer.cpu_linear = torch.nn.functional.linear
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
 
