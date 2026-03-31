@@ -2640,10 +2640,7 @@ def reshape_and_cache_flash(
     )
 
 
-try:
-    import cache_nan_ext as _cache_nan_ext
-except ModuleNotFoundError:
-    _cache_nan_ext = None
+import cache_nan_ext as _cache_nan_ext
 
 
 def concat_and_cache_mla(
