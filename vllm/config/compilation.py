@@ -135,6 +135,18 @@ class PassConfig:
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
+    fuse_qk_norm_rope_cache_quant: bool = False
+    """Fuse QK RMSNorm + RoPE + KV cache write into a single op (CUDA).
+    Targets small-batch decode where these ops are memory-bandwidth bound.
+    Useful for models with per-head QK norm (e.g. Qwen3) especially when
+    combined with FP8 KV cache.  Do not enable together with
+    enable_qk_norm_rope_fusion (this pass is a strict superset).
+    The fused op currently falls back to sequential kernel calls; a proper
+    fused CUDA kernel is tracked in vllm-project/vllm#36066."""
+    qk_norm_rope_cache_quant_max_token_num: int = 256
+    """Max token count for the QK-norm+RoPE+cache+quant fusion pass.
+    Batches larger than this threshold use the individual kernels instead."""
+
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
