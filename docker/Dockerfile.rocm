@@ -29,8 +29,11 @@ RUN if [ "$USE_SCCACHE" != "1" ]; then \
         rm -f "$(which sccache)" || true; \
     fi
 
-# Install UV
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
+# Install UV — download first, then run, so a curl failure is not masked by the pipe
+RUN curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh \
+    && env UV_INSTALL_DIR="/usr/local/bin" sh /tmp/uv-install.sh \
+    && rm -f /tmp/uv-install.sh \
+    && uv --version
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -380,6 +383,9 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src && mv vllm src/vllm
+
+# This is a workaround to ensure pytest exits with the correct status code in CI tests.
+RUN echo "import os\n\ndef pytest_sessionfinish(session, exitstatus):\n    os._exit(int(exitstatus))" > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image
