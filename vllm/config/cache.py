@@ -40,7 +40,7 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
+    gpu_memory_utilization: float = Field(default=0.93, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
     utilization. If unspecified, will use the default value of 0.92. This is a
