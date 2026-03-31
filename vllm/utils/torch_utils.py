@@ -9,9 +9,9 @@ from collections.abc import Callable, Collection
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
-import base64
 import warnings
 
+import pybase64 as base64
 import numpy as np
 import numpy.typing as npt
 import torch
