@@ -258,7 +258,7 @@ def check_kv_caches(layers) -> None:
                    f"dtype={kv.dtype}\n")
             f.write(msg)
             f.flush()
-                return
+            return
 
 
 def mark_kv_stale_fp8_nan(
