@@ -1801,7 +1801,7 @@ class OpenAIServingChat(OpenAIServing):
                 DeltaToolCall(
                     index=index,
                     id=original_tc.id if original_tc else None,
-                    type=original_tc.type if original_tc else None,
+                    type=original_tc.type if original_tc else "function",
                     function=DeltaFunctionCall(
                         name=original_fn.name if original_fn else None,
                         arguments=remaining_call,
