@@ -543,7 +543,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "scaled_fp4_quant(Tensor input,"
       "                 Tensor input_scale, bool "
-      "is_sf_swizzled_layout) -> (Tensor, Tensor)");
+      "is_sf_swizzled_layout, bool enable_pdl=False) -> (Tensor, Tensor)");
   ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant_func);
 
   // Out variant
@@ -553,8 +553,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "scaled_fp4_quant.out(Tensor input,"
       "                     Tensor input_scale, bool "
-      "is_sf_swizzled_layout, *, Tensor(a!) output, Tensor(b!) output_scale) "
-      "-> ()");
+      "is_sf_swizzled_layout, *, Tensor(a!) output, Tensor(b!) output_scale, "
+      "bool enable_pdl=False) -> ()");
   ops.impl("scaled_fp4_quant.out", torch::kCUDA, &scaled_fp4_quant_out);
 
   // Compute NVFP4 experts quantization.

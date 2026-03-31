@@ -24,7 +24,7 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf,
-                             bool is_sf_swizzled_layout);
+                             bool is_sf_swizzled_layout, bool enable_pdl);
 #endif
 
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
@@ -56,18 +56,18 @@ void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
 void scaled_fp4_quant_out(torch::Tensor const& input,
                           torch::Tensor const& input_sf,
                           bool is_sf_swizzled_layout, torch::Tensor& output,
-                          torch::Tensor& output_sf) {
+                          torch::Tensor& output_sf, bool enable_pdl) {
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
   return scaled_fp4_quant_sm1xxa(output, input, output_sf, input_sf,
-                                 is_sf_swizzled_layout);
+                                 is_sf_swizzled_layout, enable_pdl);
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled nvfp4 quantization kernel");
 }
 
 std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
     torch::Tensor const& input, torch::Tensor const& input_sf,
-    bool is_sf_swizzled_layout) {
+    bool is_sf_swizzled_layout, bool enable_pdl) {
   int64_t n = input.size(-1);
   int64_t m = input.numel() / n;
   auto device = input.device();
@@ -89,7 +89,7 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
   }
 
   scaled_fp4_quant_out(input, input_sf, is_sf_swizzled_layout, output,
-                       output_sf);
+                       output_sf, enable_pdl);
   return {output, output_sf};
 }
 

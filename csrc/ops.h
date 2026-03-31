@@ -287,12 +287,12 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
 
 std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
     torch::Tensor const& input, torch::Tensor const& input_scale,
-    bool is_sf_swizzled_layout);
+    bool is_sf_swizzled_layout, bool enable_pdl);
 
 void scaled_fp4_quant_out(torch::Tensor const& input,
                           torch::Tensor const& input_scale,
                           bool is_sf_swizzled_layout, torch::Tensor& output,
-                          torch::Tensor& output_scale);
+                          torch::Tensor& output_scale, bool enable_pdl);
 
 void scaled_fp4_experts_quant(
     torch::Tensor& output, torch::Tensor& output_scale,
