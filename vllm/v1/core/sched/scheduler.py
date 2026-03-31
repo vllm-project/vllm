@@ -1406,6 +1406,22 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
+            if new_token_ids and self.structured_output_manager.should_advance(request):
+                struct_output_request = request.structured_output_request
+                assert struct_output_request is not None
+                assert struct_output_request.grammar is not None
+                if not request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                    req_id, new_token_ids
+                ):
+                    logger.warning(
+                        "Unexpected: grammar rejected tokens %s for request %s.",
+                        new_token_ids,
+                        req_id,
+                    )
+                    request.status = RequestStatus.FINISHED_ABORTED
+                    stopped = True
+                    request.fsm_failed_to_advance = True
+
             routed_experts = None
             finish_reason = None
             if stopped:
@@ -1430,18 +1446,6 @@ class Scheduler(SchedulerInterface):
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
-
-            if new_token_ids and self.structured_output_manager.should_advance(request):
-                struct_output_request = request.structured_output_request
-                assert struct_output_request is not None
-                assert struct_output_request.grammar is not None
-                ok = struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
-                if not ok:
-                    logger.warning(
-                        "Unexpected: grammar rejected tokens %s for request %s.",
-                        new_token_ids,
-                        req_id,
-                    )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1584,6 +1588,9 @@ class Scheduler(SchedulerInterface):
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
+            return True
+
+        if request.fsm_failed_to_advance:
             return True
 
         if request.streaming_queue:
