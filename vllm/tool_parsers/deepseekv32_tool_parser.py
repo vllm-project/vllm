@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -78,7 +79,9 @@ class DeepSeekV32ToolParser(ToolParser):
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 
-    def adjust_request(self, request):
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens
@@ -139,12 +142,11 @@ class DeepSeekV32ToolParser(ToolParser):
         self,
         function_name: str,
         param_dict: dict[str, str],
-        request: ChatCompletionRequest | None,
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
         param_config: dict = {}
-        if request and request.tools:
-            for tool in request.tools:
+        if self.tools:
+            for tool in self.tools:
                 if (
                     hasattr(tool, "function")
                     and tool.function.name == function_name
@@ -238,9 +240,7 @@ class DeepSeekV32ToolParser(ToolParser):
             invoke_name, invoke_body = complete_invokes[self.current_tool_index]
             param_dict = self._parse_invoke_params(invoke_body)
 
-            converted = self._convert_params_with_schema(
-                invoke_name, param_dict, request
-            )
+            converted = self._convert_params_with_schema(invoke_name, param_dict)
             args_json = json.dumps(converted, ensure_ascii=False)
             idx = self.current_tool_index
             self.current_tool_index += 1
