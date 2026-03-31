@@ -265,6 +265,9 @@ def get_quant_config(
     if model_config.quantization == "gguf":
         return quant_cls()
 
+    if model_config.quantization == "block_fp8":
+        return quant_cls(weight_block_size=[128, 128])
+
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
     # some vision model may keep quantization_config in their text_config
