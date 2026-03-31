@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Comprehensive TurboQuant benchmark: quality + latency + batching.
 
 Measures:
@@ -16,8 +18,8 @@ import argparse
 import time
 
 import torch
-from vllm import LLM, SamplingParams
 
+from vllm import LLM, SamplingParams
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -45,6 +47,7 @@ def create_llm(model_name: str, bits: int | None, gpu_util: float = 0.5):
     """Create LLM instance with optional TurboQuant."""
     if bits is not None:
         import vllm.model_executor.layers.quantization.turboquant as tq
+
         tq.TurboQuantConfig.__init__.__defaults__ = (bits, False, 42)
         kv_dtype = "turboquant"
     else:
@@ -79,8 +82,7 @@ def measure_ttft(llm: LLM, prompt: str, n_runs: int = 5) -> dict:
     }
 
 
-def measure_itl(llm: LLM, prompt: str, max_tokens: int = 50,
-                n_runs: int = 3) -> dict:
+def measure_itl(llm: LLM, prompt: str, max_tokens: int = 50, n_runs: int = 3) -> dict:
     """Measure Inter-Token Latency (ITL) via single-request generation."""
     sampling = SamplingParams(max_tokens=max_tokens, temperature=0)
     # Warmup
@@ -115,14 +117,15 @@ def measure_prefill_throughput(llm: LLM, n_runs: int = 3) -> dict:
 
     for length_name, prompt in [
         ("short (32tok)", "What is the meaning of life?"),
-        ("medium (128tok)",
-         "Explain the complete history of computing from Charles Babbage "
-         "to modern GPUs, including all major milestones, key figures, "
-         "and technological breakthroughs that shaped the industry. "
-         "Cover mechanical computers, vacuum tubes, transistors, "
-         "integrated circuits, microprocessors, and parallel computing."),
-        ("long (512tok)",
-         ("Describe the solar system in detail. " * 30).strip()),
+        (
+            "medium (128tok)",
+            "Explain the complete history of computing from Charles Babbage "
+            "to modern GPUs, including all major milestones, key figures, "
+            "and technological breakthroughs that shaped the industry. "
+            "Cover mechanical computers, vacuum tubes, transistors, "
+            "integrated circuits, microprocessors, and parallel computing.",
+        ),
+        ("long (512tok)", ("Describe the solar system in detail. " * 30).strip()),
     ]:
         # Warmup
         llm.generate([prompt], sampling_1)
@@ -146,8 +149,9 @@ def measure_prefill_throughput(llm: LLM, n_runs: int = 3) -> dict:
     return results
 
 
-def measure_throughput(llm: LLM, prompt: str, batch_sizes: list[int],
-                       max_tokens: int = 128) -> dict:
+def measure_throughput(
+    llm: LLM, prompt: str, batch_sizes: list[int], max_tokens: int = 128
+) -> dict:
     """Measure throughput at different batch sizes."""
     sampling = SamplingParams(max_tokens=max_tokens, temperature=0)
     results = {}
@@ -196,9 +200,9 @@ def run_benchmark(model_name: str):
     all_results = {}
 
     for config_name, bits in configs:
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"  Config: {config_name}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
 
         llm = create_llm(model_name, bits)
 
@@ -219,35 +223,42 @@ def run_benchmark(model_name: str):
             "founding to its fall, including all major events.",
             n_runs=5,
         )
-        print(f"    Short prompt TTFT: {ttft_short['mean_ms']:.1f} ms "
-              f"(min={ttft_short['min_ms']:.1f}, max={ttft_short['max_ms']:.1f})")
-        print(f"    Long prompt TTFT:  {ttft_long['mean_ms']:.1f} ms "
-              f"(min={ttft_long['min_ms']:.1f}, max={ttft_long['max_ms']:.1f})")
+        print(
+            f"    Short prompt TTFT: {ttft_short['mean_ms']:.1f} ms "
+            f"(min={ttft_short['min_ms']:.1f}, max={ttft_short['max_ms']:.1f})"
+        )
+        print(
+            f"    Long prompt TTFT:  {ttft_long['mean_ms']:.1f} ms "
+            f"(min={ttft_long['min_ms']:.1f}, max={ttft_long['max_ms']:.1f})"
+        )
 
         # Throughput under batching
         # ITL + E2E latency
         print("\n  [3/5] ITL + E2E latency (3 runs, 50 tokens)...")
         itl = measure_itl(llm, "Explain how a car engine works.", n_runs=3)
         print(f"    ITL: {itl['itl_mean_ms']:.1f} ms/token")
-        print(f"    E2E: {itl['e2e_mean_ms']:.1f} ms "
-              f"(min={itl['e2e_min_ms']:.1f})")
+        print(f"    E2E: {itl['e2e_mean_ms']:.1f} ms (min={itl['e2e_min_ms']:.1f})")
         print(f"    Tokens generated: {itl['tokens_generated']}")
 
         # Prefill throughput
         print("\n  [4/5] Prefill throughput (varying prompt lengths)...")
         prefill = measure_prefill_throughput(llm, n_runs=3)
         for name, data in prefill.items():
-            print(f"    {name}: {data['prefill_tok_per_s']:.0f} tok/s "
-                  f"({data['prompt_tokens']:.0f} tokens, "
-                  f"{data['latency_ms']:.1f} ms)")
+            print(
+                f"    {name}: {data['prefill_tok_per_s']:.0f} tok/s "
+                f"({data['prompt_tokens']:.0f} tokens, "
+                f"{data['latency_ms']:.1f} ms)"
+            )
 
         # Throughput under batching
         print(f"\n  [5/5] Throughput (batch sizes: {batch_sizes})...")
         throughput = measure_throughput(llm, BATCH_PROMPT, batch_sizes)
         for bs, data in throughput.items():
-            print(f"    batch={bs:>2}: {data['gen_tok_per_s']:>8.1f} gen tok/s, "
-                  f"{data['total_tok_per_s']:>8.1f} total tok/s, "
-                  f"{data['elapsed_s']:.2f}s")
+            print(
+                f"    batch={bs:>2}: {data['gen_tok_per_s']:>8.1f} gen tok/s, "
+                f"{data['total_tok_per_s']:>8.1f} total tok/s, "
+                f"{data['elapsed_s']:.2f}s"
+            )
 
         all_results[config_name] = {
             "responses": responses,
@@ -266,28 +277,28 @@ def run_benchmark(model_name: str):
     # ---------------------------------------------------------------------------
     baseline_responses = all_results["baseline"]["responses"]
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  SUMMARY: Quality")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  {'Config':<12} {'1st-sent match':>15} {'Exact match':>12}")
-    print(f"  {'-'*42}")
+    print(f"  {'-' * 42}")
     for config_name, data in all_results.items():
         first_match = sum(
-            1 for b, r in zip(baseline_responses, data["responses"])
-            if b.split('.')[0] == r.split('.')[0]
+            1
+            for b, r in zip(baseline_responses, data["responses"])
+            if b.split(".")[0] == r.split(".")[0]
         )
         exact_match = sum(
-            1 for b, r in zip(baseline_responses, data["responses"])
-            if b == r
+            1 for b, r in zip(baseline_responses, data["responses"]) if b == r
         )
         n = len(baseline_responses)
         print(f"  {config_name:<12} {first_match}/{n:>13} {exact_match}/{n:>11}")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  SUMMARY: TTFT (ms)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  {'Config':<12} {'Short prompt':>14} {'Long prompt':>14} {'Overhead':>10}")
-    print(f"  {'-'*52}")
+    print(f"  {'-' * 52}")
     base_short = all_results["baseline"]["ttft_short"]["mean_ms"]
     base_long = all_results["baseline"]["ttft_long"]["mean_ms"]
     for config_name, data in all_results.items():
@@ -297,13 +308,13 @@ def run_benchmark(model_name: str):
         overhead_str = f"{overhead:.2f}x" if config_name != "baseline" else "-"
         print(f"  {config_name:<12} {short:>13.1f} {long_:>13.1f} {overhead_str:>10}")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  SUMMARY: ITL + E2E Latency")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  {'Config':<12} {'ITL (ms/tok)':>13} {'E2E (ms)':>10} {'Overhead':>10}")
-    print(f"  {'-'*47}")
+    print(f"  {'-' * 47}")
     base_itl = all_results["baseline"]["itl"]["itl_mean_ms"]
-    base_e2e = all_results["baseline"]["itl"]["e2e_mean_ms"]
+    _ = all_results["baseline"]["itl"]["e2e_mean_ms"]
     for config_name, data in all_results.items():
         itl_ms = data["itl"]["itl_mean_ms"]
         e2e_ms = data["itl"]["e2e_mean_ms"]
@@ -311,15 +322,15 @@ def run_benchmark(model_name: str):
         overhead_str = f"{overhead:.2f}x" if config_name != "baseline" else "-"
         print(f"  {config_name:<12} {itl_ms:>12.1f} {e2e_ms:>9.1f} {overhead_str:>10}")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  SUMMARY: Prefill Throughput (tok/s)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     pfill_keys = list(next(iter(all_results.values()))["prefill"].keys())
     header = f"  {'Config':<12}"
     for k in pfill_keys:
         header += f" {k:>16}"
     print(header)
-    print(f"  {'-'*(12 + 17 * len(pfill_keys))}")
+    print(f"  {'-' * (12 + 17 * len(pfill_keys))}")
     for config_name, data in all_results.items():
         row = f"  {config_name:<12}"
         for k in pfill_keys:
@@ -327,14 +338,14 @@ def run_benchmark(model_name: str):
             row += f" {tok_s:>16.0f}"
         print(row)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  SUMMARY: Throughput (gen tok/s)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     header = f"  {'Config':<12}"
     for bs in batch_sizes:
-        header += f" {'bs='+str(bs):>10}"
+        header += f" {'bs=' + str(bs):>10}"
     print(header)
-    print(f"  {'-'*(12 + 11 * len(batch_sizes))}")
+    print(f"  {'-' * (12 + 11 * len(batch_sizes))}")
     for config_name, data in all_results.items():
         row = f"  {config_name:<12}"
         for bs in batch_sizes:
@@ -343,14 +354,17 @@ def run_benchmark(model_name: str):
         print(row)
 
     # Diffs
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  DIFFERENCES vs baseline")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     for config_name, data in all_results.items():
         if config_name == "baseline":
             continue
-        diffs = [(i, b, r) for i, (b, r) in enumerate(
-            zip(baseline_responses, data["responses"])) if b != r]
+        diffs = [
+            (i, b, r)
+            for i, (b, r) in enumerate(zip(baseline_responses, data["responses"]))
+            if b != r
+        ]
         if diffs:
             print(f"\n  {config_name}: {len(diffs)}/{len(baseline_responses)} differ")
             for i, b, r in diffs[:3]:
