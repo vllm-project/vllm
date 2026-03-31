@@ -51,14 +51,11 @@ _layer_idx_gpu: torch.Tensor | None = None
 # Per-layer max abs of hidden_states input (column 0). Shape (num_layers,) float32.
 _hidden_maxabs: torch.Tensor | None = None
 
-# GPU tensor for batch info — survives CUDA graph replay.
-# Shape (4,) int64: [num_actual_toks, padded_size, num_decode_tokens, num_mha_tokens]
-_batch_info_gpu: torch.Tensor | None = None
 
 
 def ensure_flags(num_layers: int, device: torch.device) -> None:
     global _nan_counts, _inf_counts, _attn_detail, _inf_attn_detail
-    global _fwd_mqa_real_nan, _layer_idx_gpu, _hidden_maxabs, _batch_info_gpu
+    global _fwd_mqa_real_nan, _layer_idx_gpu, _hidden_maxabs
     _ensure_kv_write_counts(num_layers, device)
     if _nan_counts is None or _nan_counts.shape[0] < num_layers:
         _nan_counts = torch.zeros(num_layers, 4, dtype=torch.int64, device=device)
@@ -74,8 +71,6 @@ def ensure_flags(num_layers: int, device: torch.device) -> None:
         _layer_idx_gpu = torch.arange(num_layers, dtype=torch.int64, device=device)
     if _hidden_maxabs is None or _hidden_maxabs.shape[0] < num_layers:
         _hidden_maxabs = torch.zeros(num_layers, dtype=torch.float32, device=device)
-    if _batch_info_gpu is None:
-        _batch_info_gpu = torch.zeros(4, dtype=torch.int64, device=device)
 
 
 def _is_fp8(dtype: torch.dtype) -> bool:
@@ -375,17 +370,6 @@ def report_batch_info(
         "num_decode_tokens": num_decode_tokens,
         "num_mha_tokens": num_mha_tokens,
     }
-    # GPU tensor write for batch info.
-    # NOTE: scalar assignments (_batch_info_gpu[i] = python_int) are
-    # captured as constants in CUDA graphs and do NOT replay with
-    # current values. The GPU tensor is still useful for non-graph
-    # (eager / first-prefill) steps; for graph replay, _saved_batch_info
-    # is also stale, so report_if_nan derives what it can from counts.
-    if _batch_info_gpu is not None:
-        _batch_info_gpu[0] = num_actual_toks
-        _batch_info_gpu[1] = padded_size
-        _batch_info_gpu[2] = num_decode_tokens
-        _batch_info_gpu[3] = num_mha_tokens
 
 
 def _emit_batch_info(tag: str) -> None:
@@ -863,13 +847,10 @@ def _emit_nan_origin(
             origin_stage = "MOE"
 
         # Derive token counts from NaN element counts (hidden_size=7168)
+        # These are reliable since _nan_counts tensor writes replay in graphs.
         hs = 7168
         attn_nan_toks = attn_nan // hs if attn_nan > 0 else 0
         moe_nan_toks = moe_nan // hs if moe_nan > 0 else 0
-        gpu_n = _batch_info_gpu[0].item() if _batch_info_gpu is not None else -1
-        gpu_pad = _batch_info_gpu[1].item() if _batch_info_gpu is not None else -1
-        gpu_dec = _batch_info_gpu[2].item() if _batch_info_gpu is not None else -1
-        gpu_mha = _batch_info_gpu[3].item() if _batch_info_gpu is not None else -1
 
         msg = (f"[NAN_ORIGIN] phase={phase} layer={layer_idx} "
                f"origin_stage={origin_stage} "
@@ -879,9 +860,7 @@ def _emit_nan_origin(
                f"moe_nan={moe_nan} moe_inf={moe_inf} "
                f"attn_nan_toks={attn_nan_toks} moe_nan_toks={moe_nan_toks} "
                f"hs_maxabs={ma:.4g} "
-               f"padded={padded} actual={num_actual} "
-               f"gpu_actual={gpu_n} gpu_padded={gpu_pad} "
-               f"gpu_decode={gpu_dec} gpu_mha={gpu_mha}\n")
+               f"padded={padded} actual={num_actual}\n")
         f.write(msg)
         f.flush()
 
@@ -1019,22 +998,19 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     real_has_nan = hidden_states.isnan().any().item()
     real_has_inf = hidden_states.isinf().any().item()
 
-    # Determine phase: prefill vs decode (prefer GPU tensor)
+    # Determine phase: prefill vs decode
     global _current_phase
-    if _batch_info_gpu is not None and _batch_info_gpu[2].item() > 0:
-        _current_phase = "DECODE"
-    elif _saved_batch_info and _saved_batch_info.get("num_decode_tokens", 0) > 0:
+    if _saved_batch_info and _saved_batch_info.get("num_decode_tokens", 0) > 0:
         _current_phase = "DECODE"
     else:
         _current_phase = "PREFILL"
     phase = _current_phase
 
-    # For per-layer count thresholds, use batch info from the GPU tensor
-    # (survives CUDA graph replay) rather than Python globals (stale).
-    if _batch_info_gpu is not None and _batch_info_gpu[0].item() > 0:
-        n = _batch_info_gpu[0].item()
-        padded = _batch_info_gpu[1].item()
-    elif _saved_batch_info:
+    # NOTE: _saved_batch_info is Python state set inside the compiled/graph
+    # region, so it may be stale during CUDA graph replay. Use it as a
+    # best-effort estimate; the derived attn_nan_toks in NAN_ORIGIN is
+    # reliable since _nan_counts tensor writes DO replay correctly.
+    if _saved_batch_info:
         padded = _saved_batch_info["padded_size"]
         n = _saved_batch_info["num_actual_toks"]
     else:
