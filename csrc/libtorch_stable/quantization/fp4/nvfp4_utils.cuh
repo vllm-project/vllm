@@ -20,7 +20,7 @@
 #include <cuda_fp8.h>
 #include <utility>
 
-#include "../../cuda_vec_utils.cuh"
+#include "cuda_vec_utils.cuh"
 
 #if defined(NVFP4_ENABLE_ELTS16) && defined(CUDA_VERSION) && \
     CUDA_VERSION >= 12090
