@@ -1092,32 +1092,32 @@ def test_fused_marlin_moe(
             per_act_token_quant=True,
         )
 
-    marlin_output = fused_marlin_moe(
-        a,
-        w1_data.qweight,
-        w2_data.qweight,
-        None,
-        None,
-        w1_data.scales,
-        w2_data.scales,
-        topk_weights,
-        topk_ids,
-        global_num_experts=e,
-        expert_map=e_map,
-        global_scale1=w1_data.global_scale,
-        global_scale2=w2_data.global_scale,
-        g_idx1=w1_data.g_idx,
-        g_idx2=w2_data.g_idx,
-        input_global_scale1=w1_data.a_scales_factor,
-        input_global_scale2=w2_data.a_scales_factor,
-        sort_indices1=w1_data.sort_indices,
-        sort_indices2=w2_data.sort_indices,
-        w1_zeros=w1_data.zeros,
-        w2_zeros=w2_data.zeros,
-        input_dtype=a_dtype,
-        quant_type_id=b_type.id,
-        is_k_full=is_k_full,
-    )
+        marlin_output = fused_marlin_moe(
+            a,
+            w1_data.qweight,
+            w2_data.qweight,
+            None,
+            None,
+            w1_data.scales,
+            w2_data.scales,
+            topk_weights,
+            topk_ids,
+            global_num_experts=e,
+            expert_map=e_map,
+            global_scale1=w1_data.global_scale,
+            global_scale2=w2_data.global_scale,
+            g_idx1=w1_data.g_idx,
+            g_idx2=w2_data.g_idx,
+            input_global_scale1=w1_data.a_scales_factor,
+            input_global_scale2=w2_data.a_scales_factor,
+            sort_indices1=w1_data.sort_indices,
+            sort_indices2=w2_data.sort_indices,
+            w1_zeros=w1_data.zeros,
+            w2_zeros=w2_data.zeros,
+            input_dtype=a_dtype,
+            quant_type_id=b_type.id,
+            is_k_full=is_k_full,
+        )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
 
@@ -1167,29 +1167,29 @@ def test_fused_marlin_moe_with_bias(m):
             a, w1_data.w_ref, w2_data.w_ref, score, topk, b_bias1, b_bias2
         )
 
-    marlin_output = fused_marlin_moe(
-        a,
-        w1_data.qweight,
-        w2_data.qweight,
-        w1_data.marlin_bias,
-        w2_data.marlin_bias,
-        w1_data.scales,
-        w2_data.scales,
-        topk_weights,
-        topk_ids,
-        global_num_experts=e,
-        expert_map=None,
-        global_scale1=w1_data.global_scale,
-        global_scale2=w2_data.global_scale,
-        g_idx1=w1_data.g_idx,
-        g_idx2=w2_data.g_idx,
-        sort_indices1=w1_data.sort_indices,
-        sort_indices2=w2_data.sort_indices,
-        w1_zeros=w1_data.zeros,
-        w2_zeros=w2_data.zeros,
-        quant_type_id=quant_type.id,
-        is_k_full=is_k_full,
-    )
+        marlin_output = fused_marlin_moe(
+            a,
+            w1_data.qweight,
+            w2_data.qweight,
+            w1_data.marlin_bias,
+            w2_data.marlin_bias,
+            w1_data.scales,
+            w2_data.scales,
+            topk_weights,
+            topk_ids,
+            global_num_experts=e,
+            expert_map=None,
+            global_scale1=w1_data.global_scale,
+            global_scale2=w2_data.global_scale,
+            g_idx1=w1_data.g_idx,
+            g_idx2=w2_data.g_idx,
+            sort_indices1=w1_data.sort_indices,
+            sort_indices2=w2_data.sort_indices,
+            w1_zeros=w1_data.zeros,
+            w2_zeros=w2_data.zeros,
+            quant_type_id=quant_type.id,
+            is_k_full=is_k_full,
+        )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=5e-2, rtol=0)
 
@@ -1248,30 +1248,30 @@ def test_fused_marlin_moe_non_gated(
             activation=activation,
         )
 
-    marlin_output = fused_marlin_moe(
-        a,
-        w1_data.qweight,
-        w2_data.qweight,
-        None,  # bias1
-        None,  # bias2
-        w1_data.scales,
-        w2_data.scales,
-        topk_weights,
-        topk_ids,
-        global_num_experts=e,
-        expert_map=None,
-        global_scale1=w1_data.global_scale,
-        global_scale2=w2_data.global_scale,
-        g_idx1=w1_data.g_idx,
-        g_idx2=w2_data.g_idx,
-        sort_indices1=w1_data.sort_indices,
-        sort_indices2=w2_data.sort_indices,
-        w1_zeros=w1_data.zeros,
-        w2_zeros=w2_data.zeros,
-        quant_type_id=quant_type.id,
-        is_k_full=is_k_full,
-        activation=activation,
-    )
+        marlin_output = fused_marlin_moe(
+            a,
+            w1_data.qweight,
+            w2_data.qweight,
+            None,  # bias1
+            None,  # bias2
+            w1_data.scales,
+            w2_data.scales,
+            topk_weights,
+            topk_ids,
+            global_num_experts=e,
+            expert_map=None,
+            global_scale1=w1_data.global_scale,
+            global_scale2=w2_data.global_scale,
+            g_idx1=w1_data.g_idx,
+            g_idx2=w2_data.g_idx,
+            sort_indices1=w1_data.sort_indices,
+            sort_indices2=w2_data.sort_indices,
+            w1_zeros=w1_data.zeros,
+            w2_zeros=w2_data.zeros,
+            quant_type_id=quant_type.id,
+            is_k_full=is_k_full,
+            activation=activation,
+        )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
 
