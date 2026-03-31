@@ -84,4 +84,54 @@ void get_cutlass_batched_moe_mm_data(
     const torch::stable::Tensor& expert_num_tokens,
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
     const int64_t k);
+
+// FP4/NVFP4 ops
+bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
+
+void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
+                           torch::stable::Tensor const& A,
+                           torch::stable::Tensor const& B,
+                           torch::stable::Tensor const& A_sf,
+                           torch::stable::Tensor const& B_sf,
+                           torch::stable::Tensor const& alpha);
+
+void cutlass_fp4_group_mm(torch::stable::Tensor& output,
+                          const torch::stable::Tensor& a,
+                          const torch::stable::Tensor& b,
+                          const torch::stable::Tensor& a_blockscale,
+                          const torch::stable::Tensor& b_blockscales,
+                          const torch::stable::Tensor& alphas,
+                          const torch::stable::Tensor& problem_sizes,
+                          const torch::stable::Tensor& expert_offsets,
+                          const torch::stable::Tensor& sf_offsets);
+
+std::tuple<torch::stable::Tensor, torch::stable::Tensor> scaled_fp4_quant_func(
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_scale, bool is_sf_swizzled_layout);
+
+void scaled_fp4_quant_out(torch::stable::Tensor const& input,
+                          torch::stable::Tensor const& input_scale,
+                          bool is_sf_swizzled_layout,
+                          torch::stable::Tensor& output,
+                          torch::stable::Tensor& output_scale);
+
+void scaled_fp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_global_scale,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts);
+
+void silu_and_mul_scaled_fp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_global_scale,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts);
+
+void silu_and_mul_nvfp4_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor& output_block_scale,
+                              torch::stable::Tensor& input,
+                              torch::stable::Tensor& input_global_scale);
+
 #endif
