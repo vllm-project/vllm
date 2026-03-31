@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
@@ -321,7 +324,7 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
+    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)

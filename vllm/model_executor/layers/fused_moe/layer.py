@@ -566,68 +566,19 @@ class FusedMoE(CustomOp):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        # TODO(bnell): Why is this needed? Can probably be removed.
+        # TODO(bnell): this is un-needed and removed in a follow up PR.
         self.base_quant_method = self.quant_method
 
-        # Note: for now, the layer must keep _gate and _shared_experts.
-        # This is because a number of locations swap out the quant_method
-        # which requires re-initializing the SharedExperts and DefaultMoERunner.
-        # Once we've figured out alternatives to swapping out the quant_method,
-        # we can move ownership of _gate and _shared_experts into the runner.
-        self._gate = gate
-        self._shared_experts = shared_experts
-        self.shared_experts: SharedExperts | None = None
-        self.runner = self._init_runner()
-
-    def _init_shared_experts(self):  # -> SharedExperts | None:
-        if self._shared_experts is None:
-            return
-
-        # Note: If the SharedExperts already exist, we reinitialize
-        # them in place. This is because the MK might be holding a
-        # reference to the same SharedExperts object. If we create a
-        # new instance, the MK will still be holding onto the old one,
-        # including the old quant_method. This is a workaround for
-        # UnquantizedFusedMoEMethod's handling of MK initialization
-        # which should be fixed by #36732.
-        if self.shared_experts is not None:
-            self.shared_experts.__init__(  # type: ignore
-                self._shared_experts,
-                moe_config=self.moe_config,
-                # Note: For now we must pass quant_method along to SharedExperts so it
-                # can property determine where the shared experts are supposed to be
-                # called, i.e. by a MK or by the MoERunner.
-                # Once the MK can be created upfront, we can just pass in the proper
-                # flags derived from the quant_method's MK.
-                reduce_results=self.reduce_results,
-                quant_method=self.quant_method,
-            )
-            return
-
-        self.shared_experts = SharedExperts(
-            self._shared_experts,
-            moe_config=self.moe_config,
-            # Note: For now we must pass quant_method along to SharedExperts so it
-            # can property determine where the shared experts are supposed to be
-            # called, i.e. by a MK or by the MoERunner.
-            # Once the MK can be created upfront, we can just pass in the proper
-            # flags derived from the quant_method's MK.
-            reduce_results=self.reduce_results,
-            quant_method=self.quant_method,
-        )
-
-    def _init_runner(self) -> DefaultMoERunner:
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        self._init_shared_experts()
-        return DefaultMoERunner(
+        self.runner = DefaultMoERunner(
             layer=self,
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=self._gate,
-            shared_experts=self.shared_experts,
+            gate=gate,
+            shared_experts=shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
@@ -638,10 +589,7 @@ class FusedMoE(CustomOp):
     # intrusive way to do this.
     def _replace_quant_method(self, mk: FusedMoEMethodBase):
         self.quant_method = mk
-        # We need to force reconstruction of runner because we're swapping out
-        # the quant_method with a FusedMoEModularMethod. This logic can go
-        # away once the FusedMoEModularMethod is eliminated.
-        self.runner = self._init_runner()
+        self.runner._replace_quant_method(mk)
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -673,6 +621,10 @@ class FusedMoE(CustomOp):
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
+
+    @property
+    def shared_experts(self) -> SharedExperts | None:
+        return self.runner.shared_experts
 
     @property
     def layer_id(self):
