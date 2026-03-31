@@ -14,13 +14,12 @@
 #include "cutlass/util/mixed_dtype_utils.hpp"
 
 // vllm includes
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include "libtorch_stable/torch_utils.h"
 #include "cutlass_extensions/torch_utils.hpp"
 #include "cutlass_extensions/common.hpp"
 
-#include "core/registration.h"
 #include "get_group_starts.cuh"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "w4a8_utils.cuh"
@@ -168,31 +167,40 @@ struct W4A8GroupedGemmKernel {
   static_assert(sizeof(LayoutB_Reordered) % sizeof(int32_t) == 0,
                 "LayoutB_Reordered size must be divisible by 4 bytes");
 
-  static void grouped_mm(
-      torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
-      const torch::Tensor& b_tensors, const torch::Tensor& a_scales,
-      const torch::Tensor& b_scales, const torch::Tensor& b_group_scales,
-      const int64_t b_group_size, const torch::Tensor& expert_offsets,
-      const torch::Tensor& problem_sizes_torch, const torch::Tensor& a_strides,
-      const torch::Tensor& b_strides, const torch::Tensor& c_strides,
-      const torch::Tensor& group_scale_strides) {
+  static void grouped_mm(torch::stable::Tensor& out_tensors,
+                         const torch::stable::Tensor& a_tensors,
+                         const torch::stable::Tensor& b_tensors,
+                         const torch::stable::Tensor& a_scales,
+                         const torch::stable::Tensor& b_scales,
+                         const torch::stable::Tensor& b_group_scales,
+                         const int64_t b_group_size,
+                         const torch::stable::Tensor& expert_offsets,
+                         const torch::stable::Tensor& problem_sizes_torch,
+                         const torch::stable::Tensor& a_strides,
+                         const torch::stable::Tensor& b_strides,
+                         const torch::stable::Tensor& c_strides,
+                         const torch::stable::Tensor& group_scale_strides) {
     auto device = a_tensors.device();
     auto device_id = device.index();
-    const at::cuda::OptionalCUDAGuard device_guard(device);
-    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+    const torch::stable::accelerator::DeviceGuard device_guard(device_id);
+    auto stream = get_current_cuda_stream(device_id);
 
     int num_experts = static_cast<int>(expert_offsets.size(0));
     int n = static_cast<int>(b_tensors.size(1));
     int k = static_cast<int>(b_tensors.size(2)) * PackFactor;
 
-    auto options_int =
-        torch::TensorOptions().dtype(torch::kInt64).device(device);
-    torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
-    torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
-    torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
-    torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
-    torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
-    torch::Tensor b_group_scales_ptrs = torch::empty(num_experts, options_int);
+    torch::stable::Tensor a_ptrs = torch::stable::empty(
+        num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+    torch::stable::Tensor b_ptrs = torch::stable::empty(
+        num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+    torch::stable::Tensor out_ptrs = torch::stable::empty(
+        num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+    torch::stable::Tensor a_scales_ptrs = torch::stable::empty(
+        num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+    torch::stable::Tensor b_scales_ptrs = torch::stable::empty(
+        num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+    torch::stable::Tensor b_group_scales_ptrs = torch::stable::empty(
+        num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
 
     // get the correct offsets to pass to gemm
     run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
@@ -247,9 +255,9 @@ struct W4A8GroupedGemmKernel {
 
     // Allocate workspace
     size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
-    torch::Tensor workspace =
-        torch::empty(workspace_size,
-                     torch::TensorOptions().dtype(torch::kU8).device(device));
+    torch::stable::Tensor workspace = torch::stable::empty(
+        workspace_size, torch::headeronly::ScalarType::Byte, std::nullopt,
+        device);
 
     // Run GEMM
     GemmShuffled gemm;
@@ -294,14 +302,20 @@ using Kernel_256x128_2x1x1_Coop =
 using Kernel_128x256_2x1x1_Coop =
     W4A8GroupedGemmKernel<Shape<_128, _256>, Shape<_2, _1, _1>, Coop, CoopEpi>;
 
-void mm_dispatch(
-    torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
-    const torch::Tensor& b_tensors, const torch::Tensor& a_scales,
-    const torch::Tensor& b_scales, const torch::Tensor& b_group_scales,
-    const int64_t b_group_size, const torch::Tensor& expert_offsets,
-    const torch::Tensor& problem_sizes, const torch::Tensor& a_strides,
-    const torch::Tensor& b_strides, const torch::Tensor& c_strides,
-    const torch::Tensor& group_scale_strides, const std::string& schedule) {
+void mm_dispatch(torch::stable::Tensor& out_tensors,
+                 const torch::stable::Tensor& a_tensors,
+                 const torch::stable::Tensor& b_tensors,
+                 const torch::stable::Tensor& a_scales,
+                 const torch::stable::Tensor& b_scales,
+                 const torch::stable::Tensor& b_group_scales,
+                 const int64_t b_group_size,
+                 const torch::stable::Tensor& expert_offsets,
+                 const torch::stable::Tensor& problem_sizes,
+                 const torch::stable::Tensor& a_strides,
+                 const torch::stable::Tensor& b_strides,
+                 const torch::stable::Tensor& c_strides,
+                 const torch::stable::Tensor& group_scale_strides,
+                 const std::string& schedule) {
   if (schedule == "Kernel_128x16_1x1x1_Coop") {
     Kernel_128x16_1x1x1_Coop::grouped_mm(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
@@ -358,18 +372,23 @@ void mm_dispatch(
         b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
         c_strides, group_scale_strides);
   } else {
-    TORCH_CHECK(false,
-                "cutlass_w4a8_moe_mm: unknown schedule string: ", schedule);
+    STD_TORCH_CHECK(false,
+                    "cutlass_w4a8_moe_mm: unknown schedule string: ", schedule);
   }
 }
 
-void mm(torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
-        const torch::Tensor& b_tensors, const torch::Tensor& a_scales,
-        const torch::Tensor& b_scales, const torch::Tensor& b_group_scales,
-        const int64_t b_group_size, const torch::Tensor& expert_offsets,
-        const torch::Tensor& problem_sizes, const torch::Tensor& a_strides,
-        const torch::Tensor& b_strides, const torch::Tensor& c_strides,
-        const torch::Tensor& group_scale_strides,
+void mm(torch::stable::Tensor& out_tensors,
+        const torch::stable::Tensor& a_tensors,
+        const torch::stable::Tensor& b_tensors,
+        const torch::stable::Tensor& a_scales,
+        const torch::stable::Tensor& b_scales,
+        const torch::stable::Tensor& b_group_scales, const int64_t b_group_size,
+        const torch::stable::Tensor& expert_offsets,
+        const torch::stable::Tensor& problem_sizes,
+        const torch::stable::Tensor& a_strides,
+        const torch::stable::Tensor& b_strides,
+        const torch::stable::Tensor& c_strides,
+        const torch::stable::Tensor& group_scale_strides,
         std::optional<std::string> maybe_schedule) {
   // user has specified a schedule
   if (maybe_schedule) {
@@ -406,26 +425,27 @@ void mm(torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
               a_strides, b_strides, c_strides, group_scale_strides, schedule);
 }
 
-std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(
-    torch::Tensor const& b_tensors) {
-  TORCH_CHECK(b_tensors.dtype() == torch::kInt32);
-  TORCH_CHECK(b_tensors.dim() == 3);  // (experts, n, k)
-  TORCH_CHECK(b_tensors.is_contiguous());
-  TORCH_CHECK(b_tensors.is_cuda());
+std::tuple<torch::stable::Tensor, torch::stable::Tensor>
+encode_and_reorder_int4b(torch::stable::Tensor const& b_tensors) {
+  STD_TORCH_CHECK(b_tensors.scalar_type() ==
+                  torch::headeronly::ScalarType::Int);
+  STD_TORCH_CHECK(b_tensors.dim() == 3);  // (experts, n, k)
+  STD_TORCH_CHECK(b_tensors.is_contiguous());
+  STD_TORCH_CHECK(b_tensors.is_cuda());
 
   int n = static_cast<int>(b_tensors.size(1));
   int k = static_cast<int>(b_tensors.size(2)) * PackFactor;  // logical k
 
   // CUTLASS reorder_tensor requires k % 256 == 0 and n % 16 == 0.
   // These misalignments cause silent OOB unless run under Compute Sanitizer.
-  TORCH_CHECK(k % 256 == 0, "logical k must be divisible by 256");
-  TORCH_CHECK(n % 16 == 0, "n must be divisible by 16");
+  STD_TORCH_CHECK(k % 256 == 0, "logical k must be divisible by 256");
+  STD_TORCH_CHECK(n % 16 == 0, "n must be divisible by 16");
 
   // we will store the layout to an int32 tensor;
   // this is the number of elements we need per layout
   constexpr size_t layout_width = sizeof(LayoutB_Reordered) / sizeof(int32_t);
 
-  torch::Tensor b_tensors_packed = torch::empty_like(b_tensors);
+  torch::stable::Tensor b_tensors_packed = torch::stable::empty_like(b_tensors);
   int num_experts = static_cast<int>(b_tensors.size(0));
 
   auto b_ptr = static_cast<QuantType const*>(b_tensors.const_data_ptr());
@@ -435,7 +455,7 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(
   size_t num_int4_elems = 1ull * num_experts * n * k;
   bool ok = vllm::cutlass_w4a8_utils::unified_encode_int4b(b_ptr, b_packed_ptr,
                                                            num_int4_elems);
-  TORCH_CHECK(ok, "unified_encode_int4b failed");
+  STD_TORCH_CHECK(ok, "unified_encode_int4b failed");
 
   // construct the layout once; assumes each expert has the same layout
   using LayoutType = LayoutB_Reordered;
@@ -456,28 +476,28 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(
   }
 
   // save the packed layout to torch tensor so we can re-use it
-  auto cpu_opts =
-      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-  torch::Tensor layout_cpu =
-      torch::empty({num_experts, layout_width}, cpu_opts);
+  torch::stable::Tensor layout_cpu = torch::stable::empty(
+      {num_experts, layout_width}, torch::headeronly::ScalarType::Int,
+      std::nullopt, torch::stable::Device(torch::stable::DeviceType::CPU));
 
-  int32_t* layout_data = layout_cpu.data_ptr<int32_t>();
+  int32_t* layout_data = layout_cpu.mutable_data_ptr<int32_t>();
   for (int i = 0; i < num_experts; ++i) {
     std::memcpy(layout_data + i * layout_width,  // dst (int32*)
                 &layout_B_reordered,             // src (LayoutType*)
                 sizeof(LayoutType));             // number of bytes
   }
 
-  torch::Tensor packed_layout =
-      layout_cpu.to(b_tensors.device(), /*non_blocking=*/false);
+  torch::stable::Tensor packed_layout =
+      torch::stable::to(layout_cpu, b_tensors.device(),
+                        /*non_blocking=*/false);
 
   return {b_tensors_packed, packed_layout};
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("cutlass_w4a8_moe_mm", &mm);
-  m.impl("cutlass_encode_and_reorder_int4b_grouped", &encode_and_reorder_int4b);
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+  m.impl("cutlass_w4a8_moe_mm", TORCH_BOX(&mm));
+  m.impl("cutlass_encode_and_reorder_int4b_grouped",
+         TORCH_BOX(&encode_and_reorder_int4b));
 }
 
 }  // namespace vllm::cutlass_w4a8_moe
-/////////////////////////////////////////////////////////////////////////////////////////////////
