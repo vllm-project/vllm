@@ -35,7 +35,7 @@ from torch import nn
 from transformers import Qwen2MoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -206,6 +206,7 @@ class Qwen2MoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -262,6 +263,7 @@ class Qwen2MoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
             **{
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": dual_chunk_attention_config,
@@ -290,6 +292,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -307,6 +310,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             dual_chunk_attention_config=dual_chunk_attention_config,
+            model_config=model_config,
         )
 
         # Note: Qwen/Qwen2-57B-A14B-Instruct does not have
@@ -365,6 +369,7 @@ class Qwen2MoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.vocab_size = config.vocab_size
         self.config = config
@@ -382,6 +387,7 @@ class Qwen2MoeModel(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

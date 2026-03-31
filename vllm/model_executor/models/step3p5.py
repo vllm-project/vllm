@@ -138,6 +138,7 @@ class Step3p5Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         rope_scaling: dict[str, Any] | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         # Step3p5 specific args
@@ -245,6 +246,7 @@ class Step3p5Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -432,6 +434,7 @@ class Step3p5DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
@@ -470,6 +473,7 @@ class Step3p5DecoderLayer(nn.Module):
                 rms_norm_eps=config.rms_norm_eps,
                 qkv_bias=getattr(config, "attention_bias", False),
                 head_dim=head_dim if head_dim else getattr(config, "head_dim", None),
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 rope_scaling=getattr(config, "rope_scaling", None),

@@ -20,7 +20,7 @@ from transformers import (
     PretrainedConfig,
 )
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -102,6 +102,7 @@ class BartDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ):
         super().__init__()
         self.embed_dim = config.d_model
@@ -113,6 +114,7 @@ class BartDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            model_config=model_config,
         )
         self.activation_fn = get_act_fn(config.activation_function)
 
@@ -128,6 +130,7 @@ class BartDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder_attn",
+            model_config=model_config,
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
 
@@ -252,6 +255,7 @@ class MBartDecoderNoPos(nn.Module):
         lora_config: LoRAConfig | None = None,
         embed_tokens: nn.Embedding | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ):
         super().__init__()
         self.cache_config = cache_config
@@ -273,6 +277,7 @@ class MBartDecoderNoPos(nn.Module):
                     cache_config,
                     quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
+                    model_config=model_config,
                 )
                 for layer_idx in range(config.decoder_layers)
             ]
@@ -596,6 +601,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.decoder",
+                model_config=vllm_config.model_config,
             )
 
         self.vocab_size = config.decoder.vocab_size

@@ -33,7 +33,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -73,6 +73,7 @@ class BailingAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
@@ -142,6 +143,7 @@ class BailingAttention(nn.Module):
             self.head_dim,
             self.scale,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             prefix=f"{prefix}.attn",
         )
@@ -336,6 +338,7 @@ class BailingMoeBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -348,7 +351,11 @@ class BailingMoeBlock(nn.Module):
 
         self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
         self.attention = BailingAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attention"
+            config,
+            model_config=model_config,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attention",
         )
 
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
@@ -416,10 +423,12 @@ class BailingMoeModel(nn.Module):
 
         self.embedding_dropout = torch.nn.Dropout(config.embedding_dropout)
 
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: BailingMoeBlock(
                 config=config,
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,

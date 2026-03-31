@@ -343,7 +343,11 @@ class TpKVTopology:
         if not self.is_mamba:
             _MOCK_BLOCK_SIZE = 16
             kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
-                num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
+                num_blocks=1,
+                block_size=_MOCK_BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=1,
+                cache_dtype_str="float16",
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],

@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -165,7 +166,6 @@ class RocmAttentionBackend(AttentionBackend):
         torch.float32,
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
         "float16",
         "bfloat16",
         "fp8",
@@ -231,7 +231,7 @@ class RocmAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
@@ -315,7 +315,7 @@ class RocmAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
@@ -406,7 +406,7 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             assert layer._q_scale_float == 1.0, (
@@ -513,7 +513,7 @@ class RocmAttentionImpl(AttentionImpl):
         )
         flash_layout = False
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

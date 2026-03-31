@@ -16,12 +16,12 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -38,7 +38,6 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 class FlashInferMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
         "float16",
         "bfloat16",
         "fp8",
@@ -184,12 +183,12 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
         # Reuse pre-allocated zero-init output buffer to avoid a memset

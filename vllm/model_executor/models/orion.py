@@ -16,7 +16,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -93,6 +93,7 @@ class OrionAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -146,6 +147,7 @@ class OrionAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(
@@ -168,6 +170,7 @@ class OrionDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -181,6 +184,7 @@ class OrionDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            model_config=model_config,
         )
         self.mlp = OrionMLP(
             hidden_size=self.hidden_size,
@@ -226,6 +230,7 @@ class OrionModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -236,7 +241,11 @@ class OrionModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: OrionDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

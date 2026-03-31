@@ -30,7 +30,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -422,6 +422,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
@@ -508,6 +509,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
@@ -560,6 +562,7 @@ class OpenPanguSinkAttention(nn.Module):
         num_kv_heads: int,
         rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
@@ -662,6 +665,7 @@ class OpenPanguSinkAttention(nn.Module):
             self.scaling,
             sink_len=self.param_sink_number,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
@@ -820,6 +824,7 @@ class OpenPanguDecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
@@ -885,6 +890,7 @@ class OpenPanguDecoderLayer(nn.Module):
                 ),
                 rope_parameters=rope_parameters,
                 max_position_embeddings=max_position_embeddings,
+                model_config=model_config,
                 quant_config=quant_config,
                 bias=attention_bias,
                 bias_o_proj=bias_o_proj,
@@ -915,6 +921,7 @@ class OpenPanguDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 max_position_embeddings=max_position_embeddings,
+                model_config=model_config,
                 quant_config=quant_config,
                 bias=attention_bias,
                 bias_o_proj=bias_o_proj,

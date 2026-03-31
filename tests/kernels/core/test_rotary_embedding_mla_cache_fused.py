@@ -22,7 +22,7 @@ from vllm.utils.torch_utils import set_random_seed
 @pytest.mark.parametrize("seq_len", [11, 42])
 @pytest.mark.parametrize("qk_rope_head_dim", [64, 128])
 @pytest.mark.parametrize("num_q_heads", [128])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("kv_cache_dtype", ["bfloat16", "fp8"])
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("num_blocks", [64])
 @pytest.mark.parametrize("block_size", [16, 64, 256])

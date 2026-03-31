@@ -365,6 +365,7 @@ class AXK1Attention(nn.Module):
             self.qk_head_dim,
             self.scaling,
             num_kv_heads=self.num_local_heads,
+            model_config=vllm_config.model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",

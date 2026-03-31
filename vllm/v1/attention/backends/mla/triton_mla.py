@@ -14,11 +14,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
@@ -28,7 +28,6 @@ logger = init_logger(__name__)
 class TritonMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
         "float16",
         "bfloat16",
         "fp8",

@@ -33,7 +33,6 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 
         cache_config = vllm_config.cache_config
         if cache_config.cache_dtype == "bfloat16":
-            cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 

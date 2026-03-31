@@ -23,7 +23,10 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    TORCH_DTYPE_TO_KV_CACHE_STR,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -101,7 +104,7 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         torch.float32,
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
+        "float16",
         "bfloat16",
     ]
     forward_includes_kv_cache_update: bool = False
@@ -128,7 +131,7 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         # We set `num_kv_heads = num_hidden_layers` and `head_size = hidden_size`
         # We also don't use a k/v (2) dim
@@ -258,16 +261,14 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             kv_cache_dtype = cache_config.cache_dtype
             self.block_size = cache_config.block_size
         else:
-            kv_cache_dtype = "auto"
+            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[vllm_config.model_config.dtype]
             self.block_size = 16
 
-        assert kv_cache_dtype in ["auto", "bfloat16", "float16"], (
+        assert kv_cache_dtype in ["bfloat16", "float16"], (
             "CacheOnlyAttentionLayer doesn't currently support quantized kv cache but"
-            f"kv cache dtype was set to {kv_cache_dtype}"
+            f" kv cache dtype was set to {kv_cache_dtype}"
         )
-        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
-            kv_cache_dtype, vllm_config.model_config
-        )
+        self.kv_cache_torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
         # Initialize KV cache quantization attributes
         set_default_quant_scales(self, register_buffer=True)

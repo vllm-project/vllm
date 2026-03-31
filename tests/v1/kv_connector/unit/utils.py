@@ -96,7 +96,7 @@ def create_vllm_config(
     enable_permute_local_kv: bool = False,
     kv_connector_extra_config: dict[str, Any] | None = None,
     dtype: str = "float16",
-    cache_dtype: str = "auto",
+    cache_dtype: str = "float16",
     hf_overrides: dict[str, Any] | None = None,
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",

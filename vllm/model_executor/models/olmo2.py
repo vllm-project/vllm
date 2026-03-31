@@ -33,7 +33,7 @@ from torch import nn
 from transformers import Olmo2Config, Olmo3Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
@@ -72,10 +72,18 @@ class Olmo2Attention(nn.Module):
     (plus another skip connection).
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         assert isinstance(self.config, (Olmo2Config, Olmo3Config))
+        if model_config is None:
+            model_config = vllm_config.model_config
 
         hidden_size = self.config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -135,6 +143,7 @@ class Olmo2Attention(nn.Module):
             quant_config=vllm_config.quant_config,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
         # Rotary embeddings. Rope scaling is only applied on full attention layers.
@@ -242,9 +251,12 @@ class Olmo2DecoderLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         assert isinstance(config, (Olmo2Config, Olmo3Config))
+        model_config = vllm_config.model_config
         # Attention block.
         self.self_attn = Olmo2Attention(
-            vllm_config=vllm_config, prefix=f"{prefix}.self_attn"
+            vllm_config=vllm_config,
+            model_config=model_config,
+            prefix=f"{prefix}.self_attn",
         )
 
         # MLP block.

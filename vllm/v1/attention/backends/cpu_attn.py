@@ -69,7 +69,7 @@ class CPUAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         return 2, num_blocks, num_kv_heads, block_size, head_size
 

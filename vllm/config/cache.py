@@ -8,11 +8,12 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
 CacheDType = Literal[
-    "auto",
+    "float32",
     "float16",
     "bfloat16",
     "fp8",
@@ -48,13 +49,13 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
-    cache_dtype: CacheDType = "auto"
-    """Data type for kv cache storage. If "auto", will use model data type.
+    cache_dtype: CacheDType = "bfloat16"
+    """Data type for kv cache storage. When the user passes --kv-cache-dtype
+    auto (the CLI default), it is resolved to the model dtype (or to fp8 if the
+    model's HF quantization_config specifies a kv_cache_scheme) before this
+    config is constructed.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
-    Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
-    bfloat16 instead, this is an invalid option for models that do not default
-    to fp8.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
@@ -236,7 +237,7 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
-        if cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(cache_dtype):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "

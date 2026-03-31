@@ -6,7 +6,7 @@ import os
 import random
 import threading
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.config.cache import CacheDType
     from vllm.sequence import IntermediateTensors
 else:
     ModelConfig = object
@@ -57,6 +58,17 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
     # (for example supports nvfp4).
     "fp8": "fp8_e4m3",
 }
+
+TORCH_DTYPE_TO_KV_CACHE_STR: dict[torch.dtype, "CacheDType"] = {
+    torch.float32: "float32",
+    torch.float16: "float16",
+    torch.bfloat16: "bfloat16",
+}
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype.startswith("fp8")
+
 
 T = TypeVar("T")
 
@@ -261,8 +273,8 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     """Get the KV cache quantization algorithm string from the quantization config.
 
     Maps various FP8 format names to vLLM's standard cache dtype strings.
-    Returns None if no kv_cache_quant_algo is specified.
-    Returns "auto" if the value is not recognized/supported.
+    Returns None if no kv_cache_quant_algo is specified or if the value is
+    not recognized/supported.
     """
     # Mapping from model config values to vLLM cache_dtype strings
 
@@ -284,14 +296,14 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
             ):
                 kv_algo = "fp8"
             else:
-                # Unknown/unsupported format - return "auto" as safe fallback
                 logger.warning(
-                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
-                    "config. Supported values: %s. Falling back to 'auto'.",
+                    "Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to "
+                    "model dtype.",
                     f"{kv_algo}",
                     list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
                 )
-                return "auto"
+                return None
         if isinstance(kv_algo, str):
             kv_algo_lower = kv_algo.lower()
 
@@ -299,34 +311,33 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
             if kv_algo_lower in MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP:
                 return MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP[kv_algo_lower]
             else:
-                # Unknown/unsupported format - return "auto" as safe fallback
                 logger.warning(
-                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
-                    "config. Supported values: %s. Falling back to 'auto'.",
+                    "Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to "
+                    "model dtype.",
                     kv_algo,
                     list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
                 )
-                return "auto"
+                return None
     return None
 
 
 def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
     """Get the KV cache quantization algorithm dtype from the quantization config."""
     kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-    if kv_algo_str is not None and kv_algo_str != "auto":
-        # Only convert if we have a valid dtype string (not "auto" fallback)
+    if kv_algo_str is not None:
         return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
     return None
 
 
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
-) -> str:
+) -> "CacheDType":
     """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
-    Returns the resolved cache_dtype string.
+    Returns the resolved cache_dtype string (never "auto").
     """
     if kv_cache_dtype != "auto":
-        return kv_cache_dtype
+        return cast("CacheDType", kv_cache_dtype)
 
     hf_cfg = getattr(model_config, "hf_config", None)
     if hf_cfg is not None:
@@ -334,19 +345,9 @@ def resolve_kv_cache_dtype_string(
         if quant_cfg is not None:
             kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
             if kv_algo_str is not None:
-                return kv_algo_str
+                return cast("CacheDType", kv_algo_str)
 
-    # Default to auto (will be handled by downstream code)
-    return "auto"
-
-
-def kv_cache_dtype_str_to_dtype(
-    kv_cache_dtype: str, model_config: ModelConfig
-) -> torch.dtype:
-    if kv_cache_dtype == "auto":
-        # Model config may not be specified for unit tests, default to float16
-        return model_config.dtype if model_config else torch.half
-    return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+    return TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
 
 
 def set_random_seed(seed: int | None) -> None:
@@ -387,10 +388,12 @@ def create_kv_caches_with_random_flash(
         key_value_cache = torch.empty(
             size=kv_cache_allocation_shape, dtype=dtype, device=device
         ).permute(*stride_order)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+        if cache_dtype in ("auto", "half", "bfloat16", "float", "float16", "float32"):
             key_value_cache.uniform_(-scale, scale)
-        elif cache_dtype == "fp8":
+        elif isinstance(cache_dtype, str) and is_quantized_kv_cache(cache_dtype):
             _generate_random_fp8(key_value_cache, -scale, scale)
+        elif isinstance(cache_dtype, torch.dtype):
+            key_value_cache.uniform_(-scale, scale)
         else:
             raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
@@ -424,10 +427,12 @@ def create_kv_caches_with_random(
     key_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device=device)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+        if cache_dtype in ("auto", "half", "bfloat16", "float", "float16", "float32"):
             key_cache.uniform_(-scale, scale)
-        elif cache_dtype == "fp8":
+        elif isinstance(cache_dtype, str) and is_quantized_kv_cache(cache_dtype):
             _generate_random_fp8(key_cache, -scale, scale)
+        elif isinstance(cache_dtype, torch.dtype):
+            key_cache.uniform_(-scale, scale)
         else:
             raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_cache)
@@ -436,10 +441,12 @@ def create_kv_caches_with_random(
     value_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape, dtype=dtype, device=device)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+        if cache_dtype in ("auto", "half", "bfloat16", "float", "float16", "float32"):
             value_cache.uniform_(-scale, scale)
-        elif cache_dtype == "fp8":
+        elif isinstance(cache_dtype, str) and is_quantized_kv_cache(cache_dtype):
             _generate_random_fp8(value_cache, -scale, scale)
+        elif isinstance(cache_dtype, torch.dtype):
+            value_cache.uniform_(-scale, scale)
         else:
             raise ValueError(f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)

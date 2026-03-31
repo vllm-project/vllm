@@ -139,7 +139,7 @@ def test_standard_attention_backend_selection(
     attn_selector_config = AttentionSelectorConfig(
         head_size=128,
         dtype=torch.float16,
-        kv_cache_dtype="auto",
+        kv_cache_dtype="float16",
         block_size=16,
         use_mla=False,
         has_sink=False,
@@ -266,7 +266,7 @@ def test_mla_backend_selection(
                 attn_selector_config = AttentionSelectorConfig(
                     head_size=128,
                     dtype=torch.float16,
-                    kv_cache_dtype="auto",
+                    kv_cache_dtype="float16",
                     block_size=block_size,
                     use_mla=True,
                     has_sink=False,
@@ -275,7 +275,7 @@ def test_mla_backend_selection(
                 attn_selector_config = AttentionSelectorConfig(
                     head_size=128,
                     dtype=torch.float16,
-                    kv_cache_dtype="auto",
+                    kv_cache_dtype="float16",
                     block_size=block_size,
                     use_mla=True,
                     has_sink=False,
@@ -290,7 +290,7 @@ def test_mla_backend_selection(
             attn_selector_config = AttentionSelectorConfig(
                 head_size=128,
                 dtype=torch.float16,
-                kv_cache_dtype="auto",
+                kv_cache_dtype="float16",
                 block_size=block_size,
                 use_mla=True,
                 has_sink=False,
@@ -319,7 +319,7 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
         attn_selector_config = AttentionSelectorConfig(
             head_size=128,
             dtype=torch.float16,
-            kv_cache_dtype="auto",
+            kv_cache_dtype="float16",
             block_size=16,
             use_mla=False,
             has_sink=False,
@@ -343,7 +343,7 @@ def test_sparse_not_supported(mock_vllm_config):
         attn_selector_config = AttentionSelectorConfig(
             head_size=128,
             dtype=torch.float16,
-            kv_cache_dtype="auto",
+            kv_cache_dtype="float16",
             block_size=16,
             use_mla=False,
             has_sink=False,

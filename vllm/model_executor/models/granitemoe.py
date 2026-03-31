@@ -32,7 +32,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -142,6 +142,7 @@ class GraniteMoeAttention(nn.Module):
         num_kv_heads: int,
         max_position: int = 4096 * 32,
         rope_parameters: dict[str, Any] | None = None,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attention_multiplier: float | None = None,
@@ -199,6 +200,7 @@ class GraniteMoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -226,6 +228,7 @@ class GraniteMoeDecoderLayer(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
@@ -237,6 +240,7 @@ class GraniteMoeDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_parameters=config.rope_parameters,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",

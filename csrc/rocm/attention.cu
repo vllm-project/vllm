@@ -3669,17 +3669,17 @@ void paged_attention(
   // clang-format on
   bool is_navi = is_navi_gpu();
   const int head_size = query.size(2);
-  if (kv_cache_dtype == "auto") {
-    if (query.dtype() == at::ScalarType::Half) {
-      CALL_CUSTOM_LAUNCHER_BLK_HEAD(
-          _Float16, _Float16, vllm::Fp8KVCacheDataType::kAuto, MFMAType::F16);
-    } else if (query.dtype() == at::ScalarType::BFloat16) {
-      CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, __hip_bfloat16,
-                                    vllm::Fp8KVCacheDataType::kAuto,
-                                    MFMAType::F16);
-    } else {
-      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
-    }
+  if (kv_cache_dtype == "float16") {
+    TORCH_CHECK(query.dtype() == at::ScalarType::Half, "KV cache dtype ",
+                kv_cache_dtype, " does not match model dtype ", query.dtype());
+    CALL_CUSTOM_LAUNCHER_BLK_HEAD(
+        _Float16, _Float16, vllm::Fp8KVCacheDataType::kAuto, MFMAType::F16);
+  } else if (kv_cache_dtype == "bfloat16") {
+    TORCH_CHECK(query.dtype() == at::ScalarType::BFloat16, "KV cache dtype ",
+                kv_cache_dtype, " does not match model dtype ", query.dtype());
+    CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, __hip_bfloat16,
+                                  vllm::Fp8KVCacheDataType::kAuto,
+                                  MFMAType::F16);
   } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
     if (query.dtype() == at::ScalarType::Half) {
       if (mfma_type == "fp8") {

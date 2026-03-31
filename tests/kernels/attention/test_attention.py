@@ -34,7 +34,7 @@ HEAD_SIZES = [32, 80, 128, 256]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
-KV_CACHE_DTYPE = ["auto", "fp8"]
+KV_CACHE_DTYPE = ["bfloat16", "fp8"]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)

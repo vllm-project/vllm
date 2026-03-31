@@ -10,7 +10,7 @@ from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -68,6 +68,7 @@ class DFlashQwen3Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.layer_name = prefix
@@ -118,6 +119,7 @@ class DFlashQwen3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
+            model_config=model_config,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -162,6 +164,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        model_config = vllm_config.model_config
         set_default_rope_theta(config, default_theta=1000000)
         attn_type = AttentionType.DECODER
 
@@ -178,6 +181,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            model_config=model_config,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,

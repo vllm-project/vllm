@@ -115,12 +115,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
-        self.kv_cache_dtype = self.dtype
-        if self.cache_config.cache_dtype != "auto":
-            # Quantized KV cache.
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype
-            ]
+        self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len

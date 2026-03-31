@@ -79,7 +79,7 @@ class MockModelConfig:
 def create_mock_vllm_config(
     hf_config,
     model_dtype="bfloat16",
-    cache_dtype="auto",
+    cache_dtype="bfloat16",
     quant_config=None,
     data_parallel_size=1,
     tensor_parallel_size=1,
