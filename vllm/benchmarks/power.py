@@ -344,5 +344,5 @@ def get_power_recorder(interval: float = 5.0) -> PowerRecorderMixin:
     if current_platform.is_rocm():
         return PowerRecorderAMD(interval=interval)
     raise NotImplementedError(
-        "Power recording is only implemented on AMD GPUs (is_hip()=False)."
+        "Power recording is only implemented on AMD GPUs."
     )
