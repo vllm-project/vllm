@@ -11,6 +11,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 
@@ -24,8 +28,8 @@ MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
 
 
-def make_parser() -> DeepSeekV32ToolParser:
-    return DeepSeekV32ToolParser(MOCK_TOKENIZER)
+def make_parser(tools=None) -> DeepSeekV32ToolParser:
+    return DeepSeekV32ToolParser(MOCK_TOKENIZER, tools=tools)
 
 
 def make_tool_param(name: str, params: dict) -> MagicMock:
@@ -275,20 +279,22 @@ class TestExtractToolCallsStreaming:
         content = "".join(d.content for d in deltas if d.content is not None)
         assert "Thinking" in content
 
-    def test_type_conversion_in_streaming(self, parser):
-        tool = make_tool_param(
-            "add",
-            {
-                "type": "object",
-                "properties": {
-                    "x": {"type": "integer"},
-                    "y": {"type": "integer"},
+    def test_type_conversion_in_streaming(self):
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="add",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                    },
                 },
-            },
+            ),
         )
-        request = make_request(tools=[tool])
+        parser = make_parser(tools=[tool])
         full_text = build_tool_call("add", {"x": "3", "y": "4"})
-        deltas = self._stream(parser, full_text, request=request)
+        deltas = self._stream(parser, full_text)
         args_str = self._reconstruct_args(deltas)
         assert json.loads(args_str) == {"x": 3, "y": 4}
 
