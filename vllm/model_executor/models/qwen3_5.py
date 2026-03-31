@@ -448,7 +448,6 @@ class Qwen3_5ForCausalLMBase(
     HasInnerState,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
 ):
     packed_modules_mapping = {
@@ -566,7 +565,9 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     info=Qwen3_5ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+class Qwen3_5ForConditionalGeneration(
+    Qwen3VLForConditionalGeneration, IsHybrid, SupportsMambaPrefixCaching
+):
     # Qwen3.5 does not support multimodal pruning (EVS).
     supports_multimodal_pruning = False
 
