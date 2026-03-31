@@ -93,11 +93,7 @@ def test_per_token_group_quant_fp8(
         tma_aligned_scales=tma_aligned_scales,
     )
 
-    # atol covers FP8-subnormal rounding where the CUDA kernel and
-    # the Python reference may round to adjacent representable values.
-    assert torch.allclose(
-        out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15, atol=0.002
-    )
+    assert torch.allclose(out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15)
     assert torch.allclose(scale, ref_scale)
 
     if column_major_scales:
