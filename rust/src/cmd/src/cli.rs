@@ -4,11 +4,12 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod serve_validate;
+
 use std::ffi::OsString;
 use std::time::Duration;
 
-use clap::error::{ContextKind, ContextValue, ErrorKind};
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use vllm_openai_server::Config;
 
 use crate::managed_engine::ManagedEngineConfig;
@@ -36,7 +37,8 @@ impl Cli {
     {
         let args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
         <Self as Parser>::try_parse_from(args.clone())
-            .map_err(|error| rewrite_serve_unknown_arg_error(&args, error))
+            .map_err(|error| serve_validate::rewrite_unknown_arg_error(&args, error))
+            .and_then(serve_validate::validate_passthrough_args)
     }
 }
 
@@ -197,38 +199,6 @@ impl ServeArgs {
             python_args,
         }
     }
-}
-
-/// Rewrite clap errors about unknown arguments in the `serve` subcommand to clarify the `--`
-/// separator for Python engine flags.
-fn rewrite_serve_unknown_arg_error(args: &[OsString], error: clap::Error) -> clap::Error {
-    if error.kind() != ErrorKind::UnknownArgument {
-        return error;
-    }
-    let subcommand = args
-        .iter()
-        .skip(1)
-        .find(|s| !s.to_string_lossy().starts_with('-'));
-    if subcommand.map(|s| s.as_os_str()) != Some("serve".as_ref()) {
-        return error;
-    }
-    let Some(ContextValue::String(unrecognized_arg)) = error.get(ContextKind::InvalidArg) else {
-        return error;
-    };
-
-    let mut command = Cli::command();
-    let serve_command = command
-        .find_subcommand_mut("serve")
-        .expect("serve subcommand should exist");
-    serve_command.error(
-        ErrorKind::UnknownArgument,
-        format!(
-            "unrecognized serve argument {unrecognized_arg:?}\n\n\
-             This may be a flag the Rust frontend does not support yet, or a Python vLLM engine \
-             flag.\nIf it is a Python engine flag, pass it after `--`, for example:\n    \
-             vllm-rs serve <model> -- {unrecognized_arg}"
-        ),
-    )
 }
 
 #[cfg(test)]
@@ -477,8 +447,8 @@ mod tests {
             "--",
             "--tensor-parallel-size",
             "2",
-            "--data-parallel-size",
-            "4",
+            "--dtype",
+            "float16",
         ])
         .unwrap();
 
@@ -503,14 +473,75 @@ mod tests {
                         python_args: [
                             "--tensor-parallel-size",
                             "2",
-                            "--data-parallel-size",
-                            "4",
+                            "--dtype",
+                            "float16",
                         ],
                     },
                 ),
             }
         "#]]
         .assert_debug_eq(&cli);
+    }
+
+    #[test]
+    fn serve_args_reject_rust_long_flag_after_separator() {
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--",
+            "--port",
+            "9123",
+        ])
+        .unwrap_err();
+
+        expect![[r#"
+            error: misplaced serve argument "--port" after `--`
+
+            Arguments after `--` are forwarded directly to the managed Python `vllm serve --headless` process.
+            Use "--port" before `--` to configure `vllm-rs serve`.
+
+            Usage: serve [OPTIONS] <MODEL> [-- <PYTHON_ARGS>...]
+
+            For more information, try '--help'.
+        "#]]
+        .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn serve_args_reject_rust_short_flag_after_separator() {
+        let error =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--", "-h"]).unwrap_err();
+
+        expect![[r#"
+            error: misplaced serve argument "-h" after `--`
+
+            Arguments after `--` are forwarded directly to the managed Python `vllm serve --headless` process.
+            Use "-h" before `--` to configure `vllm-rs serve`.
+
+            Usage: serve [OPTIONS] <MODEL> [-- <PYTHON_ARGS>...]
+
+            For more information, try '--help'.
+        "#]]
+        .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn serve_args_reject_python_multi_char_alias_for_rust_flag_after_separator() {
+        let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--", "-dp", "4"])
+            .unwrap_err();
+
+        expect![[r#"
+            error: misplaced serve argument "-dp" after `--`
+
+            Arguments after `--` are forwarded directly to the managed Python `vllm serve --headless` process.
+            Use "--data-parallel-size" before `--` to configure `vllm-rs serve`.
+
+            Usage: serve [OPTIONS] <MODEL> [-- <PYTHON_ARGS>...]
+
+            For more information, try '--help'.
+        "#]]
+        .assert_eq(&error.to_string());
     }
 
     #[test]
