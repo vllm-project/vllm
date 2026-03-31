@@ -216,7 +216,6 @@ class XPUPlatform(Platform):
         # Disable fusion passes not yet supported on XPU.
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "enable_sp": "Sequence parallelism",
             "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
             "fuse_norm_quant": "RMSNorm + quant fusion",
@@ -409,3 +408,7 @@ class XPUPlatform(Platform):
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.xpu.get_device_properties(device_id).max_compute_units
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
