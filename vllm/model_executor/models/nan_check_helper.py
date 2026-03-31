@@ -48,10 +48,13 @@ _fwd_mqa_real_nan: torch.Tensor | None = None
 # during CUDA graph capture (torch.tensor(int, device=cuda) is illegal).
 _layer_idx_gpu: torch.Tensor | None = None
 
+# Per-layer max abs of hidden_states input (column 0). Shape (num_layers,) float32.
+_hidden_maxabs: torch.Tensor | None = None
+
 
 def ensure_flags(num_layers: int, device: torch.device) -> None:
     global _nan_counts, _inf_counts, _attn_detail, _inf_attn_detail
-    global _fwd_mqa_real_nan, _layer_idx_gpu
+    global _fwd_mqa_real_nan, _layer_idx_gpu, _hidden_maxabs
     _ensure_kv_write_counts(num_layers, device)
     if _nan_counts is None or _nan_counts.shape[0] < num_layers:
         _nan_counts = torch.zeros(num_layers, 4, dtype=torch.int64, device=device)
@@ -65,6 +68,8 @@ def ensure_flags(num_layers: int, device: torch.device) -> None:
         _fwd_mqa_real_nan = torch.zeros(num_layers, dtype=torch.int64, device=device)
     if _layer_idx_gpu is None or _layer_idx_gpu.shape[0] < num_layers:
         _layer_idx_gpu = torch.arange(num_layers, dtype=torch.int64, device=device)
+    if _hidden_maxabs is None or _hidden_maxabs.shape[0] < num_layers:
+        _hidden_maxabs = torch.zeros(num_layers, dtype=torch.float32, device=device)
 
 
 def _is_fp8(dtype: torch.dtype) -> bool:
@@ -93,6 +98,8 @@ def mark(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
         tensor = tensor[:n]
     _nan_counts[layer_idx, stage_col] = tensor.isnan().sum()
     _inf_counts[layer_idx, stage_col] = tensor.isinf().sum()
+    if stage_col == 0 and _hidden_maxabs is not None:
+        _hidden_maxabs[layer_idx] = tensor.abs().max()
 
 
 def mark_attn(
@@ -442,6 +449,8 @@ def _zero_all():
         _inf_attn_detail.zero_()
     if _fwd_mqa_real_nan is not None:
         _fwd_mqa_real_nan.zero_()
+    if _hidden_maxabs is not None:
+        _hidden_maxabs.zero_()
     if _kv_write_nan_counts is not None:
         _kv_write_nan_counts.zero_()
     if _kv_kernel_nan_flags is not None:
@@ -905,6 +914,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     attn_inf_cpu = _inf_attn_detail.cpu() if _inf_attn_detail is not None else None
     kv_write_cpu = _kv_write_nan_counts.cpu() if _kv_write_nan_counts is not None else None
     kv_kernel_cpu = _kv_kernel_nan_flags.cpu() if _kv_kernel_nan_flags is not None else None
+    maxabs_cpu = _hidden_maxabs.cpu() if _hidden_maxabs is not None else None
     _zero_all()
 
     if kv_write_nan:
@@ -951,10 +961,12 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             kvc_post_inf = ai[2].item() if ai is not None else 0
             kpe_pre_nan = ad[22].item() if ad is not None else 0
             kpe_pre_inf = ai[22].item() if ai is not None else 0
+            hs_maxabs = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
             msg = (f"[KV_KERNEL_NAN] layer={layer_idx} "
                    f"bits=0x{bits:02x} flags={','.join(flags)} "
                    f"first_tok={tok_idx} num_actual={n} "
                    f"tok_type={is_padding} "
+                   f"hs_maxabs={hs_maxabs:.4g} "
                    f"kvc_pre_norm_nan={kvc_pre_nan} "
                    f"kvc_pre_norm_inf={kvc_pre_inf} "
                    f"kvc_post_norm_nan={kvc_post_nan} "
