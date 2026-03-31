@@ -16,7 +16,7 @@ from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -213,7 +213,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def supports_video(self):
-        return self.get_hf_processor().supports_video
+        return True
 
     def get_video_token(self) -> str | None:
         return IMG_CONTEXT
@@ -225,20 +225,24 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def audio_extractor(self) -> ParakeetExtractor | None:
         return self.get_hf_processor().audio_extractor
 
+    @property
+    def sound_config(self) -> PretrainedConfig | None:
+        return getattr(self.get_hf_config(), "sound_config", None)
+
     def get_default_tok_params(self) -> TokenizeParams:
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         image_limit = {"image": None}
         video_limit = {"video": None} if self.supports_video else {}
-        audio_limit = {"audio": None} if self.audio_extractor is not None else {}
+        audio_limit = {"audio": None} if self.sound_config is not None else {}
         return {**image_limit, **video_limit, **audio_limit}
 
     def get_data_parser(self):
         target_sr = None
         target_channels = None
-        if extractor := self.audio_extractor:
-            target_sr = extractor.sampling_rate
+        if config := self.sound_config:
+            target_sr = config.sampling_rate
             target_channels = 1
 
         return MultiModalDataParser(
