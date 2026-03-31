@@ -154,12 +154,32 @@ def mark_fp8_nan(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
 
 _kv_write_nan_counts: torch.Tensor | None = None
 
+# Per-layer int32 flags written by concat_and_cache_mla_kernel via atomicOr.
+# Bit layout: bit0=FP8 NaN in kv_c, bit1=FP8 NaN in k_pe,
+#             bit2=Inf in kv_c source, bit3=Inf in k_pe source.
+_kv_kernel_nan_flags: torch.Tensor | None = None
+
 
 def _ensure_kv_write_counts(num_layers: int, device: torch.device) -> None:
-    global _kv_write_nan_counts
+    global _kv_write_nan_counts, _kv_kernel_nan_flags
     if _kv_write_nan_counts is None or _kv_write_nan_counts.shape[0] < num_layers:
         _kv_write_nan_counts = torch.zeros(
             num_layers, dtype=torch.int64, device=device)
+    if _kv_kernel_nan_flags is None or _kv_kernel_nan_flags.shape[0] < num_layers:
+        _kv_kernel_nan_flags = torch.zeros(
+            num_layers, dtype=torch.int32, device=device)
+
+
+def get_kernel_nan_flag(layer_idx: int) -> "torch.Tensor | None":
+    """Return a 1-element int32 view for the kernel's atomicOr nan_flag.
+
+    Returns None if checks are disabled or flags not yet allocated.
+    """
+    if not _per_layer_checks_enabled:
+        return None
+    if _kv_kernel_nan_flags is None:
+        return None
+    return _kv_kernel_nan_flags[layer_idx:layer_idx + 1]
 
 
 def mark_kv_cache_write(
@@ -416,6 +436,8 @@ def _zero_all():
         _fwd_mqa_real_nan.zero_()
     if _kv_write_nan_counts is not None:
         _kv_write_nan_counts.zero_()
+    if _kv_kernel_nan_flags is not None:
+        _kv_kernel_nan_flags.zero_()
 
 
 def _emit_report(
@@ -858,7 +880,14 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         and _kv_write_nan_counts.any().item()
     )
 
-    if not (real_has_nan or real_has_inf or kv_poison or kv_write_nan):
+    # Check kernel-side NaN/Inf flags (set by concat_and_cache_mla_kernel)
+    kv_kernel_hit = (
+        _kv_kernel_nan_flags is not None
+        and _kv_kernel_nan_flags.any().item()
+    )
+
+    if not (real_has_nan or real_has_inf or kv_poison or kv_write_nan
+            or kv_kernel_hit):
         _zero_all()
         return
 
@@ -868,6 +897,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     attn_nan_cpu = _attn_detail.cpu() if _attn_detail is not None else None
     attn_inf_cpu = _inf_attn_detail.cpu() if _inf_attn_detail is not None else None
     kv_write_cpu = _kv_write_nan_counts.cpu() if _kv_write_nan_counts is not None else None
+    kv_kernel_cpu = _kv_kernel_nan_flags.cpu() if _kv_kernel_nan_flags is not None else None
     _zero_all()
 
     if kv_write_nan:
@@ -880,6 +910,26 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                 f.write(msg)
                 f.flush()
                 print(msg, file=sys.stderr, end="", flush=True)
+
+    if kv_kernel_hit:
+        _BIT_NAMES = {
+            0: "fp8_nan_kv_c",
+            1: "fp8_nan_k_pe",
+            2: "inf_src_kv_c",
+            3: "inf_src_k_pe",
+        }
+        f = _get_log()
+        for layer_idx in range(kv_kernel_cpu.shape[0]):
+            bits = kv_kernel_cpu[layer_idx].item()
+            if bits == 0:
+                continue
+            flags = [name for bit, name in _BIT_NAMES.items()
+                     if bits & (1 << bit)]
+            msg = (f"[KV_KERNEL_NAN] layer={layer_idx} "
+                   f"bits=0x{bits:02x} flags={','.join(flags)}\n")
+            f.write(msg)
+            f.flush()
+            print(msg, file=sys.stderr, end="", flush=True)
 
     if kv_poison and not _kv_poison_reported:
         _kv_poison_reported = True

@@ -252,6 +252,9 @@ from vllm.model_executor.models.nan_check_helper import (
 from vllm.model_executor.models.nan_check_helper import (
     stash_if_nan as _nan_stash_if_nan,
 )
+from vllm.model_executor.models.nan_check_helper import (
+    get_kernel_nan_flag as _get_kernel_nan_flag,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
@@ -589,6 +592,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 slot_mapping.get(self.layer_name),
                 self.kv_cache_dtype,
                 self._k_scale,
+                nan_flag=_get_kernel_nan_flag(self._nan_layer_idx),
             )
             _nan_mark_mla(
                 kv_c_normed, 6, self._nan_layer_idx
@@ -1120,6 +1124,7 @@ def unified_mla_kv_cache_update(
             layer_slot_mapping,
             kv_cache_dtype,
             k_scale,
+            nan_flag=_get_kernel_nan_flag(attn_layer._nan_layer_idx),
         )
 
     return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
