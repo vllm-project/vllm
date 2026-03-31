@@ -213,7 +213,9 @@ class ServingScores(PoolingServing):
         self._maybe_get_adapters(ctx)
         await self.io_processor.pre_process_online_async(ctx)
 
-        query_ctx = await self._late_interaction_encode_queries(ctx)
+        # stage 1: encode queries and cache token embeddings on workers.
+        await self._late_interaction_encode_queries(ctx)
+        # stage 2: encode docs and return scalar scores from workers.
         doc_ctx = await self._late_interaction_encode_docs(ctx)
 
         # await self.io_processor.post_process_online_async(ctx)
@@ -222,8 +224,6 @@ class ServingScores(PoolingServing):
     async def _late_interaction_encode_queries(
         self, ctx: ScoringServeContext
     ) -> ScoringServeContext:
-        # stage 1: encode queries and cache token embeddings on workers.
-
         offset = cast(int, ctx.intermediates)
         query_engine_inputs = ctx.engine_inputs[:offset]
         default_pooling_params = ctx.request.to_pooling_params("token_embed")
@@ -257,9 +257,9 @@ class ServingScores(PoolingServing):
 
         return query_ctx
 
-    async def _late_interaction_encode_docs(self, ctx: ScoringServeContext):
-        # stage 2: encode docs and return scalar scores from workers.
-
+    async def _late_interaction_encode_docs(
+        self, ctx: ScoringServeContext
+    ) -> ScoringServeContext:
         offset = cast(int, ctx.intermediates)
         doc_engine_inputs = ctx.engine_inputs[offset:]
         default_pooling_params = ctx.request.to_pooling_params("token_embed")
