@@ -654,6 +654,111 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        """Get the NUMA node ID for a GPU device."""
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
+        try:
+            return pynvml.nvmlDeviceGetNumaNodeId(handle)
+        except Exception:
+            pass
+
+        try:
+            cpu_ids = cls._get_device_cpu_affinity(handle)
+            if cpu_ids:
+                numa_node = cls._get_numa_node_for_cpu(cpu_ids[0])
+                if numa_node is not None:
+                    logger.debug(
+                        "Determined NUMA node %d for GPU %d via CPU affinity",
+                        numa_node,
+                        device_id,
+                    )
+                    return numa_node
+        except Exception as e:
+            logger.warning("Failed to get NUMA node for GPU %d: %s", device_id, e)
+
+        return None
+
+    @classmethod
+    def _get_device_cpu_affinity(cls, handle) -> list[int]:
+        """Get the list of CPU IDs associated with a GPU via NVML."""
+        cpu_count = os.cpu_count()
+        if cpu_count is None:
+            return []
+
+        cpu_set_size = (cpu_count + 63) // 64
+        cpu_affinity_mask = pynvml.nvmlDeviceGetCpuAffinity(handle, cpu_set_size)
+
+        cpu_ids = []
+        for i, mask in enumerate(cpu_affinity_mask):
+            for bit in range(64):
+                cpu_id = i * 64 + bit
+                if cpu_id >= cpu_count:
+                    break
+                if mask & (1 << bit):
+                    cpu_ids.append(cpu_id)
+        return cpu_ids
+
+    @classmethod
+    def _get_numa_node_for_cpu(cls, cpu_id: int) -> int | None:
+        """Determine which NUMA node a CPU belongs to."""
+        from pathlib import Path
+
+        node_path = Path("/sys/devices/system/node")
+        if not node_path.exists():
+            return None
+
+        for node_dir in node_path.iterdir():
+            if not node_dir.name.startswith("node"):
+                continue
+            try:
+                node_id = int(node_dir.name[4:])
+                cpulist_file = node_dir / "cpulist"
+                if cpulist_file.exists():
+                    cpulist = cpulist_file.read_text().strip()
+                    if cls._cpu_in_cpulist(cpu_id, cpulist):
+                        return node_id
+            except (ValueError, OSError):
+                continue
+        return None
+
+    @classmethod
+    def _cpu_in_cpulist(cls, cpu_id: int, cpulist: str) -> bool:
+        """Check if a CPU ID is in a cpulist string such as '0-3,8-11'."""
+        for part in cpulist.split(","):
+            part = part.strip()
+            if "-" in part:
+                start, end = part.split("-", 1)
+                if int(start) <= cpu_id <= int(end):
+                    return True
+            elif part.isdigit() and int(part) == cpu_id:
+                return True
+        return False
+
+    @classmethod
+    @with_nvml_context
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        """Get NUMA nodes for all visible GPU devices."""
+        try:
+            numa_nodes = []
+            for device_id in range(cls.device_count()):
+                numa_node = cls.get_device_numa_node(device_id)
+                if numa_node is None:
+                    logger.warning(
+                        "Could not detect NUMA node for GPU %d, "
+                        "disabling automatic NUMA binding",
+                        device_id,
+                    )
+                    return None
+                numa_nodes.append(numa_node)
+            return numa_nodes
+        except Exception as e:
+            logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
+            return None
+
+    @classmethod
+    @with_nvml_context
     def log_warnings(cls):
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
@@ -693,6 +798,14 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
             " not found. Assuming no NVLink available."
         )
         return False
+
+    @classmethod
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        return None
+
+    @classmethod
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        return None
 
 
 # Autodetect either NVML-enabled or non-NVML platform
