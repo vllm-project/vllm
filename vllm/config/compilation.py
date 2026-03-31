@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -281,9 +281,9 @@ class PassConfig:
         TODO also log the compile ranges for which this is enabled.
         """
         enabled_fusions = [
-            name[len("fuse_") :]
-            for name, value in vars(self).items()
-            if name.startswith("fuse_") and value
+            f.name[len("fuse_") :]
+            for f in fields(self)
+            if getattr(self, f.name) and f.name.startswith("fuse_")
         ]
 
         if enabled_fusions:
