@@ -81,7 +81,11 @@ def select_mxfp8_moe_backend(
 
     # Auto-select: pick the first supported backend.
     for backend in _SUPPORTED_BACKENDS:
+        try:
+            experts_cls = _select_kernel_cls(backend, config)
+        except ValueError:
+            continue
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
-        return backend, _select_kernel_cls(backend, config)
+        return backend, experts_cls
 
     raise ValueError("No MXFP8 MoE backends available.")
