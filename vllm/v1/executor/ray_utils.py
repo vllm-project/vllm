@@ -596,6 +596,8 @@ def initialize_ray_cluster(
         current_ip = get_ip()
         current_node_id = ray.get_runtime_context().get_node_id()
         current_node_resource = available_resources_per_node()[current_node_id]
+        # TODO (jeffreywang): require_gpu_on_driver should be always False
+        # after deprecating RayDistributedExecutor.
         if require_gpu_on_driver:
             if current_node_resource.get(device_str, 0) < 1:
                 raise ValueError(

@@ -64,7 +64,7 @@ class RayWorkerHandle:
     bundle_id_idx: int = -1
     """Placement group bundle index for the worker"""
 
-    run_ref: ObjectRef = None
+    run_ref: ObjectRef | None = None
     """run() ObjectRef used as a sentinel for health monitoring"""
 
     def run(self):
@@ -207,6 +207,9 @@ class RayExecutorV2(MultiprocExecutor):
 
     Inherits from MultiprocExecutor to reuse the MQ-based control plane
     and NCCL data plane. Workers are Ray actors.
+
+    Async scheduling is enabled, inherited from MultiprocExecutor.
+    This is cricitcal for RayExecutorV2 to be performant.
     """
 
     uses_ray: bool = True
@@ -249,6 +252,7 @@ class RayExecutorV2(MultiprocExecutor):
         self.is_failed = False
         self.failure_callback = None
         self.shutting_down = False
+        self.shutdown_lock = threading.Lock()
 
         # Step 1: Initialize Ray cluster and retrieve placement group
         if ray is None:
@@ -316,6 +320,9 @@ class RayExecutorV2(MultiprocExecutor):
             worker_specific_vars=WORKER_SPECIFIC_ENV_VARS,
         )
 
+        runtime_env = self._build_runtime_env()
+        resource_kwargs = self._get_actor_resource_kwargs()
+
         for bundle_idx in range(self.world_size):
             bundle = bundle_assignments[bundle_idx]
             is_driver_worker = self._is_driver_worker(bundle["rank"])
@@ -325,9 +332,6 @@ class RayExecutorV2(MultiprocExecutor):
                 placement_group=placement_group,
                 placement_group_bundle_index=bundle["bundle_id_idx"],
             )
-
-            runtime_env = self._build_runtime_env()
-            resource_kwargs = self._get_actor_resource_kwargs()
 
             actor_name = build_actor_name(
                 instance_id, bundle["rank"], tp_size, pp_size, pcp_size
@@ -452,7 +456,7 @@ class RayExecutorV2(MultiprocExecutor):
                 if not done or _should_stop():
                     continue
 
-                dead_ranks = [ref_to_rank[r] for r in done if r in ref_to_rank]
+                dead_ranks = [ref_to_rank[r] for r in done]
                 executor = self_ref()
                 if not executor:
                     return
@@ -492,11 +496,15 @@ class RayExecutorV2(MultiprocExecutor):
             monitor.join(timeout=10)
 
     def shutdown(self) -> None:
-        """Properly shut down the executor and its workers"""
-        if getattr(self, "shutting_down", False):
-            self._join_monitor_thread()
+        """Properly shut down the executor and its workers."""
+        lock = getattr(self, "shutdown_lock", None)
+        if lock is None:
             return
-        self.shutting_down = True
+
+        with lock:
+            if getattr(self, "shutting_down", False):
+                return
+            self.shutting_down = True
 
         self._join_monitor_thread()
 
