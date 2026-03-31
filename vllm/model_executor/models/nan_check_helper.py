@@ -852,8 +852,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     seq_lens-filtered and reliable during CUDA graph replay, unlike
     hidden_states[:_last_num_actual_toks] which only checks 1 token.
     """
-    global _nan_reported, _inf_reported, _kv_poison_reported
-    if _nan_counts is None or (_nan_reported and _inf_reported and _kv_poison_reported):
+    if _nan_counts is None:
         _zero_all()
         return
 
@@ -866,8 +865,8 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         real = hidden_states
         n = total
 
-    real_has_nan = not _nan_reported and real.isnan().any().item()
-    real_has_inf = not _inf_reported and real.isinf().any().item()
+    real_has_nan = real.isnan().any().item()
+    real_has_inf = real.isinf().any().item()
 
     # Check kv_c_normed_real (col 17) for NaN OR Inf — seq_lens-filtered,
     # reliable during graph replay. Catches the initial poisoning event
@@ -875,8 +874,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     # Inf matters because FP8 e4m3fn has no Inf representation — bf16 Inf
     # may become FP8 NaN if __NV_SATFINITE has a hardware bug on Blackwell.
     kv_poison = (
-        not _kv_poison_reported
-        and _attn_detail is not None
+        _attn_detail is not None
         and (
             _attn_detail[:, 17].any().item()
             or (_inf_attn_detail is not None and _inf_attn_detail[:, 17].any().item())
@@ -967,12 +965,10 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
 
-    if kv_poison and not _kv_poison_reported:
-        _kv_poison_reported = True
+    if kv_poison:
         _emit_kv_poison(hidden_states, nan_cpu, attn_nan_cpu, attn_inf_cpu, n)
 
     if real_has_nan:
-        _nan_reported = True
         rc = real.isnan().sum().item()
         _emit_report(
             "NAN_FIRST", hidden_states, nan_cpu, attn_nan_cpu, rc, num_actual_toks=n
@@ -982,7 +978,6 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         _dump_repro(hidden_states, nan_cpu, attn_nan_cpu)
 
     if real_has_inf:
-        _inf_reported = True
         rc = real.isinf().sum().item()
         _emit_report(
             "INF_FIRST", hidden_states, inf_cpu, attn_inf_cpu, rc, num_actual_toks=n
