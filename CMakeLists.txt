@@ -301,6 +301,8 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/quantization/activation_kernels.cu"
+  "csrc/quantization/turboquant/polarquant_kernels.cu"
+  "csrc/quantization/turboquant/turboquant_attention_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")

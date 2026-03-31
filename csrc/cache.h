@@ -74,6 +74,35 @@ void indexer_k_quant_and_cache(
     int64_t quant_block_size,     // quantization block size
     const std::string& scale_fmt);
 
+// TurboQuant KV cache quantization (PolarQuant + QJL)
+void reshape_and_cache_turboquant(
+    torch::Tensor key, torch::Tensor value, torch::Tensor key_cache,
+    torch::Tensor value_cache, torch::Tensor slot_mapping, int64_t num_kv_heads,
+    int64_t head_size, int64_t block_size, const std::string& tq_type,
+    int64_t layer_seed, int64_t qjl_proj_dim);
+
+void turboquant_encode(torch::Tensor kv_data, torch::Tensor angles_out,
+                       torch::Tensor radii_out, torch::Tensor qjl_out,
+                       torch::Tensor residual_norms_out,
+                       int64_t num_kv_heads, int64_t head_size,
+                       const std::string& tq_type, int64_t layer_seed,
+                       int64_t qjl_proj_dim);
+
+void turboquant_decode(torch::Tensor angles, torch::Tensor radii,
+                       torch::Tensor qjl_bits, torch::Tensor residual_norms,
+                       torch::Tensor kv_out,
+                       int64_t num_kv_heads, int64_t head_size,
+                       const std::string& tq_type, int64_t layer_seed,
+                       int64_t qjl_proj_dim);
+
+void paged_attention_turboquant(
+    torch::Tensor output, torch::Tensor query, torch::Tensor key_cache,
+    torch::Tensor value_cache, torch::Tensor block_tables,
+    torch::Tensor context_lens, double scale, int64_t num_heads,
+    int64_t num_kv_heads, int64_t head_size, int64_t block_size,
+    int64_t max_blocks_per_seq, const std::string& tq_type,
+    int64_t layer_seed, int64_t qjl_proj_dim);
+
 // Concatenate query nope and rope for MLA/DSA attention
 void concat_mla_q(
     torch::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
