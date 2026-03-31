@@ -95,6 +95,10 @@ class PriorityEvictionQueue:
             self._block_ids_in_queue.discard(block.block_id)
             self._num_blocks -= 1
 
+    def __contains__(self, block: KVCacheBlock) -> bool:
+        """Check if a block is logically in the queue."""
+        return block.block_id in self._block_ids_in_queue
+
     def _effective_priority(self, block: KVCacheBlock) -> int:
         """Compute effective priority, accounting for TTL expiry.
 

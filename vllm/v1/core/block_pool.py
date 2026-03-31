@@ -451,11 +451,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in an eviction queue, remove it.
             if block.ref_cnt == 0 and not block.is_null:
-                if (
-                    has_prioritized
-                    and block.block_id
-                    in self.priority_eviction_queue._block_ids_in_queue
-                ):
+                if has_prioritized and block in self.priority_eviction_queue:
                     self.priority_eviction_queue.remove(block)
                 else:
                     self.free_block_queue.remove(block)
