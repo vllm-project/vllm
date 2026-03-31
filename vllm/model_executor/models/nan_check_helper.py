@@ -348,6 +348,20 @@ _saved_batch_info: dict | None = None
 _last_num_actual_toks: int = 0
 
 
+def set_batch_padded_size(padded_size: int, num_actual_toks: int) -> None:
+    """Called before the layer loop to set correct batch info for mark().
+
+    report_batch_info is called from inside attention (after mark for col 0),
+    so without this, _saved_batch_info is stale during mark().
+    """
+    global _saved_batch_info, _last_num_actual_toks
+    _last_num_actual_toks = num_actual_toks
+    if _saved_batch_info is None:
+        _saved_batch_info = {}
+    _saved_batch_info["padded_size"] = padded_size
+    _saved_batch_info["num_actual_toks"] = num_actual_toks
+
+
 def report_batch_info(
     layer_idx: int,
     num_actual_toks: int,
@@ -422,6 +436,9 @@ def _emit_scales(tag: str) -> None:
     print(msg, file=sys.stderr, end="", flush=True)
 
 
+_pad_log_fh = None
+
+
 def _get_log():
     global _log_fh
     if _log_fh is None:
@@ -435,6 +452,21 @@ def _get_log():
         _log_fh.write(f"=== NaN/Inf check started {datetime.datetime.now()} ===\n")
         _log_fh.flush()
     return _log_fh
+
+
+def _get_pad_log():
+    global _pad_log_fh
+    if _pad_log_fh is None:
+        log_dir = "/mnt/lustre/vllm-vlm-elvircrn/logs/nan_check"
+        os.makedirs(log_dir, exist_ok=True)
+        hostname = os.environ.get("HOSTNAME", "unknown")
+        gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "x")
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"{log_dir}/{hostname}_gpu{gpu}_{ts}.pad.log"
+        _pad_log_fh = open(path, "a")  # noqa: SIM115
+        _pad_log_fh.write(f"=== Pad NaN log started {datetime.datetime.now()} ===\n")
+        _pad_log_fh.flush()
+    return _pad_log_fh
 
 
 
@@ -1032,8 +1064,8 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             print(msg, file=sys.stderr, end="", flush=True)
 
     if per_layer_pad_nan and not kv_kernel_hit:
-        # Log padding NaN only once as a summary (not per-layer flood)
-        f = _get_log()
+        # Log padding NaN to separate .pad.log file
+        f = _get_pad_log()
         pad_layers = [i for i in range(nan_cpu.shape[0])
                       if nan_cpu[i, 0].item() > 0]
         msg = (f"[HS_PAD_NAN] padding-only NaN in {len(pad_layers)} layers "
@@ -1042,7 +1074,6 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                f"padded={padded} actual={n}\n")
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
 
     if kv_poison:
         _emit_kv_poison(hidden_states, nan_cpu, attn_nan_cpu, attn_inf_cpu, n)

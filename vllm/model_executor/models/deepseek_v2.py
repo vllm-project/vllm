@@ -94,6 +94,9 @@ from vllm.model_executor.models.nan_check_helper import (
 from vllm.model_executor.models.nan_check_helper import (
     check_kv_caches as _nan_check_kv_caches,
 )
+from vllm.model_executor.models.nan_check_helper import (
+    set_batch_padded_size as _nan_set_batch,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -1321,6 +1324,24 @@ class DeepseekV2Model(nn.Module):
             )
         else:
             llama_4_scaling = None
+
+        # Set batch info for NaN checking before layer loop
+        # (report_batch_info inside attention runs after mark(col=0))
+        try:
+            from vllm.forward_context import get_forward_context
+            _fwd_ctx = get_forward_context()
+            _am = _fwd_ctx.attn_metadata
+            if isinstance(_am, dict):
+                _am = next(iter(_am.values()))
+            _nan_set_batch(
+                padded_size=hidden_states.shape[0],
+                num_actual_toks=_am.num_actual_tokens,
+            )
+        except Exception:
+            _nan_set_batch(
+                padded_size=hidden_states.shape[0],
+                num_actual_toks=hidden_states.shape[0],
+            )
 
         aux_hidden_states = []
         for idx, layer in enumerate(
