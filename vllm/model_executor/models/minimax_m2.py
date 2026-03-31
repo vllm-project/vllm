@@ -379,14 +379,14 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], 0, hidden_states, residual)
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual)
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
