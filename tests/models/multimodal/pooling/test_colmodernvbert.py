@@ -15,6 +15,7 @@ from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
 MODEL_NAME = "ModernVBERT/colmodernvbert-merged"
 COLBERT_DIM = 128
 DTYPE = "half"
+revision = "4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee"
 
 
 # -----------------------------------------------------------------------
@@ -26,6 +27,7 @@ def test_colmodernvbert_text_token_embed(vllm_runner):
     """Text query produces per-token embeddings with shape (seq_len, 128)."""
     with vllm_runner(
         MODEL_NAME,
+        revision=revision,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
