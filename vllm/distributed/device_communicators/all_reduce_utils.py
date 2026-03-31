@@ -19,9 +19,6 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
@@ -44,6 +41,12 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
         6: 1 * MiB,  # 1 MB
         8: 1 * MiB,  # 1 MB
     },
+    "10.3": {
+        2: 4 * MiB,  # 4 MB
+        4: 4 * MiB,  # 4 MB
+        6: 8 * MiB,  # 8 MB
+        8: 4 * MiB,  # 4 MB
+    },
 }
 
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
@@ -58,6 +61,12 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         4: 32 * MiB,  # 32 MB
         6: 128 * MiB,  # 128 MB
         8: 128 * MiB,  # 128 MB
+    },
+    "10.3": {
+        2: 4 * MiB,  # 4 MB
+        4: 32 * MiB,  # 32 MB
+        6: 32 * MiB,  # 32 MB
+        8: 64 * MiB,  # 64 MB
     },
 }
 
@@ -103,7 +112,7 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
         is_symmetric_memory_enabled,
     )
 
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         return False
 
     if not is_symmetric_memory_enabled():

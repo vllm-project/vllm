@@ -227,7 +227,6 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
@@ -372,7 +371,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if (
             cache_config is not None
             and cache_config.enable_prefix_caching
-            and vllm_is_batch_invariant()
+            and envs.VLLM_BATCH_INVARIANT
             and (
                 self.attn_backend.get_name() == "TRITON_MLA"
                 or self.attn_backend.get_name() == "FLASHINFER"
@@ -416,12 +415,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
-        ]
+        self.kv_cache = torch.tensor([])
 
         self.use_sparse = use_sparse
 
@@ -480,7 +474,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
@@ -940,7 +934,7 @@ def unified_mla_kv_cache_update(
         return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
     attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache
 
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
@@ -1065,6 +1059,10 @@ except ImportError:
                 "MLA models using TRITON_MLA will require flash_attn. "
                 "AITER_MLA backends use aiter kernels instead."
             )
+    elif current_platform.is_xpu():
+        from vllm._xpu_ops import xpu_ops as ops
+
+        flash_attn_varlen_func = ops.flash_attn_varlen_func  # type: ignore[no-redef]
 
 
 def dynamic_per_batched_tensor_quant(
@@ -2188,7 +2186,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
         attn_out = self.flash_attn_varlen_func(

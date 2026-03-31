@@ -173,8 +173,10 @@ print(candidates[0] if candidates else '')
 endfunction()
 
 # Macro for converting a `gencode` version number to a cmake version number.
+# Preserves architecture-specific suffixes (a/f) needed for correct
+# __CUDA_ARCH_FAMILY_SPECIFIC__ definition. E.g. "121a" -> "12.1a".
 macro(string_to_ver OUT_VER IN_STR)
-  string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
+  string(REGEX REPLACE "\([0-9]+\)\([0-9][af]?\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
 endmacro()
 
 #
@@ -211,7 +213,7 @@ endmacro()
 function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
-    string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
+    string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
     if (_COMPUTE)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
@@ -353,8 +355,11 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # If x.0a or x.0f is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a or x.0f from SRC_CUDA_ARCHS and add x.0a or x.0f to _CUDA_ARCHS
+  # Handle architecture-specific suffixes (a/f) for SRC entries.
+  # First try exact base match (x.y), then cross-suffix match (x.ya / x.yf).
+  # For 'f' (family) suffix: if no exact/cross match, fall back to major-version
+  # match — e.g. SRC="12.0f" matches TGT="12.1a" since SM121 is in the SM12x
+  # family. The output uses TGT's value to preserve the user's compilation flags.
   set(_CUDA_ARCHS)
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
@@ -362,6 +367,38 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      elseif("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a")
+        list(APPEND _CUDA_ARCHS "${_base}a")
+      elseif("${_base}f" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}f")
+        list(APPEND _CUDA_ARCHS "${_base}f")
+      elseif(_arch MATCHES "f$")
+        # Family suffix: match any TGT entry in the same major version family.
+        string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _src_major "${_base}")
+        foreach(_tgt ${_TGT_CUDA_ARCHS})
+          string(REGEX REPLACE "[af]$" "" _tgt_base "${_tgt}")
+          string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _tgt_major "${_tgt_base}")
+          if(_tgt_major STREQUAL _src_major)
+            list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_tgt}")
+            list(APPEND _CUDA_ARCHS "${_tgt}")
+            break()
+          endif()
+        endforeach()
+      endif()
+    endif()
+  endforeach()
+
+  # Symmetric handling: if TGT has x.ya/f and SRC has x.y (without suffix),
+  # preserve TGT's suffix in the output.
+  set(_tgt_copy ${_TGT_CUDA_ARCHS})
+  foreach(_arch ${_tgt_copy})
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if ("${_base}" IN_LIST _SRC_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_arch}")
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
       endif()
     endif()
