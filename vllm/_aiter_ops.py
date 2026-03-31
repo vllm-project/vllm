@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import threading
 from collections.abc import Callable
 
 import torch
@@ -99,16 +98,6 @@ def _mxfp4_moe_w2_triton_gemm_view(w2: torch.Tensor) -> torch.Tensor:
     return w2.transpose(1, 2)
 
 
-def _mxfp4_moe_triton_scales(w_scale: torch.Tensor | None):
-    """Return scales for moe_gemm_a4w4 without CDNA4 HBM swizzle.
-
-    Quark's MoE loading applies ``e8m0_shuffle`` for the CK/AITER fused_moe path; that
-    layout is not the same as ``swizzle_scales`` expects. Use unswizzled scales and
-    ``swizzle_mx_scale=None`` (see aiter ``test_moe_gemm_a4w4`` with ``hbm_swizzling=False``).
-    """
-    return w_scale, None
-
-
 def _silu_and_mul_glu(x: torch.Tensor) -> torch.Tensor:
     """SiLU(gate) * up for g1u1 tensors with last dim 2 * inter (matches CK ``silu_and_mul``)."""
     d = x.shape[-1] // 2
@@ -129,79 +118,6 @@ def _mxfp4_moe_weight_as_uint8(w: torch.Tensor) -> torch.Tensor:
     return w
 
 
-_aiter_reduce_grouped_patch_lock = threading.Lock()
-_aiter_reduce_grouped_patched: bool = False
-
-
-def _patch_aiter_moe_gemm_a4w4_reduce_grouped_for_rocm() -> None:
-    """Chunk aiter ``reduce_grouped`` so grid y stays within HIP limits (see env)."""
-    global _aiter_reduce_grouped_patched
-    if _aiter_reduce_grouped_patched:
-        return
-    with _aiter_reduce_grouped_patch_lock:
-        if _aiter_reduce_grouped_patched:
-            return
-        import aiter.ops.triton.moe.moe_op_gemm_a4w4 as m4
-
-        if getattr(m4, "_vllm_reduce_grouped_chunked", False):
-            _aiter_reduce_grouped_patched = True
-            return
-
-        _orig = m4.reduce_grouped
-
-        def reduce_grouped_chunked(
-            x,
-            indx,
-            out,
-            apply_swiglu=False,
-            alpha=1.0,
-            limit=1.0,
-            reduction_n=1,
-            out_dtype=None,
-        ):
-            max_groups = envs.VLLM_ROCM_AITER_MOE_REDUCE_MAX_GROUPS
-            if indx is None:
-                return _orig(
-                    x,
-                    indx,
-                    out,
-                    apply_swiglu,
-                    alpha,
-                    limit,
-                    reduction_n,
-                    out_dtype,
-                )
-            n = indx.shape[0]
-            if n <= max_groups:
-                return _orig(
-                    x,
-                    indx,
-                    out,
-                    apply_swiglu,
-                    alpha,
-                    limit,
-                    reduction_n,
-                    out_dtype,
-                )
-            for start in range(0, n, max_groups):
-                end = min(start + max_groups, n)
-                _orig(
-                    x,
-                    indx[start:end],
-                    out[start:end],
-                    apply_swiglu,
-                    alpha,
-                    limit,
-                    reduction_n,
-                    out_dtype,
-                )
-            return out
-
-        m4.reduce_grouped = reduce_grouped_chunked
-        m4._vllm_reduce_grouped_chunked = True
-        _aiter_reduce_grouped_patched = True
-
-
 def _rocm_aiter_fused_moe_triton_gemm_a4w4(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -217,9 +133,6 @@ def _rocm_aiter_fused_moe_triton_gemm_a4w4(
     from aiter.fused_moe import get_inter_dim
     from aiter.ops.triton.moe.moe_op_gemm_a4w4 import moe_gemm_a4w4, mxfp4_quant
     from aiter.ops.triton.moe.moe_routing.routing import routing
-
-    if current_platform.is_rocm():
-        _patch_aiter_moe_gemm_a4w4_reduce_grouped_for_rocm()
 
     if activation_method != int(ActivationType.Silu):
         raise RuntimeError(
@@ -256,9 +169,6 @@ def _rocm_aiter_fused_moe_triton_gemm_a4w4(
     w1_v = _mxfp4_moe_weight_as_uint8(_mxfp4_moe_w1_triton_gemm_view(w1, w2))
     w2_v = _mxfp4_moe_weight_as_uint8(_mxfp4_moe_w2_triton_gemm_view(w2))
 
-    w1_s, sw1 = _mxfp4_moe_triton_scales(w1_scale)
-    w2_s, sw2 = _mxfp4_moe_triton_scales(w2_scale)
-
     x_q, x_s = mxfp4_quant(hidden_states.to(out_dtype))
     # Raw W1@x per (token, expert), then CK-style silu_and_mul (not Triton ``apply_swiglu``).
     # ``scatter_indx=None`` keeps expanded rows until after activation; higher VRAM than fused swiglu.
@@ -266,7 +176,7 @@ def _rocm_aiter_fused_moe_triton_gemm_a4w4(
         x_q,
         w1_v,
         x_s,
-        w1_s,
+        w1_scale,
         x_static_scale=None,
         quant_static_scale=None,
         bias=None,
@@ -274,7 +184,7 @@ def _rocm_aiter_fused_moe_triton_gemm_a4w4(
         gather_indx=gather_idx,
         scatter_indx=None,
         gammas=None,
-        swizzle_mx_scale=sw1,
+        swizzle_mx_scale=None,
         out_dtype=gemm_out_dt,
         apply_swiglu=False,
     )
@@ -284,7 +194,7 @@ def _rocm_aiter_fused_moe_triton_gemm_a4w4(
         mid_q,
         w2_v,
         mid_s,
-        w2_s,
+        w2_scale,
         x_static_scale=None,
         quant_static_scale=None,
         bias=None,
@@ -292,7 +202,7 @@ def _rocm_aiter_fused_moe_triton_gemm_a4w4(
         gather_indx=None,
         scatter_indx=scatter_idx,
         gammas=gate_scal,
-        swizzle_mx_scale=sw2,
+        swizzle_mx_scale=None,
         out_dtype=gemm_out_dt,
         apply_swiglu=False,
     )
