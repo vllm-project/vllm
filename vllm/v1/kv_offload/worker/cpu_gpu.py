@@ -94,6 +94,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
 
+        # assert a single KV group until transfer_async supports multiple groups
+        assert len(kv_cache_groups_data_refs) == 1
+
         # assert input tensors are as expected
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
             assert gpu_tensor.dtype == torch.int8

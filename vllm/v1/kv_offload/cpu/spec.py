@@ -60,6 +60,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
+            assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
             offloaded_block_size = gpu_block_size * self.block_size_factor
 

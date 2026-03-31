@@ -30,6 +30,7 @@ class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(self, spec: OffloadingSpec):
+        assert len(spec.gpu_block_size) == 1
         self.gpu_block_size = spec.gpu_block_size[0]
         self.offloaded_block_size = self.gpu_block_size * spec.block_size_factor
         self.block_size_factor = spec.block_size_factor
@@ -339,11 +340,7 @@ class OffloadingConnectorScheduler:
         """
         for event in self.manager.take_events():
             if event.removed:
-                yield BlockRemoved(
-                    block_hashes=event.block_hashes,
-                    medium=event.medium,
-                    evicted_groups=event.evicted_groups,
-                )
+                yield BlockRemoved(block_hashes=event.block_hashes, medium=event.medium)
             else:
                 yield BlockStored(
                     block_hashes=event.block_hashes,
@@ -353,5 +350,4 @@ class OffloadingConnectorScheduler:
                     block_size=event.block_size,
                     medium=event.medium,
                     lora_name=None,
-                    stored_groups=event.stored_groups,
                 )
