@@ -30,6 +30,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
+from vllm.utils import numa_utils
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
@@ -76,7 +77,6 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
-from vllm.utils import numa_utils
 
 logger = init_logger(__name__)
 
@@ -1258,8 +1258,9 @@ class EngineCoreProc(EngineCore):
                 return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (method := getattr(self, method_name)) and method(
-                *self._convert_msgspec_args(method, args)
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
