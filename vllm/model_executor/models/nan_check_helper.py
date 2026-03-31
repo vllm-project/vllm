@@ -878,14 +878,17 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
     real_has_inf = real.isinf().any().item()
 
     # Check per-layer hidden_states NaN from mark() inside CUDA graph.
-    # mark() checks all padded tokens, so filter out padding-only NaN.
+    # mark() checks all padded tokens, so distinguish padding vs real NaN.
     # tok0 has NaN only if count > num_padding * hidden_dim.
     hidden_dim = hidden_states.shape[-1]
     padded = (_saved_batch_info["padded_size"]
               if _saved_batch_info else total)
     num_padding = padded - n
     hs_pad_max = num_padding * hidden_dim
-    per_layer_hs_nan = (_nan_counts[:, 0] > hs_pad_max).any().item()
+    per_layer_real_nan = (_nan_counts[:, 0] > hs_pad_max).any().item()
+    per_layer_pad_nan = (
+        not per_layer_real_nan and _nan_counts[:, 0].any().item()
+    )
 
     # Check kv_c_normed_real (col 17) for NaN OR Inf — seq_lens-filtered,
     # reliable during graph replay. Catches the initial poisoning event
@@ -912,7 +915,8 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
         and _kv_kernel_nan_flags[:, 0].any().item()
     )
 
-    if not (real_has_nan or real_has_inf or per_layer_hs_nan or kv_poison
+    if not (real_has_nan or real_has_inf or per_layer_real_nan
+            or per_layer_pad_nan or kv_poison
             or kv_write_nan or kv_kernel_hit):
         _zero_all()
         return
@@ -1006,31 +1010,39 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
 
-    if per_layer_hs_nan:
+    if per_layer_real_nan:
         f = _get_log()
-        # hidden_dim, padded, num_padding, hs_pad_max already computed above
         for layer_idx in range(nan_cpu.shape[0]):
             hs_nan = nan_cpu[layer_idx, 0].item()
+            if hs_nan <= hs_pad_max:
+                continue
             hs_inf = inf_cpu[layer_idx, 0].item() if inf_cpu is not None else 0
             attn_nan = nan_cpu[layer_idx, 2].item()
             moe_nan = nan_cpu[layer_idx, 3].item()
             ma = maxabs_cpu[layer_idx].item() if maxabs_cpu is not None else 0.0
-            # Only report layers where tok0 has NaN (above padding threshold)
-            if hs_nan <= hs_pad_max and hs_inf == 0 and attn_nan <= hs_pad_max and moe_nan <= hs_pad_max:
-                continue
-            # Determine if real token (tok 0) has NaN
-            tok0_nan = "YES" if hs_nan > hs_pad_max else "NO"
-            real_nan_elems = max(0, hs_nan - hs_pad_max)
-            msg = (f"[HS_NAN] layer={layer_idx} "
-                   f"input_nan={hs_nan} tok0_nan={tok0_nan} "
+            real_nan_elems = hs_nan - hs_pad_max
+            msg = (f"[HS_REAL_NAN] layer={layer_idx} "
                    f"real_nan_elems={real_nan_elems} "
-                   f"input_inf={hs_inf} "
+                   f"input_nan={hs_nan} input_inf={hs_inf} "
                    f"attn_nan={attn_nan} moe_nan={moe_nan} "
                    f"hs_maxabs={ma:.4g} "
                    f"padded={padded} actual={n}\n")
             f.write(msg)
             f.flush()
             print(msg, file=sys.stderr, end="", flush=True)
+
+    if per_layer_pad_nan and not kv_kernel_hit:
+        # Log padding NaN only once as a summary (not per-layer flood)
+        f = _get_log()
+        pad_layers = [i for i in range(nan_cpu.shape[0])
+                      if nan_cpu[i, 0].item() > 0]
+        msg = (f"[HS_PAD_NAN] padding-only NaN in {len(pad_layers)} layers "
+               f"(first={pad_layers[0] if pad_layers else '?'} "
+               f"last={pad_layers[-1] if pad_layers else '?'}) "
+               f"padded={padded} actual={n}\n")
+        f.write(msg)
+        f.flush()
+        print(msg, file=sys.stderr, end="", flush=True)
 
     if kv_poison:
         _emit_kv_poison(hidden_states, nan_cpu, attn_nan_cpu, attn_inf_cpu, n)
