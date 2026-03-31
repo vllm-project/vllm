@@ -1393,7 +1393,8 @@ class Glm4vForConditionalGeneration(
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["gate_up_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "attn.qkv": ["attn.q", "attn.k", "attn.v"],
     }
 
     # To ensure correct weight loading and mapping.
@@ -1735,4 +1736,5 @@ class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
             "gate_proj",
             "up_proj",
         ],
+        "attn.qkv": ["attn.q", "attn.k", "attn.v"],
     }
