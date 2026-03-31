@@ -114,7 +114,7 @@ class ARCCachePolicy(CachePolicy):
             if virtual_t1_size >= int(self.target_t1_size):
                 for block_hash, block in self.t1.items():
                     if (
-                        block.ref_cnt == 0
+                        block.ref_cnt in (0, -1)
                         and block_hash not in protected
                         and block_hash not in already_selected
                     ):
@@ -125,7 +125,7 @@ class ARCCachePolicy(CachePolicy):
             if candidate is None:
                 for block_hash, block in self.t2.items():
                     if (
-                        block.ref_cnt == 0
+                        block.ref_cnt in (0, -1)
                         and block_hash not in protected
                         and block_hash not in already_selected
                     ):
