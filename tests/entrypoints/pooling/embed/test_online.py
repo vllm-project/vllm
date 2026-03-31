@@ -25,6 +25,7 @@ from vllm.entrypoints.pooling.utils import (
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
+from vllm.utils.torch_utils import base64_to_tensor
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -519,7 +520,7 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
     base64_data = []
     for data in responses_base64.data:
         base64_data.append(
-            np.frombuffer(base64.b64decode(data.embedding), dtype="float32").tolist()
+            base64_to_tensor(data.embedding, dtype=torch.float32).tolist()
         )
 
     run_embedding_correctness_test(hf_model, input_texts, base64_data)

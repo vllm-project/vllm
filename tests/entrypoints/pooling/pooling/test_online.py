@@ -19,6 +19,7 @@ from vllm.entrypoints.pooling.utils import (
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
+from vllm.utils.torch_utils import base64_to_tensor
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -289,7 +290,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str)
     decoded_responses_base64_data = []
     for data in responses_base64.data:
         decoded_responses_base64_data.append(
-            np.frombuffer(base64.b64decode(data.data), dtype="float32").tolist()
+            base64_to_tensor(data.data, dtype=torch.float32).tolist()
         )
 
     check_embeddings_close(
