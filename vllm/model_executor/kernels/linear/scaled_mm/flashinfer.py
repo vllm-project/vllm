@@ -177,6 +177,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     fallback_type: ClassVar[type[DeepGemmFp8BlockScaledMMKernel]] = (
         DeepGemmFp8BlockScaledMMKernel
     )
+    apply_input_quant: ClassVar[bool] = False
 
     @classmethod
     def is_supported(cls, compute_capability=None):
