@@ -202,6 +202,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)

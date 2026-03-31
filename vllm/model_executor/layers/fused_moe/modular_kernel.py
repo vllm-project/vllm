@@ -9,6 +9,7 @@ from typing import final
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -563,6 +564,8 @@ class FusedMoEExperts(ABC):
             )
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
+        elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
+            return False, _make_reason("batch invariance")
         return True, None
 
     @staticmethod
@@ -644,6 +647,15 @@ class FusedMoEExperts(ABC):
         has specific shape requirements.
         """
         return True
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        """
+        Whether the kernel supports batch invariance, i.e. the output does not
+        depend on the order of the tokens in the input batch. This is useful
+        for determining if the kernel can used with VLLM_BATCH_INVARIANT=1.
+        """
+        return False
 
     #
     # Various helpers for accessing quantization parameters from the
