@@ -201,7 +201,7 @@ class MPTBlock(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.attn",
         )
         self.norm_2 = nn.LayerNorm(hidden_size)
@@ -247,7 +247,7 @@ class MPTModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.blocks",

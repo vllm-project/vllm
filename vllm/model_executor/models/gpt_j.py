@@ -175,7 +175,7 @@ class GPTJBlock(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = GPTJMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
@@ -219,7 +219,7 @@ class GPTJModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",

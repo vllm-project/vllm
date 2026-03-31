@@ -198,7 +198,7 @@ class BloomBlock(nn.Module):
             config,
             cache_config,
             quant_config,
-            model_config=model_config,
+            model_config,
             prefix=f"{prefix}.self_attention",
         )
         self.post_attention_layernorm = nn.LayerNorm(
@@ -271,7 +271,7 @@ class BloomModel(nn.Module):
                 config,
                 cache_config,
                 quant_config,
-                model_config=model_config,
+                model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",
