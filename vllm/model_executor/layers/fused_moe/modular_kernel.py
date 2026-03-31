@@ -1377,6 +1377,12 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
         )
+        if (
+            not self.inplace
+            and fused_out.shape == output.shape
+            and fused_out.is_contiguous()
+        ):
+            output = fused_out
 
         return self._finalize(
             output,
