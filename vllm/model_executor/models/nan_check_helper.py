@@ -363,6 +363,13 @@ def set_batch_info_external(num_actual: int, padded: int) -> None:
     global _ext_num_actual, _ext_padded
     _ext_num_actual = num_actual
     _ext_padded = padded
+    # Log first call to verify values are correct
+    if not hasattr(set_batch_info_external, '_logged'):
+        set_batch_info_external._logged = True
+        f = _get_log()
+        f.write(f"[EXT_BATCH_INFO] first call: "
+                f"num_actual={num_actual} padded={padded}\n")
+        f.flush()
 
 
 def report_batch_info(

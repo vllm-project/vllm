@@ -945,8 +945,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             from vllm.model_executor.models.nan_check_helper import (
                 set_batch_info_external as _nan_set_ext,
             )
-            _nan_set_ext(input_batch.num_tokens,
-                         input_batch.num_tokens_after_padding)
+            _nan_set_ext(
+                getattr(input_batch, 'num_tokens', 0),
+                getattr(input_batch, 'num_tokens_after_padding', 0),
+            )
         except Exception:
             pass
         logits = self.model.compute_logits(sample_hidden_states)
