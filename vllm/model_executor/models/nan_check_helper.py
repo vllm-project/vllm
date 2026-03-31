@@ -258,8 +258,7 @@ def check_kv_caches(layers) -> None:
                    f"dtype={kv.dtype}\n")
             f.write(msg)
             f.flush()
-            print(msg, file=sys.stderr, end="", flush=True)
-            return
+                return
 
 
 def mark_kv_stale_fp8_nan(
@@ -382,7 +381,6 @@ def _emit_batch_info(tag: str) -> None:
     )
     f.write(msg)
     f.flush()
-    print(msg, file=sys.stderr, end="", flush=True)
 
 
 _saved_scales: dict | None = None
@@ -420,7 +418,6 @@ def _emit_scales(tag: str) -> None:
     )
     f.write(msg)
     f.flush()
-    print(msg, file=sys.stderr, end="", flush=True)
 
 
 def _get_log():
@@ -497,7 +494,6 @@ def _emit_report(
     )
     f.write(msg)
     f.flush()
-    print(msg, file=sys.stderr, end="", flush=True)
 
     for layer_idx in range(layer_counts.shape[0]):
         input_c = layer_counts[layer_idx, 0].item()
@@ -513,7 +509,6 @@ def _emit_report(
         )
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
 
         if attn_counts is not None and attn_c > 0:
             ad = attn_counts[layer_idx]
@@ -525,8 +520,7 @@ def _emit_report(
             )
             f.write(msg)
             f.flush()
-            print(msg, file=sys.stderr, end="", flush=True)
-
+    
             msg = (
                 f"[{tag}] layer={layer_idx} mla_inner: "
                 f"kv_cache_upd={ad[6].item()} W_UK_bmm={ad[7].item()} "
@@ -542,8 +536,7 @@ def _emit_report(
             )
             f.write(msg)
             f.flush()
-            print(msg, file=sys.stderr, end="", flush=True)
-
+    
 
 # ---------------------------------------------------------------------------
 # Single shared stash buffer for NaN repro dump.
@@ -708,7 +701,6 @@ def _dump_repro(
         )
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
         return
 
     stash_layer = _stash_layer_idx[B].item()
@@ -756,7 +748,6 @@ def _dump_repro(
         )
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
 
     # Persistent tensor refs from metadata
     for k in ("block_table", "seq_lens"):
@@ -788,12 +779,10 @@ def _dump_repro(
         msg = f"[NAN_REPRO] saved to {save_path} (stash_layer={stash_layer})\n"
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
     except Exception as e:
         msg = f"[NAN_REPRO] FAILED to save: {e}\n"
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
 
 
 _nan_origin_reported = False
@@ -862,7 +851,6 @@ def _emit_nan_origin(
                f"padded={padded} actual={num_actual}\n")
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
 
         # Dump full attn_detail for the origin layer
         if attn_nan_cpu is not None:
@@ -892,8 +880,7 @@ def _emit_nan_origin(
                    f"k_pe_pre_rope_nan={ad[22].item() if ad.shape[0] > 22 else '?'}\n")
             f.write(msg)
             f.flush()
-            print(msg, file=sys.stderr, end="", flush=True)
-
+    
             if ai is not None:
                 msg = (f"[NAN_ORIGIN] phase={phase} layer={layer_idx} attn_inf: "
                        f"fused_qkv_inf={ai[0].item()} "
@@ -904,8 +891,7 @@ def _emit_nan_origin(
                        f"kv_fp8_inf={ai[18].item()}\n")
                 f.write(msg)
                 f.flush()
-                print(msg, file=sys.stderr, end="", flush=True)
-
+        
         return  # Only report the first origin
 
 
@@ -946,7 +932,6 @@ def _emit_kv_poison(
     )
     f.write(msg)
     f.flush()
-    print(msg, file=sys.stderr, end="", flush=True)
 
     # Emit full detail for all layers with nonzero kv_c_normed_real NaN or Inf
     num_layers = max(
@@ -979,7 +964,6 @@ def _emit_kv_poison(
         )
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
 
     _emit_scales("KV_POISON")
     _emit_batch_info("KV_POISON")
@@ -1079,8 +1063,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                        f"nan_count={c}\n")
                 f.write(msg)
                 f.flush()
-                print(msg, file=sys.stderr, end="", flush=True)
-
+        
     if kv_kernel_hit:
         _BIT_NAMES = {
             0: "fp8_nan_kv_c",
@@ -1147,8 +1130,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                    f"padded={padded}\n")
             f.write(msg)
             f.flush()
-            print(msg, file=sys.stderr, end="", flush=True)
-
+    
     if per_layer_real_nan:
         f = _get_log()
         for layer_idx in range(nan_cpu.shape[0]):
@@ -1168,8 +1150,7 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                    f"padded={padded} actual={n}\n")
             f.write(msg)
             f.flush()
-            print(msg, file=sys.stderr, end="", flush=True)
-
+    
     if per_layer_pad_nan:
         # Log padding NaN to separate .pad.log file
         f = _get_pad_log()
@@ -1182,7 +1163,6 @@ def report_if_nan(hidden_states: torch.Tensor) -> None:
                f"padded={padded} actual={n}\n")
         f.write(msg)
         f.flush()
-        print(msg, file=sys.stderr, end="", flush=True)
 
     # Find the NaN origin: first layer where input (col0) is clean but
     # a later stage (post_ln/attn/moe) has NaN. This is where NaN is BORN.
