@@ -1,14 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from io import BytesIO
+
+import pybase64 as base64
 import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
+from PIL import Image
 from safetensors.torch import load_file
 from transformers import AutoModel, AutoTokenizer
 
 from tests.conftest import HfRunner
-from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartTextParam,
+)
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
 
 class ColBERTScoringHfRunner(torch.nn.Module):
@@ -67,3 +76,32 @@ class EncoderScoringHfRunner(HfRunner):
             for pair in hf_embeddings
         ]
         return torch.as_tensor(hf_outputs)
+
+
+def make_base64_image(
+    width: int = 64, height: int = 64, color: tuple[int, int, int] = (255, 0, 0)
+) -> str:
+    """Create a small solid-color PNG image and return its base64 data URI."""
+    img = Image.new("RGB", (width, height), color)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
+
+
+def make_image_mm_param(
+    image_uri: str,
+    text: str | None = None,
+) -> ScoreMultiModalParam:
+    """Build a ScoreMultiModalParam containing an image (and optional text)."""
+    content: list = [
+        ChatCompletionContentPartImageParam(
+            type="image_url",
+            image_url={"url": image_uri},
+        ),
+    ]
+    if text is not None:
+        content.append(
+            ChatCompletionContentPartTextParam(type="text", text=text),
+        )
+    return ScoreMultiModalParam(content=content)

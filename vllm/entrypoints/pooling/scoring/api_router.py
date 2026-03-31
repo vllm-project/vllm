@@ -3,20 +3,14 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
-from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.score.protocol import (
-    RerankRequest,
-    RerankResponse,
-    ScoreRequest,
-    ScoreResponse,
-)
-from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
+
+from .protocol import RerankRequest, ScoreRequest
+from .serving import ServingScores
 
 router = APIRouter()
 
@@ -46,16 +40,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Score API")
 
-    generator = await handler.create_score(request, raw_request)
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, ScoreResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
+    return await handler(request, raw_request)
 
 
 @router.post(
@@ -92,16 +77,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     if handler is None:
         raise NotImplementedError("The model does not support Rerank (Score) API")
 
-    generator = await handler.do_rerank(request, raw_request)
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, RerankResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
+    return await handler(request, raw_request)
 
 
 @router.post(

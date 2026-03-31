@@ -13,13 +13,16 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
+from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.typing import (
+    OfflineInputsContext,
+    OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingServeContext,
 )
 from vllm.inputs import EngineInput, SingletonPrompt
-from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -96,29 +99,29 @@ class PoolingIOProcessor:
     #######################################
     # offline APIs
 
-    def pre_process_offline(
-        self,
-        prompts: PromptType | Sequence[PromptType],
-        tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[EngineInput]:
+    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        assert not isinstance(ctx.prompts, ScoringData)
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
         return self._preprocess_completion_offline(
-            prompts=prompts, tokenization_kwargs=tokenization_kwargs
+            prompts=ctx.prompts, tok_params=tok_params
         )
 
-    async def pre_process_offline_async(self, *args, **kwargs):
-        return self.pre_process_offline(*args, **kwargs)
+    async def pre_process_offline_async(self, ctx: OfflineInputsContext):
+        return self.pre_process_offline(ctx)
 
     def post_process_offline(
         self,
-        outputs: list[PoolingRequestOutput],
+        ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        return outputs
+        return ctx.outputs
 
     async def post_process_offline_async(
         self,
-        outputs: list[PoolingRequestOutput],
+        ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        return self.post_process_offline(outputs)
+        return self.post_process_offline(ctx)
 
     #######################################
     # helpers
@@ -204,28 +207,21 @@ class PoolingIOProcessor:
     def _preprocess_completion_offline(
         self,
         prompts: PromptType | Sequence[PromptType],
-        tokenization_kwargs: dict[str, Any] | None = None,
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
-        renderer = self.renderer
-        model_config = self.model_config
-
         prompts = prompt_to_seq(prompts)
-
         parsed_prompts = [
             (
                 prompt
                 if isinstance(prompt, bytes)
-                else parse_model_prompt(model_config, prompt)
+                else parse_model_prompt(self.model_config, prompt)
             )
             for prompt in prompts
         ]
-        tok_params = renderer.default_cmpl_tok_params.with_kwargs(
-            **(tokenization_kwargs or {})
-        )
 
-        return renderer.render_cmpl(
-            parsed_prompts,
-            tok_params,
+        return self.renderer.render_cmpl(
+            parsed_prompts, tok_params, prompt_extras=prompt_extras
         )
 
     def _validate_chat_template(
