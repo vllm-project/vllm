@@ -180,12 +180,8 @@ class SharedExperts:
     ):
         experts_order = self._determine_shared_experts_order(shared_experts_input)
 
-        print(f"ORDER {order} {experts_order}")
-
         if order != experts_order:
             return None
-
-        print("EXECUTING")
 
         assert self._output is None
 
