@@ -16,7 +16,6 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
@@ -726,9 +725,9 @@ class ParallelConfig:
                 backend = "mp"
             elif (
                 current_platform.is_cuda()
-                and cuda_device_count_stateless() < self.world_size
+                and current_platform.device_count() < self.world_size
             ):
-                gpu_count = cuda_device_count_stateless()
+                gpu_count = current_platform.device_count()
                 raise ValueError(
                     f"World size ({self.world_size}) is larger than the number of "
                     f"available GPUs ({gpu_count}) in this node. If this is "
