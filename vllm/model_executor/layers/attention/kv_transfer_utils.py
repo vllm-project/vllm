@@ -40,8 +40,8 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
 
         layer_name: str = args[layer_name_index]
 
-        # Extract attention context (layer-specific metadata, layer, and kv_cache)
-        attn_metadata, attn_layer, kv_cache = get_attention_context(layer_name)
+        # Extract attention context (metadata, layer, kv_cache, layer_slot_mapping)
+        attn_metadata, _, kv_cache, _ = get_attention_context(layer_name)
         connector = get_kv_transfer_group()
         if attn_metadata is None or not connector.has_connector_metadata():
             return func(*args, **kwargs)

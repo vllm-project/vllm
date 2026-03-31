@@ -28,7 +28,9 @@ if current_platform.is_cuda_alike():
     from .fusion.attn_quant_fusion import AttnFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
+    from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
     from .fusion.sequence_parallelism import SequenceParallelismPass
+    from .utility.scatter_split_replace import ScatterSplitReplacementPass
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda():
@@ -135,6 +137,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
+            if self.pass_config.fuse_rope_kvcache:
+                self.passes += [SplitCoalescingPass(config)]
+                self.passes += [ScatterSplitReplacementPass(config)]
+                self.passes += [RopeKVCacheFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]

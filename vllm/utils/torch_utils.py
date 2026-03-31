@@ -6,7 +6,6 @@ import os
 import random
 import threading
 from collections.abc import Callable, Collection
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -16,7 +15,6 @@ from packaging import version
 from packaging.version import Version
 from torch.library import Library, infer_schema
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -567,8 +565,8 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream_tls.value
 
 
-# Global auxilary stream for running operations in background streams.
-# We have single global auxilary stream to avoid an explosion of streams
+# Global auxiliary stream for running operations in background streams.
+# We have single global auxiliary stream to avoid an explosion of streams
 # for every layer (and make profiling look sane).
 #
 # aux_stream() is currently used for:
@@ -588,49 +586,6 @@ def aux_stream() -> torch.cuda.Stream | None:
         _aux_stream = torch.cuda.Stream()
 
     return _aux_stream
-
-
-@lru_cache(maxsize=8)
-def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
-    # Note: cuda_visible_devices is not used, but we keep it as an argument for
-    # LRU Cache purposes.
-
-    # Code below is based on
-    # https://github.com/pytorch/pytorch/blob/
-    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
-    # torch/cuda/__init__.py#L831C1-L831C17
-    import torch.cuda
-    import torch.version
-
-    from vllm.platforms import current_platform
-
-    if not torch.cuda._is_compiled():
-        return 0
-    if current_platform.is_rocm():
-        # ROCm uses amdsmi instead of nvml for stateless device count
-        # This requires a sufficiently modern version of Torch 2.4.0
-        raw_count = (
-            torch.cuda._device_count_amdsmi()
-            if (hasattr(torch.cuda, "_device_count_amdsmi"))
-            else -1
-        )
-    else:
-        raw_count = torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
-    return r
-
-
-def cuda_device_count_stateless() -> int:
-    """Get number of CUDA devices, caching based on the value of
-    CUDA_VISIBLE_DEVICES at the time of call.
-
-    This should be used instead of torch.cuda.device_count()
-    unless CUDA_VISIBLE_DEVICES has already been set to the desired
-    value."""
-
-    # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -678,12 +633,18 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     """
     Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
-    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
+        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
-    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    elif current_platform.is_cuda_alike():
+        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    else:
+        raise ValueError(
+            f"`get_accelerator_view_from_cpu_tensor` is currently "
+            f"not supported in: {current_platform.device_name}"
+        )
 
 
 # Helper function used in testing.
@@ -734,9 +695,49 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
+HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+
+if HAS_OPAQUE_TYPE:
+    from torch._opaque_base import OpaqueBase
+else:
+    OpaqueBase = object  # type: ignore[misc, assignment]
+
+
+class ModuleName(OpaqueBase):  # type: ignore[misc]
+    """Wraps a module name string for use as a torch opaque type.
+
+    When torch >= 2.11, this is registered as a hoisted value-type opaque
+    object so that torch.compile lifts it as a graph input instead of baking
+    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    """
+
+    def __init__(self, value: str):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, ModuleName) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __fx_repr__(self):
+        return (f"ModuleName({self.value!r})", {ModuleName})
+
+
+if HAS_OPAQUE_TYPE:
+    from torch._library.opaque_object import register_opaque_type
+
+    register_opaque_type(ModuleName, typ="value", hoist=True)
+
+
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return torch.distributed.is_xccl_available()
+
+
+# Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform
+def supports_xpu_graph() -> bool:
+    return is_torch_equal_or_newer("2.11.0.dev")
 
 
 # create a library to hold the custom op

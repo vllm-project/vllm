@@ -23,6 +23,17 @@ from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
+
+# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
+# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
+# forward_mqa interface but needs validation on ROCm hardware.
+if not current_platform.is_cuda():
+    pytest.skip(
+        "Sparse MLA backend tests currently only support CUDA. "
+        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
+        allow_module_level=True,
+    )
+
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseBackend,
@@ -167,6 +178,7 @@ def _quantize_dequantize_fp8_ds_mla(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
     dist_init,
@@ -176,9 +188,21 @@ def test_sparse_backend_decode_correctness(
     tensor_parallel_size,
     block_size,
     workspace_init,
+    q_scale: float,
+    k_scale: float,
 ):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
+
+    if (
+        backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype.startswith("fp8")
+        and kv_cache_dtype != "fp8_ds_mla"
+    ):
+        pytest.skip(
+            "FlashMLA Sparse Attention backend fp8 only supports "
+            "fp8_ds_mla kv-cache dtype"
+        )
 
     supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
     if block_size not in supported_block_sizes:
@@ -311,7 +335,7 @@ def test_sparse_backend_decode_correctness(
     kv_c_contexts, k_pe_contexts = [], []
     reference_outputs = []
 
-    kv_cache_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache_scale = torch.tensor(k_scale, dtype=torch.float32, device=device)
     global_token_idx = 0
 
     for i in range(batch_spec.batch_size):
@@ -408,7 +432,7 @@ def test_sparse_backend_decode_correctness(
         num_blocks=vllm_config.cache_config.num_gpu_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=False,
-        kv_cache_dtype=kv_cache_dtype if use_fp8_ds_mla_quantization else "auto",
+        kv_cache_dtype=kv_cache_dtype,
         scale=kv_cache_scale,
     )
 
@@ -469,6 +493,8 @@ def test_sparse_backend_decode_correctness(
             device=device,
             W_UK=W_UK,
             W_UV=W_UV,
+            q_scale=q_scale,
+            k_scale=k_scale,
         )
 
     out_buffer = torch.empty(
@@ -492,7 +518,9 @@ def test_sparse_backend_decode_correctness(
     # FP8 quantization introduces some error, but should be within reasonable bounds
     # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
     if kv_cache_dtype.startswith("fp8"):
-        torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.05, atol=0.05)
+        torch.testing.assert_close(
+            backend_output, sdpa_reference, rtol=0.065, atol=0.05
+        )
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
 

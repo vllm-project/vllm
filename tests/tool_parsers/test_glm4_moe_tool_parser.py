@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: E501
 
 import json
+from unittest.mock import Mock
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
 )
 
-pytest.skip("skip glm4_moe parser test", allow_module_level=True)
 # Use a common model that is likely to be available
 MODEL = "zai-org/GLM-4.5"
 
@@ -24,8 +27,27 @@ def glm4_moe_tokenizer():
 
 
 @pytest.fixture
-def glm4_moe_tool_parser(glm4_moe_tokenizer):
-    return Glm4MoeModelToolParser(glm4_moe_tokenizer)
+def sample_tools():
+    return [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="get_weather",
+                parameters={"city": {"type": "string"}},
+            ),
+        ),
+    ]
+
+
+@pytest.fixture
+def glm4_moe_tool_parser(glm4_moe_tokenizer, sample_tools):
+    return Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=sample_tools)
+
+
+@pytest.fixture
+def mock_request(sample_tools) -> ChatCompletionRequest:
+    request = Mock(spec=ChatCompletionRequest)
+    request.tools = sample_tools
+    return request
 
 
 def assert_tool_calls(
@@ -47,10 +69,10 @@ def assert_tool_calls(
         assert actual_args == expected_args
 
 
-def test_extract_tool_calls_no_tools(glm4_moe_tool_parser):
+def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
     model_output = "This is a test"
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
@@ -160,7 +182,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser):
                     )
                 )
             ],
-            "I'll help you check the weather.",
+            "I'll help you check the weather. ",
         ),
         (
             """<tool_call>get_current_weather
@@ -212,10 +234,14 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser):
     ],
 )
 def test_extract_tool_calls(
-    glm4_moe_tool_parser, model_output, expected_tool_calls, expected_content
+    glm4_moe_tool_parser,
+    mock_request,
+    model_output,
+    expected_tool_calls,
+    expected_content,
 ):
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
     assert extracted_tool_calls.tools_called
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -223,7 +249,7 @@ def test_extract_tool_calls(
     assert extracted_tool_calls.content == expected_content
 
 
-def test_extract_tool_calls_with_thinking_tags(glm4_moe_tool_parser):
+def test_extract_tool_calls_with_thinking_tags(glm4_moe_tool_parser, mock_request):
     """Test tool extraction when thinking tags are present."""
     model_output = """<think>I want to get the weather.</think>
 
@@ -236,7 +262,7 @@ I will help you get the weather.
 </tool_call>"""
 
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
@@ -245,11 +271,12 @@ I will help you get the weather.
 
     expected_content = """<think>I want to get the weather.</think>
 
-I will help you get the weather."""
+I will help you get the weather.
+"""
     assert extracted_tool_calls.content == expected_content
 
 
-def test_extract_tool_calls_malformed_xml(glm4_moe_tool_parser):
+def test_extract_tool_calls_malformed_xml(glm4_moe_tool_parser, mock_request):
     """Test that malformed XML is handled gracefully."""
     model_output = """<tool_call>get_weather
 <arg_key>city</arg_key>
@@ -259,7 +286,7 @@ def test_extract_tool_calls_malformed_xml(glm4_moe_tool_parser):
 </tool_call>"""
 
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
 
     # Should handle malformed XML gracefully
@@ -269,13 +296,13 @@ def test_extract_tool_calls_malformed_xml(glm4_moe_tool_parser):
     assert isinstance(extracted_tool_calls.tool_calls, list)
 
 
-def test_extract_tool_calls_empty_arguments(glm4_moe_tool_parser):
+def test_extract_tool_calls_empty_arguments(glm4_moe_tool_parser, mock_request):
     """Test tool calls with no arguments."""
     model_output = """<tool_call>get_current_time
 </tool_call>"""
 
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
@@ -285,7 +312,7 @@ def test_extract_tool_calls_empty_arguments(glm4_moe_tool_parser):
     assert extracted_tool_calls.tool_calls[0].function.arguments == "{}"
 
 
-def test_extract_tool_calls_mixed_content(glm4_moe_tool_parser):
+def test_extract_tool_calls_mixed_content(glm4_moe_tool_parser, mock_request):
     """Test extraction with mixed content and multiple tool calls."""
     model_output = """I will help you get the weather info.
 
@@ -306,7 +333,7 @@ meaningwhile, I will also check the weather in Shanghai.
 </tool_call>"""
 
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
@@ -325,10 +352,10 @@ meaningwhile, I will also check the weather in Shanghai.
     assert args2["date"] == "2025-08-01"
 
     # Content should be everything before the first tool call
-    assert extracted_tool_calls.content == "I will help you get the weather info."
+    assert extracted_tool_calls.content == "I will help you get the weather info.\n\n"
 
 
-def test_streaming_basic_functionality(glm4_moe_tool_parser):
+def test_streaming_basic_functionality(glm4_moe_tool_parser, mock_request):
     """Test basic streaming functionality."""
     # Reset streaming state
     glm4_moe_tool_parser.current_tool_name_sent = False
@@ -353,7 +380,7 @@ def test_streaming_basic_functionality(glm4_moe_tool_parser):
         previous_token_ids=[],
         current_token_ids=[tool_call_start_id, tool_call_end_id],
         delta_token_ids=[tool_call_end_id],
-        request=None,
+        request=mock_request,
     )
 
     # The result behavior depends on the streaming state
@@ -361,7 +388,7 @@ def test_streaming_basic_functionality(glm4_moe_tool_parser):
     assert result is None or hasattr(result, "tool_calls") or hasattr(result, "content")
 
 
-def test_streaming_no_tool_calls(glm4_moe_tool_parser):
+def test_streaming_no_tool_calls(glm4_moe_tool_parser, mock_request):
     """Test streaming when there are no tool calls."""
     current_text = "This is just regular text without any tool calls."
 
@@ -372,7 +399,7 @@ def test_streaming_no_tool_calls(glm4_moe_tool_parser):
         previous_token_ids=[],
         current_token_ids=[],
         delta_token_ids=[],
-        request=None,
+        request=mock_request,
     )
 
     # Should return the delta text as content
@@ -381,7 +408,7 @@ def test_streaming_no_tool_calls(glm4_moe_tool_parser):
     assert result.content == " without any tool calls."
 
 
-def test_streaming_with_content_before_tool_calls(glm4_moe_tool_parser):
+def test_streaming_with_content_before_tool_calls(glm4_moe_tool_parser, mock_request):
     """Test streaming when there's content before tool calls."""
     # Reset streaming state
     glm4_moe_tool_parser.current_tool_name_sent = False
@@ -398,16 +425,16 @@ def test_streaming_with_content_before_tool_calls(glm4_moe_tool_parser):
         previous_token_ids=[],
         current_token_ids=[],
         delta_token_ids=[],
-        request=None,
+        request=mock_request,
     )
 
     # Should return content when no tool call tokens are detected
     assert result is not None
     assert hasattr(result, "content")
-    assert result.content == "get the weather.<tool_call>"
+    assert result.content == "get the weather."
 
 
-def test_extract_tool_calls_special_characters(glm4_moe_tool_parser):
+def test_extract_tool_calls_special_characters(glm4_moe_tool_parser, mock_request):
     """Test tool calls with special characters and unicode."""
     model_output = """<tool_call>send_message
 <arg_key>recipient</arg_key>
@@ -419,7 +446,7 @@ def test_extract_tool_calls_special_characters(glm4_moe_tool_parser):
 </tool_call>"""
 
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
@@ -432,7 +459,7 @@ def test_extract_tool_calls_special_characters(glm4_moe_tool_parser):
     assert args["priority"] == "high"
 
 
-def test_extract_tool_calls_incomplete_tool_call(glm4_moe_tool_parser):
+def test_extract_tool_calls_incomplete_tool_call(glm4_moe_tool_parser, mock_request):
     """Test incomplete tool calls (missing closing tag)."""
     model_output = """<tool_call>get_weather
 <arg_key>city</arg_key>
@@ -441,7 +468,7 @@ def test_extract_tool_calls_incomplete_tool_call(glm4_moe_tool_parser):
 <arg_value>2025-08-01</arg_value>"""
 
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
 
     # Incomplete tool calls should not be extracted
@@ -467,7 +494,7 @@ def _reset_streaming_state(parser):
     parser._seen_keys = []
 
 
-def test_streaming_incremental_string_value(glm4_moe_tool_parser):
+def test_streaming_incremental_string_value(glm4_moe_tool_parser, mock_request):
     """Test incremental streaming of string argument values."""
     _reset_streaming_state(glm4_moe_tool_parser)
 
@@ -492,7 +519,7 @@ def test_streaming_incremental_string_value(glm4_moe_tool_parser):
             previous_token_ids=[],
             current_token_ids=[],
             delta_token_ids=[],
-            request=None,
+            request=mock_request,
         )
         if result is not None and hasattr(result, "tool_calls") and result.tool_calls:
             for tc in result.tool_calls:
@@ -516,7 +543,7 @@ def test_streaming_incremental_string_value(glm4_moe_tool_parser):
     assert "get_weather" in combined or "name:get_weather" in combined
 
 
-def test_streaming_empty_tool_call(glm4_moe_tool_parser):
+def test_streaming_empty_tool_call(glm4_moe_tool_parser, mock_request):
     """Test that empty tool calls don't cause infinite loops."""
     _reset_streaming_state(glm4_moe_tool_parser)
 
@@ -528,7 +555,7 @@ def test_streaming_empty_tool_call(glm4_moe_tool_parser):
         previous_token_ids=[],
         current_token_ids=[],
         delta_token_ids=[],
-        request=None,
+        request=mock_request,
     )
 
     # Should not hang and should return something (None or content)
@@ -538,19 +565,23 @@ def test_streaming_empty_tool_call(glm4_moe_tool_parser):
     assert glm4_moe_tool_parser.current_tool_id == -1
 
 
-def test_streaming_prev_tool_call_arr_finalization(glm4_moe_tool_parser):
+def test_streaming_prev_tool_call_arr_updates(glm4_moe_tool_parser, mock_request):
     """Test that prev_tool_call_arr contains parsed dict after tool call."""
     _reset_streaming_state(glm4_moe_tool_parser)
 
     # Stream a complete tool call
+    name_only = {"name": "get_weather", "arguments": {}}
+    name_and_args = {"name": "get_weather", "arguments": {"city": "Beijing"}}
     chunks = [
-        "<tool_call>get_weather\n",
-        "<arg_key>city</arg_key>",
-        "<arg_value>Beijing</arg_value>",
-        "</tool_call>",
+        # Delta, expected streamed_args_for_tool, expected prev_tool_call_arr
+        ("<tool_call>get_weather\n", "", name_only),
+        ("<arg_key>city</arg_key>", "", name_only),
+        ("<arg_value>Beijing</arg_value>", '{"city": "Beijing"', name_only),
+        # Note: arguments are only updated when the tool call is complete.
+        ("</tool_call>", '{"city": "Beijing"}', name_and_args),
     ]
 
-    for chunk in chunks:
+    for chunk, exp_streamed, exp_prev_tc in chunks:
         glm4_moe_tool_parser.extract_tool_calls_streaming(
             previous_text="",
             current_text="",
@@ -558,8 +589,10 @@ def test_streaming_prev_tool_call_arr_finalization(glm4_moe_tool_parser):
             previous_token_ids=[],
             current_token_ids=[],
             delta_token_ids=[],
-            request=None,
+            request=mock_request,
         )
+        assert glm4_moe_tool_parser.streamed_args_for_tool[0] == exp_streamed
+        assert glm4_moe_tool_parser.prev_tool_call_arr[0] == exp_prev_tc
 
     # After the tool call completes, prev_tool_call_arr should have parsed dict
     assert len(glm4_moe_tool_parser.prev_tool_call_arr) == 1
@@ -570,8 +603,14 @@ def test_streaming_prev_tool_call_arr_finalization(glm4_moe_tool_parser):
     assert isinstance(args, dict), f"Expected dict, got {type(args)}"
     assert args.get("city") == "Beijing"
 
+    # Test equivalence of prev_tool_call_arr and streamed_args_for_tool
+    # Simulates logic in chat_completion/serving.py:chat_completion_stream_generator
+    tool_call_json = json.dumps(tool_entry.get("arguments", {}))
+    streamed_content = glm4_moe_tool_parser.streamed_args_for_tool[0]
+    assert tool_call_json.startswith(streamed_content)
 
-def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser):
+
+def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser, mock_request):
     """Test streaming multiple sequential tool calls."""
     _reset_streaming_state(glm4_moe_tool_parser)
 
@@ -595,7 +634,7 @@ def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser):
             previous_token_ids=[],
             current_token_ids=[],
             delta_token_ids=[],
-            request=None,
+            request=mock_request,
         )
 
     # Should have two tool calls in prev_tool_call_arr
@@ -604,7 +643,7 @@ def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser):
     assert glm4_moe_tool_parser.prev_tool_call_arr[1]["arguments"]["city"] == "Shanghai"
 
 
-def test_streaming_json_escape_in_string(glm4_moe_tool_parser):
+def test_streaming_json_escape_in_string(glm4_moe_tool_parser, mock_request):
     """Test that special characters in string values are properly escaped."""
     _reset_streaming_state(glm4_moe_tool_parser)
 
@@ -624,7 +663,7 @@ def test_streaming_json_escape_in_string(glm4_moe_tool_parser):
             previous_token_ids=[],
             current_token_ids=[],
             delta_token_ids=[],
-            request=None,
+            request=mock_request,
         )
 
     # The streamed_args_for_tool should contain valid JSON
@@ -637,14 +676,13 @@ def test_streaming_json_escape_in_string(glm4_moe_tool_parser):
     assert '"' in parsed["message"] or "world" in parsed["message"]
 
 
-def test_streaming_long_content_incremental(glm4_moe_tool_parser):
+def test_streaming_long_content_incremental(glm4_moe_tokenizer):
     """Test incremental streaming of long content (Issue #32829).
 
     This is the core fix: for long string values like code (4000+ chars),
     the parser should stream incrementally rather than buffering until
     complete. This test verifies we get many fragments, not just 1-3.
     """
-    _reset_streaming_state(glm4_moe_tool_parser)
 
     # Bubble sort example from Issue #32829 - realistic long content
     bubble_sort_code = '''#!/usr/bin/env python3
@@ -671,26 +709,27 @@ if __name__ == "__main__":
     sorted_arr = bubble_sort(test_arr.copy())
     print(f"Sorted: {sorted_arr}")'''
 
-    # Create a request with tool schema to enable string type detection
+    # Create tools with schema to enable string type detection
     # This is required for incremental streaming of string values
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="write_to_file",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            ),
+        ),
+    ]
+    glm4_moe_tool_parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(
         model=MODEL,
         messages=[],
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_to_file",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
-                    },
-                },
-            }
-        ],
+        tools=tools,
     )
 
     # Simulate token-based streaming (special tags as single tokens)
@@ -746,7 +785,7 @@ if __name__ == "__main__":
     assert "def bubble_sort" in parsed["content"]
 
 
-def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser):
+def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_request):
     """Test that numeric arguments are deserialized as numbers, not strings."""
     model_output = """<tool_call>calculate
 <arg_key>operation</arg_key>
@@ -760,7 +799,7 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser):
 </tool_call>"""
 
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
+        model_output, request=mock_request
     )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called

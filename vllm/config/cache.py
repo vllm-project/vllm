@@ -1,27 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator
+from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import format_gib, get_cpu_memory
-
-if TYPE_CHECKING:
-    from vllm.config.parallel import ParallelConfig
-else:
-    ParallelConfig = Any
 
 logger = init_logger(__name__)
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
+    "float16",
     "bfloat16",
     "fp8",
     "fp8_e4m3",
@@ -39,13 +31,15 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
-    """Size of a contiguous cache block in number of tokens. On CUDA devices,
-    only block sizes up to 32 are supported.
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_config()` based on the current
-    platform."""
+    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    """Size of a contiguous cache block in number of tokens.
+    Accepts None (meaning "use default"). After construction, always int."""
+    user_specified_block_size: bool = field(default=False, init=False)
+    """Whether block_size was explicitly provided. Derived automatically."""
+    user_specified_mamba_block_size: bool = field(default=False, init=False)
+    """Whether mamba_block_size was explicitly provided. Derived automatically."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -54,8 +48,6 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
-    swap_space: float = Field(default=4, ge=0)
-    """Size of the CPU swap space per GPU (in GiB)."""
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
@@ -76,35 +68,29 @@ class CacheConfig:
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
-    """Set the hash algorithm for prefix caching:\n
-    - "sha256" uses Pickle for object serialization before hashing. This is the
-    current default, as SHA256 is the most secure choice to avoid potential
-    hash collisions.\n
+    """Set the hash algorithm for prefix caching:
+
+    - "sha256" uses Pickle for object serialization before hashing. This is the current
+      default, as SHA256 is the most secure choice to avoid potential hash collisions.
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
-    serializes objects using canonical CBOR and hashes them with SHA-256.\n
+      serializes objects using canonical CBOR and hashes them with SHA-256.
     - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
-    non-cryptographic hashing. Requires the optional ``xxhash`` package.
-    IMPORTANT: Use of a hashing algorithm that is not considered 
-    cryptographically secure theoretically increases the risk of hash collisions,
-    which can cause undefined behavior or even leak private information in
-    multi-tenant environments. Even if collisions are still very unlikely, it is
-    important to consider your security risk tolerance against the performance
-    benefits before turning this on.\n
+      non-cryptographic hashing. Requires the optional ``xxhash`` package.
+      IMPORTANT: Use of a hashing algorithm that is not considered  cryptographically
+      secure theoretically increases the risk of hash collisions, which can cause
+      undefined behavior or even leak private information in multi-tenant environments.
+      Even if collisions are still very unlikely, it is important to consider your
+      security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
-    reproducible hashing. Requires the optional ``xxhash`` package."""
-    cpu_offload_gb: float = Field(default=0, ge=0)
-    """The space in GiB to offload to CPU, per GPU. Default is 0, which means
-    no offloading. Intuitively, this argument can be seen as a virtual way to
-    increase the GPU memory size. For example, if you have one 24 GB GPU and
-    set this to 10, virtually you can think of it as a 34 GB GPU. Then you can
-    load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
-    Note that this requires fast CPU-GPU interconnect, as part of the model is
-    loaded from CPU memory to GPU memory on the fly in each model forward pass.
-    """
+      reproducible hashing. Requires the optional ``xxhash`` package."""
     calculate_kv_scales: bool = False
-    """This enables dynamic calculation of `k_scale` and `v_scale` when
+    """Deprecated: This option is deprecated and will be removed in v0.19.
+    It enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
+    kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
+    """Layer patterns to skip KV cache quantization. Accepts layer indices
+    (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
     cpu_kvcache_space_bytes: int | None = None
     """(CPU backend only) CPU key-value cache space."""
     mamba_page_size_padded: int | None = None
@@ -125,12 +111,20 @@ class CacheConfig:
     mamba_cache_mode: MambaCacheMode = "none"
     """The cache strategy for Mamba layers.
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size. This is 
+    - "all": cache the mamba state of all tokens at position i * block_size. This is
            the default behavior (for models that support it) when prefix caching is
            enabled.
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
+    enable_mamba_cache_stochastic_rounding: bool = False
+    """Enable stochastic rounding when writing SSM state to fp16 cache.
+    Uses random bits to unbias the rounding error, which can improve
+    numerical stability for long sequences."""
+    mamba_cache_philox_rounds: int = 0
+    """Number of Philox PRNG rounds for stochastic rounding random number
+    generation. 0 uses the Triton default. Higher values improve randomness
+    quality at the cost of compute."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -183,13 +177,15 @@ class CacheConfig:
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
-            "swap_space",
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
+            "user_specified_block_size",
+            "user_specified_mamba_block_size",
+            "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -207,6 +203,36 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
+    _block_size_resolved: bool = field(default=False, init=False)
+    """Guard against pydantic re-running _apply_block_size_default."""
+
+    @model_validator(mode="after")
+    def _apply_block_size_default(self) -> "CacheConfig":
+        # Pydantic re-runs validators when CacheConfig is nested inside
+        # another pydantic model (e.g. VllmConfig). Guard against that.
+        if self._block_size_resolved:
+            return self
+        object.__setattr__(self, "_block_size_resolved", True)
+        if self.block_size is None:
+            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+        else:
+            object.__setattr__(self, "user_specified_block_size", True)
+        if self.mamba_block_size is not None:
+            object.__setattr__(self, "user_specified_mamba_block_size", True)
+        return self
+
+    @field_validator("calculate_kv_scales", mode="after")
+    @classmethod
+    def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:
+        if calculate_kv_scales:
+            logger.warning(
+                "The `--calculate-kv-scales` option is deprecated and will "
+                "be removed in v0.19. The scales will be loaded from the "
+                "model checkpoint if available, otherwise they default to "
+                "1.0."
+            )
+        return calculate_kv_scales
+
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
@@ -219,23 +245,28 @@ class CacheConfig:
             )
         return cache_dtype
 
-    def verify_with_parallel_config(
-        self,
-        parallel_config: ParallelConfig,
-    ) -> None:
-        swap_space_bytes = math.ceil(self.swap_space * GiB_bytes)
-        total_cpu_memory = get_cpu_memory()
-        # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
-        # group are in the same node. However, the GPUs may span multiple nodes.
-        num_gpus_per_node = parallel_config.tensor_parallel_size
-        cpu_memory_usage = swap_space_bytes * num_gpus_per_node
+    def __post_init__(self):
+        if self.enable_mamba_cache_stochastic_rounding:
+            from vllm.platforms import current_platform
 
-        msg = (
-            f"{format_gib(cpu_memory_usage)} GiB out of the "
-            f"{format_gib(total_cpu_memory)} GiB total CPU memory "
-            "is allocated for the swap space."
-        )
-        if cpu_memory_usage > 0.7 * total_cpu_memory:
-            raise ValueError("Too large swap space. " + msg)
-        elif cpu_memory_usage > 0.4 * total_cpu_memory:
-            logger.warning("Possibly too large swap space. %s", msg)
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "Stochastic rounding for Mamba cache is only supported "
+                    "on NVIDIA CUDA platforms. Please do not specify  "
+                    "`--enable-mamba-cache-stochastic-rounding`."
+                )
+            if not current_platform.is_device_capability_family(100):
+                raise ValueError(
+                    "Stochastic rounding for Mamba cache requires compute "
+                    "capability 10.0 (data center Blackwell). The `cvt.rs` PTX "
+                    "instruction is not supported on your GPU. Please do not specify "
+                    "`--enable-mamba-cache-stochastic-rounding`."
+                )
+            if self.mamba_ssm_cache_dtype != "float16":
+                raise ValueError(
+                    "Stochastic rounding for Mamba cache requires "
+                    "the SSM cache to be float16. Please set it explicitly, "
+                    "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
+                    "stochastic rounding by not specifying "
+                    "`--enable-mamba-cache-stochastic-rounding`."
+                )

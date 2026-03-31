@@ -54,7 +54,7 @@ class GEMMReduceScatterPattern(BasePattern):
             gemm_rs = torch.ops.symm_mem.fused_matmul_reduce_scatter(
                 mul,
                 mm_weight,
-                "avg",
+                "sum",
                 scatter_dim=0,
                 group_name=self.tp.device_group.group_name,
             )
@@ -225,7 +225,7 @@ class ScaledMMReduceScatterPattern(BasePattern):
                 mat2,
                 scale_a,
                 scale_b,
-                "avg",
+                "sum",
                 scatter_dim,  # orig_scatter_dim
                 scatter_dim,  # scatter_dim_after_maybe_reshape
                 self.tp.device_group.group_name,
@@ -360,7 +360,7 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
                 mat2,
                 scale_a,
                 scale_b,
-                "avg",
+                "sum",
                 scatter_dim,  # orig_scatter_dim
                 scatter_dim,  # scatter_dim_after_maybe_reshape
                 self.tp.device_group.group_name,
