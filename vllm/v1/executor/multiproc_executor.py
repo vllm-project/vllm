@@ -80,15 +80,14 @@ class FutureWrapper(Future):
     def result(self, timeout=None):
         if timeout is not None:
             raise RuntimeError("timeout not implemented")
+
         # Drain any futures ahead of us in the queue.
-        while self.futures_queue:
+        while not self.done():
             future = self.futures_queue.pop()
-            future.wait_for_response()
-            if future is self:
-                break
+            future._wait_for_response()
         return super().result()
 
-    def wait_for_response(self):
+    def _wait_for_response(self):
         try:
             response = self.aggregate(self.get_response())
             with suppress(InvalidStateError):
