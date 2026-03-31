@@ -596,9 +596,17 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
 
 
 class OlmoHybridAttention(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        if model_config is None:
+            model_config = vllm_config.model_config
 
         hidden_size = self.config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -653,6 +661,7 @@ class OlmoHybridAttention(nn.Module):
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
         rope_parameters = getattr(self.config, "rope_parameters", None)
@@ -771,6 +780,7 @@ class OlmoHybridDecoderLayer(nn.Module):
         else:
             self.self_attn = OlmoHybridAttention(
                 vllm_config=vllm_config,
+                model_config=model_config,
                 prefix=f"{prefix}.self_attn",
             )
             # Attention layers use these norm names

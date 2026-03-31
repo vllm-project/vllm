@@ -490,6 +490,7 @@ class NemotronHAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             per_layer_sliding_window=sliding_window,
+            model_config=model_config,
         )
 
     def forward(

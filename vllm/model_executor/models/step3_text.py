@@ -149,6 +149,7 @@ class Step3TextAttention(nn.Module):
         share_q_dim: int | None = None,
         max_position_embedding: int = 8192,
         head_dim: int = 256,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -205,6 +206,7 @@ class Step3TextAttention(nn.Module):
             self.head_dim,
             scaling,
             self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             prefix=f"{prefix}.attn",
         )
@@ -226,6 +228,7 @@ class Step3TextDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Step3TextConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -237,6 +240,7 @@ class Step3TextDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=1,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             norm_eps=config.rms_norm_eps,
@@ -315,6 +319,7 @@ class Step3TextModel(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
@@ -334,6 +339,7 @@ class Step3TextModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Step3TextDecoderLayer(
                 config=config,
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,

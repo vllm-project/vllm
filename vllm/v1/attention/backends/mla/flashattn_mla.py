@@ -20,12 +20,12 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,

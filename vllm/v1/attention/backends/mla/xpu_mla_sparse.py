@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -21,7 +22,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     SparseMLAAttentionImpl,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,

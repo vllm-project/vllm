@@ -33,7 +33,7 @@ from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -241,6 +241,7 @@ class Glm4MoeAttention(nn.Module):
         use_qk_norm: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -297,6 +298,7 @@ class Glm4MoeAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -331,6 +333,7 @@ class Glm4MoeDecoderLayer(nn.Module):
         config: Glm4MoeConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
@@ -353,6 +356,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             qkv_bias=config.attention_bias,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
             use_qk_norm=config.use_qk_norm,
         )
@@ -414,6 +418,7 @@ class Glm4MoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
         self.config = config
 
@@ -432,6 +437,7 @@ class Glm4MoeModel(nn.Module):
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

@@ -29,7 +29,7 @@ from torch import nn
 from transformers import Exaone4Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -117,6 +117,7 @@ class Exaone4Attention(nn.Module):
         bias: bool = False,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -191,6 +192,7 @@ class Exaone4Attention(nn.Module):
             quant_config=quant_config,
             per_layer_sliding_window=self.sliding_window,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(
@@ -222,6 +224,7 @@ class Exaone4DecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -244,6 +247,7 @@ class Exaone4DecoderLayer(nn.Module):
             bias=attention_bias,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
+            model_config=model_config,
         )
         self.mlp = Exaone4GatedMLP(
             hidden_size=self.hidden_size,
@@ -313,6 +317,7 @@ class Exaone4Model(nn.Module):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Exaone4DecoderLayer(
@@ -320,6 +325,7 @@ class Exaone4Model(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

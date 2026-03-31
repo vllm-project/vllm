@@ -29,7 +29,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -88,6 +88,7 @@ class JAISAttention(nn.Module):
         config: JAISConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -133,6 +134,7 @@ class JAISAttention(nn.Module):
             alibi_slopes=alibi_slopes,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -205,6 +207,7 @@ class JAISBlock(nn.Module):
         config: JAISConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -213,7 +216,11 @@ class JAISBlock(nn.Module):
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = JAISAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attn"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.attn",
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = JAISMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
@@ -246,6 +253,7 @@ class JAISModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.config = config
         assert not config.scale_attn_by_inverse_layer_idx
@@ -268,6 +276,7 @@ class JAISModel(nn.Module):
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",

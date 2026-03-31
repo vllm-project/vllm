@@ -31,7 +31,7 @@ from torch import nn
 from transformers import PersimmonConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -95,6 +95,7 @@ class PersimmonAttention(nn.Module):
         config: PersimmonConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -144,6 +145,7 @@ class PersimmonAttention(nn.Module):
             scale=self.scaling,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -189,6 +191,7 @@ class PersimmonDecoderLayer(nn.Module):
         config: PersimmonConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -197,6 +200,7 @@ class PersimmonDecoderLayer(nn.Module):
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = PersimmonMLP(
@@ -246,6 +250,7 @@ class PersimmonModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.vocab_size = config.vocab_size
         self.config = config
@@ -255,7 +260,11 @@ class PersimmonModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: PersimmonDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                model_config=model_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )

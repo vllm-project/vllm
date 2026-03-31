@@ -13,7 +13,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -51,6 +51,7 @@ class GLMAttention(nn.Module):
         config: ChatGLMConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -120,6 +121,7 @@ class GLMAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -195,6 +197,7 @@ class GLMBlock(nn.Module):
         config: ChatGLMConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -212,7 +215,11 @@ class GLMBlock(nn.Module):
 
         # Self attention.
         self.self_attention = GLMAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.self_attention"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.self_attention",
         )
         self.hidden_dropout = config.hidden_dropout
 
@@ -268,6 +275,7 @@ class GLMTransformer(nn.Module):
         config: ChatGLMConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -279,7 +287,13 @@ class GLMTransformer(nn.Module):
         # Transformer layers.
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.num_layers,
-            lambda prefix: GLMBlock(config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: GLMBlock(
+                config,
+                cache_config,
+                quant_config,
+                model_config=model_config,
+                prefix=prefix,
+            ),
             prefix=f"{prefix}.layers",
         )
 
@@ -329,6 +343,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.config = config
 
@@ -343,7 +358,11 @@ class ChatGLMModel(nn.Module, SupportsQuant):
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
         self.encoder = GLMTransformer(
-            config, cache_config, quant_config, prefix=f"{prefix}.encoder"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.encoder",
         )
 
         self.output_layer = ParallelLMHead(

@@ -11,7 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -95,6 +95,7 @@ class InternLM2Attention(nn.Module):
         num_kv_heads: int,
         rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -150,6 +151,7 @@ class InternLM2Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -196,6 +198,7 @@ class InternLMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -209,6 +212,7 @@ class InternLMDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attention",
@@ -258,6 +262,7 @@ class InternLM2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -270,7 +275,11 @@ class InternLM2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: layer_type(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                model_config=model_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )

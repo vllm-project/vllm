@@ -27,7 +27,7 @@ from torch import nn
 from transformers import GPTNeoXConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -62,6 +62,7 @@ class GPTNeoXAttention(nn.Module):
         config: GPTNeoXConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -102,6 +103,7 @@ class GPTNeoXAttention(nn.Module):
             scaling,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -153,6 +155,7 @@ class GPTNeoXLayer(nn.Module):
         config: GPTNeoXConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -164,7 +167,11 @@ class GPTNeoXLayer(nn.Module):
             config.hidden_size, eps=config.layer_norm_eps
         )
         self.attention = GPTNeoXAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attention"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.attention",
         )
         self.mlp = GPTNeoXMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
@@ -204,6 +211,7 @@ class GPTNeoXModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.config = config
 
@@ -214,7 +222,11 @@ class GPTNeoXModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: GPTNeoXLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                model_config=model_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )

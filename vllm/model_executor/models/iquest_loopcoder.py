@@ -25,7 +25,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -47,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.llama import LlamaMLP
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
 from vllm.v1.attention.backend import AttentionType
 
 from .utils import (
@@ -66,6 +67,7 @@ class LoopCoderAttention(nn.Module):
         num_kv_heads: int,
         max_position: int = 4096 * 32,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
@@ -147,9 +149,12 @@ class LoopCoderAttention(nn.Module):
                         sliding_window=self.loop_window_size,
                     )
                 else:
+                    assert model_config is not None, (
+                        "model_config is required when cache_config is not provided"
+                    )
                     loop_cache_config = CacheConfig(
                         sliding_window=self.loop_window_size,
-                        cache_dtype="bfloat16",
+                        cache_dtype=TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype],
                     )
 
             self.attn.append(

@@ -20,7 +20,7 @@ from transformers import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
@@ -410,6 +410,7 @@ class MolmoAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -468,6 +469,7 @@ class MolmoAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -600,6 +602,7 @@ class MolmoDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -607,7 +610,11 @@ class MolmoDecoderLayer(nn.Module):
         super().__init__()
         # Attention block.
         self.self_attn = MolmoAttention(
-            config, cache_config, quant_config, prefix=f"{prefix}.self_attn"
+            config,
+            model_config=model_config,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
         )
 
         # MLP block.
@@ -853,13 +860,18 @@ class MolmoModel(nn.Module, SupportsQuant):
             quant_config=quant_config,
         )
 
+        model_config = vllm_config.model_config
         decoder_layer = (
             MolmoDecoderNormAfterLayer if config.norm_after else MolmoDecoderLayer
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                model_config=model_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )

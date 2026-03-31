@@ -31,7 +31,7 @@ from torch import nn
 from transformers import PretrainedConfig as SeedOssConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -116,6 +116,7 @@ class SeedOssAttention(nn.Module):
         head_dim: int,
         rope_parameters: dict,
         max_position: int = 4096 * 32,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -169,6 +170,7 @@ class SeedOssAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             attn_type=attn_type,
@@ -192,6 +194,7 @@ class SeedOssDecoderLayer(nn.Module):
     def __init__(
         self,
         config: SeedOssConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -215,6 +218,7 @@ class SeedOssDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             head_dim=config.head_dim,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             rope_parameters=config.rope_parameters,
@@ -309,11 +313,13 @@ class SeedOssModel(nn.Module):
             self.embed_tokens = PPMissingLayer()
 
         # Use the provided decoder layer type or default to SeedDecoderLayer
+        model_config = vllm_config.model_config
         decoder_layer_type = decoder_layer_type or SeedOssDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer_type(
                 config=config,
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,

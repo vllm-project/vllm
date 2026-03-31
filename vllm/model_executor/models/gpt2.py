@@ -28,7 +28,7 @@ from torch import nn
 from transformers import GPT2Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -66,6 +66,7 @@ class GPT2Attention(nn.Module):
         config: GPT2Config,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -98,6 +99,7 @@ class GPT2Attention(nn.Module):
             scale=self.scale,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -151,6 +153,7 @@ class GPT2Block(nn.Module):
         config: GPT2Config,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -159,7 +162,11 @@ class GPT2Block(nn.Module):
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPT2Attention(
-            config, cache_config, quant_config, prefix=f"{prefix}.attn"
+            config,
+            cache_config,
+            quant_config,
+            model_config=model_config,
+            prefix=f"{prefix}.attn",
         )
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPT2MLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
@@ -190,6 +197,7 @@ class GPT2Model(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.config = config
         assert not config.add_cross_attention
@@ -205,7 +213,13 @@ class GPT2Model(nn.Module):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: GPT2Block(config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: GPT2Block(
+                config,
+                cache_config,
+                quant_config,
+                model_config=model_config,
+                prefix=prefix,
+            ),
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
