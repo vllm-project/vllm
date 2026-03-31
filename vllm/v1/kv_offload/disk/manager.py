@@ -115,10 +115,12 @@ class TieredOffloadingManager(OffloadingManager):
         self._pending_dispatch: list[DiskPrefetchOp] = []
         # Prefetches completed by worker, need complete_store
         self._pending_completion: list[DiskPrefetchOp] = []
-        # Total blocks currently reserved for prefetch (guards against
-        # prefetches consuming too much of the CPU pool)
+        # Total blocks currently reserved for prefetch
         self._prefetch_blocks_reserved = 0
         self._max_prefetch_blocks = num_cpu_blocks // 5  # 20% cap
+        # Per-step disk miss candidates: (disk_count, req_id, hashes)
+        # Populated by record_disk_miss, consumed by process_top_disk_miss
+        self._disk_miss_candidates: list[tuple[int, str, list[BlockHash]]] = []
 
         logger.info(
             "TieredOffloadingManager: cpu=%d blocks, disk=%d blocks, "
@@ -168,6 +170,58 @@ class TieredOffloadingManager(OffloadingManager):
             "disk_index_size": self._disk.size,
             "prefetch_reserved": self._prefetch_blocks_reserved,
         }
+
+    def record_disk_miss(
+        self, request_id: str, block_hashes: list[BlockHash]
+    ) -> None:
+        """Record a disk miss for potential prefetch. CHEAP — no allocation.
+
+        Called from get_num_new_matched_tokens for each request with
+        CPU miss. Just counts disk hits for ranking.
+        """
+        # Count how many consecutive blocks are on disk
+        disk_count = 0
+        for bh in block_hashes:
+            if bh in self._active_prefetches:
+                return  # Already being prefetched
+            if self._disk.contains(bh):
+                disk_count += 1
+            else:
+                break
+        if disk_count > 0:
+            self._disk_miss_candidates.append(
+                (disk_count, request_id, block_hashes[:disk_count])
+            )
+
+    def process_top_disk_miss(self) -> None:
+        """Pick the best prefetch candidate and allocate. ONCE per step.
+
+        Called from build_connector_meta, not from the hot lookup loop.
+        """
+        if not self._disk_miss_candidates:
+            return
+
+        # Pick the candidate with the most disk blocks (most benefit)
+        self._disk_miss_candidates.sort(key=lambda x: x[0], reverse=True)
+        best = self._disk_miss_candidates[0]
+        self._disk_miss_candidates.clear()
+
+        disk_count, request_id, block_hashes = best
+
+        # Only prefetch if enough blocks to be worthwhile
+        if disk_count < 4:
+            return
+
+        # Budget check
+        if self._prefetch_blocks_reserved >= self._max_prefetch_blocks:
+            return
+
+        logger.info(
+            "DISK_DEBUG process_top_miss: req=%s disk_blocks=%d reserved=%d",
+            request_id, disk_count, self._prefetch_blocks_reserved,
+        )
+
+        self.try_disk_prefetch(block_hashes)
 
     def try_disk_prefetch(
         self,
