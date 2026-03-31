@@ -873,7 +873,7 @@ class OpenAIServingResponses(OpenAIServing):
             usage=usage,
             kv_transfer_params=context.kv_transfer_params,
         )
-
+        response.completed_at = int(time.time()) if status == "completed" else None
         if request.store:
             async with self.response_store_lock:
                 stored_response = self.response_store.get(response.id)

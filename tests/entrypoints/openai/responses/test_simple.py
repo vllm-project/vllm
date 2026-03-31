@@ -44,7 +44,7 @@ async def test_basic(client: OpenAI, model_name: str):
     print("response: ", response)
     assert response.status == "completed"
     assert response.incomplete_details is None
-
+    assert response.completed_at is not None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
