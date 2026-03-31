@@ -494,19 +494,35 @@ def _gen_prompt_embeds_extra_hash_keys(
     return [embeds_hash]
 
 
-def _gen_steering_extra_hash_keys(request: "Request") -> list[int]:
+def _gen_steering_extra_hash_keys(
+    request: "Request", start_token_idx: int
+) -> list[int]:
     """Generate extra keys for steering-aware prefix caching.
 
-    Only includes the prefill steering hash since decode steering
-    does not affect KV cache content during prefill.
+    For prompt blocks (start_token_idx < num_prompt_tokens): uses the
+    prefill steering hash since only prefill steering affects KV content
+    during the prompt phase.
 
-    Returns empty list when no prefill steering is active, ensuring
+    For generated blocks (start_token_idx >= num_prompt_tokens): uses the
+    decode steering hash since decode steering affects KV computation
+    during generation.  The prefill hash is already embedded in the
+    parent hash chain through earlier prompt blocks.
+
+    Returns empty list when no relevant steering is active, ensuring
     zero impact on cache keys for non-steered requests.
     """
-    prefill_hash = getattr(request, "prefill_steering_config_hash", 0)
-    if prefill_hash == 0:
-        return []
-    return [prefill_hash]
+    if start_token_idx < request.num_prompt_tokens:
+        # Prompt block — only prefill steering affects KV
+        prefill_hash = getattr(request, "prefill_steering_config_hash", 0)
+        if prefill_hash == 0:
+            return []
+        return [prefill_hash]
+    else:
+        # Generated block — decode steering affects KV
+        decode_hash = getattr(request, "decode_steering_config_hash", 0)
+        if decode_hash == 0:
+            return []
+        return [decode_hash]
 
 
 def generate_block_hash_extra_keys(
@@ -514,7 +530,8 @@ def generate_block_hash_extra_keys(
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs, request specific metadata (e.g., LoRA names),
-    hashed data from prompt embeddings, and prefill steering config hashes.
+    hashed data from prompt embeddings, and steering config hashes (prefill
+    steering for prompt blocks, decode steering for generated blocks).
 
     Args:
         request: The request object.
@@ -536,7 +553,9 @@ def generate_block_hash_extra_keys(
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
-    steering_extra_keys: list[int] = _gen_steering_extra_hash_keys(request)
+    steering_extra_keys: list[int] = _gen_steering_extra_hash_keys(
+        request, start_token_idx
+    )
 
     extra_keys: list[Any] = (
         lora_extra_keys
