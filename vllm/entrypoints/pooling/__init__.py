@@ -119,6 +119,7 @@ def init_pooling_state(
         ServingScores(
             engine_client,
             state.openai_serving_models,
+            use_gpu_for_late_interaction_scoring=args.use_gpu_for_late_interaction_scoring,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
