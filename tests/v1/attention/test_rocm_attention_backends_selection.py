@@ -149,9 +149,7 @@ def test_standard_attention_with_sink_backend_selection(
     )
 
     # If we expect a ValueError, wrap the call in pytest.raises
-    if isinstance(
-        expected_backend_path, ValueError
-    ):  # or however you signal this in your test params
+    if expected_backend_path is ValueError:
         with pytest.raises(ValueError, match="is not valid for this configuration"):
             RocmPlatform.get_attn_backend_cls(
                 selected_backend=backend_enum, attn_selector_config=attn_selector_config
