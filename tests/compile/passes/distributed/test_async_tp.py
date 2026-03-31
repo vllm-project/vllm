@@ -224,9 +224,7 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
 
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize(
-    "test_model",
+TEST_MODELS = (
     [
         TestMMRSModel,
         TestAGMMModel,
@@ -234,14 +232,27 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         TestAGScaledMMModel,
         TestCutlassScaledMMRSModel,
         TestAGCutlassScaledMMModel,
-    ],
+    ]
+    if current_platform.is_cuda_alike()
+    else [
+        TestMMRSModel,
+        TestAGMMModel,
+        TestScaledMMRSModel,
+        TestAGScaledMMModel,
+    ]
 )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("test_model", TEST_MODELS)
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("dynamic", [True, False])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on CUDA or XPU"
+)
 def test_async_tp_pass_replace(
     test_model: str,
     batch_size: int,
@@ -299,7 +310,7 @@ def async_tp_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{current_platform.device_type}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -324,7 +335,9 @@ def async_tp_pass_on_test_model(
             fuse_gemm_comms=True,
         ),
     )
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.device_config = DeviceConfig(
+        device=torch.device(current_platform.device_type)
+    )
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.

@@ -36,8 +36,8 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
-    from .fusion.collective_fusion import AsyncTPPass
 
+from .fusion.collective_fusion import AsyncTPPass
 from .inductor_pass import (
     CustomGraphPass,
     InductorPass,
