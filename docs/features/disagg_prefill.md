@@ -5,50 +5,345 @@ This page introduces you to the disaggregated prefilling feature in vLLM.
 !!! note
     This feature is experimental and subject to change.
 
-## Why disaggregated prefilling?
+## What's Prefill-Decode Disaggregation
+Prefill–Decode Disaggregation (PD Disaggregation) refers to separating:
 
-Two main reasons:
+- Prefill (context encoding)
+- Decode (token-by-token generation)
 
-- **Tuning time-to-first-token (TTFT) and inter-token-latency (ITL) separately**. Disaggregated prefilling put prefill and decode phase of LLM inference inside different vLLM instances. This gives you the flexibility to assign different parallel strategies (e.g. `tp` and `pp`) to tune TTFT without affecting ITL, or to tune ITL without affecting TTFT.
-- **Controlling tail ITL**. Without disaggregated prefilling, vLLM may insert some prefill jobs during the decoding of one request. This results in higher tail latency. Disaggregated prefilling helps you solve this issue and control tail ITL. Chunked prefill with a proper chunk size also can achieve the same goal, but in practice it's hard to figure out the correct chunk size value. So disaggregated prefilling is a much more reliable way to control tail ITL.
+into different instances for execution, thereby achieving:
+
+- Lower latency (Decode focuses on step-by-step generation)
+- More flexible resource scheduling (enabling tiered GPU utilization)
+
+## When to Use Disaggregated Prefilling?
+
+If you have any of the following needs, you may consider using the PD (Prefill–Decode) disaggregation approach:
+
+- **Tuning time-to-first-token (TTFT) and inter-token-latency (ITL) independently**. Disaggregated prefilling separates the prefill and decode phase of LLM inference into different vLLM instances. This allows you apply different parallelization strategies (e.g. `tp` and `pp`) to optimize TTFT without impacting ITL, or optimize ITL without affecting TTFT.
+- **Controlling tail ITL**. Without disaggregated prefilling, vLLM may interleave prefill jobs during the decoding phase of a request, which can increase tail latency. Disaggregated prefilling helps mitigate this issue and provides better control over tail ITL. While chunked prefill with an appropriate chunk size can achieve a similar effect, determining the optimal chunk size in practice is often difficult. Therefore, disaggregated prefilling is generally a more reliable approach for controlling tail ITL.
 
 !!! note
-    Disaggregated prefill DOES NOT improve throughput.
+    Disaggregated prefilling does NOT improve overall throughput. Its primary goal is to optimize latency (e.g., TTFT and tail ITL), not throughput.
 
-## Usage example
+## How Disaggregated Prefilling Works
+Disaggregated prefilling separates the LLM inference pipeline into two independent stages—Prefill and Decode—and executes them on different vLLM instances.
 
+![Disaggregated prefilling abstractions](../assets/features/disagg_prefill/work_steps.png)
+
+**1. Request Routing**
+
+When a request arrives, it is first sent to a Prefill instance. A router (or gateway) is responsible for directing incoming traffic to the appropriate Prefill service.
+
+**2. Prefill Phase (Context Encoding)**
+
+The Prefill instance processes the full input prompt and performs the forward pass to compute the **KV cache** for all input tokens. This stage is typically compute-intensive and benefits from:
+- Large batch sizes
+- Higher parallelism (e.g., tensor parallelism, pipeline parallelism)
+
+Instead of generating tokens, the Prefill instance outputs the generated KV cache along with necessary metadata (e.g., sequence state).
+
+**3. KV Cache Transfer**
+
+The computed KV cache is then transferred from the Prefill instance to a **Decode instance**. This transfer can be implemented via:
+- Network communication (e.g., RPC, shared storage, or RDMA)
+- In-memory transfer (if colocated)
+
+Efficient KV cache transfer is critical, as it directly impacts end-to-end latency.
+
+**4. Decode Phase (Token Generation)**
+
+The Decode instance receives the KV cache and continues the generation process token by token. This stage is latency-sensitive and typically optimized for:
+- Low batch sizes or continuous batching
+- Fast scheduling and iteration
+- Stable inter-token latency (ITL)
+
+Unlike Prefill, Decode focuses on incremental computation using the existing KV cache.
+
+**5. Independent Scaling and Optimization**
+
+Because Prefill and Decode are decoupled:
+- They can be scaled independently (e.g., more Prefill instances for heavy prompts, more Decode instances for high concurrency)
+- Different hardware can be used (e.g., high-memory GPUs for Prefill, low-latency GPUs for Decode)
+- Different parallel strategies can be applied without interference
+
+---
+**Summary**
+
+Disaggregated prefilling transforms the monolithic inference flow into a **two-stage pipeline**:
+
+```text
+Request → Prefill (compute KV cache) → Transfer → Decode (generate tokens)
+```
+
+This design enables finer-grained control over latency and resource utilization, especially in large-scale production deployments.
+
+!!!note
+    Disaggregated prefilling introduces additional KV cache transfer overhead, so network performance is critical.
+    It is primarily designed for latency optimization, not throughput improvement.
+
+## How to Run Disaggregated Prefilling
+1. Choose a connector. See the [Connectors](#connectors) section for the list of supported connectors.
+
+2. Start the components in the following order:
+   - Router. Such as: https://github.com/vllm-project/router. **Start Router First** before P/D servers
+   - Prefill instances.
+   - Decode instances.
+
+    For a complete end-to-end example or more details, see: https://github.com/vllm-project/router/blob/main/scripts/install.sh
+3. Scale Prefill and Decode instances independently based on workload characteristics.
+
+### NCCL-based Connector
+
+```bash
+
+  export ROUTER_PORT=10001
+
+  # When vLLM runs the NCCL connector, ZMQ based discovery is supported. Prefill and Decode instances register themselves via `--vllm-discovery-address`.
+  export ZMQ_DISCOVERY_IP=0.0.0.0
+  export ZMQ_DISCOVERY_PORT=30001
+
+  # vLLM Prefill Instance ip and port, Please replace ip and port.
+  export PREFILL_INSTANCE_IP_1=0.0.0.0
+  export PREFILL_INSTANCE_PORT=8100
+  export KV_PREFILL_PORT=14579
+
+  # vLLM Decode Instance ip and port, Please replace ip and port.
+  export PREFILL_DECODE_IP_1=0.0.0.0
+  export PREFILL_DECODE_PORT=8200
+  export KV_DECODE_PORT=14580
+
+  export MODEL_NAME=Qwen/Qwen3-0.6B
+
+  # Install Router
+  pip install vllm-router
+
+  # Step 1: Start Router
+  cargo run --release -- \
+    --policy consistent_hash \
+    --vllm-pd-disaggregation \
+    --vllm-discovery-address $ZMQ_DISCOVERY_IP:$ZMQ_DISCOVERY_PORT \
+    --host 0.0.0.0 \
+    --port $ROUTER_PORT \
+    --prefill-policy consistent_hash \
+    --decode-policy consistent_hash
+
+  # Step 2: Start Prefill Instances
+  CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port $PREFILL_INSTANCE_PORT \
+    --max-model-len 100 \
+    --gpu-memory-utilization 0.8 \
+    --trust-remote-code \
+    --kv-transfer-config \
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"$KV_PREFILL_PORT","kv_connector_extra_config":{"proxy_ip":"$ZMQ_DISCOVERY_IP","proxy_port":"$ZMQ_DISCOVERY_PORT","http_ip":"'"$PREFILL_INSTANCE_IP_1"'","http_port":"$PREFILL_INSTANCE_PORT","send_type":"PUT_ASYNC"}}' &
+
+  # Step 3: Start Decode Instances
+  CUDA_VISIBLE_DEVICES=1 vllm serve "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port $PREFILL_DECODE_PORT \
+    --max-model-len 100 \
+    --gpu-memory-utilization 0.8 \
+    --trust-remote-code \
+    --kv-transfer-config \
+    '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":"1e10","kv_port":"$KV_DECODE_PORT","kv_connector_extra_config":{"proxy_ip":"'"$ZMQ_DISCOVERY_IP"'","proxy_port":"$ZMQ_DISCOVERY_PORT","http_ip":"'"$PREFILL_DECODE_IP_1"'","http_port":"$PREFILL_DECODE_PORT","send_type":"PUT_ASYNC"}}' &
+
+  # Step 4: Send a Test Request
+  # Please replace localhost with your correct Router ip
+  curl -s http://localhost:$ROUTER_PORT/v1/completions \
+  -H "Content-Type: application/json" \
+  -d  '{"model":"$MODEL_NAME","prompt":"Who won the world series in 2020?","max_tokens":64,"temperature":0.0}'
+```
+Get more informations, https://github.com/vllm-project/vllm/blob/main/docs/design/p2p_nccl_connector.md
+
+### NIXL Connector
+```bash
+  # Install Nixl
+  pip install "nixl[cu13]"
+
+  # Install flashinfer related cubin and jit to skip local compilation
+  pip install flashinfer-cubin==0.6.4
+  pip install flashinfer-jit-cache==0.6.4 --index-url https://flashinfer.ai/whl/cu130
+  pip install fastsafetensors # to enable --load-format "fastsafetensors"
+
+  # Install Router
+  pip install vllm-router
+
+  export ROUTER_PORT=10001
+
+  export PREFILL_INSTANCE_IP_1=0.0.0.0
+  export PREFILL_INSTANCE_PORT_1=8001
+
+  export DECODE_INSTANCE_IP_1=0.0.0.0
+  export DECODE_INSTANCE_PORT_1=8200
+
+  export MODEL_NAME=Qwen/Qwen3-0.6B
+
+  # Step 1: Start Router
+  cargo run --release -- \
+    --policy round_robin \
+    --vllm-pd-disaggregation \
+    --prefill http://$PREFILL_INSTANCE_IP_1:$PREFILL_INSTANCE_PORT_1 \
+    #--prefill http://$PREFILL_INSTANCE_IP_2:$PREFILL_INSTANCE_PORT_2 \
+    --decode http://$DECODE_INSTANCE_IP_1:$DECODE_INSTANCE_PORT_1 \
+    #--decode http://$DECODE_INSTANCE_IP_2:$DECODE_INSTANCE_PORT_2 \
+    --host 127.0.0.1 \
+    --port $ROUTER_PORT \
+    --intra-node-data-parallel-size 4
+
+  # 1st GPU as prefiller
+  CUDA_VISIBLE_DEVICES=0 \
+  UCX_NET_DEVICES=all \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+  vllm serve $MODEL_NAME \
+    --port $PREFILL_INSTANCE_PORT_1 \
+    --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+
+  # 2nd GPU as decoder
+  CUDA_VISIBLE_DEVICES=1 \
+  UCX_NET_DEVICES=all \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
+  vllm serve $MODEL_NAME \
+    --port $DECODE_INSTANCE_PORT_1 \
+    --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+
+```
+
+  Get more informations, [NixlConnector Usage Guide](./nixl_connector_usage.md)
+
+## Connectors
+
+Choosing the right connector depends on your deployment environment, performance requirements, and infrastructure capabilities.
 Please refer to [examples/online_serving/disaggregated_prefill.sh](../../examples/online_serving/disaggregated_prefill.sh) for the example usage of disaggregated prefilling.
 
-Now supports 6 types of connectors:
+### Available Connectors
 
-- **ExampleConnector**: refer to [examples/offline_inference/disaggregated-prefill-v1/run.sh](../../examples/offline_inference/disaggregated-prefill-v1/run.sh) for the example usage of ExampleConnector disaggregated prefilling.
-- **LMCacheConnectorV1**: refer to [examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh](../../examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh) for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission.
-- **NixlConnector**: refer to [tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh) for the example usage of NixlConnector disaggregated prefilling which support fully async send/recv. For detailed usage guide, see [NixlConnector Usage Guide](nixl_connector_usage.md). For feature compatibility details, see [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md).
-- **P2pNcclConnector**: refer to [examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh](../../examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh) for the example usage of P2pNcclConnector disaggregated prefilling.
-- **MooncakeConnector**: refer to [examples/online_serving/disaggregated_serving/mooncake_connector/run_mooncake_connector.sh](../../examples/online_serving/disaggregated_serving/mooncake_connector/run_mooncake_connector.sh) for the example usage of ExampleConnector disaggregated prefilling. For detailed usage guide, see [MooncakeConnector Usage Guide](mooncake_connector_usage.md).
-- **MultiConnector**: take advantage of the kv_connector_extra_config: dict[str, Any] already present in KVTransferConfig to stash all the connectors we want in an ordered list of kwargs.such as:
+vLLM currently supports multiple connector implementations for disaggregated prefilling:
 
-  ```bash
-  --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both"},{"kv_connector":"ExampleConnector","kv_role":"kv_both","kv_connector_extra_config":{"shared_storage_path":"local_storage"}}]}}'
-  ```
+- **ExampleConnector**: A minimal reference implementation for demonstration purposes. For simple testing or getting started. See: [examples/offline_inference/disaggregated-prefill-v1/run.sh](../../examples/offline_inference/disaggregated-prefill-v1/run.sh)
 
-For NixlConnector, you may also specify one or multiple NIXL_Backend. Such as:
+- **LMCacheConnectorV1**: Uses LMCache with NIXL as the underlying KV transfer mechanism. For integrating with external KV cache systems. See: [examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh](../../examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh)
 
-  ```bash
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both", "kv_buffer_device":"cuda", "kv_connector_extra_config":{"backends":["UCX", "GDS"]}}'
-  ```
+- **NixlConnector**: Provides fully asynchronous KV cache transfer using NIXL. For production with high-performance networking (RDMA / UCX / GDS). See:
+  - [tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh)  
+  - [nixl_connector_usage](nixl_connector_usage.md)
 
-- **OffloadingConnector**: enable offloading of KV data to CPU memory, customizing the CPU block size (in tokens) and total CPU memory bytes to allocate:
+  NIXL connector requires explicit Prefill and Decode endpoints. You must specify them via `--prefill` and `--decode` arguments for Router. Such as:
 
   ```bash
-  --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"block_size": 64, "cpu_bytes_to_use": 1000000000}}'
+
+    # When vLLM runs the NIXL connector, prefill/decode URLs are required.
+    # See a working example in scripts/llama3.1/ folder.
+    cargo run --release -- \
+      --policy consistent_hash \
+      --vllm-pd-disaggregation \
+      --prefill http://127.0.0.1:8100 \
+      #--prefill http://127.0.0.1:8101 \
+      --decode http://127.0.0.1:8200 \
+      #--decode http://127.0.0.1:8201 \
+      --host 127.0.0.1 \
+      --port 8090 \
+      --intra-node-data-parallel-size 1 \
   ```
 
-- **FlexKVConnectorV1**: refer to [examples/offline_inference/prefix_caching_flexkv.py](../../examples/offline_inference/prefix_caching_flexkv.py) for the example usage of FlexKVConnectorV1. FlexKV is a distributed KV Store and multi-level cache management system for ultra-large-scale LLM inference.
+  NixlConnector supports one or more backends (e.g., UCX, GDS) for KV cache transfer. It requires configuring the connector via `--kv-transfer-config` for vllm prefill and decode instances, for example:
+  ```bash
+  --kv-transfer-config '{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_both",
+    "kv_buffer_device": "cuda",
+    "kv_connector_extra_config": {
+      "backends": ["UCX", "GDS"]
+    }
+  }'
+
+- **P2pNcclConnector**: Uses NCCL-based peer-to-peer communication for KV transfer. For GPU-to-GPU high-speed communication (same cluster). See: [examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh](../../examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh)
+
+- **MooncakeConnector**: Integration with Mooncake for distributed KV transfer. See:
+  - [examples/online_serving/disaggregated_serving/mooncake_connector/run_mooncake_connector.sh](../../examples/online_serving/disaggregated_serving/mooncake_connector/run_mooncake_connector.sh)  
+  - [mooncake_connector_usage](mooncake_connector_usage.md)
+
+- **OffloadingConnector**: Offloads KV cache to CPU memory.
+  ```bash
+  --kv-transfer-config '{
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "block_size": 64,
+      "cpu_bytes_to_use": 1000000000
+    }
+  }'
+
+- **FlexKVConnectorV1**: A distributed KV store with multi-level cache.
+  ```bash
+  --kv-transfer-config '{
+    "kv_connector": "FlexKVConnectorV1",
+    "kv_role": "kv_both"
+  }'
+
+- **MultiConnector**: Allows composing multiple connectors in sequence. For combining multiple strategies.
 
   ```bash
-  --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
-  ```
+  --kv-transfer-config '{
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "connectors": [
+        {
+          "kv_connector": "NixlConnector",
+          "kv_role": "kv_both"
+        },
+        {
+          "kv_connector": "ExampleConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "shared_storage_path": "local_storage"
+          }
+        }
+      ]
+    }
+  }'
+
+### Connector Comparison
+
+| Connector            | Key Feature                         | Best For                         | Notes                         |
+|---------------------|-------------------------------------|----------------------------------|-------------------------------|
+| ExampleConnector    | Minimal implementation              | Testing / debugging               | Not for production            |
+| LMCacheConnectorV1  | External KV cache (via NIXL)        | KV reuse / caching systems        | Requires LMCache setup        |
+| NixlConnector       | Async, high-performance transfer    | Production / distributed systems  | Supports multiple backends    |
+| P2pNcclConnector    | NCCL-based GPU communication        | Single cluster, GPU-heavy setups  | Low latency                   |
+| MooncakeConnector   | External distributed KV system      | Specialized infra                 | Requires Mooncake             |
+| MultiConnector      | Compose multiple connectors         | Hybrid strategies                 | Flexible but complex          |
+| OffloadingConnector | CPU memory offloading               | Limited GPU memory                | Trades latency for capacity   |
+| FlexKVConnectorV1   | Distributed KV + multi-level cache  | Large-scale inference             | Advanced setup                |
+
+### Design Considerations
+
+When selecting a connector, consider:
+
+- Latency vs Throughput
+  - NCCL / NIXL → low latency
+  - Offloading → higher latency, more capacity
+- Network Capabilities
+  - RDMA / UCX available → prefer NixlConnector
+  - Standard TCP → consider simpler connectors
+- Memory Constraints
+  - Limited GPU memory → OffloadingConnector
+  - Large-scale KV reuse → FlexKV / LMCache
+- System Complexity
+  - Simple deployment → ExampleConnector / P2pNccl
+  - Complex infra → Nixl / MultiConnector
+
+### Advanced Usage
+
+For complex production environments, connectors can be combined. Use MultiConnector to:
+- Chain fast-path + fallback
+- Combine GPU transfer + storage-based transfer
+- Implement tiered KV cache systems
+
+
 
 ## Benchmarks
 
@@ -56,48 +351,80 @@ Please refer to [benchmarks/disagg_benchmarks](../../benchmarks/disagg_benchmark
 
 ## Development
 
-We implement disaggregated prefilling by running 2 vLLM instances. One for prefill (we call it prefill instance) and one for decode (we call it decode instance), and then use a connector to transfer the prefill KV caches and results from prefill instance to decode instance.
+!!! note
+    This section focuses on the internal architecture and implementation details.  
+    It is intended for developers and contributors. End users can skip it.
 
-All disaggregated prefilling implementation is under `vllm/distributed/kv_transfer`.
+Disaggregated prefilling is implemented by running two independent vLLM instances:
 
-Key abstractions for disaggregated prefilling:
+- A **Prefill instance** that processes input prompts and computes KV caches  
+- A **Decode instance** that performs token-by-token generation using the KV cache  
 
-- **Connector**: Connector allows **kv consumer** to retrieve the KV caches of a batch of request from **kv producer**.
-- **LookupBuffer**: LookupBuffer provides two API: `insert` KV cache and `drop_select` KV cache. The semantics of `insert` and `drop_select` are similar to SQL, where `insert` inserts a KV cache into the buffer, and `drop_select` returns the KV cache that matches the given condition and drop it from the buffer.
-- **Pipe**: A single-direction FIFO pipe for tensor transmission. It supports `send_tensor` and `recv_tensor`.
+A connector is used to transfer KV caches and associated request state from the Prefill instance to the Decode instance.
+
+All disaggregated prefilling components are implemented under `vllm/distributed/kv_transfer`.
+
+### Key Abstractions
+
+- **Connector**: Enables the KV consumer to retrieve KV caches for a batch of requests from the KV producer.
+
+- **LookupBuffer**: Provides two APIs: `insert` and `drop_select`.  
+  - `insert`: inserts KV caches into the buffer  
+  - `drop_select`: retrieves KV caches matching given conditions and removes them from the buffer  
+
+  The semantics are similar to SQL operations.
+
+- **Pipe**: A unidirectional FIFO channel for tensor transmission. Provides `send_tensor` and `recv_tensor` interfaces.
 
 !!! note
-    `insert` is non-blocking operation but `drop_select` is blocking operation.
+    `insert` is a non-blocking operation, whereas `drop_select` is blocking.
 
-Here is a figure illustrating how the above 3 abstractions are organized:
+The following figure illustrates how the three core abstractions are organized:
 
 ![Disaggregated prefilling abstractions](../assets/features/disagg_prefill/abstraction.jpg)
 
-The workflow of disaggregated prefilling is as follows:
+The overall workflow of disaggregated prefilling is shown below:
 
 ![Disaggregated prefilling workflow](../assets/features/disagg_prefill/overview.jpg)
 
-The `buffer` corresponds to `insert` API in LookupBuffer, and the `drop_select` corresponds to `drop_select` API in LookupBuffer.
+In this workflow:
+- **buffer** corresponds to the `insert` API of `LookupBuffer`
+- **drop_select** corresponds to the `drop_select` API of `LookupBuffer`
 
-Now every process in vLLM will have a corresponding connector. Specifically, we have:
+---
 
-- Scheduler connector: the connector that locates in the same process as the scheduler process. It schedules the KV cache transfer ops.
-- Worker connectors: the connectors that locate in the worker processes. They execute KV cache transfer ops.
+Each vLLM process is associated with a connector. There are two types of connectors:
 
-Here is a figure illustrating how the above 2 connectors are organized:
+- **Scheduler connector**: Located in the scheduler process. Responsible for orchestrating KV cache transfer operations.
+
+- **Worker connectors**: Located in worker processes. Responsible for executing KV cache transfer operations.
+
+The following figure illustrates how these connectors are organized:
 
 ![Disaggregated prefilling high level design](../assets/features/disagg_prefill/high_level_design.png)
 
-The figure below shows how the worker connector works with the attention module to achieve layer-by-layer KV cache store and load:
+---
 
-![Disaggregated prefilling workflow](../assets/features/disagg_prefill/workflow.png)
+The figure below shows how the worker connector interacts with the attention module to enable layer-by-layer KV cache storage and loading:
 
-## Third-party contributions
+![Disaggregated prefilling worker workflow](../assets/features/disagg_prefill/workflow.png)
 
-Disaggregated prefilling is highly related to infrastructure, so vLLM relies on third-party connectors for production-level disaggregated prefilling (and vLLM team will actively review and merge new PRs for third-party connectors).
+## Third-Party Contributions
 
-We recommend three ways of implementations:
+Disaggregated prefilling is tightly coupled with infrastructure. For production deployments, vLLM relies on third-party connectors to provide efficient and scalable KV cache transfer.
 
-- **Fully-customized connector**: Implement your own `Connector`, and call third-party libraries to send and receive KV caches, and many many more (like editing vLLM's model input to perform customized prefilling, etc.). This approach gives you the most control, but at the risk of being incompatible with future vLLM versions.
-- **Database-like connector**: Implement your own `LookupBuffer` and support the `insert` and `drop_select` APIs just like SQL.
-- **Distributed P2P connector**: Implement your own `Pipe` and support the `send_tensor` and `recv_tensor` APIs, just like `torch.distributed`.
+The vLLM project actively welcomes and reviews contributions of third-party connectors.
+
+We recommend the following implementation approaches:
+
+- **Fully customized connector**  
+  Implement a custom `Connector` and integrate with external systems or libraries to handle KV cache transfer.  
+  This approach provides maximum flexibility (e.g., customizing model inputs or prefill behavior), but may require additional effort to maintain compatibility with future vLLM versions.
+
+- **Database-like connector**  
+  Implement a custom `LookupBuffer` that supports the `insert` and `drop_select` APIs, similar to database semantics.  
+  This approach is suitable for systems that naturally model KV cache storage and retrieval as query operations.
+
+- **Distributed P2P connector**  
+  Implement a custom `Pipe` that provides `send_tensor` and `recv_tensor` APIs, similar to `torch.distributed`.  
+  This approach is ideal for high-performance, peer-to-peer KV cache transfer in distributed environments.
