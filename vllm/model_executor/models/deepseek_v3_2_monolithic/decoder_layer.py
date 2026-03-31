@@ -117,6 +117,7 @@ class MonolithicDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
             self.mlp.skip_final_allreduce = True
+            self.mlp.skip_scale_and_add = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -279,7 +280,15 @@ class MonolithicDecoderLayer(nn.Module):
         # MLP / MoE
         # When fused_allreduce_rms is enabled, the MLP/MoE AllReduce is
         # deferred — it will be fused with the next layer's input norm.
-        hidden_states = self.mlp(hidden_states)
+        if self.is_moe:
+            # MoE returns raw (shared_output, routed_output) without
+            # applying scale + add. torch.compile fuses the elementwise ops.
+            shared_output, routed_output = self.mlp(hidden_states)
+            hidden_states = scale_and_add(
+                routed_output, self.routed_scaling_factor, shared_output
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 
@@ -337,3 +346,12 @@ class MonolithicDecoderLayer(nn.Module):
         out = out.transpose(0, 1)
         torch.bmm(x, mla.W_UV, out=out)
         return output
+
+
+@torch.compile
+def scale_and_add(x: torch.Tensor, scale: float, y: torch.Tensor) -> torch.Tensor:
+    orig_dtype = x.dtype
+    x = x.to(torch.float32)
+    x = x * scale
+    z = x + y.to(torch.float32)
+    return z.to(orig_dtype)
