@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -1405,9 +1406,7 @@ def prepare_fp8_moe_layer_for_deepgemm(
     return w13, w2, w13_scale, w2_scale
 
 
-# torch._scaled_mm requires both matrix dimensions divisible by 16.
-# Models where intermediate_size / tp_size is not 16-aligned
-# (e.g. 10944 / tp=8 = 1368) fail CUDA Graph capture without padding.
+# torch._scaled_mm requires both matrix dimensions to be divisible by 16.
 FP8_MM_ALIGNMENT = 16
 
 
@@ -1420,8 +1419,6 @@ def pad_weight_to_fp8_alignment(
     Returns (weight_padded, weight_scale_padded, orig_N).
     weight_scale is padded along dim-0 when per-channel (shape [N, 1]).
     """
-    import torch.nn.functional as F
-
     orig_n, orig_k = weight.shape
     pad_n = (-orig_n) % FP8_MM_ALIGNMENT
     pad_k = (-orig_k) % FP8_MM_ALIGNMENT
