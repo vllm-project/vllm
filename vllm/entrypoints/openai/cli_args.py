@@ -154,7 +154,7 @@ class BaseFrontendArgs:
     """
     [Deprecated]
     If set to True, including usage on every request. Use
-    `--include-usage-policy=always` instead.
+    `--include-usage-policy=always --continuous-usage-policy=always` instead.
     """
     enable_tokenizer_info_endpoint: bool = False
     """Enable the `/tokenizer_info` endpoint. May expose chat
@@ -412,10 +412,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_force_include_usage:
         logger.warning_once(
             "--enable-force-include-usage is deprecated. "
-            "Use --include-usage-policy=always instead."
+            "Use `--include-usage-policy=always --continuous-usage-policy=always` "
+            "instead."
         )
         if args.include_usage_policy is None:
             args.include_usage_policy = "always"
+        if args.continuous_usage_policy is None:
+            args.continuous_usage_policy = "always"
 
     if args.continuous_usage_policy == "always" and args.include_usage_policy is None:
         logger.warning_once(

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import APIRouter, FastAPI, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from vllm.entrypoints.chat_utils import UsagePolicy
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
@@ -126,12 +127,17 @@ def init_transcription_state(
     request_logger: RequestLogger | None,
     supported_tasks: tuple["SupportedTask", ...],
 ):
+    usage_policy = UsagePolicy(
+        include_usage=args.include_usage_policy,
+        continuous_usage=args.continuous_usage_policy,
+    )
+
     state.openai_serving_transcription = (
         OpenAIServingTranscription(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
         )
         if "transcription" in supported_tasks
         else None
@@ -141,7 +147,7 @@ def init_transcription_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
         )
         if "transcription" in supported_tasks
         else None
