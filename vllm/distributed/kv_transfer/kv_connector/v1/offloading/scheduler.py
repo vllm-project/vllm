@@ -270,10 +270,13 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        # Collect disk prefetch requests if using tiered offloading
+        # Collect disk prefetch requests if using tiered offloading.
+        # First trigger prefetch selection (picks top requests by disk hits),
+        # then drain the outbound queue.
         disk_prefetches: list[DiskPrefetchSpec] = []
         from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
         if isinstance(self.manager, TieredOffloadingManager):
+            self.manager.maybe_prefetch_top_requests()
             for p in self.manager.take_outbound_prefetches():
                 disk_prefetches.append(DiskPrefetchSpec(
                     cpu_block_ids=p.cpu_block_ids,
