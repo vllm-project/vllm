@@ -69,6 +69,25 @@ class LoRAConfig:
     for variable LoRA usage patterns at the cost of increased startup time and
     memory usage. Only takes effect when cudagraph_specialize_lora is True.
     """
+    enable_lora_weight_merge: bool = False
+    """When enabled, merge single-LoRA adapter weights directly into the base
+    model weights at decode time, bypassing Punica/SGMV kernels and using the
+    non-LoRA CUDA graph to reduce per-token overhead. Works with any max_loras
+    setting — activates when a batch has a single adapter, and falls back to
+    the standard LoRA path when multiple adapters are active or the batch is
+    mixed (base + LoRA). Supports BF16/FP16/FP32 base models.
+    """
+    lora_weight_merge_golden_device: Literal["cpu", "gpu", "off"] = "cpu"
+    """Where to store golden base weight copies for automerge restore.
+    'cpu' (default): store in host RAM — no extra GPU memory, restore
+        requires a CPU-to-GPU copy (fast, only on adapter switch).
+    'gpu': store on the same GPU — fastest restore, but doubles the
+        GPU memory for LoRA target module weights.
+    'off': no golden copies — restore uses W -= delta (subtract).
+        Zero extra memory but may accumulate minor floating-point drift
+        over many merge/unmerge cycles with BF16/FP16.
+    Only takes effect when enable_lora_weight_merge is True.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -104,6 +123,15 @@ class LoRAConfig:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})."
+            )
+
+        if self.enable_lora_weight_merge and self.max_loras > 1:
+            logger.info(
+                "enable_lora_weight_merge with max_loras=%d: auto-merge "
+                "will activate when a batch has a single adapter, and "
+                "fall back to standard LoRA when multiple adapters are "
+                "active in the same batch.",
+                self.max_loras,
             )
 
         return self

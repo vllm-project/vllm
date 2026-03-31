@@ -14,6 +14,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
+from vllm.lora.automerge import get_state
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -54,10 +55,22 @@ class LoRAModelRunnerMixin:
     ) -> None:
         self._ensure_lora_enabled()
 
-        # Set is_prefill to True, so we always use the SGMV kernels on
-        # non-cuda platforms.
-        # On cuda platforms we use the same kernels for prefill and
-        # decode and this flag is generally ignored.
+        # When enable_lora_weight_merge is set, attempt to merge the single
+        # active adapter's weights directly into the base model, bypassing
+        # Punica kernels and using the non-LoRA CUDA graph.
+        lora_config = getattr(self, "lora_config", None)
+        if lora_config is not None and lora_config.enable_lora_weight_merge:
+            handled = self._try_automerge(
+                prompt_lora_mapping,
+                token_lora_mapping,
+                lora_requests,
+                mapping_type,
+            )
+            if handled:
+                return
+
+        # Standard LoRA path
+        self._automerge_active = False
         lora_mapping = LoRAMapping(
             token_lora_mapping,
             prompt_lora_mapping,
@@ -65,6 +78,125 @@ class LoRAModelRunnerMixin:
             type=mapping_type,
         )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+    def _try_automerge(
+        self,
+        prompt_lora_mapping: tuple[int, ...],
+        token_lora_mapping: tuple[int, ...],
+        lora_requests: set[LoRARequest],
+        mapping_type: LoRAMappingType,
+    ) -> bool:
+        """Attempt auto-merge. Returns True if handled, False to fall through.
+
+        Falls back to the standard LoRA path when:
+          - CUDA graph capture / warmup is in progress
+          - No LoRA is requested (base-only batch)
+          - Multiple distinct LoRAs in one step
+          - Mixed base + LoRA tokens in the same batch
+          - Merge fails (unsupported dtype, shape mismatch, etc.)
+        """
+        # Skip during CUDA graph capture / warmup (dummy LoRAs have zero
+        # weights and would pollute the automerge state).
+        if getattr(self, "_automerge_bypass", False):
+            return False
+
+        lora_config = getattr(self, "lora_config", None)
+        golden_device = (
+            lora_config.lora_weight_merge_golden_device
+            if lora_config is not None
+            else "cpu"
+        )
+        st = get_state(self, golden_device=golden_device)
+        names = self._unique_lora_names(lora_requests)
+
+        # No LoRA requested -> ensure base weights are clean
+        if len(names) == 0:
+            if st.merged_lora_name is not None:
+                st.unmerge_if_needed(self)
+            return False  # fall through to standard path
+
+        # Multiple LoRAs in one step -> fallback
+        if len(names) != 1:
+            logger.warning("automerge: multiple LoRAs %s — fallback", names)
+            if st.merged_lora_name is not None:
+                st.unmerge_if_needed(self)
+            return False
+
+        desired_name = names[0]
+
+        # Mixed base+LoRA batch -> fallback
+        if self._batch_has_mixed_base_and_lora(prompt_lora_mapping, token_lora_mapping):
+            logger.warning("automerge: mixed base+LoRA batch — fallback")
+            if st.merged_lora_name is not None:
+                st.unmerge_if_needed(self)
+            return False
+
+        # Switching adapter? unmerge previous first
+        if st.merged_lora_name is not None and st.merged_lora_name != desired_name:
+            st.unmerge_if_needed(self)
+
+        # If already merged for this adapter, skip all LoRA manager work.
+        # This avoids the per-step Punica metadata update overhead.
+        if st.merged_lora_name == desired_name:
+            self._automerge_active = True
+            return True
+
+        # First time or adapter switch: tell vLLM "no LoRA" via zeroed
+        # mapping, but keep lora_requests so the manager keeps the adapter
+        # loaded (needed for merge_active to find the adapter weights).
+        no_prompt = tuple(0 for _ in prompt_lora_mapping)
+        no_token = tuple(0 for _ in token_lora_mapping)
+        lora_mapping = LoRAMapping(
+            no_token,
+            no_prompt,
+            is_prefill=True,
+            type=mapping_type,
+        )
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+        # Merge the adapter weights into base
+        desired_adapter_id = next(iter(lora_requests)).lora_int_id
+        ok = st.merge_active(self, desired_name, adapter_id=desired_adapter_id)
+        if not ok:
+            logger.warning(
+                "automerge: could not merge '%s' (err=%s) — fallback",
+                desired_name,
+                st.last_error,
+            )
+            st.unmerge_if_needed(self)
+            return False  # fall through to standard path
+
+        # Signal: use non-LoRA CUDA graph
+        self._automerge_active = True
+        return True  # handled, skip standard path
+
+    @staticmethod
+    def _unique_lora_names(lora_requests) -> list[str]:
+        if not lora_requests:
+            return []
+        try:
+            reqs = list(lora_requests)
+        except Exception:
+            return []
+        names: list[str] = []
+        for r in reqs:
+            n = getattr(r, "lora_name", None)
+            if isinstance(n, str) and n:
+                names.append(n)
+        return sorted(set(names))
+
+    @staticmethod
+    def _batch_has_mixed_base_and_lora(
+        prompt_lora_mapping: tuple[int, ...],
+        token_lora_mapping: tuple[int, ...],
+    ) -> bool:
+        has_lora = any(v > 0 for v in prompt_lora_mapping) or any(
+            v > 0 for v in token_lora_mapping
+        )
+        has_base = any(v <= 0 for v in prompt_lora_mapping) or any(
+            v <= 0 for v in token_lora_mapping
+        )
+        return has_lora and has_base
 
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
@@ -100,6 +232,11 @@ class LoRAModelRunnerMixin:
             # __enter__ code
             assert self.lora_manager is not None, "LoRA is not enabled"
 
+            # Disable automerge during dummy/warmup runs to prevent
+            # merging zero-weight dummy adapters into base weights.
+            prev_bypass = getattr(self, "_automerge_bypass", False)
+            self._automerge_bypass = True
+
             num_loras = lora_config.max_loras
             lora_warmup_rank = (
                 lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
@@ -123,6 +260,7 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
+            self._automerge_bypass = prev_bypass
             if remove_lora:
                 self.lora_manager.remove_all_adapters()
 
