@@ -721,7 +721,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
     beta: torch.Tensor | None = None,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    chunk_size: int = 64,
+    chunk_size: int = FLA_CHUNK_SIZE,
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -1189,6 +1189,7 @@ def chunk_kda_fwd(
         beta=beta,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
         output_dtype=torch.float32,
     )
     A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)

@@ -121,13 +121,13 @@ def chunk_scaled_dot_kkt_fwd(
         cu_seqlens (torch.Tensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
+        chunk_indices (torch.Tensor):
+            Pre-computed chunk indices. If None and cu_seqlens is provided,
+            computed internally. Default: None
         chunk_size (int):
             The chunk size. Default: 64.
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float32`
-        chunk_indices (torch.Tensor):
-            Pre-computed chunk indices. If None and cu_seqlens is provided,
-            computed internally. Default: None
 
     Returns:
         beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.

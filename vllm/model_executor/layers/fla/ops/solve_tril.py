@@ -519,11 +519,11 @@ def solve_tril(
             [B, T, H, BT], where BT should only be 16, 32, or 64.
         cu_seqlens (torch.Tensor):
             The cumulative sequence lengths of the input tensor. Default: `None`.
+        chunk_indices (torch.Tensor):
+            Pre-computed chunk indices. Default: `None`.
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float`.
             If `None`, the output dtype will be the same as the input dtype.
-        chunk_indices (torch.Tensor):
-            Pre-computed chunk indices. Default: `None`.
 
     Returns:
         (I + A)^-1 with the same shape as A

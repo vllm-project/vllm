@@ -164,6 +164,16 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
+        # chunk_indices/chunk_offsets are accepted for interface parity
+        # with forward_native; expected to be None on the FlashInfer path.
+        if chunk_indices is not None or chunk_offsets is not None:
+            logger.warning_once(
+                "FlashInfer GDN backend received pre-computed "
+                "chunk_indices/chunk_offsets which it does not use. "
+                "This is not a critical error but indicates unexpected "
+                "behavior — please consider filing a bug at "
+                "https://github.com/vllm-project/vllm/issues"
+            )
         return fi_chunk_gated_delta_rule(
             q=q,
             k=k,
