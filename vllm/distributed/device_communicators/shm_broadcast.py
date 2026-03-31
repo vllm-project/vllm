@@ -38,6 +38,11 @@ from vllm.utils.network_utils import (
     is_valid_ipv6_address,
 )
 
+if envs.VLLM_USE_MONITORX:
+    from vllm.monitorx import monitorx
+
+MONITORX_TIMEOUT_SECONDS = 0.1
+
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
@@ -540,13 +545,17 @@ class MessageQueue:
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
-                # Memory fence ensures we see the latest read flags from readers.
-                # Without this, we may read stale flags from our CPU cache and
-                # spin indefinitely even though readers have completed.
-                memory_fence()
-                read_count = sum(metadata_buffer[1:])
-                written_flag = metadata_buffer[0]
-                if written_flag and read_count != self.buffer.n_reader:
+
+                def check():
+                    memory_fence()
+                    read_count = sum(metadata_buffer[1:])
+                    written_flag = metadata_buffer[0]
+                    return not (written_flag and read_count != self.buffer.n_reader)
+
+                if envs.VLLM_USE_MONITORX and not check():
+                    monitorx(metadata_buffer, check, timeout=MONITORX_TIMEOUT_SECONDS)
+
+                if not check():
                     # this block is written and not read by all readers
                     # for writers, `self.current_idx` is the next block to write
                     # if this block is not ready to write,
@@ -657,13 +666,21 @@ class MessageQueue:
         )
         with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
             while True:
-                # Memory fence ensures we see the latest writes from the writer.
-                # Without this, we may read stale flags from our CPU cache
-                # and spin indefinitely even though writer has updated them.
-                memory_fence()
-                read_flag = metadata_buffer[self.local_reader_rank + 1]
-                written_flag = metadata_buffer[0]
-                if not written_flag or read_flag:
+
+                def check():
+                    memory_fence()
+                    read_flag = metadata_buffer[self.local_reader_rank + 1]
+                    written_flag = metadata_buffer[0]
+                    return not (not written_flag or read_flag)
+
+                if envs.VLLM_USE_MONITORX and not check():
+                    monitorx(
+                        metadata_buffer[0 : self.local_reader_rank + 1],
+                        check,
+                        timeout=MONITORX_TIMEOUT_SECONDS,
+                    )
+
+                if not check():
                     # this block is either
                     # (1) not written
                     # (2) already read by this reader

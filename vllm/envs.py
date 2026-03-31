@@ -1674,6 +1674,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
+    # If set to 1, use monitorx/monitorx instructions to poll in a more efficient
+    # way when using the mp backend. (Requires an AMD CPU.)
+    "VLLM_USE_MONITORX": lambda: bool(
+        int(
+            os.getenv("VLLM_USE_MONITORX", "0")
+        ),
 }
 
 

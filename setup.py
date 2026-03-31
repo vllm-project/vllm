@@ -672,6 +672,7 @@ class precompiled_wheel_utils:
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
+                    "vllm/monitorx.abi3.so",
                     # ROCm-specific libraries
                     "vllm/_rocm_C.abi3.so",
                 ]
@@ -961,6 +962,8 @@ if _is_cuda() or _is_hip():
     # Optional since this doesn't get built (produce an .so file). This is just
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
+
+ext_modules.append(CMakeExtension(name="vllm.monitorx"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
