@@ -87,7 +87,7 @@ def run_one_test(
     # Cleanup
     del llm
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     return found, answer
 
 

@@ -270,7 +270,7 @@ def run_benchmark(model_name: str):
         }
 
         del llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     # ---------------------------------------------------------------------------
     # Summary tables
