@@ -462,7 +462,7 @@ def parse_attention_types(node: ast.ClassDef) -> str:
 
     if not types:
         return "Decoder"
-    return "All" if len(types) >= 3 else ", ".join(sorted(types))
+    return "All" if types >= set(type_map.values()) else ", ".join(sorted(types))
 
 
 def parse_impl_bool_attr(
