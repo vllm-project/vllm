@@ -22,6 +22,7 @@ QuantizationMethods = Literal[
     "gptq_marlin",
     "awq_marlin",
     "gptq",
+    "humming",
     "compressed-tensors",
     "bitsandbytes",
     "experts_int8",
@@ -119,6 +120,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
+    from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,
@@ -157,6 +159,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp8": Mxfp8Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
+        "humming": HummingConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

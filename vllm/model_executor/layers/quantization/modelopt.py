@@ -8,6 +8,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.layers.attention import Attention, MLAAttention
@@ -141,6 +142,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     ):
         super().__init__()
         self.exclude_modules: list[str] = exclude_modules
+        self.original_config: dict[str, Any] = {}
 
     def is_layer_excluded(self, prefix: str) -> bool:
         """
@@ -186,6 +188,12 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         # handle kv-cache first so we can focus only on weight quantization thereafter
         if isinstance(layer, (Attention, MLAAttention)):
             return self.KVCacheMethodCls(self)
+
+        if envs.VLLM_USE_HUMMING:
+            from vllm.model_executor.layers.quantization.humming import HummingConfig
+
+            config = HummingConfig.from_config(config=self.original_config)
+            return config.get_quant_method(layer, prefix)
 
         # handle exclusion
         if self.is_layer_excluded(prefix):
@@ -354,13 +362,15 @@ class ModelOptQuantConfigBase(QuantizationConfig):
                 "`hf_quant_config.json` file for your model's "
                 "quant configuration."
             )
-        return cls._from_config(
+        quant_config = cls._from_config(
             quant_method=quant_method,
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=exclude_modules,
             group_size=group_size,
             original_config=config,
         )
+        quant_config.original_config = config
+        return quant_config
 
 
 class ModelOptFp8Config(ModelOptQuantConfigBase):

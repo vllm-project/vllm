@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -929,6 +930,10 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self.model_arch_config.quantization_config
 
+        if self.quantization == "humming":
+            os.environ["VLLM_USE_HUMMING"] = "1"
+            envs.VLLM_USE_HUMMING = True
+
         if quant_cfg is not None:
             quant_method = quant_cfg["quant_method"]
             # Quantization methods which are overrides (i.e. they have a
@@ -948,6 +953,7 @@ class ModelConfig:
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "cpu_awq",
+                "humming",
                 "gguf",
             ]
             quantization_methods = [
