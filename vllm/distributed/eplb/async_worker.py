@@ -34,7 +34,7 @@ def start_async_worker(
     def thread_target() -> None:
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
-        cuda_stream = torch.cuda.Stream(device=device_index)
+        cuda_stream = torch.Stream(device=device_index)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -89,7 +89,7 @@ def run_rebalance_experts(
 async def transfer_run_periodically(
     state: "EplbState",
     eplb_group: ProcessGroup,
-    cuda_stream: torch.cuda.Stream,
+    cuda_stream: torch.Stream,
     is_profile: bool = False,
 ) -> None:
     while True:

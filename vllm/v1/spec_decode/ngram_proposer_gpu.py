@@ -638,7 +638,7 @@ def _sync_num_tokens(
 
 def copy_num_valid_draft_tokens(
     num_valid_draft_tokens_cpu: torch.Tensor,
-    num_valid_draft_tokens_copy_stream: torch.cuda.Stream,
+    num_valid_draft_tokens_copy_stream: torch.Stream,
     num_valid_draft_tokens_event: torch.cuda.Event,
     num_valid_draft_tokens: torch.Tensor | None,
     batch_size: int,

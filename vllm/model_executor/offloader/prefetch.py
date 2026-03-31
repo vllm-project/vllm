@@ -153,7 +153,7 @@ class PrefetchOffloader(BaseOffloader):
         self.mode = mode
 
         # Copy stream for async H2D transfers
-        self.copy_stream = torch.cuda.Stream()
+        self.copy_stream = torch.Stream()
 
         # Module offloaders and buffer pool (populated in wrap_modules/post_init)
         self.module_offloaders: list[_ModuleOffloader] = []
@@ -375,7 +375,7 @@ class _ModuleOffloader:
         self,
         mode: str,
         module: nn.Module,
-        copy_stream: torch.cuda.Stream,
+        copy_stream: torch.Stream,
         whitelist_param_names: list[str],
         layer_idx: int,
     ):

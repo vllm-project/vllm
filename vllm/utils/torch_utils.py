@@ -514,7 +514,7 @@ prev_set_stream = torch.cuda.set_stream
 _current_stream_tls = threading.local()
 
 
-def _patched_set_stream(stream: torch.cuda.Stream) -> None:
+def _patched_set_stream(stream: torch.Stream) -> None:
     _current_stream_tls.value = stream
     prev_set_stream(stream)
 
@@ -527,7 +527,7 @@ class _StreamPlaceholder:
         self.synchronize = lambda: None
 
 
-def current_stream() -> torch.cuda.Stream:
+def current_stream() -> torch.Stream:
     """
     replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
     it turns out that `torch.cuda.current_stream()` is quite expensive,
@@ -552,7 +552,7 @@ def current_stream() -> torch.cuda.Stream:
         # for more details. Therefore, we create a dedicated stream per process.
         if current_platform.is_rocm() or current_platform.is_cuda():
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
-            torch.cuda.set_stream(torch.cuda.Stream())
+            torch.cuda.set_stream(torch.Stream())
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:
@@ -573,10 +573,10 @@ def current_stream() -> torch.cuda.Stream:
 #
 # aux_stream() is currently used for:
 #   - MoE shared_expert overlap with router
-_aux_stream: torch.cuda.Stream | None = None
+_aux_stream: torch.Stream | None = None
 
 
-def aux_stream() -> torch.cuda.Stream | None:
+def aux_stream() -> torch.Stream | None:
     """
     Ensures aux_stream is initialized only once
     """
@@ -585,7 +585,7 @@ def aux_stream() -> torch.cuda.Stream | None:
     from vllm.platforms import current_platform
 
     if _aux_stream is None and current_platform.is_cuda_alike():
-        _aux_stream = torch.cuda.Stream()
+        _aux_stream = torch.Stream()
 
     return _aux_stream
 

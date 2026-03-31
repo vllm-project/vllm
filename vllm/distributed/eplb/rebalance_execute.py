@@ -157,7 +157,7 @@ def move_to_buffer(
     new_indices: np.ndarray,
     expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: Sequence[torch.Tensor],
-    cuda_stream: torch.cuda.Stream | None,
+    cuda_stream: torch.Stream | None,
     ep_group: ProcessGroup,
 ) -> MoveToBufferResult:
     """
@@ -472,7 +472,7 @@ async def transfer_layer(
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    cuda_stream: torch.cuda.Stream | None = None,
+    cuda_stream: torch.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
 ) -> MoveToBufferResult:
     """
