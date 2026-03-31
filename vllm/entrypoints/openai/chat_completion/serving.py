@@ -558,7 +558,8 @@ class OpenAIServingChat(OpenAIServing):
 
         # Prepare the tool parser if it's needed
         try:
-            if tool_choice_auto and self.tool_parser:
+            need_tool_parser = tool_choice_auto or request.tool_choice == "required"
+            if need_tool_parser and self.tool_parser:
                 if tokenizer is None:
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
@@ -861,6 +862,7 @@ class OpenAIServingChat(OpenAIServing):
                             and prompt_is_reasoning_end_arr[i]
                         ):
                             reasoning_end_arr[i] = True
+                            current_token_ids = output_token_ids
 
                         if reasoning_parser and not reasoning_end_arr[i]:
                             delta_message = (
@@ -875,33 +877,89 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             if reasoning_parser.is_reasoning_end(output_token_ids):
                                 reasoning_end_arr[i] = True
+                                # Strip reasoning-related token ids so
+                                # the tool parser only sees content ids.
+                                current_token_ids = (
+                                    reasoning_parser.extract_content_ids(
+                                        output_token_ids
+                                    )
+                                )
                                 if delta_message and delta_message.content:
                                     current_text = delta_message.content
                                     delta_message.content = None
                                 else:
-                                    # reasoning ended
                                     current_text = ""
 
-                        else:
-                            # either finished reasoning or no reasoning at all
-                            content = current_text
-
-                            delta_message, function_name_returned[i] = (
-                                self.extract_tool_call_required_streaming(
-                                    previous_text=previous_text,
-                                    current_text=content,
-                                    delta_text=delta_text,
-                                    function_name_returned=fn_name_returned,
-                                    tool_call_idx=history_tool_call_cnt,
+                        # Process tool calls after reasoning is done.
+                        # This is a separate `if` (not `else`) so that
+                        # when reasoning ends and tool call tokens
+                        # arrive in the same chunk (common with
+                        # MTP/speculative decoding), the tool parser
+                        # runs immediately in the same iteration.
+                        if reasoning_end_arr[i] if reasoning_parser else True:
+                            if tool_parser is not None and self.enable_auto_tools:
+                                assert added_content_delta_arr is not None
+                                delta_token_ids = output_token_ids
+                                if not added_content_delta_arr[i]:
+                                    added_content_delta_arr[i] = True
+                                    previous_text = ""
+                                    previous_token_ids = []
+                                    delta_text = current_text
+                                    delta_token_ids = current_token_ids
+                                delta_message = (
+                                    tool_parser.extract_tool_calls_streaming(
+                                        previous_text=previous_text,
+                                        current_text=current_text,
+                                        delta_text=delta_text,
+                                        previous_token_ids=(previous_token_ids),
+                                        current_token_ids=(current_token_ids),
+                                        delta_token_ids=delta_token_ids,
+                                        request=request,
+                                    )
                                 )
-                            )
-                            if (
-                                delta_message
-                                and delta_message.tool_calls
-                                and delta_message.tool_calls[0].id is not None
-                            ):
-                                history_tool_call_cnt += 1
-                                tools_streamed[i] = True
+                                if delta_message and delta_message.tool_calls:
+                                    tools_streamed[i] = True
+                                # If tool_parser didn't produce tool
+                                # calls, also try the JSON-only parser
+                                # as fallback (MTP may produce JSON
+                                # instead of XML non-deterministically).
+                                if not tools_streamed[i]:
+                                    content = current_text
+                                    json_msg, function_name_returned[i] = (
+                                        self.extract_tool_call_required_streaming(
+                                            previous_text=previous_text,
+                                            current_text=content,
+                                            delta_text=delta_text,
+                                            function_name_returned=(fn_name_returned),
+                                            tool_call_idx=(history_tool_call_cnt),
+                                        )
+                                    )
+                                    if (
+                                        json_msg
+                                        and json_msg.tool_calls
+                                        and json_msg.tool_calls[0].id is not None
+                                    ):
+                                        delta_message = json_msg
+                                        history_tool_call_cnt += 1
+                                        tools_streamed[i] = True
+                            else:
+                                content = current_text
+                                delta_message, function_name_returned[i] = (
+                                    self.extract_tool_call_required_streaming(
+                                        previous_text=previous_text,
+                                        current_text=content,
+                                        delta_text=delta_text,
+                                        function_name_returned=(fn_name_returned),
+                                        tool_call_idx=(history_tool_call_cnt),
+                                    )
+                                )
+                                if (
+                                    delta_message
+                                    and delta_message.tool_calls
+                                    and delta_message.tool_calls[0].id is not None
+                                ):
+                                    history_tool_call_cnt += 1
+                                    tools_streamed[i] = True
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
