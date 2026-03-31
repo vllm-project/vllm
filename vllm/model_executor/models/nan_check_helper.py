@@ -83,8 +83,7 @@ def _is_fp8(dtype: torch.dtype) -> bool:
 
 def mark(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
     """Called per-layer inside compiled/cudagraph region.
-    Only checks token 0 — always the real token during decode.
-    Using [:1] avoids stale _last_num_actual_toks during CUDA graph replay.
+    Only counts NaN/Inf in real tokens ([:_last_num_actual_toks]).
     All ops stay on GPU — no .item(), no sync, no graph break.
     """
     global _nan_counts, _inf_counts
@@ -94,11 +93,13 @@ def mark(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
         return
     if _is_fp8(tensor.dtype):
         return
-    tok0 = tensor[0:1]
-    _nan_counts[layer_idx, stage_col] = tok0.isnan().sum()
-    _inf_counts[layer_idx, stage_col] = tok0.isinf().sum()
+    n = _last_num_actual_toks
+    if n > 0 and n < tensor.shape[0]:
+        tensor = tensor[:n]
+    _nan_counts[layer_idx, stage_col] = tensor.isnan().sum()
+    _inf_counts[layer_idx, stage_col] = tensor.isinf().sum()
     if stage_col == 0 and _hidden_maxabs is not None:
-        _hidden_maxabs[layer_idx] = tok0.abs().max()
+        _hidden_maxabs[layer_idx] = tensor.abs().max()
 
 
 def mark_attn(
@@ -131,9 +132,11 @@ def mark_attn(
         nan_count = (tensor.isnan() & real_mask).sum()
         inf_count = (tensor.isinf() & real_mask).sum()
     else:
-        tok0 = tensor[0:1]
-        nan_count = tok0.isnan().sum()
-        inf_count = tok0.isinf().sum()
+        n = _last_num_actual_toks
+        if n > 0 and n < tensor.shape[0]:
+            tensor = tensor[:n]
+        nan_count = tensor.isnan().sum()
+        inf_count = tensor.isinf().sum()
     _attn_detail[layer_idx, stage_col] = nan_count
     _inf_attn_detail[layer_idx, stage_col] = inf_count
 
