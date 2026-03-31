@@ -366,12 +366,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
-            # Padded CUDA graph requests have block_table entries of -1.
-            # Clamp to 0 to prevent OOB access in the DeepGEMM kernel.
-            # This is safe because padded requests have seq_lens=0, so the
-            # kernel produces no meaningful output for those rows.
-            block_table.clamp_(min=0)
-
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
             use_native = not self.use_flattening and max_decode_len == next_n
