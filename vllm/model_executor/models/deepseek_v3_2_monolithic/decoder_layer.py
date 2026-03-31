@@ -165,23 +165,33 @@ class MonolithicDecoderLayer(nn.Module):
         index_k, _ = self.attn.indexer_wk(hidden_states)
         index_weights, _ = self.attn.indexer_weights_proj(hidden_states)
 
-        # Step 2. Q RMS norm
-        #         + KV RMS norm + KV RoPE
-        #         + Index K layer norm + RoPE + FP8 quant + cache write
-        #         + Init topk indices
-        #
         # Fetch slot_mapping early so fused_norm_rope can write FP8 data
         # directly into the indexer KV cache (saves a separate kernel).
         from vllm.forward_context import get_forward_context
 
-        attn_metadata = get_forward_context().attn_metadata
+        fwd_ctx = get_forward_context()
+        attn_metadata = fwd_ctx.attn_metadata
         if isinstance(attn_metadata, dict):
             idx_meta = attn_metadata[self.attn.indexer_k_cache.prefix]
+            # Indexer and MLA caches share the same block_size and track
+            # the same requests, so their slot_mappings are identical.
             slot_mapping = idx_meta.slot_mapping
         else:
             slot_mapping = None
+        if slot_mapping is not None:
+            indexer_k_cache = self.attn.indexer_k_cache.kv_cache
+            mla_kv_cache = self.attn.mla_attn.kv_cache
+            mla_k_scale = self.attn.mla_attn._k_scale
+        else:
+            indexer_k_cache = None
+            mla_kv_cache = None
+            mla_k_scale = None
 
-        q_c, kv_c = fused_norm_rope(
+        # Step 2. Q RMS norm
+        #         + KV RMS norm + KV RoPE + MLA cache write
+        #         + Index K layer norm + RoPE + FP8 quant + cache write
+        #         + Init topk indices
+        q_c = fused_norm_rope(
             positions,
             # Q RMS norm
             q_c,
@@ -202,11 +212,12 @@ class MonolithicDecoderLayer(nn.Module):
             self.attn.indexer_rope_emb.cos_sin_cache,
             # Top k indices
             self.attn.topk_indices_buffer,
-            # Fused FP8 quant + cache write
+            # Fused cache writes (single slot_mapping for both caches)
             slot_mapping=slot_mapping,
-            indexer_k_cache=self.attn.indexer_k_cache.kv_cache
-            if slot_mapping is not None
-            else None,
+            indexer_k_cache=indexer_k_cache,
+            mla_kv_cache=mla_kv_cache,
+            mla_kv_cache_dtype=self.attn.mla_attn.kv_cache_dtype,
+            mla_k_scale=mla_k_scale,
         )
 
         # Step 3. q_c -> q
@@ -248,16 +259,9 @@ class MonolithicDecoderLayer(nn.Module):
             self.attn.topk_indices_buffer,
         )
 
-        # Step 6. MLA attention.
-        attn_out = self.attn.mla_attn(
-            q,
-            kv_c,
-            k_pe,
-            output_shape=(
-                hidden_states.shape[0],
-                self.attn.num_local_heads * self.attn.v_head_dim,
-            ),
-        )
+        # Step 6. MLA sparse decode attention (inlined).
+        # The KV cache update was already done in fused_norm_rope (step 2).
+        attn_out = self._mla_sparse_decode(q, slot_mapping, hidden_states.shape[0])
 
         # Step 7. Output projection (AllReduce disabled when fused).
         hidden_states, _ = self.attn.o_proj(attn_out)
@@ -278,3 +282,58 @@ class MonolithicDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
+
+    def _mla_sparse_decode(
+        self,
+        q: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        num_padded_tokens: int,
+    ) -> torch.Tensor:
+        mla = self.attn.mla_attn
+        output_shape = (num_padded_tokens, mla.num_heads * mla.v_head_dim)
+
+        from vllm.forward_context import get_forward_context
+
+        fwd_ctx = get_forward_context()
+        attn_metadata = fwd_ctx.attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[mla.layer_name]
+        if attn_metadata is None or slot_mapping is None:
+            return torch.zeros(output_shape, dtype=q.dtype, device=q.device)
+
+        num_actual_toks = attn_metadata.num_actual_tokens
+        q = q[:num_actual_toks]
+        kv_cache = mla.kv_cache
+
+        fp8_attention = mla.kv_cache_dtype.startswith("fp8")
+        if fp8_attention and mla.kv_cache_dtype != "fp8_ds_mla":
+            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+
+        impl = mla.impl
+
+        # 1. Q absorption: q_nope @ W_UK^T → ql_nope
+        q_nope, q_pe = q.split([mla.qk_nope_head_dim, mla.qk_rope_head_dim], dim=-1)
+        q_nope = q_nope.transpose(0, 1)  # (B, N, P) → (N, B, P)
+        ql_nope = q_nope.new_empty(
+            q_nope.shape[0], q_nope.shape[1], mla.W_UK_T.shape[2]
+        )
+        torch.bmm(q_nope, mla.W_UK_T, out=ql_nope)
+        ql_nope = ql_nope.transpose(0, 1)  # (N, B, L) → (B, N, L)
+
+        # 2. FP8 query quantization (if needed)
+        if fp8_attention and impl.supports_quant_query_input:
+            mqa_q = mla._decode_concat_quant_fp8_op(ql_nope, q_pe, mla._q_scale)
+        else:
+            mqa_q = (ql_nope, q_pe)
+
+        # 3. Forward MQA (topk conversion + FlashInfer kernel)
+        attn_out, _ = impl.forward_mqa(mqa_q, kv_cache, attn_metadata, mla)
+
+        # 4. V up-projection: attn_out @ W_UV → output
+        #    (N, B, L) x (N, L, V) → (N, B, V) → (B, N*V)
+        output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+        x = attn_out.view(-1, mla.num_heads, mla.kv_lora_rank).transpose(0, 1)
+        out = output[:num_actual_toks].view(-1, mla.num_heads, mla.v_head_dim)
+        out = out.transpose(0, 1)
+        torch.bmm(x, mla.W_UV, out=out)
+        return output
