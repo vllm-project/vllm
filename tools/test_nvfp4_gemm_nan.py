@@ -1,113 +1,194 @@
-"""Test whether the NVFP4 GEMM path contaminates clean tokens
+"""Test whether the fused_qkv_a_proj NVFP4 GEMM contaminates clean tokens
 when other tokens in the batch have NaN input.
 
-Replicates the actual inference path:
-  bf16 input -> scaled_fp4_quant -> flashinfer/cutlass FP4 GEMM -> bf16 output
+Targets the EXACT decode path for DeepSeek-R1-0528-NVFP4-v2:
+  DeepSeekV2FusedQkvAProjLinear.forward()
+    -> _use_min_latency_gemm = False (weights are uint8 FP4, not bf16)
+    -> MergedColumnParallelLinear.forward()
+      -> ModelOptNvFp4LinearMethod.apply()
+        -> apply_nvfp4_linear(flashinfer-cutlass on GB200)
+          -> scaled_fp4_quant(bf16 -> fp4)
+          -> flashinfer_scaled_fp4_mm(fp4 x fp4 -> bf16)
 
-Run on a GPU with SM >= 100 (Blackwell) for flashinfer-cutlass,
-or SM >= 90 (Hopper) for vllm-cutlass fallback:
+Loads real weights from the model checkpoint (layer 0).
+
+Run on GB200:
     python tools/test_nvfp4_gemm_nan.py
 """
-import torch
+import glob
+import os
 
-# Load vllm ops
+import torch
+from torch.nn import Parameter
+
+# vllm imports
 import vllm._C  # noqa: F401
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    pad_nvfp4_activation_for_cutlass,
-    prepare_weights_for_nvfp4_cutlass,
+    convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
-    slice_nvfp4_output,
-    swizzle_blockscale,
 )
 
-# Try to import flashinfer backend
 try:
-    from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
-    HAS_FLASHINFER = has_flashinfer()
+    from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
 except ImportError:
-    HAS_FLASHINFER = False
+    flashinfer_scaled_fp4_mm = None
+
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    apply_nvfp4_linear,
+    NvFp4LinearBackend,
+    pad_nvfp4_activation_for_cutlass,
+    slice_nvfp4_output,
+)
 
 
-def make_fake_fp4_weight(output_size, input_size, device):
-    """Create a fake NVFP4 weight with random data and valid scales."""
-    # FP4 weights: 2 values packed per uint8 byte, so shape is [N, K//2]
-    k_packed = input_size // 2
-    weight_fp4 = torch.randint(0, 256, (output_size, k_packed),
-                               dtype=torch.uint8, device=device)
+# DeepSeek V3/R1 MLA dimensions
+HIDDEN_SIZE = 7168
+Q_LORA_RANK = 1536
+KV_LORA_RANK = 512
+QK_ROPE_HEAD_DIM = 64
+OUTPUT_SIZE = Q_LORA_RANK + KV_LORA_RANK + QK_ROPE_HEAD_DIM  # 2112
+GROUP_SIZE = 16  # NVFP4 block size
 
-    # Block scales: one fp8 scale per 16 elements along K dim
-    # Shape: [N, K//16]
-    num_blocks_k = input_size // 16
-    weight_scale = torch.ones(output_size, num_blocks_k,
+
+def load_layer0_weights(device):
+    """Load fused_qkv_a_proj weights from the model checkpoint (layer 0)."""
+    # Find model path in common cache locations
+    model_name = "DeepSeek-R1-0528-NVFP4-v2"
+    search_paths = [
+        "/mnt/local/hf_cache",
+        os.path.expanduser("~/.cache/huggingface/hub"),
+        "/mnt/lustre",
+    ]
+
+    model_dir = None
+    for base in search_paths:
+        candidates = glob.glob(f"{base}/**/models--nvidia--{model_name}",
+                               recursive=True)
+        if candidates:
+            snapshots = glob.glob(f"{candidates[0]}/snapshots/*/")
+            if snapshots:
+                model_dir = snapshots[0]
+                break
+
+    if model_dir is None:
+        # Try direct path
+        for base in search_paths:
+            candidates = glob.glob(f"{base}/**/{model_name}", recursive=True)
+            if candidates:
+                model_dir = candidates[0]
+                break
+
+    if model_dir is None:
+        print("Model checkpoint not found, using synthetic weights")
+        return None
+
+    print(f"Loading weights from: {model_dir}")
+
+    # Find safetensors files and load layer 0 fused_qkv_a_proj weights
+    from safetensors import safe_open
+
+    # Weight keys for layer 0 fused_qkv_a_proj:
+    # model.layers.0.self_attn.fused_qkv_a_proj.weight
+    # model.layers.0.self_attn.fused_qkv_a_proj.input_scale
+    # model.layers.0.self_attn.fused_qkv_a_proj.weight_scale
+    # model.layers.0.self_attn.fused_qkv_a_proj.weight_scale_2
+    prefix = "model.layers.0.self_attn.fused_qkv_a_proj"
+    needed = {
+        f"{prefix}.weight": "weight",
+        f"{prefix}.input_scale": "input_scale",
+        f"{prefix}.weight_scale": "weight_scale",
+        f"{prefix}.weight_scale_2": "weight_scale_2",
+    }
+    found = {}
+
+    st_files = sorted(glob.glob(f"{model_dir}/*.safetensors"))
+    for sf_path in st_files:
+        with safe_open(sf_path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if key in needed:
+                    found[needed[key]] = f.get_tensor(key)
+        if len(found) == len(needed):
+            break
+
+    if len(found) != len(needed):
+        missing = set(needed.values()) - set(found.keys())
+        print(f"Missing weights: {missing}, using synthetic weights")
+        return None
+
+    return {k: v.to(device) for k, v in found.items()}
+
+
+def make_synthetic_weights(device):
+    """Create synthetic NVFP4 weights matching fused_qkv_a_proj dimensions."""
+    k_packed = HIDDEN_SIZE // 2
+    num_blocks_k = HIDDEN_SIZE // GROUP_SIZE
+
+    weight = torch.randint(0, 256, (OUTPUT_SIZE, k_packed),
+                           dtype=torch.uint8, device=device)
+    weight_scale = torch.ones(OUTPUT_SIZE, num_blocks_k,
                               dtype=torch.float8_e4m3fn, device=device)
+    input_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+    weight_scale_2 = torch.tensor([1.0], dtype=torch.float32, device=device)
 
-    # Global scale (scalar)
-    weight_global_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-
-    # Alpha = weight_global_scale (used as scaling in the GEMM)
-    alpha = weight_global_scale.clone()
-
-    # Input global scale inverse
-    input_global_scale_inv = torch.tensor(1.0, dtype=torch.float32,
-                                          device=device)
-
-    return weight_fp4, weight_scale, weight_global_scale, alpha, input_global_scale_inv
+    return {
+        "weight": weight,
+        "input_scale": input_scale,
+        "weight_scale": weight_scale,
+        "weight_scale_2": weight_scale_2,
+    }
 
 
-def run_nvfp4_gemm(x_bf16, weight_fp4, weight_scale_swizzled, alpha,
-                   input_global_scale_inv, output_size, backend_name,
-                   weights_padding_cols=0):
-    """Run the full NVFP4 GEMM path: quantize input + matmul."""
-    # Step 1: Quantize bf16 input to FP4
-    x_fp4, x_blockscale = scaled_fp4_quant(
-        x_bf16, input_global_scale_inv,
-        is_sf_swizzled_layout=True,
-        backend=backend_name,
-    )
+def build_layer(weights, backend):
+    """Build a fake layer module with the right attributes for apply_nvfp4_linear."""
 
-    # Step 2: Pad activations if needed
-    x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
+    class FakeLayer(torch.nn.Module):
+        pass
 
-    # Step 3: Run the GEMM
-    mm_args = (x_fp4, weight_fp4, x_blockscale, weight_scale_swizzled,
-               alpha, torch.bfloat16)
+    layer = FakeLayer()
 
-    if backend_name.startswith("flashinfer-"):
-        backend_short = backend_name[len("flashinfer-"):]
-        out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_short)
-    else:
-        from vllm._custom_ops import cutlass_scaled_fp4_mm
-        out = cutlass_scaled_fp4_mm(*mm_args)
+    # Set weight and scales as parameters (mimics ModelOptNvFp4LinearMethod)
+    layer.weight = Parameter(weights["weight"], requires_grad=False)
+    layer.weight_scale = Parameter(weights["weight_scale"], requires_grad=False)
 
-    # Step 4: Slice output
-    out = slice_nvfp4_output(out, output_size)
-    return out
+    # process_weights_after_loading logic
+    input_global_scale = weights["input_scale"].max().to(torch.float32)
+    layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
+    weight_global_scale = weights["weight_scale_2"].max().to(torch.float32)
+    layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+    layer.alpha = Parameter(
+        input_global_scale * weight_global_scale, requires_grad=False)
+    layer.input_global_scale_inv = Parameter(
+        (1.0 / input_global_scale).to(torch.float32), requires_grad=False)
+    layer.output_size_per_partition = OUTPUT_SIZE
+    layer.input_size_per_partition = HIDDEN_SIZE
+
+    # Convert to kernel format (swizzle scales, pad weights)
+    convert_to_nvfp4_linear_kernel_format(backend, layer)
+
+    return layer
 
 
 def test_nan_contamination():
     torch.manual_seed(42)
     device = "cuda"
 
-    # DeepSeek V3 fused A projection dimensions
-    hidden_size = 7168
-    output_size = 2112  # q_lora_rank(1536) + kv_lora_rank(512) + rope(64)
-
-    # Select backend (same logic as production)
     backend = select_nvfp4_linear_backend()
-    backend_name = backend.value
-    print(f"Using NVFP4 backend: {backend_name}")
+    print(f"NVFP4 backend: {backend.value}")
 
-    # Create fake FP4 weights
-    (weight_fp4, weight_scale, weight_global_scale,
-     alpha, input_global_scale_inv) = make_fake_fp4_weight(
-        output_size, hidden_size, device)
+    # Try loading real weights, fall back to synthetic
+    weights = load_layer0_weights(device)
+    if weights is None:
+        weights = make_synthetic_weights(device)
+        print("Using synthetic NVFP4 weights")
+    else:
+        print(f"Using real model weights — "
+              f"weight={list(weights['weight'].shape)} "
+              f"weight_scale={list(weights['weight_scale'].shape)}")
 
-    # Prepare weights for the backend
-    weight_prepared, weight_scale_swizzled, weights_padding_cols = \
-        prepare_weights_for_nvfp4_cutlass(weight_fp4, weight_scale)
+    layer = build_layer(weights, backend)
 
-    # Build test patterns: CUDA graph scenario
+    # CUDA graph decode patterns: first N tokens real, rest NaN padding
     patterns = []
     for batch_size in [8, 16]:
         for num_real in [1, 2, 3]:
@@ -119,17 +200,13 @@ def test_nan_contamination():
             patterns.append((batch_size, p))
 
     for batch_size, nan_pattern in patterns:
-        # Clean bf16 input
-        hidden = torch.randn(batch_size, hidden_size, dtype=torch.bfloat16,
+        hidden = torch.randn(batch_size, HIDDEN_SIZE, dtype=torch.bfloat16,
                              device=device)
 
-        # Reference output from clean input
-        ref_output = run_nvfp4_gemm(
-            hidden, weight_prepared, weight_scale_swizzled, alpha,
-            input_global_scale_inv, output_size, backend_name,
-            weights_padding_cols)
+        # Reference: clean input through the real NVFP4 path
+        ref_output = apply_nvfp4_linear(backend, layer, hidden)
 
-        # Now poison some tokens with NaN
+        # Poison some tokens
         poisoned = hidden.clone()
         if nan_pattern == "none":
             pass
@@ -145,13 +222,10 @@ def test_nan_contamination():
         elif nan_pattern == "even":
             poisoned[::2] = float("nan")
 
-        # Run GEMM with poisoned input
-        test_output = run_nvfp4_gemm(
-            poisoned, weight_prepared, weight_scale_swizzled, alpha,
-            input_global_scale_inv, output_size, backend_name,
-            weights_padding_cols)
+        # Run with poisoned input
+        test_output = apply_nvfp4_linear(backend, layer, poisoned)
 
-        # Check: clean tokens should produce the same output
+        # Check clean tokens
         for tok in range(batch_size):
             is_poisoned = poisoned[tok].isnan().any().item()
             out_has_nan = test_output[tok].isnan().any().item()
@@ -159,8 +233,7 @@ def test_nan_contamination():
             if is_poisoned:
                 assert out_has_nan, (
                     f"batch={batch_size} pattern={nan_pattern} tok={tok}: "
-                    f"NaN input but clean output!"
-                )
+                    f"NaN input but clean output!")
             else:
                 if out_has_nan:
                     print(f"FAIL batch={batch_size} pattern={nan_pattern} "
@@ -182,7 +255,8 @@ def test_nan_contamination():
 
         print(f"OK batch={batch_size} pattern={nan_pattern}")
 
-    print("\nAll tests passed — no cross-token NaN contamination")
+    print("\nAll tests passed — no cross-token NaN contamination "
+          "in fused_qkv_a_proj NVFP4 path")
     return True
 
 
