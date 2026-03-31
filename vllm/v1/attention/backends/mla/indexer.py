@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
-    is_deep_gemm_supported,
+    has_deep_gemm,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
@@ -214,12 +214,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        if not is_deep_gemm_supported():
-            logger.warning_once(
-                "DeepGEMM is not available. Disabling CUDA graph support "
-                "for sparse attention indexer. This may reduce performance.",
-            )
-            return AttentionCGSupport.NEVER
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
@@ -371,12 +365,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
-            # Padded CUDA graph requests have block_table entries of -1.
-            # Clamp to 0 to prevent OOB access in the DeepGEMM kernel.
-            # This is safe because padded requests have seq_lens=0, so the
-            # kernel produces no meaningful output for those rows.
-            block_table.clamp_(min=0)
-
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
             use_native = not self.use_flattening and max_decode_len == next_n
@@ -445,7 +433,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 offsets = None
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
-            if current_platform.is_cuda() and is_deep_gemm_supported():
+            if current_platform.is_cuda() and has_deep_gemm():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.block_size,

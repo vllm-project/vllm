@@ -28,9 +28,6 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -544,7 +541,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
             self.prefill_fixed_split_size = 4096
             self.disable_split_kv = True
@@ -719,7 +716,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if vllm_is_batch_invariant():
+            if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
@@ -1319,10 +1316,14 @@ class FlashInferImpl(AttentionImpl):
         )
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+            self.bmm1_scale = self.scale
+            if self.kv_cache_dtype.startswith("fp8"):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         if self.bmm2_scale is None:
-            self.bmm2_scale = layer._v_scale_float
+            self.bmm2_scale = 1.0
+            if self.kv_cache_dtype.startswith("fp8"):
+                self.bmm2_scale *= layer._v_scale_float
 
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
         decode_use_trtllm = isinstance(attn_metadata.decode, TRTLLMDecode)
