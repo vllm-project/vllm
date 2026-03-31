@@ -1175,9 +1175,14 @@ def gptq_marlin_repack(
     num_bits: int,
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_repack(
-        b_q_weight, perm, size_k, size_n, num_bits, is_a_8bit
-    )
+    try:
+        return torch.ops._C.gptq_marlin_repack(
+            b_q_weight, perm, size_k, size_n, num_bits, is_a_8bit
+        )
+    except RuntimeError as err:
+        if "unsupported toolchain" in str(err):
+            _raise_ptx_error(err)
+        raise
 
 
 if hasattr(torch.ops._C, "gptq_marlin_repack"):
@@ -1208,9 +1213,14 @@ def awq_marlin_repack(
     num_bits: int,
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
-    return torch.ops._C.awq_marlin_repack(
-        b_q_weight, size_k, size_n, num_bits, is_a_8bit
-    )
+    try:
+        return torch.ops._C.awq_marlin_repack(
+            b_q_weight, size_k, size_n, num_bits, is_a_8bit
+        )
+    except RuntimeError as err:
+        if "unsupported toolchain" in str(err):
+            _raise_ptx_error(err)
+        raise
 
 
 if hasattr(torch.ops._C, "awq_marlin_repack"):
@@ -1232,6 +1242,34 @@ if hasattr(torch.ops._C, "awq_marlin_repack"):
         )
 
 
+def _raise_ptx_error(original_error: Exception) -> None:
+    """Raise an informative error when a Marlin kernel fails due to PTX
+    incompatibility (e.g. pre-built wheel compiled with CUDA 12.9+ running
+    on a system with a CUDA 12.8 driver)."""
+    import subprocess
+    cuda_ver = "unknown"
+    try:
+        result = subprocess.run(["nvidia-smi",
+                                 "--query-gpu=driver_version",
+                                 "--format=csv,noheader"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            cuda_ver = result.stdout.strip().split("\n")[0]
+    except Exception:
+        pass
+    raise RuntimeError(
+        "Marlin MoE repack kernel failed with a CUDA error that usually "
+        "indicates a PTX version mismatch: the pre-built vLLM wheel was "
+        "compiled with a CUDA toolkit newer than what your GPU driver "
+        f"supports (driver version: {cuda_ver}).\n\n"
+        "To fix this, build vLLM from source with your system's CUDA "
+        "toolkit:\n"
+        "  pip install vllm --no-binary vllm\n\n"
+        "Or install a matching CUDA toolkit / update your GPU driver.\n"
+        "See https://github.com/vllm-project/vllm/issues/38619"
+    ) from original_error
+
+
 def gptq_marlin_moe_repack(
     b_q_weight: torch.Tensor,
     perm: torch.Tensor,
@@ -1248,9 +1286,14 @@ def gptq_marlin_moe_repack(
         dtype=b_q_weight.dtype,
     )
     for e in range(num_experts):
-        output[e] = torch.ops._C.gptq_marlin_repack(
-            b_q_weight[e], perm[e], size_k, size_n, num_bits, is_a_8bit
-        )
+        try:
+            output[e] = torch.ops._C.gptq_marlin_repack(
+                b_q_weight[e], perm[e], size_k, size_n, num_bits, is_a_8bit
+            )
+        except RuntimeError as err:
+            if "unsupported toolchain" in str(err):
+                _raise_ptx_error(err)
+            raise
     return output
 
 
@@ -1270,9 +1313,14 @@ def awq_marlin_moe_repack(
         dtype=b_q_weight.dtype,
     )
     for e in range(num_experts):
-        output[e] = torch.ops._C.awq_marlin_repack(
-            b_q_weight[e], size_k, size_n, num_bits, is_a_8bit
-        )
+        try:
+            output[e] = torch.ops._C.awq_marlin_repack(
+                b_q_weight[e], size_k, size_n, num_bits, is_a_8bit
+            )
+        except RuntimeError as err:
+            if "unsupported toolchain" in str(err):
+                _raise_ptx_error(err)
+            raise
     return output
 
 
