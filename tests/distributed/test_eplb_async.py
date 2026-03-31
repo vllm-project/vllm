@@ -10,7 +10,11 @@ from unittest import mock
 import torch
 
 from vllm.distributed.eplb.async_worker import transfer_run_periodically
-from vllm.distributed.eplb.eplb_state import EplbModelState, EplbStats
+from vllm.distributed.eplb.eplb_state import (
+    EplbModelState,
+    EplbStats,
+    _move_to_workspace,
+)
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 
 
@@ -129,3 +133,44 @@ def test_worker_snapshots_map_and_load_window_at_wake_time():
 
     assert torch.equal(captured_old_indices[0], p2l_v2[0].cpu())
     assert torch.equal(captured_load_windows[0], load_window.cpu())
+
+
+def test_consumed_event_handshake():
+    """
+    The worker blocks on consumed_event.wait() after publishing pending_result.
+    _move_to_workspace must record consumed_event to unblock it.
+    """
+    NUM_LAYERS = 1
+    NUM_PHYSICAL_EXPERTS = 4
+
+    p2l = torch.arange(NUM_PHYSICAL_EXPERTS, device="cuda").unsqueeze(0)
+    model_state = make_model_state(p2l)
+    eplb_state = make_eplb_state(model_state)
+    ep_group = SimpleNamespace(rank=lambda: 0)
+
+    async def mock_transfer(**kwargs):
+        return mock.MagicMock(), mock.MagicMock(), mock.MagicMock()
+
+    with (
+        mock.patch("vllm.distributed.eplb.async_worker.transfer_layer", mock_transfer),
+        mock.patch("vllm.distributed.eplb.eplb_state.move_from_buffer"),
+    ):
+        start_worker_thread(eplb_state)
+        time.sleep(5)
+
+        model_state.eplb_stats = make_eplb_stats(NUM_LAYERS, NUM_PHYSICAL_EXPERTS)
+        model_state.rebalanced = True
+        eplb_state.rearrange_event.record()
+
+        # Poll until the worker publishes pending_result.
+        deadline = time.monotonic() + 5.0
+        while model_state.pending_result is None:
+            assert time.monotonic() < deadline, "worker never published pending_result"
+            time.sleep(0.001)
+
+        # Worker is now blocked on consumed_event.wait() — event not yet recorded.
+        assert not model_state.pending_result.consumed_event._recorded.is_set()
+
+        _move_to_workspace(model_state, ep_group)
+
+    assert model_state.pending_result is None
