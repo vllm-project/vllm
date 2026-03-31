@@ -241,11 +241,35 @@ cleanup_docker
 
 # --- Build or pull test image ---
 if [[ -n "${IMAGE_TAG_XPU:-}" ]]; then
-  echo "Using prebuilt XPU image: ${IMAGE_TAG_XPU}"
-  docker pull "${IMAGE_TAG_XPU}"
+  IMAGE="${IMAGE_TAG_XPU}"
 else
-  echo "Using prebuilt XPU image: ${image_name}"
-  docker pull "${image_name}"
+  IMAGE="${image_name}"
+fi
+
+echo "Using image: ${IMAGE}"
+
+if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+  echo "Image already exists locally, skip pull"
+else
+  echo "Image not found locally"
+
+  if flock -w 300 /tmp/docker-pull.lock bash -c "
+    if ! docker image inspect '${IMAGE}' >/dev/null 2>&1; then
+      echo 'Pulling image...'
+      timeout 600 docker pull '${IMAGE}'
+    else
+      echo 'Image pulled by another runner'
+    fi
+  "; then
+    echo "Pull step finished"
+  else
+    echo "Timeout waiting for lock, fallback check..."
+
+    if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+      echo "Fallback pulling..."
+      timeout 600 docker pull "${IMAGE}"
+    fi
+  fi
 fi
 
 remove_docker_container() {
