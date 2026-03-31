@@ -21,6 +21,9 @@ from vllm.utils.torch_utils import (
     aux_stream,
     current_stream,
 )
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id,
+)
 
 logger = init_logger(__name__)
 
@@ -51,6 +54,7 @@ class SharedExperts:
         moe_config: FusedMoEConfig,
         quant_method: QuantizeMethodBase,
         reduce_results: bool,
+        enable_dbo: bool,
     ):
         from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
             FusedMoEMethodBase,
@@ -60,7 +64,12 @@ class SharedExperts:
         # due to circular imports.
         assert isinstance(quant_method, FusedMoEMethodBase)
 
-        self._output: torch.Tensor | None = None
+        # The SharedExperts need to handle DBO since they can be called from
+        # an MK's finalize method.  We keep a list of outputs indexed by current
+        # DBO ubatch id to handle this case.  If DBO is not enabled, the
+        # index is always 0 and the second output list element is ignored.
+        self.enable_dbo = enable_dbo
+        self._output: list[torch.Tensor | None] = [None, None]
         self._layer = layer
         self._moe_config = moe_config
         self._quant_method = quant_method
@@ -167,10 +176,14 @@ class SharedExperts:
         return shared_out
 
     @property
+    def _output_idx(self) -> int:
+        return dbo_current_ubatch_id() if self.enable_dbo else 0
+
+    @property
     def output(self) -> torch.Tensor:
-        assert self._output is not None
-        output = self._output
-        self._output = None
+        assert self._output[self._output_idx] is not None
+        output = self._output[self._output_idx]
+        self._output[self._output_idx] = None
         return output
 
     def apply(
@@ -183,17 +196,21 @@ class SharedExperts:
         if order != experts_order:
             return None
 
-        assert self._output is None
+        assert self._output[self._output_idx] is None
 
         if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
-            self._output = self._run_in_aux_stream(shared_experts_input)
+            self._output[self._output_idx] = self._run_in_aux_stream(
+                shared_experts_input
+            )
         else:
-            self._output = self._layer(shared_experts_input)
+            self._output[self._output_idx] = self._layer(shared_experts_input)
 
         if order == SharedExpertsOrder.EXTERNAL:
             # TODO: figure out how to combine this with maybe_reduce_output?
             # or get rid of it completely.
-            assert self._output is not None
-            self._output = self._maybe_reduce_shared_out(self._output)
+            assert self._output[self._output_idx] is not None
+            self._output[self._output_idx] = self._maybe_reduce_shared_out(
+                self._output[self._output_idx]
+            )
 
-        assert self._output is not None
+        assert self._output[self._output_idx] is not None
