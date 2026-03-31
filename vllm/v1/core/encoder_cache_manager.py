@@ -4,9 +4,10 @@
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from vllm.config import VllmConfig
 from typing import TYPE_CHECKING, Dict
 
+from vllm.config import VllmConfig
+from vllm.config.score_encoder_cache import get_score_encoder_cache_config
 from vllm.logger import init_logger
 from vllm.v1.request import Request
 
@@ -396,24 +397,28 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
     Score-based encoder cache manager.
 
     The overall structure is a two-level cache:
-        NPU cache (fast / small capacity)
+        GPU cache (fast / small capacity)
         CPU cache (slower / large capacity)
 
     Core strategy:
     1. Newly generated encoder embeddings are first placed into the CPU cache
     2. If an entry is accessed frequently enough and has a sufficiently high score,
-       it can be promoted to the NPU cache
-    3. When the NPU cache runs out of space, entries with the lowest scores are evicted
+       it can be promoted to the GPU cache
+    3. When the GPU cache runs out of space, entries with the lowest scores are evicted
     4. A clock-based aging mechanism is used to prevent stale hot entries
        from occupying the cache for too long
     """
     def __init__(self, cache_size: int, vllm_config: VllmConfig):
-        # ---------------- NPU cache ----------------
-        self.npu_num_free_slots = cache_size    # Empty slots
-        self.npu_num_freeable_slots = cache_size    # Reclaimable capacity: reclaimable slots + empty slots
+        super().__init__(cache_size)
+
+        score_encoder_cache_config = get_score_encoder_cache_config(vllm_config) 
+        # ---------------- GPU cache ----------------
+        self.cache_size = cache_size
+        self.gpu_num_free_slots = cache_size    # Empty slots
+        self.gpu_num_freeable_slots = cache_size    # Reclaimable capacity: reclaimable slots + empty slots
 
         # ---------------- CPU cache ----------------
-        self.cpu_cache_size = vllm_config.score_encoder_cache_config.cpu_cache_slots
+        self.cpu_cache_size = score_encoder_cache_config.cpu_cache_slots
         self.cpu_num_free_slots = self.cpu_cache_size
         self.cpu_num_freeable_slots = self.cpu_cache_size
 
@@ -421,26 +426,26 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.cached: dict[str, set[str]] = {}
 
         # Actual cache contents
-        self.npu_cache: Dict[str, CacheEntry] = {}
+        self.gpu_cache: Dict[str, CacheEntry] = {}
         self.cpu_cache: Dict[str, CacheEntry] = {}
 
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         # Evictable cache entries (entries not referenced by any request)
-        self.npu_freeable: Dict[str, CacheEntry] = {}
+        self.gpu_freeable: Dict[str, CacheEntry] = {}
         self.cpu_freeable: OrderedDict[str, CacheEntry] = OrderedDict()
 
-        # mm_hashes evicted in the previous round; after NPU eviction they may be placed into CPU,
+        # mm_hashes evicted in the previous round; after GPU eviction they may be placed into CPU,
         # and after CPU eviction they may also be recorded here
 
         self.req_cnt = 0
 
-        self.watermark = vllm_config.score_encoder_cache_config.watermark
-        self.promote_percentile = vllm_config.score_encoder_cache_config.promote_percentile
-        self.max_clock = vllm_config.score_encoder_cache_config.max_clock
-        self.clock_decay_every = vllm_config.score_encoder_cache_config.clock_decay_every
+        self.watermark = score_encoder_cache_config.watermark
+        self.promote_percentile = score_encoder_cache_config.promote_percentile
+        self.max_clock = score_encoder_cache_config.max_clock
+        self.clock_decay_every = score_encoder_cache_config.clock_decay_every
 
         # Actions to execute in the current round
-        self.promoting: list[str] = []             # mm_hashes to be promoted from CPU -> NPU
+        self.promoting: list[str] = []             # mm_hashes to be promoted from CPU -> GPU
         self.cpu_get_encoder_mm_hashes: list[str] = []  # mm_hashes whose embeddings need to be prefetched from CPU
 
         # ---------------- Load model config (used to estimate theoretical compute cost) ----------------
@@ -456,45 +461,41 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.alpha = 4 * self.hidden_size + 5 * self.attn_heads
         self.beta = self.hidden_size * (8 * self.hidden_size + 6 * self.feedforward + 14)
 
-        self.stats = EmbCacheStats()
 
     def score(self, ent: CacheEntry) -> float:
         return (ent.freq + ent.clock) * ent.cal_cost
 
-    def evict_from_npu(self, ent: CacheEntry):
+    def evict_from_gpu(self, ent: CacheEntry):
         """
-        Evict an entry from the NPU cache.
+        Evict an entry from the GPU cache.
         """
-        del self.npu_cache[ent.mm_hash]
+        del self.gpu_cache[ent.mm_hash]
         self.freed.append(ent.mm_hash)
-        self.npu_num_free_slots += ent.num_embeds
+        self.gpu_num_free_slots += ent.num_embeds
 
-        self.stats.evict_npu += 1
-        self.stats.npu_freed_entries += 1
 
     def should_promote(self, mm_hash: str) -> bool:
         """
-        Determine whether an entry in the CPU cache should be promoted to the NPU cache.
+        Determine whether an entry in the CPU cache should be promoted to the GPU cache.
 
         Logic:
-        1. If the NPU has enough free space, promote directly
+        1. If the GPU has enough free space, promote directly
         2. If space is insufficient, decide based on the score percentile
-        3. If needed, evict lower-score entries from the NPU cache
+        3. If needed, evict lower-score entries from the GPU cache
         """
         ent = self.cpu_cache[mm_hash]
 
-        # No reclaimable space on the NPU, promotion is impossible
-        if ent.num_embeds > self.npu_num_freeable_slots:
-            self.stats.promote_fail_no_space += 1
+        # No reclaimable space on the GPU, promotion is impossible
+        if ent.num_embeds > self.gpu_num_freeable_slots:
             return False
 
-        if ent.num_embeds <= self.npu_num_free_slots:
-            # The NPU has free space, place it directly
+        if ent.num_embeds <= self.gpu_num_free_slots:
+            # The GPU has free space, place it directly
             return True
 
         ent_value = self.score(ent)
         scored = []
-        for cur_hash, cur_ent in self.npu_freeable.items():
+        for cur_hash, cur_ent in self.gpu_freeable.items():
             value = self.score(cur_ent)
             scored.append((value, cur_hash, cur_ent))
 
@@ -503,19 +504,18 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         threshold = scored[idx][0]
         if ent_value < threshold:
-            self.stats.promote_fail_low_score += 1
             return False
 
-        free_slots = max(self.cache_size * self.watermark - self.npu_num_free_slots,
-                         ent.num_embeds - self.npu_num_free_slots)
+        free_slots = max(self.cache_size * self.watermark - self.gpu_num_free_slots,
+                         ent.num_embeds - self.gpu_num_free_slots)
 
         i = 0
         while free_slots > 0:
             min_hash = scored[i][1]
-            ent = self.npu_freeable.pop(min_hash)
-            self.evict_from_npu(ent)
+            evict_ent = self.gpu_freeable.pop(min_hash)
+            self.evict_from_gpu(evict_ent)
             i += 1
-            free_slots -= ent.num_embeds
+            free_slots -= evict_ent.num_embeds
 
         return True
 
@@ -534,9 +534,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         # Not cached at all
         if mm_hash not in self.cached:
-            self.stats.total_requests += 1
             self.on_request()
-            self.stats.cache_misses += 1
             return False
 
 
@@ -544,30 +542,24 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             if mm_hash in self.cpu_freeable:
                 ent = self.cpu_freeable.pop(mm_hash)
                 self.cpu_num_freeable_slots -= ent.num_embeds
-            if mm_hash in self.npu_freeable:
-                ent = self.npu_freeable.pop(mm_hash)
-                self.npu_num_freeable_slots -= ent.num_embeds
+            if mm_hash in self.gpu_freeable:
+                ent = self.gpu_freeable.pop(mm_hash)
+                self.gpu_num_freeable_slots -= ent.num_embeds
 
         if request.request_id not in self.cached[mm_hash]:
             self.cached[mm_hash].add(request.request_id)
-            self.stats.total_requests += 1
-            self.stats.cache_hits += 1
             ent = None
-            if mm_hash in self.npu_cache:
-                ent = self.npu_cache[mm_hash]
-                self.stats.npu_hits += 1
+            if mm_hash in self.gpu_cache:
+                ent = self.gpu_cache[mm_hash]
             else:
-                self.stats.cpu_hits += 1
-
                 if self.should_promote(mm_hash):
                     # Promote
                     ent = self.cpu_cache[mm_hash]
-                    self.npu_cache[mm_hash] = ent
-                    self.npu_num_free_slots -= ent.num_embeds
-                    self.npu_num_freeable_slots -= ent.num_embeds
+                    self.gpu_cache[mm_hash] = ent
+                    self.gpu_num_free_slots -= ent.num_embeds
+                    self.gpu_num_freeable_slots -= ent.num_embeds
                     self.promoting.append(mm_hash)
 
-                    self.stats.promote_success += 1
                 else:
                     self.cpu_get_encoder_mm_hashes.append(mm_hash)
                     ent = self.cpu_cache[mm_hash]
@@ -581,12 +573,10 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
     def on_request(self):
         self.req_cnt += 1
         if self.req_cnt % self.clock_decay_every == 0:
-            for ent in self.npu_cache.values():
+            for ent in self.gpu_cache.values():
                 ent.clock = max(0, ent.clock - 1)
 
-        if self.req_cnt % 1 == 0:
-            self.emb_log_stats()
-
+        # TODO(zkx): Enabled only in debug mode.
         if self.req_cnt % 1000 == 0:
             self._check_invariant()
 
@@ -626,7 +616,6 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             del self.cpu_cache[mm_hash]
             self.freed.append(mm_hash)
             self.cpu_num_free_slots += ent.num_embeds
-            self.stats.cpu_evict_due_to_alloc += 1
 
         return True
 
@@ -694,9 +683,9 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         if mm_hash in self.cpu_cache:
             self.cpu_freeable[mm_hash] = self.cpu_cache[mm_hash]
             self.cpu_num_freeable_slots += num_encoder_embeds
-        if mm_hash in self.npu_cache:
-            self.npu_freeable[mm_hash] = self.npu_cache[mm_hash]
-            self.npu_num_freeable_slots += num_encoder_embeds
+        if mm_hash in self.gpu_cache:
+            self.gpu_freeable[mm_hash] = self.gpu_cache[mm_hash]
+            self.gpu_num_freeable_slots += num_encoder_embeds
 
     def get_promoting_mm_hashes(self) -> list[str]:
         promoting = self.promoting
@@ -744,95 +733,53 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
                 f"{self.cached.get(mm_hash)}"
             )
 
-        # ---------- NPU ----------
-        npu_sum = sum(ent.num_embeds for ent in self.npu_cache.values())
-        assert (npu_sum + self.npu_num_free_slots == self.cache_size), (
-            f"npu_sum + npu_num_free_slots != cache_size, "
-            f"npu_sum={npu_sum}, "
-            f"npu_num_free_slots={self.npu_num_free_slots}, "
+        # ---------- GPU ----------
+        gpu_sum = sum(ent.num_embeds for ent in self.gpu_cache.values())
+        assert (gpu_sum + self.gpu_num_free_slots == self.cache_size), (
+            f"gpu_sum + gpu_num_free_slots != cache_size, "
+            f"gpu_sum={gpu_sum}, "
+            f"gpu_num_free_slots={self.gpu_num_free_slots}, "
             f"cache_size={self.cache_size}"
         )
-        npu_freeable_sum = sum(ent.num_embeds for ent in self.npu_freeable.values())
+        gpu_freeable_sum = sum(ent.num_embeds for ent in self.gpu_freeable.values())
         assert (
-            self.npu_num_freeable_slots
-            == self.npu_num_free_slots + npu_freeable_sum
+            self.gpu_num_freeable_slots
+            == self.gpu_num_free_slots + gpu_freeable_sum
         ), (
-            f"NPU invariant broken: "
-            f"freeable={self.npu_num_freeable_slots}, "
-            f"free={self.npu_num_free_slots}, "
-            f"freeable_sum={npu_freeable_sum}"
+            f"GPU invariant broken: "
+            f"freeable={self.gpu_num_freeable_slots}, "
+            f"free={self.gpu_num_free_slots}, "
+            f"freeable_sum={gpu_freeable_sum}"
         )
 
-        for mm_hash in self.npu_freeable:
+        for mm_hash in self.gpu_freeable:
             assert not self.cached.get(mm_hash), (
-                f"NPU freeable entry {mm_hash} still referenced: "
+                f"GPU freeable entry {mm_hash} still referenced: "
                 f"{self.cached.get(mm_hash)}"
             )
 
-    def emb_log_stats(self):
-        s = self.stats
-        assert s.total_requests == self.req_cnt, f"total_requests={s.total_requests}, req_cnt={self.req_cnt}"
+    def reset(self) -> None:
+        """Reset the encoder cache to its initial state.
 
-        hit_rate = s.cache_hits * 100 / max(1, s.total_requests)
-        npu_hit_rate = s.npu_hits * 100 / max(1, s.total_requests)
-        cpu_hit_rate = s.cpu_hits * 100 / max(1, s.total_requests)
+        This clears all cached encoder outputs and resets capacity tracking.
+        Called when model weights are updated to invalidate stale embeddings.
+        """
+        self.cached.clear()
+        self.freeable.clear()
+        self.freed.clear()
+        self.promoting.clear()
+        self.cpu_get_encoder_mm_hashes.clear()
 
-        cpu_entries = len(self.cpu_cache)
-        npu_entries = len(self.npu_cache)
-        cpu_freeable_entries = len(self.cpu_freeable)
-        npu_freeable_entries = len(self.npu_freeable)
+        self.gpu_num_free_slots = self.cache_size
+        self.gpu_num_freeable_slots = self.cache_size
 
-        logger.info(
-            "[EmbCacheStats] "
-            "req=%d | hit=%d npu_hit=%d cpu_hit=%d | "
-            "hit_rate=%.3f%% npu_hit_rate=%.3f%% cpu_hit_rate=%.3f%% | "
-            "promote=%d/%d | "
-            "evict(cpu=%d npu2cpu=%d due2alloc=%d freed=%d) | "
-            "entries(cpu=%d freeable=%d | npu=%d freeable=%d) | "
-            "slots(cpu=%d/%d npu=%d/%d)",
-            s.total_requests,
-            s.cache_hits,
-            s.npu_hits,
-            s.cpu_hits,
-            hit_rate,
-            npu_hit_rate,
-            cpu_hit_rate,
-            s.promote_success,
-            s.promote_attempts,
-            s.evict_cpu,
-            s.evict_npu_to_cpu,
-            s.cpu_evict_due_to_alloc,
-            s.freed_entries,
-            cpu_entries,
-            cpu_freeable_entries,
-            npu_entries,
-            npu_freeable_entries,
-            self.cpu_num_free_slots,
-            self.cpu_num_freeable_slots,
-            self.npu_num_free_slots,
-            self.npu_num_freeable_slots,
-        )
+        self.cpu_num_free_slots = self.cpu_cache_size
+        self.cpu_num_freeable_slots = self.cpu_cache_size
+        
+        self.gpu_cache.clear()
+        self.cpu_cache.clear()
 
+        self.cpu_freeable.clear()
+        self.gpu_freeable.clear()
 
-@dataclass
-class EmbCacheStats:
-    # ---- access ----
-    total_requests: int = 0
-    cache_hits: int = 0
-    cache_misses: int = 0
-    cpu_hits: int = 0
-    npu_hits: int = 0
-
-    # ---- promote ----
-    promote_attempts: int = 0
-    promote_success: int = 0
-    promote_fail_no_space: int = 0
-    promote_fail_low_score: int = 0
-
-    # ---- eviction ----
-    evict_npu: int = 0
-    evict_cpu: int = 0
-    evict_npu_to_cpu: int = 0
-    cpu_evict_due_to_alloc: int = 0
-    freed_entries: int = 0
-    npu_freed_entries: int = 0
+        self.req_cnt = 0

@@ -29,9 +29,9 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
-    set_current_vllm_config,
     update_config,
 )
+from vllm.config.score_encoder_cache import get_score_encoder_cache_config
 from vllm.config.cache import CacheConfig
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -1057,7 +1057,7 @@ class GPUModelRunner(
         torch.accelerator.synchronize()
 
     def free_tmp_cache(self, req_id, request):
-        if not self.vllm_config.score_encoder_cache_config.enabled:
+        if not get_score_encoder_cache_config(self.vllm_config).enabled:
             self.cached.clear()
             return
         free_mm_hashes = set()
@@ -1080,20 +1080,20 @@ class GPUModelRunner(
             if value is None and mm_hash not in scheduler_output.promoting_mm_hashes:
                 self.cpu_encoder_cache.pop(mm_hash, None)
 
-        # 处理晋升列表
+        # Handle promotion: move selected cache entries from CPU to device (e.g., GPU/NPU).
         for mm_hash in scheduler_output.promoting_mm_hashes:
             cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
             if cpu_value is None:
                 continue
             
             staging = cpu_value.pin_memory()
-            npu_value = staging.detach().to(self.device, non_blocking=True)
-            # 让 staging 的生命周期绑定到 NPU stream
-            # npu_value.record_stream(torch.npu.current_stream())
+            gpu_value = staging.detach().to(self.device, non_blocking=True)
+            gpu_value.record_stream(torch.cuda.current_stream())
 
-            self.encoder_cache[mm_hash] = npu_value
+            self.encoder_cache[mm_hash] = gpu_value
             del staging
 
+        # Handle CPU fetch requests: load required cache entries from CPU to temporary device cache.
         for mm_hash in scheduler_output.cpu_get_encoder_mm_hashes:
             if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
                 continue
@@ -1101,13 +1101,12 @@ class GPUModelRunner(
             if cpu_value is None:
                 continue
             staging = cpu_value.pin_memory()
-            npu_value = staging.detach().to(self.device, non_blocking=True)
-            # 保证拷贝完成前 staging 不会被释放
-            # npu_value.record_stream(torch.npu.current_stream())
-            self.tmp_encoder_cache[mm_hash] = npu_value
+            gpu_value = staging.detach().to(self.device, non_blocking=True)
+            gpu_value.record_stream(torch.cuda.current_stream())
+            self.tmp_encoder_cache[mm_hash] = gpu_value
             del staging
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -1119,8 +1118,8 @@ class GPUModelRunner(
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
-            self.requests.pop(req_id, None)
-            self.free_tmp_cache(req_id, req_state)
+            req = self.requests.pop(req_id, None)
+            self.free_tmp_cache(req_id, req)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
@@ -1134,6 +1133,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
 
+        # Free the cached encoder outputs.
         self._async_process_scheduler_output(scheduler_output)
 
         # Zero GPU memory for freshly allocated cache blocks to prevent
@@ -2933,7 +2933,7 @@ class GPUModelRunner(
 
         # Cache the encoder outputs by mm_hash
         for mm_hash, output in zip(mm_hashes, encoder_outputs):
-            if self.vllm_config.score_encoder_cache_config.enabled:
+            if get_score_encoder_cache_config(self.vllm_config).enabled:
                 staging = torch.empty_like(
                     output,
                     device="cpu",
@@ -2946,8 +2946,8 @@ class GPUModelRunner(
                     mm_hash in scheduler_output.promoting_mm_hashes and
                     mm_hash not in scheduler_output.free_encoder_mm_hashes
                 ):
-                    # 如果还在晋升列表，且不在淘汰列表，还要放入npu中
-                    # 1.首次进入，放cpu  2.命中cpu，不晋升 3.命中cpu，晋升 4.由于别人晋升被淘汰
+                    # If the entry is marked for promotion and not marked for eviction,
+                    # keep it in the device (GPU) cache as well.
                     self.encoder_cache[mm_hash] = output
                 else:
                     self.tmp_encoder_cache[mm_hash] = output

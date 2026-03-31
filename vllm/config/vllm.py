@@ -44,7 +44,6 @@ from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
-from .score_encoder_cache import ScoreEncoderCacheConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
@@ -340,10 +339,6 @@ class VllmConfig:
     """Shutdown grace period for in-flight requests. Shutdown will be delayed for
     up to this amount of time to allow already-running requests to complete. Any
     remaining requests are aborted once the timeout is reached.
-    """
-
-    score_encoder_cache_config: ScoreEncoderCacheConfig | None = None
-    """Configuration class for controlling the behavior of the CHIME system.
     """
 
     def compute_hash(self) -> str:
