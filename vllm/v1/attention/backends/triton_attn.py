@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
 
+import os
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -41,6 +42,44 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+TRITON_ATTN_SEQ_THRESHOLD_3D_ENV = "VLLM_TRITON_ATTN_SEQ_THRESHOLD_3D"
+
+
+def _maybe_override_seq_threshold_3d(seq_threshold_3d: int) -> int:
+    raw_value = os.environ.get(TRITON_ATTN_SEQ_THRESHOLD_3D_ENV)
+    if raw_value in (None, ""):
+        return seq_threshold_3d
+    assert raw_value is not None
+
+    try:
+        override = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{TRITON_ATTN_SEQ_THRESHOLD_3D_ENV} must be a positive integer, "
+            f"got {raw_value!r}."
+        ) from exc
+
+    if override <= 0:
+        raise ValueError(
+            f"{TRITON_ATTN_SEQ_THRESHOLD_3D_ENV} must be a positive integer, "
+            f"got {raw_value!r}."
+        )
+
+    return override
+
+
+def _get_seq_threshold_3d(
+    seq_threshold_3d: int,
+    *,
+    device_capability: DeviceCapability | None,
+    model_type: str | None,
+    head_size: int,
+    num_heads_kv: int,
+    sliding_window: int,
+) -> int:
+    """Return the configured Triton 3D threshold unchanged."""
+    del device_capability, model_type, head_size, num_heads_kv, sliding_window
+    return seq_threshold_3d
 
 
 @dataclass
@@ -134,6 +173,13 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+        sliding_window = model_config.get_sliding_window() or 0
+        model_type = getattr(model_config.hf_config, "model_type", None)
+        device_capability = (
+            current_platform.get_device_capability()
+            if current_platform.is_cuda()
+            else None
+        )
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -165,6 +211,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 capture_sizes,
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
+
+        self.seq_threshold_3D = _get_seq_threshold_3d(
+            self.seq_threshold_3D,
+            device_capability=device_capability,
+            model_type=model_type,
+            head_size=self.headdim,
+            num_heads_kv=self.num_heads_kv,
+            sliding_window=sliding_window,
+        )
+        self.seq_threshold_3D = _maybe_override_seq_threshold_3d(self.seq_threshold_3D)
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
