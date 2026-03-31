@@ -161,7 +161,9 @@ class CoreEngineProcManager:
                         # shard". The actual TP/PP worker processes spawned by
                         # the executor are bound separately with their own
                         # local_rank values.
-                        vllm_config, local_rank=0, dp_local_rank=local_dp_rank
+                        vllm_config,
+                        local_rank=0,
+                        dp_local_rank=local_dp_rank,
                     ),
                 ):
                     proc.start()

@@ -370,9 +370,7 @@ class ParallelConfig:
 
     @field_validator("numa_bind_nodes")
     @classmethod
-    def _validate_numa_bind_nodes(
-        cls, value: list[int] | None
-    ) -> list[int] | None:
+    def _validate_numa_bind_nodes(cls, value: list[int] | None) -> list[int] | None:
         if value is None:
             return None
         if not value:
@@ -383,9 +381,7 @@ class ParallelConfig:
 
     @field_validator("numa_bind_cpus")
     @classmethod
-    def _validate_numa_bind_cpus(
-        cls, value: list[str] | None
-    ) -> list[str] | None:
+    def _validate_numa_bind_cpus(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
             return None
         if not value:
@@ -405,8 +401,7 @@ class ParallelConfig:
                 start_str, end_str = part.split("-", 1)
                 if int(start_str) > int(end_str):
                     raise ValueError(
-                        "numa_bind_cpus ranges must be ascending, "
-                        f"but got '{cpuset}'."
+                        f"numa_bind_cpus ranges must be ascending, but got '{cpuset}'."
                     )
         return value
 

@@ -13,6 +13,7 @@ import os
 import subprocess
 from contextlib import contextmanager
 from functools import cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psutil
@@ -116,8 +117,7 @@ def _get_gpu_index(
 ) -> int:
     """Compute the physical GPU index used for NUMA lookup."""
     if (
-        parallel_config.distributed_executor_backend
-        not in ("ray", "external_launcher")
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
         and parallel_config.data_parallel_backend != "ray"
         and parallel_config.nnodes_within_dp == 1
     ):
