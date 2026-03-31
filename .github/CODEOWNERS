@@ -2,13 +2,15 @@
 # for more info about CODEOWNERS file
 
 # This lists cover the "core" components of vLLM that require careful review
-/vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng
+/vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng @vadiklyutiy
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
-/vllm/model_executor/layers/mamba @tdoublep
+/vllm/model_executor/layers/mamba @tdoublep @tomeras91
+/vllm/model_executor/layers/mamba/gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
+/vllm/model_executor/layers/rotary_embedding.py @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/layers/batch_invariant.py @yewentao256 
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
@@ -46,8 +48,9 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/attention @LucasWilkinson @MatthewBonanni
 /vllm/v1/attention/backend.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
 /vllm/v1/attention/backends/mla @pavanimajety
-/vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
+/vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety @vadiklyutiy
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
+/vllm/v1/attention/backends/gdn_attn.py @ZJY0516 @vadiklyutiy
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
@@ -69,18 +72,18 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
-/tests/evals @mgoin
+/tests/evals @mgoin @vadiklyutiy
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
 /tests/models @DarkLight1337 @ywang96
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety
 /tests/test_inputs.py @DarkLight1337 @ywang96
-/tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
+/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
-/tests/models/language/generation/test_hybrid.py @tdoublep
+/tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
 /tests/v1/kv_connector/nixl_integration @NickLucche
 /tests/v1/kv_connector @ApostaC @orozery
 /tests/v1/kv_offload @ApostaC @orozery
@@ -124,9 +127,14 @@ mkdocs.yaml @hmellor
 /vllm/platforms/xpu.py @jikunshang
 /docker/Dockerfile.xpu @jikunshang
 
+# Nemotron-specific files
+/vllm/model_executor/models/*nemotron* @tomeras91
+/vllm/transformers_utils/configs/*nemotron* @tomeras91
+/tests/**/*nemotron* @tomeras91
+
 # Qwen-specific files
-/vllm/attention/backends/dual_chunk_flash_attn.py @sighingnow
-/vllm/model_executor/models/qwen* @sighingnow
+/vllm/model_executor/models/qwen* @sighingnow @vadiklyutiy
+/vllm/transformers_utils/configs/qwen* @sighingnow @vadiklyutiy
 
 # MTP-specific files
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
@@ -142,6 +150,7 @@ mkdocs.yaml @hmellor
 # Kernels
 /vllm/v1/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
+/vllm/model_executor/layers/fla @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa

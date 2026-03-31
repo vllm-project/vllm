@@ -372,9 +372,10 @@ class RayDistributedExecutor(Executor):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
-        if not is_eep_new_worker:
-            self.collective_rpc("init_device")
+        self.collective_rpc("init_device")
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.collective_rpc("elastic_ep_execute", args=("load_model",))
+        else:
             self.collective_rpc("load_model")
 
         def _update_block_size(worker):

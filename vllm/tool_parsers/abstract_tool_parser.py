@@ -11,7 +11,9 @@ from openai.types.responses import (
     ResponseTextConfig,
 )
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -24,9 +26,11 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.utils import get_json_schema_from_tools
+from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
+
+__all__ = ["Tool"]
 
 logger = init_logger(__name__)
 
@@ -38,7 +42,11 @@ class ToolParser:
     derived classes.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+    ):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -46,6 +54,7 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
+        self.tools = tools
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -53,7 +62,9 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """
         Static method that used to adjust the request parameters.
         """
