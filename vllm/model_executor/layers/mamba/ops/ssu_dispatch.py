@@ -142,45 +142,6 @@ class FlashInferSSUBackend(MambaSSUBackend):
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
     ) -> None:
-        # FlashInfer does not support separate dst_state_batch_indices.
-        # When dst == src (normal non-speculative path), we can safely ignore
-        # it since FlashInfer updates state in-place using state_batch_indices.
-        if (
-            dst_state_batch_indices is not None
-            and dst_state_batch_indices is not state_batch_indices
-            and not (
-                state_batch_indices is not None
-                and dst_state_batch_indices.shape == state_batch_indices.shape
-                and torch.equal(dst_state_batch_indices, state_batch_indices)
-            )
-        ):
-            raise ValueError(
-                "FlashInfer Mamba SSU backend does not support "
-                "dst_state_batch_indices different from "
-                "state_batch_indices (speculative decoding). "
-                "Use --mamba-backend triton instead."
-            )
-        # FlashInfer does not support spec-decode parameters
-        if num_accepted_tokens is not None:
-            raise ValueError(
-                "FlashInfer Mamba SSU backend does not support "
-                "num_accepted_tokens (speculative decoding). "
-                "Use --mamba-backend triton instead."
-            )
-        if cu_seqlens is not None:
-            raise ValueError(
-                "FlashInfer Mamba SSU backend does not support "
-                "cu_seqlens (speculative decoding). "
-                "Use --mamba-backend triton instead."
-            )
-
-        if state_batch_indices is not None and state_batch_indices.dim() == 2:
-            assert state_batch_indices.shape[1] == 1, (
-                "FlashInfer Mamba SSU backend only supports 1D "
-                "state_batch_indices, but got shape "
-                f"{state_batch_indices.shape}"
-            )
-
         # is_blackwell is Triton-only (block size tuning), ignored here
         self._kernel(
             state,
@@ -193,9 +154,13 @@ class FlashInferSSUBackend(MambaSSUBackend):
             z=z,
             dt_bias=dt_bias,
             dt_softplus=dt_softplus,
-            state_batch_indices=state_batch_indices.view(-1)
-            if state_batch_indices is not None
-            else None,
+            state_batch_indices=state_batch_indices,
+            dst_state_batch_indices=dst_state_batch_indices,
+            cu_seqlens=cu_seqlens,
+            num_accepted_tokens=num_accepted_tokens,
+            cache_steps=state_batch_indices.size(-1)
+            if cu_seqlens is not None and state_batch_indices is not None
+            else 0,
             pad_slot_id=pad_slot_id,
             out=out,
         )
