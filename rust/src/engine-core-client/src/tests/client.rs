@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use rmpv::Value;
 use thiserror_ext::AsReport as _;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
@@ -1680,6 +1680,11 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
+    let (engine_0_seen_tx, mut engine_0_seen_rx) = mpsc::unbounded_channel();
+    let (engine_1_seen_tx, engine_1_seen_rx) = oneshot::channel();
+    let (finish_req_1_tx, finish_req_1_rx) = oneshot::channel();
+    let (finish_req_2_tx, finish_req_2_rx) = oneshot::channel();
+    let (finish_req_3_tx, finish_req_3_rx) = oneshot::channel();
 
     let (init_rx_0, shutdown_tx_0, engine_task_0) = spawn_mock_engine_task_with_init(
         handshake_address.clone(),
@@ -1690,6 +1695,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                 assert_eq!(add_1[0].as_ref(), &[0x00]);
                 let request_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
                 assert_eq!(request_1.request_id, "req-1");
+                engine_0_seen_tx.send(request_1.request_id.clone()).unwrap();
+                finish_req_1_rx.await.unwrap();
                 send_outputs(
                     push,
                     EngineCoreOutputs {
@@ -1709,6 +1716,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                 assert_eq!(add_3[0].as_ref(), &[0x00]);
                 let request_3: EngineCoreRequest = rmp_serde::from_slice(&add_3[1]).unwrap();
                 assert_eq!(request_3.request_id, "req-3");
+                engine_0_seen_tx.send(request_3.request_id.clone()).unwrap();
+                finish_req_3_rx.await.unwrap();
                 send_outputs(
                     push,
                     EngineCoreOutputs {
@@ -1726,7 +1735,6 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
             })
         },
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let (init_rx_1, shutdown_tx_1, engine_task_1) = spawn_mock_engine_task_with_init(
         handshake_address.clone(),
         b"engine-1".to_vec(),
@@ -1736,7 +1744,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
                 assert_eq!(add_2[0].as_ref(), &[0x00]);
                 let request_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
                 assert_eq!(request_2.request_id, "req-2");
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                let _ = engine_1_seen_tx.send(request_2.request_id.clone());
+                finish_req_2_rx.await.unwrap();
                 send_outputs(
                     push,
                     EngineCoreOutputs {
@@ -1794,7 +1803,22 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), engine_0_seen_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "req-1"
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(1), engine_1_seen_rx)
+            .await
+            .unwrap()
+            .unwrap(),
+        "req-2"
+    );
 
+    let _ = finish_req_1_tx.send(());
     let final_1 = timeout(Duration::from_secs(1), stream_1.next())
         .await
         .unwrap()
@@ -1805,7 +1829,15 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(final_1.finish_reason, Some(EngineCoreFinishReason::Length));
 
     let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), engine_0_seen_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "req-3"
+    );
 
+    let _ = finish_req_3_tx.send(());
     let final_3 = timeout(Duration::from_secs(1), stream_3.next())
         .await
         .unwrap()
@@ -1815,6 +1847,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(final_3.new_token_ids, vec![30]);
     assert_eq!(final_3.finish_reason, Some(EngineCoreFinishReason::Length));
 
+    let _ = finish_req_2_tx.send(());
     let final_2 = timeout(Duration::from_secs(1), stream_2.next())
         .await
         .unwrap()
