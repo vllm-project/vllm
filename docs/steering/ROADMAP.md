@@ -134,6 +134,12 @@ All 4 hook points are always allocated:
 - **Three-tier global API**: HTTP API accepts `vectors`, `prefill_vectors`, `decode_vectors`. Worker accepts the same three tiers. `SteeringManager` tracks `global_base_vectors`, `global_prefill_vectors`, `global_decode_vectors`.
 - **Dual-hash scheduler admission**: Scheduler tracks the union of active hashes (prefill hash for prefill requests, decode hash for decode requests). New requests must fit both their prefill and decode hashes.
 
+### Post-merge fixes
+
+- **Malformed entry validation** (PR #29): `normalize_layer_entry()` now validates that dict entries contain both `"vector"` and `"scale"` keys, raising `ValueError` instead of `KeyError`. The API router catches normalization errors and returns 400 instead of 500.
+- **Decode-start registration** (PR #30): Requests with full prefix-cache hits (`num_computed_tokens >= num_prompt_tokens`) skip prefill entirely. Registration in `_update_states()` now detects the initial phase and registers the decode config directly instead of always registering prefill.
+- **Buffer overwrite fix** (PR #31): Phase-specific vectors (prefill/decode) are no longer written to shared layer buffers — only base vectors write to buffers. `_notify_manager_vectors()` constructs tensors directly from the input data instead of reading back from buffers, eliminating stale-data bugs when multiple tiers target the same layer.
+
 See [MVP_IMPLEMENTATION.md](MVP_IMPLEMENTATION.md) Phase 4 section for detailed implementation notes and lessons learned.
 
 ---

@@ -138,18 +138,22 @@ We chose additive combination (`effective = global + per_request`) over replacem
 
 ### Worker → Manager Notification
 
-When `WorkerBase.set_steering_vectors()` updates the global `steering_vector` buffer, it also calls `SteeringManager.update_global_vectors()`. This notification is necessary because the manager caches global vectors to compute combined rows. Without it, the table would contain stale global vectors.
+When `WorkerBase.set_steering_vectors()` updates global steering, it notifies the `SteeringManager` via `_notify_manager_vectors()`. This notification is necessary because the manager caches global vectors to compute combined rows. Without it, the table would contain stale global vectors.
 
-The notification uses `hasattr` guards:
+Only **base** vectors are written to the shared layer buffers. Phase-specific vectors (prefill/decode) go only to the manager — writing them to shared buffers would overwrite base values when multiple tiers target the same layer, causing `get_steering_status()` to report the wrong tier (fixed in PR #31).
+
+`_notify_manager_vectors()` constructs tensors directly from the input `list[float]` data, matching the buffer's dtype and device:
 ```python
-if hasattr(self, "model_runner") and self.model_runner is not None:
-    mgr = getattr(self.model_runner, "_steering_manager", None)
-    if mgr is not None:
-        for idx in valid_indices:
-            mgr.update_global_vectors(idx, steerable[idx].steering_vector)
+buf = getattr(mod, vec_attr)
+t = torch.tensor(vec_values, dtype=buf.dtype, device=buf.device)
+mgr.update_global_vectors(hook_point_str, idx, t, phase=phase)
 ```
 
-**Lesson**: The defensive `hasattr`/`getattr` chain is necessary because `set_steering_vectors` can be called before the model runner has initialized (during server startup). The manager is lazily created on first forward pass, so it may not exist yet.
+The earlier approach read tensor values back from the shared buffer (`getattr(mod, vec_attr).clone()`), which was fragile: for phase-specific vectors, it would capture stale or zero data if the buffer had been overwritten by another tier.
+
+The notification uses `hasattr` guards because `set_steering_vectors` can be called before the model runner has initialized (during server startup). When the manager doesn't exist yet, the converted tensors are stored in `_pending_steering_globals` for replay during lazy init.
+
+**Lesson**: When multiple callers write to a shared buffer and a downstream reader needs per-caller values, don't read back from the buffer — convert from the source data directly. The read-back pattern is fragile because it depends on ordering and exclusivity of writes.
 
 ### Lazy Initialization vs Pre-Allocation
 
@@ -318,15 +322,23 @@ The original API had a separate `scales: dict[int, float]` field that applied pe
 
 This eliminates ambiguity and makes each entry self-describing. The `SamplingParams` validation accepts both forms. Resolution pre-multiplies scales into vectors so downstream code never sees the dict form.
 
+Dict entries must contain both `"vector"` and `"scale"` keys. Missing keys now raise `ValueError` with a message listing exactly which keys are absent (fixed in PR #29). The API router catches normalization errors (`KeyError`, `TypeError`, `ValueError`) and returns 400 Bad Request instead of letting them bubble up as 500 Internal Server Error.
+
 **Lesson**: When adding dimensions to an API (phases, hook points), co-locate metadata (scales) with the data it applies to rather than using a separate parallel structure. The parallel structure doesn't scale.
+
+**Lesson**: Validate structured input at the source (the normalization function) and catch those errors at the boundary (the API router). Don't rely on downstream code to handle malformed data gracefully — it will surface as an opaque 500.
 
 ### Two Hashes, One Active at a Time
 
 Each request has two steering config hashes (`prefill_steering_config_hash` and `decode_steering_config_hash`), but only one is registered with the `SteeringManager` at any time. The lifecycle:
 
-1. Request arrives → register prefill config (if any)
-2. Prefill completes → release prefill config, register decode config
+1. Request arrives → detect initial phase via `num_computed_tokens >= num_prompt_tokens`:
+   - Normal start (prefill): register prefill config
+   - Full prefix-cache hit (decode): register decode config directly
+2. Prefill completes (normal start only) → release prefill config, register decode config
 3. Request finishes → release whichever config is active
+
+The phase detection at registration time (added in PR #30) handles full prefix-cache hits where `num_computed_tokens >= num_prompt_tokens` on arrival. Without this, the request would have its prefill config registered but never transitioned, and the decode config would never activate — causing those requests to receive no per-request steering.
 
 This matters for the `max_steering_configs` row budget. If we registered both upfront, a request with different prefill and decode configs would consume two rows for its entire lifetime, even though only one is active at any moment. With one-active-at-a-time, the row is freed for reuse during the other phase.
 
@@ -411,9 +423,9 @@ The correct test: use explicit `prefill_steering_vectors` and `decode_steering_v
 | Test | What it verifies |
 |------|-----------------|
 | `test_steering_op.py` (8 tests) | Indexed gather math: row selection, mixed indices, dtype preservation, oversized buffer slicing, in-place update visibility |
-| `test_steering_types.py` (26 tests) | `SteeringVectorSpec` normalization, `resolve_effective_vectors` additive merge, `hash_steering_config` determinism, co-located scale handling |
+| `test_steering_types.py` (30 tests) | `SteeringVectorSpec` normalization, `resolve_effective_vectors` additive merge, `hash_steering_config` determinism, co-located scale handling, malformed entry validation |
 | `test_steering_manager.py` (37 tests) | Phase-aware SteeringManager: 3-row reserved layout, phase-aware `get_row_for_config`, three-tier global population, phase registration/transition |
-| `test_worker_steering.py` (36 tests) | Three-tier set/clear/status, validation, co-located scales, replace mode |
+| `test_worker_steering.py` (39 tests) | Three-tier set/clear/status, validation, co-located scales, replace mode, buffer-reflects-base-not-phase |
 | `test_steering_scheduler.py` (28 tests) | Dual-hash admission control: union counting, phase-aware tracking, both hashes checked at admission |
 | `test_steering_cache_keys.py` (6 tests) | Prefix cache key integration: prefill hash in extra keys, zero-overhead when unused, decode-only doesn't affect cache |
 | `test_protocol.py` (10 tests) | Three-tier protocol, co-located scale format |
