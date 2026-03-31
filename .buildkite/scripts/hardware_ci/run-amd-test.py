@@ -5698,7 +5698,48 @@ def main():
         except Exception as exc:
             warn(f"GPU pre-flight crashed: {exc}. Continuing.")
 
-        section("ROCm info")
+        section("ROCm info (host)")
+        # Log the host (K8s node / agent) ROCm version -- this is the
+        # driver-level version, not what's inside the Docker image.
+        # Useful for debugging driver/image mismatches.
+        try:
+            r = sh(
+                "amd-smi version 2>/dev/null",
+                capture=True,
+                timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                info(f"Host ROCm (amd-smi): {r.stdout.strip()}")
+            else:
+                raise FileNotFoundError
+        except Exception:
+            # amd-smi not available -- fall back to rocm-smi or
+            # /opt/rocm/.info/version file.
+            try:
+                r = sh(
+                    "rocm-smi --version 2>/dev/null",
+                    capture=True,
+                    timeout=10,
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    info(f"Host ROCm (rocm-smi): {r.stdout.strip()}")
+                else:
+                    raise FileNotFoundError
+            except Exception:
+                # Last resort: read the version file directly.
+                for vpath in [
+                    "/opt/rocm/.info/version",
+                    "/opt/rocm/include/rocm-core/rocm_version.h",
+                ]:
+                    try:
+                        ver = Path(vpath).read_text().strip()
+                        info(f"Host ROCm ({vpath}): {ver}")
+                        break
+                    except OSError:
+                        continue
+                else:
+                    warn("Could not determine host ROCm version")
+
         with suppress(Exception):
             sh("rocminfo", timeout=ROCM_SMI_TIMEOUT_S)
 
