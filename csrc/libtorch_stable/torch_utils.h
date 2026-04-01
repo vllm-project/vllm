@@ -8,9 +8,7 @@
 
 #include <cuda_runtime.h>
 
-#ifndef USE_ROCM
-  #include <cublas_v2.h>
-#endif
+#include <cublas_v2.h>
 
 #include <deque>
 #include <mutex>
@@ -83,11 +81,9 @@ inline cudaStream_t get_current_cuda_stream(int32_t device_index = -1) {
   return reinterpret_cast<cudaStream_t>(stream_ptr);
 }
 
-#ifndef USE_ROCM
 // Utility to get the current cuBLAS handle using stable APIs.
 inline cublasHandle_t get_current_cuda_blas_handle() {
   void* blas_handle_ptr = nullptr;
   TORCH_ERROR_CODE_CHECK(torch_get_current_cuda_blas_handle(&blas_handle_ptr));
   return reinterpret_cast<cublasHandle_t>(blas_handle_ptr);
 }
-#endif
