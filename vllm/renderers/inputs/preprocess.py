@@ -5,7 +5,7 @@ Schemas and utilities for preprocessing inputs.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
+from typing import TYPE_CHECKING, NamedTuple, TypedDict, overload
 
 from vllm.inputs import (
     EmbedsPrompt,
@@ -68,55 +68,20 @@ def conversation_to_seq(
     return conversation_or_conversations  # type: ignore[return-value]
 
 
-DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
-"""
-A [`DecoderOnlyPrompt`][vllm.inputs.llm.DecoderOnlyPrompt]
-that has been standardized into a dictionary.
-"""
-
-
-EncoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
-"""
-A [`EncoderPrompt`][vllm.inputs.llm.EncoderPrompt]
-that has been standardized into a dictionary.
-"""
-
-
-DecoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
-"""
-A [`DecoderPrompt`][vllm.inputs.llm.DecoderPrompt]
-that has been standardized into a dictionary.
-"""
-
-
 class EncoderDecoderDictPrompt(TypedDict):
     """
     A [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
     that has been standardized into a dictionary.
     """
 
-    encoder_prompt: EncoderDictPrompt
+    encoder_prompt: TextPrompt | TokensPrompt
 
-    decoder_prompt: DecoderDictPrompt | None
-
-
-SingletonDictPrompt: TypeAlias = (
-    DecoderOnlyDictPrompt | EncoderDictPrompt | DecoderDictPrompt
-)
-"""
-A [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt]
-that has been standardized into a dictionary.
-"""
+    decoder_prompt: TextPrompt | TokensPrompt | None
 
 
-DictPrompt: TypeAlias = DecoderOnlyDictPrompt | EncoderDecoderDictPrompt
-"""
-A [`PromptType`][vllm.inputs.llm.PromptType]
-that has been standardized into a dictionary.
-"""
-
-
-def parse_dec_only_prompt(prompt: PromptType | object) -> DecoderOnlyDictPrompt:
+def parse_dec_only_prompt(
+    prompt: PromptType | object,
+) -> TextPrompt | TokensPrompt | EmbedsPrompt:
     """
     Parse a prompt for a decoder-only model and normalize it to a dictionary.
     """
@@ -145,7 +110,7 @@ def parse_dec_only_prompt(prompt: PromptType | object) -> DecoderOnlyDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_enc_prompt(prompt: PromptType | object) -> EncoderDictPrompt:
+def _parse_enc_prompt(prompt: PromptType | object) -> TextPrompt | TokensPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -167,7 +132,7 @@ def _parse_enc_prompt(prompt: PromptType | object) -> EncoderDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_dec_prompt(prompt: PromptType | object) -> DecoderDictPrompt:
+def _parse_dec_prompt(prompt: PromptType | object) -> TextPrompt | TokensPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 

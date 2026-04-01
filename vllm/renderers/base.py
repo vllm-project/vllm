@@ -48,14 +48,7 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .embed_utils import safe_load_prompt_embeds
-from .inputs import (
-    DictPrompt,
-    EncoderDecoderDictPrompt,
-    EncoderDecoderTokPrompt,
-    SingletonDictPrompt,
-    SingletonTokPrompt,
-    TokPrompt,
-)
+from .inputs import EncoderDecoderDictPrompt, EncoderDecoderTokPrompt
 from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
 
@@ -324,8 +317,12 @@ class BaseRenderer(ABC, Generic[_T]):
     # Step 1: Convert raw inputs to prompts
     def render_prompt(
         self,
-        prompt: DictPrompt | bytes,
-    ) -> DictPrompt:
+        prompt: TextPrompt
+        | TokensPrompt
+        | EmbedsPrompt
+        | EncoderDecoderDictPrompt
+        | bytes,
+    ) -> TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt:
         if isinstance(prompt, bytes):
             embeds = safe_load_prompt_embeds(self.model_config, prompt)
             prompt = EmbedsPrompt(prompt_embeds=embeds)
@@ -334,8 +331,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def render_prompts(
         self,
-        prompts: Sequence[DictPrompt | bytes],
-    ) -> list[DictPrompt]:
+        prompts: Sequence[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt | bytes
+        ],
+    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt]:
         if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
@@ -343,8 +342,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def render_prompts_async(
         self,
-        prompts: Sequence[DictPrompt | bytes],
-    ) -> list[DictPrompt]:
+        prompts: Sequence[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt | bytes
+        ],
+    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt]:
         return self.render_prompts(prompts)
 
     @abstractmethod
@@ -352,14 +353,20 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-    ) -> tuple[list["ConversationMessage"], DictPrompt]:
+    ) -> tuple[
+        list["ConversationMessage"],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         raise NotImplementedError
 
     async def render_messages_async(
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-    ) -> tuple[list["ConversationMessage"], DictPrompt]:
+    ) -> tuple[
+        list["ConversationMessage"],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
@@ -417,9 +424,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _tokenize_singleton_prompt(
         self,
-        prompt: SingletonDictPrompt,
+        prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
         params: TokenizeParams,
-    ) -> SingletonTokPrompt:
+    ) -> TokensPrompt | EmbedsPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = self._tokenize_prompt(prompt, params)
@@ -448,9 +455,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def _tokenize_singleton_prompt_async(
         self,
-        prompt: SingletonDictPrompt,
+        prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
         params: TokenizeParams,
-    ) -> SingletonTokPrompt:
+    ) -> TokensPrompt | EmbedsPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = await self._tokenize_prompt_async(prompt, params)
@@ -505,9 +512,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def tokenize_prompt(
         self,
-        prompt: DictPrompt,
+        prompt: TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
         params: TokenizeParams,
-    ) -> TokPrompt:
+    ) -> TokensPrompt | EmbedsPrompt | EncoderDecoderTokPrompt:
         if "encoder_prompt" in prompt:
             return self._tokenize_enc_dec_prompt(prompt, params)  # type: ignore[arg-type]
 
@@ -515,16 +522,18 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def tokenize_prompts(
         self,
-        prompts: Sequence[DictPrompt],
+        prompts: Sequence[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt
+        ],
         params: TokenizeParams,
-    ) -> list[TokPrompt]:
+    ) -> list[TokensPrompt | EmbedsPrompt | EncoderDecoderTokPrompt]:
         return [self.tokenize_prompt(prompt, params) for prompt in prompts]
 
     async def tokenize_prompt_async(
         self,
-        prompt: DictPrompt,
+        prompt: TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
         params: TokenizeParams,
-    ) -> TokPrompt:
+    ) -> TokensPrompt | EmbedsPrompt | EncoderDecoderTokPrompt:
         if "encoder_prompt" in prompt:
             return await self._tokenize_enc_dec_prompt_async(prompt, params)  # type: ignore[arg-type]
 
@@ -532,9 +541,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def tokenize_prompts_async(
         self,
-        prompts: Sequence[DictPrompt],
+        prompts: Sequence[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt
+        ],
         params: TokenizeParams,
-    ) -> list[TokPrompt]:
+    ) -> list[TokensPrompt | EmbedsPrompt | EncoderDecoderTokPrompt]:
         return await asyncio.gather(
             *(self.tokenize_prompt_async(prompt, params) for prompt in prompts)
         )
@@ -542,7 +553,7 @@ class BaseRenderer(ABC, Generic[_T]):
     # Step 3: Add extra keys to the prompts
     def _apply_prompt_extras(
         self,
-        prompts: Sequence[TokPrompt],
+        prompts: Sequence[TokensPrompt | EmbedsPrompt | EncoderDecoderTokPrompt],
         prompt_extras: dict[str, Any] | None,
     ):
         if not prompt_extras:
@@ -734,7 +745,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return engine_input
 
-    def _process_singleton(self, prompt: SingletonTokPrompt) -> SingletonInput:
+    def _process_singleton(self, prompt: TokensPrompt | EmbedsPrompt) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
@@ -742,7 +753,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def _process_singleton_async(
         self,
-        prompt: SingletonTokPrompt,
+        prompt: TokensPrompt | EmbedsPrompt,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
@@ -794,7 +805,11 @@ class BaseRenderer(ABC, Generic[_T]):
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
 
-    def process_for_engine(self, prompt: TokPrompt, arrival_time: float) -> EngineInput:
+    def process_for_engine(
+        self,
+        prompt: TokensPrompt | EmbedsPrompt | EncoderDecoderTokPrompt,
+        arrival_time: float,
+    ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
             engine_input = self._process_enc_dec(prompt)  # type: ignore[arg-type]
@@ -806,7 +821,9 @@ class BaseRenderer(ABC, Generic[_T]):
         return engine_input
 
     async def process_for_engine_async(
-        self, prompt: TokPrompt, arrival_time: float
+        self,
+        prompt: TokensPrompt | EmbedsPrompt | EncoderDecoderTokPrompt,
+        arrival_time: float,
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
@@ -823,7 +840,9 @@ class BaseRenderer(ABC, Generic[_T]):
     # Top-level methods
     def render_cmpl(
         self,
-        prompts: Sequence[DictPrompt | bytes],
+        prompts: Sequence[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt | bytes
+        ],
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
@@ -842,7 +861,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def render_cmpl_async(
         self,
-        prompts: Sequence[DictPrompt | bytes],
+        prompts: Sequence[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt | bytes
+        ],
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
@@ -880,7 +901,9 @@ class BaseRenderer(ABC, Generic[_T]):
         ]
 
         out_conversations = list[list["ConversationMessage"]]()
-        dict_prompts = list[DictPrompt]()
+        dict_prompts = list[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt
+        ]()
         for conv, prompt in rendered:
             out_conversations.append(conv)
             dict_prompts.append(prompt)
@@ -914,7 +937,9 @@ class BaseRenderer(ABC, Generic[_T]):
         ]
 
         out_conversations = list[list["ConversationMessage"]]()
-        dict_prompts = list[DictPrompt]()
+        dict_prompts = list[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt
+        ]()
         for conv, prompt in await asyncio.gather(*rendered):
             out_conversations.append(conv)
             dict_prompts.append(prompt)

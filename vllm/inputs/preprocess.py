@@ -11,13 +11,7 @@ from vllm.inputs import build_enc_dec_input
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.renderers import BaseRenderer, renderer_from_config
-from vllm.renderers.inputs import (
-    DecoderDictPrompt,
-    DecoderOnlyDictPrompt,
-    EncoderDecoderDictPrompt,
-    EncoderDictPrompt,
-    SingletonDictPrompt,
-)
+from vllm.renderers.inputs import EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 
@@ -190,27 +184,27 @@ class InputPreprocessor:
     @overload
     def _prompt_to_llm_inputs(
         self,
-        prompt: EncoderDictPrompt,
+        prompt: TextPrompt | TokensPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> EncoderInput: ...
 
     @overload
     def _prompt_to_llm_inputs(  # type: ignore[misc]
         self,
-        prompt: DecoderDictPrompt,
+        prompt: TextPrompt | TokensPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> DecoderEngineInput: ...
 
     @overload
     def _prompt_to_llm_inputs(  # type: ignore[misc]
         self,
-        prompt: DecoderOnlyDictPrompt,
+        prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> DecoderOnlyEngineInput: ...
 
     def _prompt_to_llm_inputs(
         self,
-        prompt: SingletonDictPrompt,
+        prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
@@ -263,7 +257,7 @@ class InputPreprocessor:
 
     def _process_decoder_only_prompt(
         self,
-        prompt: DecoderOnlyDictPrompt,
+        prompt: TextPrompt | TokensPrompt | EmbedsPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> DecoderOnlyEngineInput:
         return self._prompt_to_llm_inputs(

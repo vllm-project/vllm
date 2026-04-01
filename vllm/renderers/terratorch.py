@@ -7,10 +7,11 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 
 from .base import BaseRenderer
-from .inputs import DictPrompt
+from .inputs import EncoderDecoderDictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
@@ -22,7 +23,10 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], DictPrompt]:
+    ) -> tuple[
+        list[ConversationMessage],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         model_config = self.model_config
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -45,7 +49,10 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], DictPrompt]:
+    ) -> tuple[
+        list[ConversationMessage],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         model_config = self.model_config
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
