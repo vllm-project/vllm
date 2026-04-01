@@ -17,6 +17,7 @@ import torch.nn as nn
 
 from vllm.exceptions import SteeringVectorError
 from vllm.model_executor.layers.steering import DEFAULT_HOOK_POINT
+from vllm.v1.worker.steering_manager import SteeringManager
 from vllm.v1.worker.worker_base import WorkerBase
 
 # Shorthand for test readability
@@ -76,6 +77,7 @@ class FakeModelRunner:
 
     def __init__(self, model: nn.Module):
         self._model = model
+        self._steering_manager: SteeringManager | None = None
 
     def get_model(self) -> nn.Module:
         return self._model
@@ -86,12 +88,13 @@ class FakeWorker(WorkerBase):
 
     def __init__(self, model: nn.Module):
         # Don't call super().__init__ — just set model_runner directly
-        self.model_runner = FakeModelRunner(model)
+        self.model_runner: FakeModelRunner | None = FakeModelRunner(model)  # type: ignore[assignment]
 
     def init_device(self):
         pass
 
     def get_model(self):
+        assert self.model_runner is not None
         return self.model_runner.get_model()
 
 
@@ -103,6 +106,22 @@ def model():
 @pytest.fixture
 def worker(model):
     return FakeWorker(model)
+
+
+@pytest.fixture
+def worker_with_manager(model):
+    """Worker whose FakeModelRunner has a live SteeringManager.
+
+    This allows ``_notify_manager_vectors`` to call
+    ``mgr.update_global_vectors`` directly instead of queuing
+    to ``_pending_steering_globals``, so ``get_steering_status``
+    can read phase-specific norms.
+    """
+    w = FakeWorker(model)
+    assert w.model_runner is not None
+    mgr = SteeringManager(max_steering_configs=4)
+    w.model_runner._steering_manager = mgr
+    return w
 
 
 # --- _steerable_layers ---
@@ -348,8 +367,9 @@ class TestClearSteeringVectors:
     def test_clear_removes_pending_globals_when_no_manager(self, worker):
         """Even without a live SteeringManager, clear should remove
         pending globals so they are not replayed on lazy init."""
-        # Ensure no manager exists
-        assert not hasattr(worker.model_runner, "_steering_manager")
+        # Ensure no live manager exists
+        assert worker.model_runner is not None
+        assert worker.model_runner._steering_manager is None
         worker.model_runner._pending_steering_globals = [
             ({"post_mlp_pre_ln": {1: torch.ones(1, 8)}}, "prefill"),
             ({"post_mlp_pre_ln": {2: torch.ones(1, 8)}}, "decode"),
@@ -387,6 +407,71 @@ class TestGetSteeringStatus:
         worker.clear_steering_vectors()
         status = worker.get_steering_status()
         assert status == {}
+
+    def test_status_reports_prefill_norm(self, worker_with_manager):
+        """Prefill-only vectors appear as ``prefill_norm`` in status."""
+        vec = [2.0] * 8
+        worker_with_manager.set_steering_vectors(
+            prefill_vectors={_HP: {0: vec}},
+        )
+        status = worker_with_manager.get_steering_status()
+        assert 0 in status
+        assert _HP in status[0]
+        expected_norm = round(torch.tensor(vec).norm().item(), 6)
+        assert status[0][_HP]["prefill_norm"] == expected_norm
+        # No base norm since we only set prefill
+        assert "norm" not in status[0][_HP]
+
+    def test_status_reports_decode_norm(self, worker_with_manager):
+        """Decode-only vectors appear as ``decode_norm`` in status."""
+        vec = [3.0] * 8
+        worker_with_manager.set_steering_vectors(
+            decode_vectors={_HP: {1: vec}},
+        )
+        status = worker_with_manager.get_steering_status()
+        assert 1 in status
+        assert _HP in status[1]
+        expected_norm = round(torch.tensor(vec).norm().item(), 6)
+        assert status[1][_HP]["decode_norm"] == expected_norm
+        # No base norm since we only set decode
+        assert "norm" not in status[1][_HP]
+
+    def test_status_base_only_no_phase_keys(self, worker_with_manager):
+        """Base-only vectors produce ``norm`` but no phase-specific keys."""
+        vec = [1.0] * 8
+        worker_with_manager.set_steering_vectors(
+            vectors={_HP: {0: vec}},
+        )
+        status = worker_with_manager.get_steering_status()
+        assert 0 in status
+        assert _HP in status[0]
+        assert "norm" in status[0][_HP]
+        assert "prefill_norm" not in status[0][_HP]
+        assert "decode_norm" not in status[0][_HP]
+
+    def test_status_all_tiers(self, worker_with_manager):
+        """All three tiers on the same layer produce all three norm keys."""
+        base_vec = [1.0] * 8
+        prefill_vec = [2.0] * 8
+        decode_vec = [3.0] * 8
+        worker_with_manager.set_steering_vectors(
+            vectors={_HP: {0: base_vec}},
+            prefill_vectors={_HP: {0: prefill_vec}},
+            decode_vectors={_HP: {0: decode_vec}},
+        )
+        status = worker_with_manager.get_steering_status()
+        assert 0 in status
+        assert _HP in status[0]
+        layer_status = status[0][_HP]
+        # Base norm from layer buffer
+        expected_base = round(torch.tensor(base_vec).norm().item(), 6)
+        assert layer_status["norm"] == expected_base
+        # Prefill norm from manager
+        expected_prefill = round(torch.tensor(prefill_vec).norm().item(), 6)
+        assert layer_status["prefill_norm"] == expected_prefill
+        # Decode norm from manager
+        expected_decode = round(torch.tensor(decode_vec).norm().item(), 6)
+        assert layer_status["decode_norm"] == expected_decode
 
 
 # --- no model runner ---

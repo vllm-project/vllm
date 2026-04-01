@@ -276,12 +276,8 @@ class WorkerBase:
                 mod = steerable[idx]
                 if hasattr(mod, vec_attr):
                     buf = getattr(mod, vec_attr)
-                    t = torch.tensor(
-                        vec_values, dtype=buf.dtype, device=buf.device
-                    )
-                    mgr.update_global_vectors(
-                        hook_point_str, idx, t, phase=phase
-                    )
+                    t = torch.tensor(vec_values, dtype=buf.dtype, device=buf.device)
+                    mgr.update_global_vectors(hook_point_str, idx, t, phase=phase)
 
     def set_steering_vectors(
         self,
@@ -350,23 +346,20 @@ class WorkerBase:
 
         # Apply base vectors to layer buffers and notify manager.
         if vectors:
-            base_valid = self._validate_vectors_spec(vectors, steerable)
-            self._apply_vectors_to_buffers(vectors, steerable, base_valid)
-            self._notify_manager_vectors(vectors, steerable, base_valid, "base")
+            self._apply_vectors_to_buffers(vectors, steerable, valid_indices)
+            self._notify_manager_vectors(vectors, steerable, valid_indices, "base")
 
         # Phase-specific vectors go only to the manager, not the shared
         # buffers — writing them would overwrite base values and cause
         # get_steering_status() to report the wrong tier.
         if prefill_vectors:
-            prefill_valid = self._validate_vectors_spec(prefill_vectors, steerable)
             self._notify_manager_vectors(
-                prefill_vectors, steerable, prefill_valid, "prefill"
+                prefill_vectors, steerable, valid_indices, "prefill"
             )
 
         if decode_vectors:
-            decode_valid = self._validate_vectors_spec(decode_vectors, steerable)
             self._notify_manager_vectors(
-                decode_vectors, steerable, decode_valid, "decode"
+                decode_vectors, steerable, valid_indices, "decode"
             )
 
         return sorted(valid_indices)
@@ -392,10 +385,17 @@ class WorkerBase:
     def get_steering_status(self) -> dict:
         """Return per-hook-point status for active layers.
 
-        Returns ``{layer_idx: {hook_point: {"norm": float}}}`` for
+        Returns ``{layer_idx: {hook_point: {"norm": float,
+        "prefill_norm"?: float, "decode_norm"?: float}}}`` for
         layers/hook-points that have a non-zero steering vector.
+
+        Base norms come from layer buffers. Phase-specific norms
+        (``prefill_norm``, ``decode_norm``) come from the
+        SteeringManager's global phase vectors and are only present
+        when those vectors have non-zero norms.
         """
         result: dict = {}
+        # Base norms from layer buffers
         for idx, mod in self._steerable_layers().items():
             layer_info: dict[str, dict[str, float]] = {}
             for hp, vec_attr in HOOK_POINT_VECTOR_ATTR.items():
@@ -407,6 +407,26 @@ class WorkerBase:
                     layer_info[hp.value] = {"norm": round(norm, 6)}
             if layer_info:
                 result[idx] = layer_info
+
+        # Phase-specific norms from SteeringManager
+        if hasattr(self, "model_runner") and self.model_runner is not None:
+            mgr = getattr(self.model_runner, "_steering_manager", None)
+            if mgr is not None:
+                for phase_name, phase_dict in [
+                    ("prefill", mgr.global_prefill_vectors),
+                    ("decode", mgr.global_decode_vectors),
+                ]:
+                    for hp_str, layer_vecs in phase_dict.items():
+                        for layer_idx, vec in layer_vecs.items():
+                            norm = vec.norm().item()
+                            if norm > 0.0:
+                                if layer_idx not in result:
+                                    result[layer_idx] = {}
+                                if hp_str not in result[layer_idx]:
+                                    result[layer_idx][hp_str] = {}
+                                result[layer_idx][hp_str][f"{phase_name}_norm"] = round(
+                                    norm, 6
+                                )
         return result
 
     def get_model_inspection(self) -> str:
