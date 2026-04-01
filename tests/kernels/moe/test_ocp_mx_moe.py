@@ -9,11 +9,6 @@ import pytest
 import torch
 from packaging import version
 
-from vllm.config import (
-    VllmConfig,
-    set_current_vllm_config,
-)
-from vllm.config.compilation import CompilationConfig
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
