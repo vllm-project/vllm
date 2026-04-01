@@ -251,9 +251,9 @@ void merge_attn_states_launcher(
     const std::optional<int64_t> prefill_tokens_with_context,
     const std::optional<torch::Tensor>& output_scale) {
   constexpr uint NUM_THREADS = 128;
-  const uint num_tokens = prefix_output.size(0);
-  const uint num_heads = prefix_output.size(1);
-  const uint head_size = prefix_output.size(2);
+  const uint num_tokens = output.size(0);
+  const uint num_heads = output.size(1);
+  const uint head_size = output.size(2);
   const uint prefix_head_stride = prefix_output.stride(1);
   const uint output_head_stride = output.stride(1);
   // Thread mapping is based on input BF16 pack_size

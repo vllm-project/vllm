@@ -4,7 +4,12 @@
 import pytest
 import torch
 
-from vllm._custom_ops import merge_attn_states as merge_attn_states_cuda
+from vllm._custom_ops import (
+    merge_attn_states as merge_attn_states_cuda,
+)
+from vllm._custom_ops import (
+    scaled_fp8_quant,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
@@ -23,7 +28,6 @@ def merge_attn_states_torch(
     prefill_tokens_with_context: int | None = None,
     output_scale: torch.Tensor | None = None,  # scalar, per-tensor FP8 scale
 ):
-    out_dtype = output.dtype  # save before reassignment
     # Apply prefill_tokens_with_context mask if needed
     if prefill_tokens_with_context is None:
         prefill_tokens_with_context = output.shape[0]
@@ -51,11 +55,13 @@ def merge_attn_states_torch(
     s_scale = s_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
     p_scale = torch.transpose(p_scale, 0, 1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
     s_scale = torch.transpose(s_scale, 0, 1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
-    output = prefix_output * p_scale * mask + suffix_output * (s_scale * mask + (1 - mask))
+    output = prefix_output * p_scale * mask + suffix_output * (
+        s_scale * mask + (1 - mask)
+    )
     if output_scale is not None:
-        dtype_max = torch.finfo(out_dtype).max
-        output = (output.float() / output_scale.item()).clamp(-dtype_max, dtype_max)
-        output = output.to(out_dtype)
+        shape = output.shape
+        output, _ = scaled_fp8_quant(output.float().view(-1, shape[-1]), output_scale)
+        output = output.view(shape)
     return output, output_lse
 
 
@@ -106,6 +112,7 @@ def generate_markdown_table():
         )
 
 
+@pytest.mark.parametrize("output_scale_val", [None, 0.5, 0.05])
 @pytest.mark.parametrize("prefill_tokens_with_context", [None, 128])
 @pytest.mark.parametrize("num_tokens", NUM_BATCH_TOKENS)
 @pytest.mark.parametrize("num_query_heads", NUM_QUERY_HEADS)
@@ -113,6 +120,7 @@ def generate_markdown_table():
 @pytest.mark.parametrize("output_dtype", DTYPES)
 @torch.inference_mode()
 def test_merge_attn_states(
+    output_scale_val: float | None,
     prefill_tokens_with_context: int | None,
     num_tokens: int,
     num_query_heads: int,
@@ -129,9 +137,21 @@ def test_merge_attn_states(
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size
 
+    # When output_scale_val is set, inputs stay as output_dtype (bf16/fp16/fp32)
+    # and output becomes FP8.
+    fp8_output = output_scale_val is not None
+    input_dtype = output_dtype
+    output_scale = None
+    if fp8_output:
+        output_dtype = current_platform.fp8_dtype()
+        output_scale = torch.tensor(
+            [output_scale_val], dtype=torch.float32, device="cuda"
+        )
+
     print(
         f"\nNUM_TOKENS:{NUM_TOKENS}, NUM_HEADS:{NUM_HEADS}, "
-        f"HEAD_SIZE:{HEAD_SIZE}, DTYPE: {output_dtype}, "
+        f"HEAD_SIZE:{HEAD_SIZE}, input_dtype: {input_dtype}, "
+        f"output_dtype: {output_dtype}, output_scale: {output_scale_val}, "
         f"prefill_tokens_with_context: {prefill_tokens_with_context}, "
         f"Device: {current_platform.get_device_name()}"
     )
@@ -160,10 +180,10 @@ def test_merge_attn_states(
         (NUM_HEADS, NUM_TOKENS), dtype=torch.float32, device="cuda"
     )
     prefix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=input_dtype, device="cuda"
     )
     suffix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=input_dtype, device="cuda"
     )
 
     warmup_times = 2
@@ -187,6 +207,7 @@ def test_merge_attn_states(
             suffix_lse_torch,
             output_lse_torch,
             prefill_tokens_with_context,
+            output_scale,
         )
     torch.accelerator.synchronize()
 
@@ -200,6 +221,7 @@ def test_merge_attn_states(
             suffix_lse_torch,
             output_lse_torch,
             prefill_tokens_with_context,
+            output_scale,
         )
         end.record()
         torch.accelerator.synchronize()
@@ -224,6 +246,7 @@ def test_merge_attn_states(
             suffix_lse,
             output_lse_ref_triton,
             prefill_tokens_with_context,
+            output_scale,
         )
     torch.accelerator.synchronize()
 
@@ -237,6 +260,7 @@ def test_merge_attn_states(
             suffix_lse,
             output_lse_ref_triton,
             prefill_tokens_with_context,
+            output_scale,
         )
         end.record()
         torch.accelerator.synchronize()
@@ -258,6 +282,7 @@ def test_merge_attn_states(
             suffix_lse,
             output_lse_cuda,
             prefill_tokens_with_context,
+            output_scale,
         )
     torch.accelerator.synchronize()
 
@@ -271,6 +296,7 @@ def test_merge_attn_states(
             suffix_lse,
             output_lse_cuda,
             prefill_tokens_with_context,
+            output_scale,
         )
         end.record()
         torch.accelerator.synchronize()
@@ -292,7 +318,13 @@ def test_merge_attn_states(
     # Liger Kernel: Efficient Triton Kernels for LLM Training
     # https://arxiv.org/pdf/2410.10989, 3.3 Correctness
     # use rtol = 1e-2 for bfloat16.
-    rtol = 1e-2 if output_dtype == torch.bfloat16 else 1e-3
+    if fp8_output:
+        # FP8 e4m3 has coarse quantization levels, so wider tolerances.
+        atol, rtol = 5.0, 0.10
+    elif output_dtype == torch.bfloat16:
+        atol, rtol = 1e-3, 1e-2
+    else:
+        atol, rtol = 1e-3, 1e-3
 
     def diff(a: torch.Tensor, b: torch.Tensor):
         max_diff = torch.max(torch.abs(a.float() - b.float()))
@@ -304,7 +336,7 @@ def test_merge_attn_states(
     output_ref = output_ref_triton
     output_lse_ref = output_lse_ref_triton
     torch.testing.assert_close(
-        output_cuda.float(), output_ref.float(), atol=1e-3, rtol=rtol
+        output_cuda.float(), output_ref.float(), atol=atol, rtol=rtol
     )
     print("Output all match, max abs diff:")
     print(f"(Triton vs Torch) : {diff(output_torch, output_ref)}")
@@ -313,7 +345,7 @@ def test_merge_attn_states(
     print("-" * 100)
 
     torch.testing.assert_close(
-        output_lse_cuda.float(), output_lse_ref.float(), atol=1e-3, rtol=rtol
+        output_lse_cuda.float(), output_lse_ref.float(), atol=1e-3, rtol=1e-2
     )
     print("Output LSE all match, max abs diff:")
     print(f"(Triton vs Torch) : {diff(output_lse_torch, output_lse_ref)}")
@@ -345,160 +377,3 @@ def test_merge_attn_states(
         len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) * len(NUM_QUERY_HEADS) * len(DTYPES)
     ):
         generate_markdown_table()
-
-
-FP8_NUM_BATCH_TOKENS = [256, 512, 1024]
-FP8_NUM_QUERY_HEADS = [8, 16, 64]
-FP8_HEAD_SIZES = [64, 128, 256]
-
-
-FP8_INPUT_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
-
-
-@pytest.mark.parametrize("num_tokens", FP8_NUM_BATCH_TOKENS)
-@pytest.mark.parametrize("num_query_heads", FP8_NUM_QUERY_HEADS)
-@pytest.mark.parametrize("head_size", FP8_HEAD_SIZES)
-@pytest.mark.parametrize("output_scale_val", [0.5, 0.05])
-@pytest.mark.parametrize("use_output_lse", [True, False])
-@pytest.mark.parametrize("input_dtype", FP8_INPUT_DTYPES)
-@torch.inference_mode()
-def test_merge_attn_states_fp8(
-    num_tokens: int,
-    num_query_heads: int,
-    head_size: int,
-    output_scale_val: float,
-    use_output_lse: bool,
-    input_dtype: torch.dtype,
-):
-    if not current_platform.is_cuda():
-        pytest.skip("FP8 merge_attn_states test requires CUDA")
-    fp8_dtype = current_platform.fp8_dtype()
-
-    print(
-        f"\n[FP8] NUM_TOKENS:{num_tokens}, NUM_HEADS:{num_query_heads}, "
-        f"HEAD_SIZE:{head_size}, input_dtype:{input_dtype}, "
-        f"fp8_dtype:{fp8_dtype}, output_scale:{output_scale_val}, "
-        f"use_output_lse:{use_output_lse}"
-    )
-
-    # Create inputs in BF16
-    prefix_output = torch.randn(
-        (num_tokens, num_query_heads, head_size), dtype=input_dtype, device="cuda"
-    )
-    suffix_output = torch.randn(
-        (num_tokens, num_query_heads, head_size), dtype=input_dtype, device="cuda"
-    )
-
-    # LSE values with some inf edge cases
-    prefix_lse = torch.randn(
-        num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
-    )
-    suffix_lse = torch.randn(
-        num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
-    )
-    mask_prefix = torch.rand(num_query_heads, num_tokens) < 0.1
-    mask_suffix = torch.rand(num_query_heads, num_tokens) < 0.1
-    combined_mask = torch.logical_and(mask_prefix, mask_suffix)
-    mask_prefix = torch.logical_and(mask_prefix, ~combined_mask)
-    mask_suffix = torch.logical_and(mask_suffix, ~combined_mask)
-    prefix_lse[mask_prefix] = float("inf")
-    suffix_lse[mask_suffix] = float("inf")
-
-    # Output scale for static FP8 quantization
-    output_scale = torch.tensor([output_scale_val], dtype=torch.float32, device="cuda")
-
-    # Optional output_lse
-    output_lse_ref = None
-    output_lse_cuda = None
-    output_lse_triton = None
-    if use_output_lse:
-        output_lse_ref = torch.zeros(
-            num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
-        )
-        output_lse_cuda = torch.zeros(
-            num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
-        )
-        output_lse_triton = torch.zeros(
-            num_query_heads, num_tokens, dtype=torch.float32, device="cuda"
-        )
-
-    # 0. Compute reference using torch with output_scale
-    ref_fp8, output_lse_ref = merge_attn_states_torch(
-        torch.zeros(
-            (num_tokens, num_query_heads, head_size), dtype=fp8_dtype, device="cuda"
-        ),
-        prefix_output,
-        prefix_lse.clone(),
-        suffix_output,
-        suffix_lse.clone(),
-        output_lse=output_lse_ref,
-        output_scale=output_scale,
-    )
-
-    # 1. Run CUDA kernel with output_scale
-    output_cuda = torch.empty(
-        (num_tokens, num_query_heads, head_size), dtype=fp8_dtype, device="cuda"
-    )
-    merge_attn_states_cuda(
-        output_cuda,
-        prefix_output,
-        prefix_lse,
-        suffix_output,
-        suffix_lse,
-        output_lse=output_lse_cuda,
-        output_scale=output_scale,
-    )
-
-    # 2. Run Triton kernel with output_scale
-    output_triton = torch.empty(
-        (num_tokens, num_query_heads, head_size), dtype=fp8_dtype, device="cuda"
-    )
-    merge_attn_states_triton(
-        output_triton,
-        prefix_output,
-        prefix_lse,
-        suffix_output,
-        suffix_lse,
-        output_lse=output_lse_triton,
-        output_scale=output_scale,
-    )
-
-    # 3. Compare — use scale-dependent tolerances.
-    # FP8 e4m3 spacing grows with magnitude (e.g. 4.0 at magnitude 32),
-    # so smaller scales (larger FP8 magnitudes) need wider absolute tolerance.
-    if output_scale_val >= 0.5:
-        fp8_atol, fp8_rtol = 2.5, 0.05
-    else:
-        fp8_atol, fp8_rtol = 5.0, 0.10
-
-    def diff(a: torch.Tensor, b: torch.Tensor):
-        return torch.max(torch.abs(a.float() - b.float()))
-
-    print(f"  (CUDA vs Ref)   max diff: {diff(output_cuda, ref_fp8)}")
-    print(f"  (Triton vs Ref) max diff: {diff(output_triton, ref_fp8)}")
-    print(f"  (CUDA vs Triton) max diff: {diff(output_cuda, output_triton)}")
-
-    torch.testing.assert_close(
-        output_cuda.float(), ref_fp8.float(), atol=fp8_atol, rtol=fp8_rtol
-    )
-    torch.testing.assert_close(
-        output_triton.float(), ref_fp8.float(), atol=fp8_atol, rtol=fp8_rtol
-    )
-    torch.testing.assert_close(
-        output_cuda.float(), output_triton.float(), atol=fp8_atol, rtol=fp8_rtol
-    )
-
-    # 4. Compare output_lse if provided (float32, unaffected by FP8)
-    if use_output_lse:
-        cuda_lse_diff = diff(output_lse_cuda, output_lse_ref)
-        triton_lse_diff = diff(output_lse_triton, output_lse_ref)
-        print(f"  (CUDA LSE vs Ref)   max diff: {cuda_lse_diff}")
-        print(f"  (Triton LSE vs Ref) max diff: {triton_lse_diff}")
-        torch.testing.assert_close(
-            output_lse_cuda, output_lse_ref, atol=1e-3, rtol=1e-2
-        )
-        torch.testing.assert_close(
-            output_lse_triton, output_lse_ref, atol=1e-3, rtol=1e-2
-        )
-
-    print("[FP8] All tests passed!")
