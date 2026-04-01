@@ -495,30 +495,49 @@ def _gen_prompt_embeds_extra_hash_keys(
 
 
 def _gen_steering_extra_hash_keys(
-    request: "Request", start_token_idx: int
+    request: "Request", start_token_idx: int, end_token_idx: int
 ) -> list[int]:
     """Generate extra keys for steering-aware prefix caching.
 
-    For prompt blocks (start_token_idx < num_prompt_tokens): uses the
-    prefill steering hash since only prefill steering affects KV content
-    during the prompt phase.
+    For pure prompt blocks (start < num_prompt_tokens AND end <=
+    num_prompt_tokens): uses the prefill steering hash since only prefill
+    steering affects KV content during the prompt phase.
 
-    For generated blocks (start_token_idx >= num_prompt_tokens): uses the
-    decode steering hash since decode steering affects KV computation
-    during generation.  The prefill hash is already embedded in the
-    parent hash chain through earlier prompt blocks.
+    For boundary blocks that straddle the prompt/decode boundary
+    (start < num_prompt_tokens AND end > num_prompt_tokens): includes
+    both the prefill and decode steering hashes, since the block
+    contains tokens computed under both phases.  Without both hashes,
+    two requests with identical prefill steering but different decode
+    steering would incorrectly share this block.
+
+    For pure decode blocks (start >= num_prompt_tokens): uses the decode
+    steering hash since decode steering affects KV computation during
+    generation.  The prefill hash is already embedded in the parent hash
+    chain through earlier prompt blocks.
 
     Returns empty list when no relevant steering is active, ensuring
     zero impact on cache keys for non-steered requests.
     """
-    if start_token_idx < request.num_prompt_tokens:
-        # Prompt block — only prefill steering affects KV
+    num_prompt_tokens = request.num_prompt_tokens
+
+    if start_token_idx < num_prompt_tokens and end_token_idx > num_prompt_tokens:
+        # Boundary block — straddles prompt/decode boundary, need both
+        prefill_hash = getattr(request, "prefill_steering_config_hash", 0)
+        decode_hash = getattr(request, "decode_steering_config_hash", 0)
+        keys: list[int] = []
+        if prefill_hash != 0:
+            keys.append(prefill_hash)
+        if decode_hash != 0:
+            keys.append(decode_hash)
+        return keys
+    elif start_token_idx < num_prompt_tokens:
+        # Pure prompt block — only prefill steering affects KV
         prefill_hash = getattr(request, "prefill_steering_config_hash", 0)
         if prefill_hash == 0:
             return []
         return [prefill_hash]
     else:
-        # Generated block — decode steering affects KV
+        # Pure decode block — decode steering affects KV
         decode_hash = getattr(request, "decode_steering_config_hash", 0)
         if decode_hash == 0:
             return []
@@ -554,7 +573,7 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx
     )
     steering_extra_keys: list[int] = _gen_steering_extra_hash_keys(
-        request, start_token_idx
+        request, start_token_idx, end_token_idx
     )
 
     extra_keys: list[Any] = (
