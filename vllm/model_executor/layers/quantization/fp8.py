@@ -877,7 +877,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -902,7 +902,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1006,14 +1006,17 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = torch.ones(layer.num_experts, dtype=torch.float32)
-        w2_scale = torch.ones(layer.num_experts, dtype=torch.float32)
+        w13_scale = torch.ones(
+            layer.num_experts, device=w13.device, dtype=torch.float32
+        )
+        w2_scale = torch.ones(layer.num_experts, device=w2.device, dtype=torch.float32)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
