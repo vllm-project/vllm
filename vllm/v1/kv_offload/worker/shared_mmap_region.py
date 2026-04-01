@@ -111,7 +111,7 @@ class SharedMmapRegion:
         """
         worker_layer_view = torch.as_strided(
             self._base,
-            size=(self.num_blocks * block_size_factor, tensor_size),
+            size=(self.num_blocks, block_size_factor * tensor_size),
             stride=(self._row_stride, 1),
             storage_offset=self._worker_offset,
         )
