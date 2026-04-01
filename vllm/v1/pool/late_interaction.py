@@ -56,7 +56,7 @@ def build_late_interaction_doc_params(
     )
 
 
-def compute_maxsim_scores(
+def compute_maxsim_score_batched(
     q_embs: Sequence[torch.Tensor],
     d_embs: Sequence[torch.Tensor],
     max_batch_size: int = 64,

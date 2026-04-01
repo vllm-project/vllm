@@ -215,7 +215,7 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
 
 
 class FlashLateInteractionIOProcessor(LateInteractionIOProcessor):
-    name = "late-interaction-flash"
+    name = "flash-late-interaction"
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
         return outputs

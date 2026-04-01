@@ -60,7 +60,7 @@ class ServingScores(PoolingServing):
     ) -> PoolingIOProcessor:
         score_type = model_config.score_type
         if self.enable_flash_late_interaction:
-            score_type = "late-interaction-flash"
+            score_type = "flash-late-interaction"
 
         assert score_type in ScoringIOProcessors
         processor_cls = ScoringIOProcessors[score_type]
