@@ -253,10 +253,6 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Dynamic Speculative Decoding: optimal K chosen for this step.
-    # None means DSD is not active (use the static num_spec_tokens).
-    optimal_num_speculative_tokens: int | None = None
-
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

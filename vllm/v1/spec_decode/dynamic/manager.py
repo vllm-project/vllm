@@ -66,12 +66,10 @@ class DynamicSpeculativeDecodingManager:
 
         self.update_optimal_num_speculative_tokens()
 
-    def step(self, spec_decoding_stats_all, batch_size: int) -> int:
+    def step(self, batch_size: int) -> int:
         self.steps += 1
         if self.should_update():
-            acceptance_rate_per_pos = self.compute_acceptance_rate_per_pos(
-                spec_decoding_stats_all
-            )
+            acceptance_rate_per_pos = self.compute_acceptance_rate_per_pos()
             self.update_acceptance_rate_per_pos(acceptance_rate_per_pos)
 
         optimal_num_speculative_tokens = self.get_optimal_num_speculative_tokens(
@@ -80,15 +78,15 @@ class DynamicSpeculativeDecodingManager:
 
         return optimal_num_speculative_tokens
 
-    def compute_acceptance_rate_per_pos(self, spec_decoding_stats_all) -> list[float]:
+    def compute_acceptance_rate_per_pos(self) -> list[float]:
         acceptance_rate_per_pos = []
         for i in range(self.vllm_num_speculative_tokens):
-            if spec_decoding_stats_all.num_draft_tokens_per_pos[i] == 0:
+            if self.stats.num_draft_tokens_per_pos[i] == 0:
                 acceptance_rate = 0.0
             else:
                 acceptance_rate = (
-                    spec_decoding_stats_all.num_accepted_tokens_per_pos[i]
-                    / spec_decoding_stats_all.num_draft_tokens_per_pos[i]
+                    self.stats.num_accepted_tokens_per_pos[i]
+                    / self.stats.num_draft_tokens_per_pos[i]
                 )
 
             acceptance_rate_per_pos.append(acceptance_rate)

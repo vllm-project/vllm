@@ -57,8 +57,8 @@ from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
-from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.spec_decode.dynamic.manager import DynamicSpeculativeDecodingManager
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -915,7 +915,7 @@ class Scheduler(SchedulerInterface):
         )
 
         # Dynamic speculative decoding: compute optimal K
-        num_spec_tokens_to_schedule = None
+        num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_manager is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_manager.step(
                 len(num_scheduled_tokens)
@@ -1997,7 +1997,7 @@ class Scheduler(SchedulerInterface):
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
         if self.dynamic_sd_manager is not None and num_draft_tokens:
             self.dynamic_sd_manager.observe_draft(num_draft_tokens, num_accepted_tokens)
-        
+
         if not self.log_stats or not num_draft_tokens:
             return None
         if spec_decoding_stats is None:
