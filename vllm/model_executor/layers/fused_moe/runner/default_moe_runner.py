@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import MoERunnerBase
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 
 logger = init_logger(__name__)
 
@@ -54,18 +51,18 @@ class DefaultMoERunner(MoERunnerBase):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        layer_name: str,
         moe_config: FusedMoEConfig,
         router: FusedMoERouter,
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
-        shared_experts: SharedExperts | None,
+        shared_experts: torch.nn.Module | None,
         quant_method: FusedMoEMethodBase,
         reduce_results: bool,
         enable_dbo: bool,
     ):
         super().__init__(
-            layer,
+            layer_name,
             moe_config,
             router,
             routed_input_transform,

@@ -10,7 +10,6 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -23,6 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
@@ -109,9 +109,7 @@ class Qwen3CoderToolParser(ToolParser):
         self.accumulated_params = {}
         self.streaming_request = None
 
-    def _get_arguments_config(
-        self, func_name: str, tools: list[ChatCompletionToolsParam] | None
-    ) -> dict:
+    def _get_arguments_config(self, func_name: str, tools: list[Tool] | None) -> dict:
         """Extract argument configuration for a function."""
         if tools is None:
             return {}
@@ -133,11 +131,58 @@ class Qwen3CoderToolParser(ToolParser):
         logger.debug("Tool '%s' is not defined in the tools list.", func_name)
         return {}
 
+    @staticmethod
+    def _first_non_null_type(type_value: Any) -> str | None:
+        """Extract the first non-null type from a type value.
+
+        Handles both scalar types ("integer") and type-as-array
+        (["integer", "null"]) per JSON Schema spec.
+        """
+        if isinstance(type_value, list):
+            return next(
+                (
+                    str(t).strip().lower()
+                    for t in type_value
+                    if t is not None and str(t).lower() != "null"
+                ),
+                None,
+            )
+        if type_value is not None and str(type_value).lower() != "null":
+            return str(type_value).strip().lower()
+        return None
+
+    def _resolve_param_type(self, param_def: dict) -> str:
+        """Resolve the effective type string from a parameter definition.
+
+        Handles direct "type" fields (including type-as-array),
+        anyOf/oneOf schemas emitted by Pydantic v2 for Optional[T],
+        and $ref schemas from Pydantic model inputs.
+        """
+        if "type" in param_def:
+            resolved = self._first_non_null_type(param_def["type"])
+            return resolved or "string"
+
+        if "anyOf" in param_def or "oneOf" in param_def:
+            variants = param_def.get("anyOf") or param_def.get("oneOf", [])
+            for v in variants:
+                if not isinstance(v, dict):
+                    continue
+                resolved = self._first_non_null_type(v.get("type"))
+                if resolved:
+                    return resolved
+
+        # $ref points to a schema definition (e.g. a Pydantic model).
+        # The referenced type is almost always an object, so treat it
+        # as such to route through json.loads.
+        if "$ref" in param_def:
+            return "object"
+
+        return "string"
+
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
-        # Handle null value for any type
         if param_value.lower() == "null":
             return None
 
@@ -152,19 +197,10 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
-        if (
-            isinstance(param_config[param_name], dict)
-            and "type" in param_config[param_name]
-        ):
-            param_type = str(param_config[param_name]["type"]).strip().lower()
-        elif (
-            isinstance(param_config[param_name], dict)
-            and "anyOf" in param_config[param_name]
-        ):
-            # anyOf has no top-level "type"; treat as object to trigger json.loads.
-            param_type = "object"
-        else:
-            param_type = "string"
+        if not isinstance(param_config[param_name], dict):
+            return param_value
+
+        param_type = self._resolve_param_type(param_config[param_name])
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             return param_value
         elif (
@@ -246,7 +282,7 @@ class Qwen3CoderToolParser(ToolParser):
             return param_value
 
     def _parse_xml_function_call(
-        self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
+        self, function_call_str: str, tools: list[Tool] | None
     ) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
@@ -316,7 +352,7 @@ class Qwen3CoderToolParser(ToolParser):
                 )
 
             tool_calls = [
-                self._parse_xml_function_call(function_call_str, request.tools)
+                self._parse_xml_function_call(function_call_str, self.tools)
                 for function_call_str in function_calls
             ]
             # Populate prev_tool_call_arr for serving layer to set finish_reason
@@ -609,7 +645,7 @@ class Qwen3CoderToolParser(ToolParser):
 
                 param_config = self._get_arguments_config(
                     self.current_function_name or "",
-                    self.streaming_request.tools if self.streaming_request else None,
+                    self.tools,
                 )
 
                 converted_value = self._convert_param_value(
@@ -668,9 +704,7 @@ class Qwen3CoderToolParser(ToolParser):
                     try:
                         parsed_tool = self._parse_xml_function_call(
                             func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request
-                            else None,
+                            self.tools,
                         )
                         if parsed_tool and self.current_tool_index < len(
                             self.prev_tool_call_arr

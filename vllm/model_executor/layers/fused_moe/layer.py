@@ -39,14 +39,8 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
-    MoERunner,
-)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
     create_moe_runner,
-)
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -217,42 +211,6 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         f"{local_index.item()}->{global_index.item()}"
         for local_index, global_index in zip(local_indices, global_indices)
     )
-
-
-# TODO(rob): move this down to the kernel.
-def maybe_roundup_hidden_size(
-    hidden_size: int,
-    act_dtype: torch.dtype,
-    moe_parallel_config: FusedMoEParallelConfig,
-    is_lora_enabled: bool,
-    model_type: str | None,
-) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
-    if necessary.
-
-    Args:
-        hidden_size: Layer hidden-size
-        act_dtype: Data type of the layer activations.
-        moe_parallel_config: Fused MoE parallelization strategy configuration.
-        is_lora_enabled: True if the engine is enabled with LoRA. This
-            is used in the case of mxfp4 quantization in selecting the
-            MxFP4Backend.
-        model_type: for checking if gpt-oss
-
-    Return:
-        Rounded up hidden_size if rounding up is required based on the configs.
-        Original hidden size otherwise.
-    """
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_roundup_layer_hidden_size,
-    )
-
-    hidden_size = maybe_roundup_layer_hidden_size(
-        hidden_size, act_dtype, moe_parallel_config
-    )
-
-    return hidden_size
 
 
 # --8<-- [start:fused_moe]
@@ -466,7 +424,7 @@ class FusedMoE(CustomOp):
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
-        self.intermediate_size_per_partition = intermediate_size // self.tp_size
+        intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
 
@@ -508,28 +466,13 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
-        # Round up hidden size before creating moe_config.
-        # This way moe_config is created with the correct hidden_size from the start.
-        unpadded_hidden_size = hidden_size
-        self.model_type = (
-            self.vllm_config.model_config.hf_config.model_type
-            if self.vllm_config.model_config is not None
-            else None
-        )
-        hidden_size = maybe_roundup_hidden_size(
-            hidden_size=hidden_size,
-            act_dtype=moe_in_dtype,
-            moe_parallel_config=self.moe_parallel_config,
-            is_lora_enabled=vllm_config.lora_config is not None,
-            model_type=self.model_type,
-        )
-        self.hidden_size = hidden_size
-
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
-            intermediate_size_per_partition=self.intermediate_size_per_partition,
+            hidden_dim_unpadded=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            intermediate_size_per_partition_unpadded=intermediate_size_per_partition,
             num_local_experts=self.local_num_experts,
             num_logical_experts=self.logical_num_experts,
             moe_parallel_config=self.moe_parallel_config,
@@ -591,11 +534,24 @@ class FusedMoE(CustomOp):
                 f"EPLB is not supported {self.quant_method.__class__.__name__}."
             )
 
+        # Round up hidden size and update moe_config.
+        hidden_size, intermediate_size_per_partition = (
+            self.quant_method.maybe_roundup_sizes(
+                hidden_size,
+                intermediate_size_per_partition,
+                moe_in_dtype,
+                self.moe_parallel_config,
+            )
+        )
+        self.moe_config.hidden_dim = hidden_size
+        self.moe_config.intermediate_size_per_partition = (
+            intermediate_size_per_partition
+        )
+
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
-            "unpadded_hidden_size": unpadded_hidden_size,
-            "intermediate_size_per_partition": self.intermediate_size_per_partition,
+            "intermediate_size_per_partition": intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
             "global_num_experts": self.global_num_experts,
@@ -610,68 +566,19 @@ class FusedMoE(CustomOp):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        # TODO(bnell): Why is this needed? Can probably be removed.
+        # TODO(bnell): this is un-needed and removed in a follow up PR.
         self.base_quant_method = self.quant_method
 
-        # Note: for now, the layer must keep _gate and _shared_experts.
-        # This is because a number of locations swap out the quant_method
-        # which requires re-initializing the SharedExperts and DefaultMoERunner.
-        # Once we've figured out alternatives to swapping out the quant_method,
-        # we can move ownership of _gate and _shared_experts into the runner.
-        self._gate = gate
-        self._shared_experts = shared_experts
-        self.shared_experts: SharedExperts | None = None
-        self.runner = self._init_runner()
-
-    def _init_shared_experts(self):  # -> SharedExperts | None:
-        if self._shared_experts is None:
-            return
-
-        # Note: If the SharedExperts already exist, we reinitialize
-        # them in place. This is because the MK might be holding a
-        # reference to the same SharedExperts object. If we create a
-        # new instance, the MK will still be holding onto the old one,
-        # including the old quant_method. This is a workaround for
-        # UnquantizedFusedMoEMethod's handling of MK initialization
-        # which should be fixed by #36732.
-        if self.shared_experts is not None:
-            self.shared_experts.__init__(  # type: ignore
-                self._shared_experts,
-                moe_config=self.moe_config,
-                # Note: For now we must pass quant_method along to SharedExperts so it
-                # can property determine where the shared experts are supposed to be
-                # called, i.e. by a MK or by the MoERunner.
-                # Once the MK can be created upfront, we can just pass in the proper
-                # flags derived from the quant_method's MK.
-                reduce_results=self.reduce_results,
-                quant_method=self.quant_method,
-            )
-            return
-
-        self.shared_experts = SharedExperts(
-            self._shared_experts,
-            moe_config=self.moe_config,
-            # Note: For now we must pass quant_method along to SharedExperts so it
-            # can property determine where the shared experts are supposed to be
-            # called, i.e. by a MK or by the MoERunner.
-            # Once the MK can be created upfront, we can just pass in the proper
-            # flags derived from the quant_method's MK.
-            reduce_results=self.reduce_results,
-            quant_method=self.quant_method,
-        )
-
-    def _init_runner(self) -> MoERunner:
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        self._init_shared_experts()
-        return create_moe_runner(
-            layer=self,
+        self.runner = create_moe_runner(
+            layer_name=self.layer_name,
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=self._gate,
-            shared_experts=self.shared_experts,
+            gate=gate,
+            shared_experts=shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
@@ -682,10 +589,7 @@ class FusedMoE(CustomOp):
     # intrusive way to do this.
     def _replace_quant_method(self, mk: FusedMoEMethodBase):
         self.quant_method = mk
-        # We need to force reconstruction of runner because we're swapping out
-        # the quant_method with a FusedMoEModularMethod. This logic can go
-        # away once the FusedMoEModularMethod is eliminated.
-        self.runner = self._init_runner()
+        self.runner._replace_quant_method(mk)
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -717,6 +621,10 @@ class FusedMoE(CustomOp):
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
+
+    @property
+    def shared_experts(self) -> SharedExperts | None:
+        return self.runner.shared_experts
 
     @property
     def layer_id(self):
@@ -932,6 +840,10 @@ class FusedMoE(CustomOp):
     ):
         # for per channel weight quantization
         if shard_id == "w2":
+            hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
+            expert_data = self._narrow_expert_data_for_padding(
+                expert_data, loaded_weight, hidden_dim=hidden_dim
+            )
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -941,6 +853,59 @@ class FusedMoE(CustomOp):
                 expert_data=expert_data,
                 tp_rank=tp_rank,
             )
+
+    @staticmethod
+    def _get_hidden_dim(shard_dim: int, ndim: int) -> int:
+        """Compute the hidden dimension index from the shard (intermediate)
+        dimension and tensor rank.
+
+        For 2D weight tensors the two data dims are (0, 1). For 3D tensors
+        with an expert dimension at dim 0, they are (1, 2). ``shard_dim``
+        occupies one of these; the hidden dimension is the other.
+        For 1D tensors (e.g. per-channel scales) returns 0.
+        """
+        if ndim < 2:
+            return 0
+        dim_a = ndim - 2
+        dim_b = ndim - 1
+        if shard_dim == dim_a:
+            return dim_b
+        if shard_dim == dim_b:
+            return dim_a
+        raise ValueError(
+            f"shard_dim={shard_dim} is not a valid data dimension "
+            f"for a {ndim}D tensor (expected {dim_a} or {dim_b})"
+        )
+
+    @staticmethod
+    def _narrow_expert_data_for_padding(
+        expert_data: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        hidden_dim: int,
+    ) -> torch.Tensor:
+        """Narrow expert_data hidden dim to match loaded_weight for padded
+        hidden_size.
+
+        When backends (e.g., DeepEP) round up hidden_size, weight parameters
+        are larger than checkpoint weights. Narrow the padded hidden dimension
+        before copying.
+
+        Args:
+            expert_data: The (possibly padded) parameter tensor to narrow.
+            loaded_weight: The checkpoint weight tensor with original size.
+            hidden_dim: The dimension index corresponding to hidden_size.
+                Must be non-negative.
+        """
+        if (
+            loaded_weight.ndim > 0
+            and 0 <= hidden_dim < expert_data.ndim
+            and hidden_dim < loaded_weight.ndim
+            and expert_data.shape[hidden_dim] > loaded_weight.shape[hidden_dim]
+        ):
+            expert_data = expert_data.narrow(
+                hidden_dim, 0, loaded_weight.shape[hidden_dim]
+            )
+        return expert_data
 
     def _load_w13(
         self,
@@ -960,9 +925,17 @@ class FusedMoE(CustomOp):
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            loaded_weight = loaded_weight.narrow(
-                shard_dim, shard_size * tp_rank, shard_size
-            )
+            # Handle padding: loaded_weight might be smaller than shard_size on last
+            # TP rank
+            start_offset = shard_size * tp_rank
+            available = loaded_weight.shape[shard_dim] - start_offset
+            if available <= 0:
+                # If there is no available weight to load for this TP rank
+                # (can happen on last TP rank with padding), we can skip
+                # loading and return early
+                return
+            narrow_size = min(shard_size, available)
+            loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":
@@ -971,6 +944,10 @@ class FusedMoE(CustomOp):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+        hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
+        expert_data = self._narrow_expert_data_for_padding(
+            expert_data, loaded_weight, hidden_dim=hidden_dim
+        )
         expert_data.copy_(loaded_weight)
 
     def _load_w2(
@@ -988,10 +965,22 @@ class FusedMoE(CustomOp):
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            loaded_weight = loaded_weight.narrow(
-                shard_dim, shard_size * tp_rank, shard_size
-            )
+            # Handle padding: loaded_weight might be smaller than shard_size on last
+            # TP rank
+            start_offset = shard_size * tp_rank
+            available = loaded_weight.shape[shard_dim] - start_offset
+            if available <= 0:
+                # If there is no available weight to load for this TP rank
+                # (can happen on last TP rank with padding), we can skip
+                # loading and return early
+                return
+            narrow_size = min(shard_size, available)
+            loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # w2, down_proj: Load into only logical weight of w2.
+        hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
+        expert_data = self._narrow_expert_data_for_padding(
+            expert_data, loaded_weight, hidden_dim=hidden_dim
+        )
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
@@ -1138,9 +1127,25 @@ class FusedMoE(CustomOp):
 
             expert_data = param.data[expert_id]
             if shard_id == "w2":
+                # BnB params are stored as flat packed tensors (e.g.
+                # (packed_size, 1)), not in the logical weight layout.
+                # Narrowing packed data for hidden-dim padding is not
+                # meaningful, so require an exact shape match.
+                if expert_data.shape != loaded_weight.shape:
+                    raise ValueError(
+                        "BitsAndBytes quantization with padded hidden_size "
+                        "(e.g., from DeepEP) is not supported. "
+                        f"Parameter shape {tuple(expert_data.shape)} != "
+                        f"checkpoint shape {tuple(loaded_weight.shape)}"
+                    )
                 expert_data.copy_(loaded_weight)
             elif shard_id in ("w1", "w3"):
-                # BNB inflight quantization has already sharded the weights
+                # BnB stores weights as flat packed tensors.  _load_w13 is
+                # still used to split the w1/w3 portions along shard_dim.
+                # _narrow_expert_data_for_padding will be a no-op since
+                # packed sizes should already match; if DeepEP padding
+                # causes a mismatch the copy_() will fail with a clear
+                # shape error.
                 full_load = True
                 self._load_w13(
                     shard_id=shard_id,
@@ -1583,6 +1588,14 @@ class FusedMoE(CustomOp):
                 ("w3", ckpt_up_proj_name),
             ]
         ]
+
+    @property
+    def hidden_size(self) -> int:
+        return self.moe_config.hidden_dim
+
+    @property
+    def intermediate_size_per_partition(self) -> int:
+        return self.moe_config.intermediate_size_per_partition
 
     def extra_repr(self) -> str:
         s = (
