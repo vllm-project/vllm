@@ -28,7 +28,7 @@ def _count_in_rope_fusion_after_dump(dump_dir: Path, needle: str) -> int:
     not current_platform.is_cuda_alike() or not torch.cuda.is_available(),
     reason="MLA cache fusion test requires a CUDA-alike GPU device.",
 )
-def test_mla_cache_fusion_with_deepseek_v3_tiny_random(
+def test_mla_cache_fusion_with_deepseek_v2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
