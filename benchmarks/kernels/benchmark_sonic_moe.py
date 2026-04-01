@@ -14,11 +14,23 @@ from vllm.model_executor.layers.fused_moe.sonic_moe import (
 )
 
 SHAPES = [
-    # SonicMoE cutedsl kernels require hidden_dim (k) >= 512 and divisible by 64.
-    # Choose shapes that also have tuned Triton configs on H100:
-    # (e=8, n=4096)->N=2048 and (e=8, n=8192)->N=4096.
+    # (m, k, n, e, topk) — SonicMoE requires k >= 512, k % 64 == 0, (n/2) % 64 == 0.
+    # Shapes without a tuned Triton config on this device are skipped at runtime.
+    #
+    # Prefill shapes (larger M):
+    (256, 512, 2048, 8, 2),
     (256, 512, 4096, 8, 2),
+    (256, 1024, 4096, 16, 4),
+    (512, 512, 4096, 8, 2),
+    (512, 1024, 4096, 8, 2),
     (512, 1024, 8192, 8, 4),
+    (1024, 1024, 4096, 8, 2),
+    # Decode shapes (smaller M):
+    (1, 512, 4096, 8, 2),
+    (1, 1024, 4096, 8, 2),
+    (8, 512, 4096, 8, 2),
+    (8, 1024, 4096, 16, 4),
+    (64, 1024, 4096, 8, 2),
 ]
 
 
