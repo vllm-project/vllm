@@ -6,14 +6,13 @@ import asyncio
 
 import pytest
 
+from tests.v1.shutdown.utils import SHUTDOWN_TEST_TIMEOUT_SEC, get_engine_input
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import tokens_input
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineGenerateError
-
-from .utils import SHUTDOWN_TEST_TIMEOUT_SEC, get_engine_input
 
 MODELS = ["meta-llama/Llama-3.2-1B"]
 

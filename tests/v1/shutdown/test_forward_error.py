@@ -8,18 +8,17 @@ import inspect
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
+from tests.v1.shutdown.utils import (
+    SHUTDOWN_TEST_THRESHOLD_BYTES,
+    SHUTDOWN_TEST_TIMEOUT_SEC,
+    get_engine_input,
+)
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
-
-from .utils import (
-    SHUTDOWN_TEST_THRESHOLD_BYTES,
-    SHUTDOWN_TEST_TIMEOUT_SEC,
-    get_engine_input,
-)
 
 MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 

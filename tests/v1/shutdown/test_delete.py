@@ -5,17 +5,16 @@
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
+from tests.v1.shutdown.utils import (
+    SHUTDOWN_TEST_THRESHOLD_BYTES,
+    SHUTDOWN_TEST_TIMEOUT_SEC,
+    get_engine_input,
+)
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-
-from .utils import (
-    SHUTDOWN_TEST_THRESHOLD_BYTES,
-    SHUTDOWN_TEST_TIMEOUT_SEC,
-    get_engine_input,
-)
 
 MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
