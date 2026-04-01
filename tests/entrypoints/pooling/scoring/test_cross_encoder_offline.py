@@ -112,6 +112,37 @@ def test_classify(llm):
     assert len(outputs[0].outputs.data) == 1
 
 
+@pytest.mark.skip_global_cleanup
+def test_max_tokens_per_doc_offline(llm: LLM):
+    """Test max_tokens_per_doc via PoolingParams.extra_kwargs (offline)."""
+    long_doc = "The capital of France is Paris. " * 20
+
+    # Without truncation
+    outputs_no_limit = llm.score(
+        TEXTS_1[0],
+        long_doc,
+        use_tqdm=False,
+    )
+
+    # With truncation via extra_kwargs
+    outputs_with_limit = llm.score(
+        TEXTS_1[0],
+        long_doc,
+        pooling_params=PoolingParams(
+            extra_kwargs={"max_tokens_per_doc": 10}
+        ),
+        use_tqdm=False,
+    )
+
+    assert len(outputs_no_limit) == 1
+    assert len(outputs_with_limit) == 1
+
+    # Truncated version should have fewer prompt tokens
+    no_limit_tokens = len(outputs_no_limit[0].prompt_token_ids)
+    with_limit_tokens = len(outputs_with_limit[0].prompt_token_ids)
+    assert with_limit_tokens < no_limit_tokens
+
+
 def test_pooling_params(llm: LLM):
     def get_outputs(use_activation):
         outputs = llm.score(
