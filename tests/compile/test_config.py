@@ -412,7 +412,7 @@ def test_cudagraph_sizes_post_init(
 
     with (
         ctx,
-        patch("vllm.config.parallel.cuda_device_count_stateless", return_value=tp_size),
+        patch.object(current_platform, "device_count", return_value=tp_size),
     ):
         kwargs = {}
         if cudagraph_capture_sizes is not None:
