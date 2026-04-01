@@ -59,9 +59,9 @@ def _make_asgi_io():
     async def _send(message):
         nonlocal status_code
         mtype = message.get("type", "")
-        if mtype in ("http.response.start", "websocket.http.response.start"):
+        if mtype == "http.response.start":
             status_code = message["status"]
-        elif mtype in ("http.response.body", "websocket.http.response.body"):
+        elif mtype == "http.response.body":
             body_parts.append(message.get("body", b""))
 
     def get_response() -> tuple[int | None, dict]:
