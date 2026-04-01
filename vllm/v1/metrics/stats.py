@@ -270,7 +270,7 @@ class PromptTokenStats:
     def update_from_output(
         self,
         num_cached_tokens: int,
-        num_external_computed_tokens: int,
+        num_external_cached_tokens: int,
         prompt_len: int,
     ) -> None:
         """Update stats from a prefill output."""
@@ -280,7 +280,7 @@ class PromptTokenStats:
         recomputed = 1 if (num_cached_tokens + 1 == prompt_len) else 0
 
         self.computed += prompt_len - num_cached_tokens
-        self.external_kv_transfer += num_external_computed_tokens
+        self.external_kv_transfer += num_external_cached_tokens
         # FIXME(yifan): local_cache_hit can go negative after preemption.
         # num_cached_tokens is a one-time snapshot from first scheduling and
         # is never reset on preemption, while num_external_computed_tokens is
@@ -290,7 +290,7 @@ class PromptTokenStats:
         # as a separate metric rather than reusing num_external_computed_tokens
         # for metric directly.
         self.local_cache_hit += max(
-            0, (num_cached_tokens + recomputed - num_external_computed_tokens)
+            0, (num_cached_tokens + recomputed - num_external_cached_tokens)
         )
         self.cached_tokens += num_cached_tokens
         self.recomputed_tokens += recomputed
@@ -352,7 +352,7 @@ class IterationStats:
         if is_prefilling:
             self.prompt_token_stats.update_from_output(
                 num_cached_tokens=output.num_cached_tokens,
-                num_external_computed_tokens=output.num_external_computed_tokens,
+                num_external_cached_tokens=output.num_external_cached_tokens,
                 prompt_len=prompt_len,
             )
 
