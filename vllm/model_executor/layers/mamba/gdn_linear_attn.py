@@ -259,6 +259,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self._forward_method = (
+            self.forward_xpu if current_platform.is_xpu() else self.forward_cuda
+        )
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -491,10 +494,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        if current_platform.is_xpu():
-            self.forward_xpu(hidden_states, output)
-        else:
-            self.forward_cuda(hidden_states, output)
+        self._forward_method(hidden_states, output)
 
     def forward_cuda(
         self,
