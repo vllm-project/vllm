@@ -315,6 +315,7 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     "seq_len_range,test_id",
     [
         pytest.param((4000, 8000), "short_sequences", id="short"),
+        pytest.param((8000, 32000), "medium_sequences", id="medium"),
         pytest.param((32000, 163840), "long_sequences", id="long"),
     ],
 )
@@ -713,23 +714,23 @@ def test_persistent_topk_stress() -> None:
 @pytest.mark.parametrize(
     "test_config",
     [
-        # Mixed batch: some rows medium, some large
+        # Mixed batch: rows spanning all four paths (trivial, decode, medium, large)
         pytest.param(
             {
-                "seq_lens": [4000, 80000, 6000, 100000],
+                "seq_lens": [2000, 6000, 30000, 80000],
                 "top_k": 2048,
                 "data_type": "random",
             },
-            id="mixed_medium_large",
+            id="mixed_all_paths",
         ),
-        # All medium rows (typical decode scenario)
+        # All decode/medium rows (typical decode scenario)
         pytest.param(
             {
-                "seq_lens": [2048, 4096, 6144, 8000],
+                "seq_lens": [2048, 4096, 8192, 16000],
                 "top_k": 2048,
                 "data_type": "random",
             },
-            id="all_medium_decode",
+            id="all_decode_medium",
         ),
         # All large rows
         pytest.param(
@@ -740,10 +741,10 @@ def test_persistent_topk_stress() -> None:
             },
             id="all_large",
         ),
-        # Boundary around LARGE_THRESHOLD (64K)
+        # Boundary around LARGE_THRESHOLD (32K)
         pytest.param(
             {
-                "seq_lens": [65535, 65536, 65537, 65540],
+                "seq_lens": [32767, 32768, 32769, 32772],
                 "top_k": 2048,
                 "data_type": "random",
             },
@@ -783,7 +784,7 @@ def test_persistent_topk(test_config: dict) -> None:
     """
     Tests specific to the persistent_topk kernel:
     - Mixed medium/large rows in the same batch (dynamic per-row dispatch)
-    - Boundary around LARGE_THRESHOLD (64K)
+    - Boundary around LARGE_THRESHOLD (32K)
     - Trivial + medium + large rows in a single batch
     """
     run_large_context_topk_test(

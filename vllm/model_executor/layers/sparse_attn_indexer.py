@@ -41,7 +41,6 @@ def sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
-    topk_workspace: torch.Tensor,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -53,6 +52,7 @@ def sparse_attn_indexer(
         current_workspace_manager().get_simultaneous(
             ((total_seq_lens, head_dim), torch.float8_e4m3fn),
             ((total_seq_lens, 4), torch.uint8),
+            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
         return sparse_attn_indexer_fake(
             hidden_states,
@@ -68,7 +68,6 @@ def sparse_attn_indexer(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
-            topk_workspace,
         )
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
@@ -199,6 +198,10 @@ def sparse_attn_indexer(
             ).flatten()
 
         if current_platform.is_cuda():
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
             torch.ops._C.persistent_topk(
                 logits,
                 lengths,
@@ -259,7 +262,6 @@ def sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
-    topk_workspace: torch.Tensor | None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -296,7 +298,6 @@ class SparseAttnIndexer(CustomOp):
         max_model_len: int,
         max_total_seq_len: int,
         topk_indices_buffer: torch.Tensor,
-        topk_workspace: torch.Tensor,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -307,7 +308,6 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
-        self.topk_workspace = topk_workspace
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
@@ -351,7 +351,6 @@ class SparseAttnIndexer(CustomOp):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
-            self.topk_workspace,
         )
 
     def forward_hip(
