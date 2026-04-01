@@ -105,11 +105,6 @@ class ActiveKVConnector(KVConnector):
         self._step_has_pre_forward_work = False
         return output
 
-    def clear_metadata(self) -> None:
-        """Clear the connector metadata. Call this after draft model runs."""
-        if not self._disabled:
-            self.kv_connector.clear_connector_metadata()
-
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:
             return EMPTY_MODEL_RUNNER_OUTPUT

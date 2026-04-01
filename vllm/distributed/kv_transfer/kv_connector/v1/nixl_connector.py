@@ -330,6 +330,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         if backend.get_name() not in (
             "FLASH_ATTN",
             "FLASHINFER",
+            "TRITON_ATTN",
         ):
             return False
 
@@ -2132,6 +2133,21 @@ class NixlConnectorWorker:
                     "Or enable experimental feature to use HND to NHD support by "
                     "setting 'enable_permute_local_kv'=True in --kv-transfer-config."
                 )
+
+        # Heterogeneous TP requires head-splitting, which only works with
+        # HND layout. MLA and replicated-KV cases don't split on heads.
+        # Mamba doesn't support heterogeneous TP.
+        if (
+            abs(tp_ratio) != 1
+            and not self.use_mla
+            and not self.kv_topo.is_kv_replicated(remote_engine_id)
+            and kv_cache_layout != "HND"
+            and not self.enable_permute_local_kv
+        ):
+            raise RuntimeError(
+                "Heterogeneous TP head-dimension splitting requires contiguous heads. "
+                "Use HND layout on the prefill side."
+            )
 
         # Block len can only vary across layers when using MLA.
         remote_block_len = nixl_agent_meta.block_lens[0]
