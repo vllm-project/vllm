@@ -1982,6 +1982,10 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
+    @staticmethod
+    def _supports_batch_invariance():
+        return True
+
     def supports_expert_map(self) -> bool:
         return True
 

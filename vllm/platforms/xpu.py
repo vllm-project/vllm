@@ -21,6 +21,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -160,11 +161,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
-        # in V1(or with chunked prefill) block_size is 64
-        if cache_config and not cache_config.user_specified_block_size:
-            cache_config.block_size = 64
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
@@ -222,12 +219,6 @@ class XPUPlatform(Platform):
         os.environ["UCX_MEMTYPE_CACHE"] = "n"
 
     @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: XPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
-
-    @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
 
@@ -266,6 +257,21 @@ class XPUPlatform(Platform):
                 " is not available."
             )
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use fused kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+
+        return IrOpPriorityConfig.with_default(default)
 
     @classmethod
     def device_count(cls) -> int:
