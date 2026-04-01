@@ -356,8 +356,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # --8<-- [end:chat-completion-extra-params]
 
-    @model_validator(mode="after")
-    def _materialize_tool_calls(self) -> "ChatCompletionRequest":
+    @model_validator(mode="before")
+    @classmethod
+    def _materialize_tool_calls(cls, data: Any) -> Any:
         """Eagerly convert tool_calls from Iterable to list.
 
         The OpenAI Python library types tool_calls as Iterable[...] in
@@ -367,16 +368,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
         logging via model_dump_json()), the iterator is exhausted and
         downstream code (e.g. the Mistral tokenizer) sees empty tool_calls.
 
-        Running after validation ensures we materialise even after Pydantic
-        wraps the field in a ValidatorIterator.
+        Must run in mode="before" so generators/iterators are materialised
+        before Pydantic consumes them during union type validation.
         """
-        for msg in self.messages:
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return data
+        for msg in messages:
             if not isinstance(msg, dict):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
-        return self
+        return data
 
     def build_chat_params(
         self,
