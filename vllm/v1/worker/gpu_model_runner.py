@@ -3164,9 +3164,18 @@ class GPUModelRunner(
                         ):
                             eff = rs.sampling_params.effective_prefill_steering
                             if eff:
-                                self._steering_manager.register_config(
-                                    ph, eff, phase="prefill"
-                                )
+                                try:
+                                    self._steering_manager.register_config(
+                                        ph, eff, phase="prefill"
+                                    )
+                                except RuntimeError:
+                                    logger.warning(
+                                        "Could not register prefill steering "
+                                        "config (hash=%d) during init -- "
+                                        "capacity full, falling back to "
+                                        "global prefill steering",
+                                        ph,
+                                    )
                         self._req_steering_phase[rid] = "prefill"
                     else:
                         # In decode (full prefix-cache hit) — register
@@ -3179,9 +3188,18 @@ class GPUModelRunner(
                         ):
                             eff = rs.sampling_params.effective_decode_steering
                             if eff:
-                                self._steering_manager.register_config(
-                                    dh, eff, phase="decode"
-                                )
+                                try:
+                                    self._steering_manager.register_config(
+                                        dh, eff, phase="decode"
+                                    )
+                                except RuntimeError:
+                                    logger.warning(
+                                        "Could not register decode steering "
+                                        "config (hash=%d) during init -- "
+                                        "capacity full, falling back to "
+                                        "global decode steering",
+                                        dh,
+                                    )
                         self._req_steering_phase[rid] = "decode"
             else:
                 self._steering_manager = None

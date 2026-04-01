@@ -1033,3 +1033,158 @@ class TestPhaseTrackingRelease:
         # The prefill config for request B must still be intact.
         assert (10, "prefill") in mgr.config_to_row
         assert mgr.config_refcounts[(10, "prefill")] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestLazyInitCapacityExhaustion
+# ---------------------------------------------------------------------------
+
+
+class TestLazyInitCapacityExhaustion:
+    """Simulate the lazy-init registration path where more distinct
+    configs arrive in the first batch than ``max_steering_configs``
+    allows.  The engine must degrade gracefully (fall back to global
+    steering for the overflow configs) rather than crash with a
+    ``RuntimeError``.
+
+    This mirrors the guard already present in
+    ``_handle_steering_transition`` and validates that the lazy-init
+    block in ``_update_steering_buffers`` is equally resilient.
+    """
+
+    def test_prefill_overflow_does_not_crash(self):
+        """Registering more prefill configs than capacity should not raise."""
+        max_cfgs = 2
+        mgr = _make_manager(max_configs=max_cfgs)
+
+        # Fill all available slots
+        for i in range(max_cfgs):
+            vectors = {_HP: {0: [float(i + 1)] * HIDDEN_SIZE}}
+            mgr.register_config(config_hash=100 + i, vectors=vectors, phase="prefill")
+
+        assert mgr.num_active_configs == max_cfgs
+
+        # The next registration should raise RuntimeError (which the
+        # model runner wraps in try/except).
+        overflow_vectors = {_HP: {0: [99.0] * HIDDEN_SIZE}}
+        try:
+            mgr.register_config(
+                config_hash=999, vectors=overflow_vectors, phase="prefill"
+            )
+            overflowed = False
+        except RuntimeError:
+            overflowed = True
+
+        assert overflowed, (
+            "register_config should raise RuntimeError when capacity is full"
+        )
+
+        # Previously registered configs must still be intact.
+        assert mgr.num_active_configs == max_cfgs
+        for i in range(max_cfgs):
+            assert (100 + i, "prefill") in mgr.config_to_row
+
+    def test_decode_overflow_does_not_crash(self):
+        """Registering more decode configs than capacity should not raise."""
+        max_cfgs = 2
+        mgr = _make_manager(max_configs=max_cfgs)
+
+        # Fill all available slots with decode configs
+        for i in range(max_cfgs):
+            vectors = {_HP: {0: [float(i + 1)] * HIDDEN_SIZE}}
+            mgr.register_config(config_hash=200 + i, vectors=vectors, phase="decode")
+
+        assert mgr.num_active_configs == max_cfgs
+
+        overflow_vectors = {_HP: {0: [99.0] * HIDDEN_SIZE}}
+        try:
+            mgr.register_config(
+                config_hash=888, vectors=overflow_vectors, phase="decode"
+            )
+            overflowed = False
+        except RuntimeError:
+            overflowed = True
+
+        assert overflowed, (
+            "register_config should raise RuntimeError when capacity is full"
+        )
+
+        # Previously registered configs must still be intact.
+        assert mgr.num_active_configs == max_cfgs
+        for i in range(max_cfgs):
+            assert (200 + i, "decode") in mgr.config_to_row
+
+    def test_mixed_phase_overflow_graceful(self):
+        """Simulate a lazy-init batch with mixed prefill/decode configs
+        exceeding capacity.  The first ``max_steering_configs`` registrations
+        succeed; subsequent ones raise RuntimeError (caught by the
+        model runner).  The manager remains consistent throughout.
+        """
+        max_cfgs = 3
+        mgr = _make_manager(max_configs=max_cfgs)
+
+        registered_keys: list[tuple[int, str]] = []
+        overflow_count = 0
+
+        # Try to register 5 configs (3 prefill + 2 decode) with only 3
+        # slots available.
+        configs = [
+            (10, "prefill"),
+            (20, "prefill"),
+            (30, "prefill"),
+            (40, "decode"),
+            (50, "decode"),
+        ]
+        for config_hash, phase in configs:
+            vectors = {_HP: {0: [float(config_hash)] * HIDDEN_SIZE}}
+            try:
+                mgr.register_config(
+                    config_hash=config_hash, vectors=vectors, phase=phase
+                )
+                registered_keys.append((config_hash, phase))
+            except RuntimeError:
+                overflow_count += 1
+
+        # Exactly max_cfgs should have succeeded.
+        assert len(registered_keys) == max_cfgs
+        assert overflow_count == len(configs) - max_cfgs
+
+        # The manager must be internally consistent.
+        assert mgr.num_active_configs == max_cfgs
+        for key in registered_keys:
+            assert key in mgr.config_to_row
+
+        # Releasing one slot and retrying an overflow config should succeed.
+        last_key = registered_keys[-1]
+        mgr.release_config(config_hash=last_key[0], phase=last_key[1])
+        assert mgr.num_active_configs == max_cfgs - 1
+
+        # Now the overflow config should register fine.
+        vectors = {_HP: {0: [40.0] * HIDDEN_SIZE}}
+        row = mgr.register_config(config_hash=40, vectors=vectors, phase="decode")
+        assert row >= 3
+        assert mgr.num_active_configs == max_cfgs
+
+    def test_overflow_falls_back_to_global_row(self):
+        """When a config cannot be registered due to capacity, the
+        ``get_row_for_config`` call should return the global row
+        (1 for prefill, 2 for decode) rather than crash.
+        """
+        max_cfgs = 1
+        mgr = _make_manager(max_configs=max_cfgs)
+
+        # Fill the single slot.
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+
+        # Overflow config is NOT registered — get_row_for_config
+        # must fall back to the global row.
+        prefill_row = mgr.get_row_for_config(config_hash=999, is_prefill=True)
+        decode_row = mgr.get_row_for_config(config_hash=999, is_prefill=False)
+
+        assert prefill_row == 1, (
+            "Unregistered prefill hash should fall back to global prefill row"
+        )
+        assert decode_row == 2, (
+            "Unregistered decode hash should fall back to global decode row"
+        )
