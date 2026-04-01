@@ -202,6 +202,11 @@ class SonicMoeExperts(mk.FusedMoEExpertsModular):
     ):
         super().__init__(moe_config, quant_config)
         self.out_dtype = moe_config.in_dtype
+        # Cache for pre-allocated routing buffers keyed by
+        # (M, topk, num_experts, device) to avoid per-call GPU allocations.
+        self._routing_cache: dict[
+            tuple[int, int, int, str], dict[str, torch.Tensor]
+        ] = {}
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -378,31 +383,46 @@ class SonicMoeExperts(mk.FusedMoEExpertsModular):
                 f"K={K}, N={n}, E={num_experts}, got {tuple(w2.shape)}"
             )
 
+        # Compute routing metadata for SonicMoE.
+        # Optimized: use sort + searchsorted (2 GPU ops) instead of
+        # argsort + bincount + cumsum + scatter + arange (6+ GPU ops).
+        # Pre-allocated buffers eliminate per-call torch.empty/arange overhead.
         # TODO(https://github.com/vllm-project/vllm/issues/31578): use router logits
-        selected_experts = topk_ids.flatten()
-        # SonicMoE expects `x_gather_idx` in the order produced by sorting the
-        # flattened expert ids (equivalent to `torch.argsort(topk_ids.view(-1))`).
-        s_scatter_idx = torch.argsort(selected_experts).to(torch.int32)
+        device = hidden_states.device
+        mt = M * topk
+        cache_key = (M, topk, num_experts, str(device))
+        if cache_key not in self._routing_cache:
+            self._routing_cache[cache_key] = {
+                "expert_boundaries": torch.arange(
+                    num_experts + 1, device=device, dtype=torch.int64
+                ),
+                "arange_mt": torch.arange(mt, device=device, dtype=torch.int32),
+                "arange_router": torch.arange(
+                    0, mt + 1, topk, device=device, dtype=torch.int32
+                ),
+                "s_reverse_scatter_idx": torch.empty(
+                    mt, device=device, dtype=torch.int32
+                ),
+            }
+        buffers = self._routing_cache[cache_key]
 
-        expert_frequency = selected_experts.bincount(minlength=num_experts).to(
-            torch.int32
-        )
-        # SonicMoE expects an exclusive prefix sum with a leading 0. The i'th
-        # expert reads from [offset[i], offset[i + 1]).
-        expert_offsets = torch.empty(
-            (num_experts + 1,), device=expert_frequency.device, dtype=torch.int32
-        )
-        expert_offsets[0] = 0
-        expert_offsets[1:] = expert_frequency.cumsum(-1)
+        selected_experts = topk_ids.flatten()
+        # Sort by expert ID — returns sorted values (for searchsorted) and
+        # original indices (s_scatter_idx) in a single GPU kernel.
+        sorted_experts, s_scatter_idx = selected_experts.sort(stable=True)
+        s_scatter_idx = s_scatter_idx.to(torch.int32)
+
+        # Expert offsets via searchsorted: replaces bincount + cumsum + empty.
+        # searchsorted(sorted, i) == number of elements < i == exclusive prefix sum.
+        expert_offsets = torch.searchsorted(
+            sorted_experts, buffers["expert_boundaries"]
+        ).to(torch.int32)
         expert_schedule_order = None
 
         x_gather_idx = s_scatter_idx // topk
-        s_reverse_scatter_idx = torch.empty_like(s_scatter_idx)
-        s_reverse_scatter_idx[s_scatter_idx] = torch.arange(
-            s_scatter_idx.numel(),
-            device=s_scatter_idx.device,
-            dtype=s_scatter_idx.dtype,
-        )
+        # Inverse permutation using pre-allocated buffer.
+        s_reverse_scatter_idx = buffers["s_reverse_scatter_idx"]
+        s_reverse_scatter_idx[s_scatter_idx.long()] = buffers["arange_mt"]
 
         z = workspace13[: M * topk, :two_n].view(M * topk, two_n)
         # workspace2 is a flat buffer. Carve compact matrices for y1/y2.
@@ -428,7 +448,7 @@ class SonicMoeExperts(mk.FusedMoEExpertsModular):
                 stream_id=stream_id,
                 activation_type=act_type,
                 is_glu_activation=True,
-                is_inference_mode_enabled=False,
+                is_inference_mode_enabled=True,
             )
         except Exception as e:
             # nvidia-cutlass-dsl has known failure modes where a raised exception
@@ -486,9 +506,7 @@ class SonicMoeExperts(mk.FusedMoEExpertsModular):
                 o=output,
                 topk_scores=topk_scores,
                 s_reverse_scatter_idx=s_reverse_scatter_idx,
-                num_activated_expert_per_token_offset=torch.arange(
-                    0, M * topk + 1, topk, device=output.device, dtype=torch.int32
-                ),
+                num_activated_expert_per_token_offset=buffers["arange_router"],
                 varlen_K_max=topk,
                 H=K,
                 is_varlen_K=False,
