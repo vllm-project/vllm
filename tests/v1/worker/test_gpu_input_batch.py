@@ -440,3 +440,51 @@ def test_pooling_prompt_lens_not_aliased(device: str):
         "mutations to num_prompt_tokens_cpu_tensor corrupted prompt_lens. "
         f"Expected {prompt_lens_snapshot}, got {metadata.prompt_lens}"
     )
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_swap_states_swaps_steering_hashes(device: str):
+    """Verify that swap_states() correctly swaps per-request steering hashes.
+
+    Without the swap, requests at swapped indices would silently receive
+    the wrong steering vectors after _may_reorder_batch() (MLA backend).
+    """
+    batch_size = 4
+    input_batch = InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+    )
+
+    # Add requests with distinct steering hashes
+    reqs: list[CachedRequestState] = []
+    prefill_hashes = [111, 222, 333, 444]
+    decode_hashes = [555, 666, 777, 888]
+    for i in range(batch_size):
+        req = _construct_cached_request_state(i)
+        req.prefill_steering_config_hash = prefill_hashes[i]
+        req.decode_steering_config_hash = decode_hashes[i]
+        input_batch.add_request(req)
+        reqs.append(req)
+
+    # Swap indices 0 and 2
+    i1, i2 = 0, 2
+    input_batch.swap_states(i1, i2)
+
+    # After the swap, index 0 should have the hashes that were at index 2
+    # and vice versa.
+    assert input_batch.request_prefill_steering_hash[i1] == prefill_hashes[i2]
+    assert input_batch.request_prefill_steering_hash[i2] == prefill_hashes[i1]
+    assert input_batch.request_decode_steering_hash[i1] == decode_hashes[i2]
+    assert input_batch.request_decode_steering_hash[i2] == decode_hashes[i1]
+
+    # Indices that were NOT swapped must remain unchanged.
+    assert input_batch.request_prefill_steering_hash[1] == prefill_hashes[1]
+    assert input_batch.request_decode_steering_hash[1] == decode_hashes[1]
+    assert input_batch.request_prefill_steering_hash[3] == prefill_hashes[3]
+    assert input_batch.request_decode_steering_hash[3] == decode_hashes[3]
