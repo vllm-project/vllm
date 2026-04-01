@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use openai_protocol::common::{ChatLogProbs, ChatLogProbsContent, LogProbs, TopLogProb};
+use openai_protocol::common::LogProbs;
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
 };
 
+use super::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb};
 use crate::error::{ApiError, server_error};
 
 /// Convert decoded token-position logprobs into the OpenAI completions `logprobs` shape.
@@ -102,7 +103,7 @@ pub fn decoded_logprobs_to_openai_chat(
         .map(position_to_chat_logprobs_content)
         .try_collect()?;
 
-    Ok(ChatLogProbs::Detailed {
+    Ok(ChatLogProbs {
         content: Some(content),
     })
 }

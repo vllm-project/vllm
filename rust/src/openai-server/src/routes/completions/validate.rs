@@ -40,10 +40,6 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "suffix", "suffix is not supported.");
     }
 
-    if request.best_of.is_some() {
-        bail_invalid_request!(param = "best_of", "best_of is not supported.");
-    }
-
     if let Some(logprobs) = request.logprobs
         && logprobs > i32::MAX as u32
     {
@@ -73,40 +69,24 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "logit_bias", "logit_bias is not supported.");
     }
 
-    if request.seed.is_some() {
+    if request.use_beam_search {
         bail_invalid_request!(
-            param = "seed",
-            "seed is not supported, use sampling_seed instead."
+            param = "use_beam_search",
+            "use_beam_search is not supported."
         );
     }
 
-    if request.regex.is_some() {
-        bail_invalid_request!(param = "regex", "regex constraints are not supported.");
-    }
-
-    if request.ebnf.is_some() {
-        bail_invalid_request!(param = "ebnf", "ebnf constraints are not supported.");
-    }
-
-    if request.json_schema.is_some() {
-        bail_invalid_request!(param = "json_schema", "json_schema is not supported.");
-    }
-
-    if request.lora_path.is_some() {
-        bail_invalid_request!(param = "lora_path", "lora_path is not supported.");
-    }
-
-    if request.session_params.is_some() {
+    if request.response_format.is_some() {
         bail_invalid_request!(
-            param = "session_params",
-            "session_params are not supported."
+            param = "response_format",
+            "response_format is not supported."
         );
     }
 
-    if request.return_hidden_states {
+    if request.structured_outputs.is_some() {
         bail_invalid_request!(
-            param = "return_hidden_states",
-            "return_hidden_states is not supported."
+            param = "structured_outputs",
+            "structured_outputs is not supported."
         );
     }
 

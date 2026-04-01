@@ -61,7 +61,7 @@ pub fn prepare_completion_request(
             temperature: request.temperature,
             top_p: request.top_p,
             top_k: request.top_k,
-            seed: request.sampling_seed,
+            seed: request.seed,
             max_tokens: request.max_tokens,
             min_tokens: request.min_tokens,
             logprobs,
@@ -75,9 +75,7 @@ pub fn prepare_completion_request(
         },
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
-            // `no_stop_trim=true` is the closest existing toggle for keeping the terminal stop
-            // token visible in decoded output.
-            include_stop_str_in_output: request.no_stop_trim,
+            include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.as_ref().map(|stop| match stop {
                 StringOrArray::String(string) => vec![string.clone()],
                 StringOrArray::Array(arr) => arr.clone(),

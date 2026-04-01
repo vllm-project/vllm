@@ -40,7 +40,7 @@ pub struct SamplingParams {
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
     pub top_k: Option<i32>,
     /// Random seed used by the sampler when present.
-    pub seed: Option<u64>,
+    pub seed: Option<i64>,
     /// Maximum number of tokens to generate. `None` means no explicit user override.
     pub max_tokens: Option<u32>,
     /// Minimum number of tokens to generate before EOS or stop-token handling.

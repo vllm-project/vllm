@@ -1,4 +1,5 @@
 pub mod logprobs;
+pub mod types;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

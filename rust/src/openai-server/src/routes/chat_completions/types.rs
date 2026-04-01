@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use openai_protocol::chat::{ChatChoice, ChatMessage, MessageContent};
+use openai_protocol::chat::{ChatMessage, MessageContent};
 use openai_protocol::common::{
-    Function, FunctionCall, FunctionChoice, ResponseFormat, StreamOptions, StringOrArray, Tool,
-    ToolChoice, ToolChoiceValue, ToolReference, Usage, default_true, validate_stop,
+    ResponseFormat, StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue,
+    ToolReference, default_true, validate_stop,
 };
 use openai_protocol::sampling_params::{validate_top_k_value, validate_top_p_value};
 use openai_protocol::validated::Normalizable;
@@ -11,15 +11,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
+use crate::routes::utils::types::{ChatLogProbs, StreamOptions, Usage};
+
 /// vLLM-compatible request type for the Chat Completions API.
 ///
-/// Mirrors [`openai_protocol::chat::ChatCompletionRequest`]. The local copy keeps the request
-/// type route-owned so we can add the vLLM-only fields `echo` and `prompt_logprobs` directly
-/// instead of layering wrapper deserializers on top.
+/// Mirrors the Python vLLM `ChatCompletionRequest` class. The local copy keeps the request type
+/// route-owned so we can add vLLM-only fields directly instead of layering wrapper deserializers
+/// on top.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 #[validate(schema(function = "validate_chat_cross_parameters"))]
 pub struct ChatCompletionRequest {
+    // -------- Standard OpenAI API Parameters --------
     /// A list of messages comprising the conversation so far
     #[validate(custom(function = "validate_messages"))]
     pub messages: Vec<ChatMessage>,
@@ -33,20 +36,16 @@ pub struct ChatCompletionRequest {
     #[validate(range(min = -2.0, max = 2.0))]
     pub frequency_penalty: Option<f32>,
 
-    /// Deprecated: Replaced by tool_choice
-    #[deprecated(note = "Use tool_choice instead")]
-    pub function_call: Option<FunctionCall>,
-
-    /// Deprecated: Replaced by tools
-    #[deprecated(note = "Use tools instead")]
-    pub functions: Option<Vec<Function>>,
-
     /// Modify the likelihood of specified tokens appearing in the completion
     pub logit_bias: Option<HashMap<String, f32>>,
 
     /// Whether to return log probabilities of the output tokens
     #[serde(default)]
     pub logprobs: bool,
+
+    /// An integer between 0 and 20 specifying the number of most likely tokens to return
+    #[validate(range(min = 0, max = 20))]
+    pub top_logprobs: Option<u32>,
 
     /// Deprecated: Replaced by max_completion_tokens
     #[deprecated(note = "Use max_completion_tokens instead")]
@@ -57,42 +56,20 @@ pub struct ChatCompletionRequest {
     #[validate(range(min = 1))]
     pub max_completion_tokens: Option<u32>,
 
-    /// Developer-defined tags and values used for filtering completions in the dashboard
-    pub metadata: Option<HashMap<String, String>>,
-
-    /// Output types that you would like the model to generate for this request
-    pub modalities: Option<Vec<String>>,
-
     /// How many chat completion choices to generate for each input message
     #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
-
-    /// Whether to enable parallel function calling during tool use
-    pub parallel_tool_calls: Option<bool>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they
     /// appear in the text so far
     #[validate(range(min = -2.0, max = 2.0))]
     pub presence_penalty: Option<f32>,
 
-    /// Cache key for prompts (beta feature)
-    pub prompt_cache_key: Option<String>,
-
-    /// Effort level for reasoning models (low, medium, high)
-    pub reasoning_effort: Option<String>,
-
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
 
-    /// Safety identifier for content moderation
-    pub safety_identifier: Option<String>,
-
-    /// Deprecated: This feature is in Legacy mode
-    #[deprecated(note = "This feature is in Legacy mode")]
+    /// If specified, our system will make a best effort to sample deterministically
     pub seed: Option<i64>,
-
-    /// The service tier to use for this request
-    pub service_tier: Option<String>,
 
     /// Up to 4 sequences where the API will stop generating further tokens
     #[validate(custom(function = "validate_stop"))]
@@ -109,29 +86,30 @@ pub struct ChatCompletionRequest {
     #[validate(range(min = 0.0, max = 2.0))]
     pub temperature: Option<f32>,
 
-    /// Controls which (if any) tool is called by the model
-    pub tool_choice: Option<ToolChoice>,
-
-    /// A list of tools the model may call
-    pub tools: Option<Vec<Tool>>,
-
-    /// An integer between 0 and 20 specifying the number of most likely tokens to return
-    #[validate(range(min = 0, max = 20))]
-    pub top_logprobs: Option<u32>,
-
     /// An alternative to sampling with temperature
     #[validate(custom(function = "validate_top_p_value"))]
     pub top_p: Option<f32>,
 
-    /// Verbosity level for debugging
-    pub verbosity: Option<i32>,
+    /// A list of tools the model may call
+    pub tools: Option<Vec<Tool>>,
 
-    // =============================================================================
-    // Engine-Specific Sampling Parameters
-    // =============================================================================
-    // These parameters are extensions beyond the OpenAI API specification and
-    // control model generation behavior in engine-specific ways.
-    // =============================================================================
+    /// Controls which (if any) tool is called by the model
+    pub tool_choice: Option<ToolChoice>,
+
+    /// Effort level for reasoning models (none, low, medium, high)
+    pub reasoning_effort: Option<String>,
+
+    /// Whether to enable parallel function calling during tool use
+    pub parallel_tool_calls: Option<bool>,
+
+    /// A unique identifier representing your end-user
+    pub user: Option<String>,
+
+    // -------- vLLM Sampling Parameters --------
+    /// Use beam search instead of sampling
+    #[serde(default)]
+    pub use_beam_search: bool,
+
     /// Top-k sampling parameter (-1 to disable)
     #[validate(custom(function = "validate_top_k_value"))]
     pub top_k: Option<i32>,
@@ -140,114 +118,185 @@ pub struct ChatCompletionRequest {
     #[validate(range(min = 0.0, max = 1.0))]
     pub min_p: Option<f32>,
 
-    /// Minimum number of tokens to generate
-    #[validate(range(min = 1))]
-    pub min_tokens: Option<u32>,
-
     /// Repetition penalty for reducing repetitive text
     #[validate(range(min = 0.0, max = 2.0))]
     pub repetition_penalty: Option<f32>,
 
-    /// Regex constraint for output generation
-    pub regex: Option<String>,
-
-    /// EBNF grammar constraint for structured output
-    pub ebnf: Option<String>,
+    /// Length penalty for beam search
+    pub length_penalty: Option<f32>,
 
     /// Specific token IDs to use as stop conditions
     pub stop_token_ids: Option<Vec<u32>>,
 
-    /// Skip trimming stop tokens from output
+    /// Include stop string in output
     #[serde(default)]
-    pub no_stop_trim: bool,
+    pub include_stop_str_in_output: bool,
 
     /// Ignore end-of-sequence tokens during generation
     #[serde(default)]
     pub ignore_eos: bool,
 
-    /// Continue generating from final assistant message
-    #[serde(default)]
-    pub continue_final_message: bool,
+    /// Minimum number of tokens to generate
+    #[validate(range(min = 1))]
+    pub min_tokens: Option<u32>,
 
     /// Skip special tokens during detokenization
     #[serde(default = "default_true")]
     pub skip_special_tokens: bool,
 
-    /// Path to LoRA adapter(s) for model customization
-    pub lora_path: Option<String>,
-
-    /// Session parameters for continual prompting
-    pub session_params: Option<HashMap<String, Value>>,
-
-    /// Separate reasoning content from final answer (O1-style models)
+    /// Add spaces between special tokens during detokenization
     #[serde(default = "default_true")]
-    pub separate_reasoning: bool,
+    pub spaces_between_special_tokens: bool,
 
-    /// Stream reasoning tokens during generation
+    /// Truncate prompt tokens to this length (-1 to disable)
+    pub truncate_prompt_tokens: Option<i64>,
+
+    /// Number of prompt logprobs to return
+    pub prompt_logprobs: Option<i32>,
+
+    /// Restrict output to these token IDs only
+    pub allowed_token_ids: Option<Vec<u32>>,
+
+    /// List of bad words to avoid during generation
+    pub bad_words: Option<Vec<String>>,
+
+    // -------- Extra vLLM Parameters --------
+    /// Token budget for reasoning/thinking
+    pub thinking_token_budget: Option<i64>,
+
+    /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
-    pub stream_reasoning: bool,
-
-    /// Chat template kwargs
-    pub chat_template_kwargs: Option<HashMap<String, Value>>,
-
-    /// Return model hidden states
-    #[serde(default)]
-    pub return_hidden_states: bool,
-
-    /// Random seed for sampling for deterministic outputs
-    pub sampling_seed: Option<u64>,
+    pub include_reasoning: bool,
 
     /// If true, the new message will be prepended with the last message if they belong to the same
     /// role.
     #[serde(default)]
     pub echo: bool,
 
-    /// vLLM-compatible prompt logprobs request field missing from `openai-protocol`.
-    pub prompt_logprobs: Option<i32>,
+    /// Whether to add the generation prompt to the chat template
+    #[serde(default = "default_true")]
+    pub add_generation_prompt: bool,
+
+    /// Continue generating from final assistant message
+    #[serde(default)]
+    pub continue_final_message: bool,
+
+    /// Whether to add special tokens (e.g. BOS) to the prompt
+    #[serde(default)]
+    pub add_special_tokens: bool,
+
+    /// Documents for RAG (retrieval-augmented generation)
+    pub documents: Option<Vec<HashMap<String, String>>>,
+
+    /// Jinja chat template override
+    pub chat_template: Option<String>,
+
+    /// Additional keyword args passed to the chat template renderer
+    pub chat_template_kwargs: Option<HashMap<String, Value>>,
+
+    /// Additional kwargs for media IO connectors, keyed by modality
+    pub media_io_kwargs: Option<HashMap<String, Value>>,
+
+    /// Additional kwargs for the HF processor
+    pub mm_processor_kwargs: Option<HashMap<String, Value>>,
+
+    /// Additional kwargs for structured outputs
+    pub structured_outputs: Option<Value>,
+
+    /// Request scheduling priority (lower means earlier; default 0)
+    pub priority: Option<i64>,
+
+    /// Tokens represented as strings of the form 'token_id:{token_id}' in logprobs
+    pub return_tokens_as_token_ids: Option<bool>,
+
+    /// Include token IDs alongside generated text
+    pub return_token_ids: Option<bool>,
+
+    /// Salt for prefix cache isolation in multi-user environments
+    pub cache_salt: Option<String>,
+
+    /// KV transfer parameters for disaggregated serving
+    pub kv_transfer_params: Option<HashMap<String, Value>>,
+
+    /// Additional request parameters with string or numeric values for custom extensions
+    pub vllm_xargs: Option<HashMap<String, Value>>,
+
+    /// Parameters for detecting repetitive N-gram patterns in output tokens
+    pub repetition_detection: Option<Value>,
+}
+
+impl Default for ChatCompletionRequest {
+    #[expect(deprecated)]
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            model: default_model(),
+            frequency_penalty: None,
+            logit_bias: None,
+            logprobs: false,
+            top_logprobs: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            n: None,
+            presence_penalty: None,
+            response_format: None,
+            seed: None,
+            stop: None,
+            stream: false,
+            stream_options: None,
+            temperature: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            thinking_token_budget: None,
+            include_reasoning: true,
+            parallel_tool_calls: None,
+            user: None,
+            use_beam_search: false,
+            top_k: None,
+            min_p: None,
+            repetition_penalty: None,
+            length_penalty: None,
+            stop_token_ids: None,
+            include_stop_str_in_output: false,
+            ignore_eos: false,
+            min_tokens: None,
+            skip_special_tokens: true,
+            spaces_between_special_tokens: true,
+            truncate_prompt_tokens: None,
+            prompt_logprobs: None,
+            allowed_token_ids: None,
+            bad_words: None,
+            echo: false,
+            add_generation_prompt: true,
+            continue_final_message: false,
+            add_special_tokens: false,
+            documents: None,
+            chat_template: None,
+            chat_template_kwargs: None,
+            media_io_kwargs: None,
+            mm_processor_kwargs: None,
+            structured_outputs: None,
+            priority: None,
+            return_tokens_as_token_ids: None,
+            return_token_ids: None,
+            cache_salt: None,
+            kv_transfer_params: None,
+            vllm_xargs: None,
+            repetition_detection: None,
+        }
+    }
 }
 
 impl Normalizable for ChatCompletionRequest {
-    /// Normalize the request by applying migrations and defaults:
-    /// 1. Migrate deprecated fields to their replacements
-    /// 2. Clear deprecated fields and log warnings
-    /// 3. Apply OpenAI defaults for tool_choice
+    /// Normalize the request by applying migrations and defaults.
     fn normalize(&mut self) {
         // Migrate deprecated max_tokens → max_completion_tokens
         #[expect(deprecated)]
         if self.max_completion_tokens.is_none() && self.max_tokens.is_some() {
             self.max_completion_tokens = self.max_tokens;
-            self.max_tokens = None; // Clear deprecated field
-        }
-
-        // Migrate deprecated functions → tools
-        #[expect(deprecated)]
-        if self.tools.is_none() && self.functions.is_some() {
-            tracing::warn!("functions is deprecated, use tools instead");
-            self.tools = self.functions.as_ref().map(|functions| {
-                functions
-                    .iter()
-                    .map(|func| Tool {
-                        tool_type: "function".to_string(),
-                        function: func.clone(),
-                    })
-                    .collect()
-            });
-            self.functions = None; // Clear deprecated field
-        }
-
-        // Migrate deprecated function_call → tool_choice
-        #[expect(deprecated)]
-        if self.tool_choice.is_none() && self.function_call.is_some() {
-            tracing::warn!("function_call is deprecated, use tool_choice instead");
-            self.tool_choice = self.function_call.as_ref().map(|fc| match fc {
-                FunctionCall::None => ToolChoice::Value(ToolChoiceValue::None),
-                FunctionCall::Auto => ToolChoice::Value(ToolChoiceValue::Auto),
-                FunctionCall::Function { name } => ToolChoice::Function {
-                    tool_type: "function".to_string(),
-                    function: FunctionChoice { name: name.clone() },
-                },
-            });
-            self.function_call = None; // Clear deprecated field
+            self.max_tokens = None;
         }
 
         // Apply tool_choice defaults
@@ -265,10 +314,7 @@ impl Normalizable for ChatCompletionRequest {
     }
 }
 
-/// Mirrors [`openai_protocol::chat::ChatCompletionResponse`].
-///
-/// The top-level shape stays aligned with upstream, and the only local extension is the vLLM-only
-/// `prompt_logprobs` payload.
+/// Mirrors the Python vLLM `ChatCompletionResponse` class.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionResponse {
@@ -276,10 +322,79 @@ pub(super) struct ChatCompletionResponse {
     pub object: String,
     pub created: u64,
     pub model: String,
-    pub choices: Vec<ChatChoice>,
+    pub choices: Vec<ChatCompletionChoice>,
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+}
+
+/// Mirrors the Python vLLM `ChatCompletionResponseChoice` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionChoice {
+    pub index: u32,
+    pub message: ChatCompletionMessage,
+    pub logprobs: Option<ChatLogProbs>,
+    pub finish_reason: Option<String>,
+    pub stop_reason: Option<Value>,
+}
+
+/// Mirrors the Python vLLM response `ChatMessage` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionMessage {
+    pub role: String,
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCall>>,
+    pub reasoning: Option<String>,
+}
+
+/// Mirrors the Python vLLM `ChatCompletionStreamResponse` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionStreamResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatCompletionStreamChoice>,
+    pub usage: Option<Usage>,
+}
+
+impl ChatCompletionStreamResponse {
+    /// Create a stream response with the standard envelope fields pre-filled.
+    pub fn new(id: &str, model: &str, created: u64) -> Self {
+        Self {
+            id: id.to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created,
+            model: model.to_string(),
+            choices: Vec::new(),
+            usage: None,
+        }
+    }
+}
+
+/// Mirrors the Python vLLM `ChatCompletionResponseStreamChoice` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Serialize)]
+pub(super) struct ChatCompletionStreamChoice {
+    pub index: u32,
+    pub delta: ChatMessageDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<ChatLogProbs>,
+    pub finish_reason: Option<String>,
+    pub stop_reason: Option<Value>,
+}
+
+/// Mirrors the Python vLLM `DeltaMessage` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Serialize)]
+pub(super) struct ChatMessageDelta {
+    pub role: Option<String>,
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+    pub reasoning: Option<String>,
 }
 
 fn default_model() -> String {
@@ -349,26 +464,7 @@ fn validate_chat_cross_parameters(
         return Err(e);
     }
 
-    // 4. Validate structured output conflicts
-    let has_json_format = matches!(
-        req.response_format,
-        Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
-    );
-
-    if has_json_format && (req.regex.is_some() || req.ebnf.is_some()) {
-        let mut e = validator::ValidationError::new("response_format_conflicts_with_constraints");
-        e.message = Some("response_format cannot be used together with regex or ebnf".into());
-        return Err(e);
-    }
-
-    // 5. Validate mutually exclusive structured output constraints
-    if req.regex.is_some() && req.ebnf.is_some() {
-        let mut e = validator::ValidationError::new("regex_conflicts_with_ebnf");
-        e.message = Some("regex and ebnf cannot both be specified".into());
-        return Err(e);
-    }
-
-    // 6. Validate response format JSON schema name
+    // 4. Validate response format JSON schema name
     if let Some(ResponseFormat::JsonSchema { json_schema }) = &req.response_format
         && json_schema.name.is_empty()
     {
@@ -377,7 +473,7 @@ fn validate_chat_cross_parameters(
         return Err(e);
     }
 
-    // 7. Validate tool_choice requires tools (except for "none")
+    // 5. Validate tool_choice requires tools (except for "none")
     if let Some(ref tool_choice) = req.tool_choice {
         let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
 

@@ -12,13 +12,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use openai_protocol::chat::{
-    ChatChoice, ChatCompletionMessage, ChatCompletionStreamResponse, ChatMessageDelta,
-    ChatStreamChoice,
-};
-use openai_protocol::common::{
-    ChatLogProbs, FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
-};
+use openai_protocol::common::{FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta};
 use openai_protocol::validated::ValidatedJson;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
@@ -31,10 +25,14 @@ use vllm_engine_core_client::protocol::StopReason;
 
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::chat_completions::convert::prepare_chat_request;
-use crate::routes::chat_completions::types::{ChatCompletionRequest, ChatCompletionResponse};
+use crate::routes::chat_completions::types::{
+    ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
+};
 use crate::routes::utils::logprobs::{
     decoded_logprobs_to_openai_chat, decoded_prompt_logprobs_to_maps,
 };
+use crate::routes::utils::types::{ChatLogProbs, Usage};
 use crate::routes::utils::unix_timestamp;
 use crate::state::AppState;
 
@@ -124,7 +122,7 @@ async fn collect_chat_completion(
         output_token_count,
         finish_reason,
     } = collected;
-    let matched_stop = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
     let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?.to_string();
     let tool_calls = message
@@ -165,18 +163,17 @@ async fn collect_chat_completion(
         object: "chat.completion".to_string(),
         created,
         model: response_model,
-        choices: vec![ChatChoice {
+        choices: vec![ChatCompletionChoice {
             index: 0,
             message: ChatCompletionMessage {
                 role: "assistant".to_string(),
                 content: Some(message.text()).filter(|text| !text.is_empty()),
                 tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
-                reasoning_content: message.reasoning(),
+                reasoning: message.reasoning(),
             },
             logprobs,
             finish_reason: Some(finish_reason),
-            matched_stop,
-            hidden_states: None,
+            stop_reason,
         }],
         usage: Some(usage),
         system_fingerprint: None,
@@ -335,15 +332,9 @@ fn usage_chunk(
     created: u64,
     usage: Usage,
 ) -> ChatCompletionStreamResponse {
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: Vec::new(),
-        usage: Some(usage),
-    }
+    let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+    chunk.usage = Some(usage);
+    chunk
 }
 
 /// One in-flight chat-completions SSE chunk being assembled at the route layer.
@@ -357,7 +348,7 @@ fn usage_chunk(
 /// following `LogprobsDelta` and flushes one combined chunk. It relies on the
 /// current `vllm-chat` invariant that all semantic events from one decoded
 /// update are emitted before that update's `LogprobsDelta`.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PendingChatChunk {
     /// The currently buffered OpenAI delta payload assembled from one or more
     /// chat semantic events belonging to the same decoded update.
@@ -367,28 +358,12 @@ struct PendingChatChunk {
     logprobs: Option<ChatLogProbs>,
 }
 
-impl Default for PendingChatChunk {
-    fn default() -> Self {
-        Self {
-            delta: ChatMessageDelta {
-                role: None,
-                content: None,
-                tool_calls: None,
-                reasoning_content: None,
-            },
-            logprobs: None,
-        }
-    }
-}
-
 impl PendingChatChunk {
     /// Append one assistant text/reasoning block delta to the buffered OpenAI delta payload.
     fn push_block_delta(&mut self, kind: AssistantBlockKind, delta: String) {
         match kind {
             AssistantBlockKind::Text => append_delta_text(&mut self.delta.content, delta),
-            AssistantBlockKind::Reasoning => {
-                append_delta_text(&mut self.delta.reasoning_content, delta)
-            }
+            AssistantBlockKind::Reasoning => append_delta_text(&mut self.delta.reasoning, delta),
             AssistantBlockKind::ToolCall => {
                 unreachable!("tool calls must flow through dedicated tool-call chunks")
             }
@@ -445,28 +420,20 @@ impl PendingChatChunk {
         created: u64,
     ) -> Option<ChatCompletionStreamResponse> {
         let has_delta = self.delta.content.is_some()
-            || self.delta.reasoning_content.is_some()
+            || self.delta.reasoning.is_some()
             || self.delta.tool_calls.is_some();
         let logprobs = self.logprobs.take();
         if !has_delta && logprobs.is_none() {
             return None;
         }
 
-        Some(ChatCompletionStreamResponse {
-            id: response_id.to_string(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: response_model.to_string(),
-            system_fingerprint: None,
-            choices: vec![ChatStreamChoice {
-                index: 0,
-                delta: self.take_delta(),
-                logprobs,
-                finish_reason: None,
-                matched_stop: None,
-            }],
-            usage: None,
-        })
+        let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+        chunk.choices.push(ChatCompletionStreamChoice {
+            delta: self.take_delta(),
+            logprobs,
+            ..Default::default()
+        });
+        Some(chunk)
     }
 
     /// Take the currently buffered OpenAI delta payload and leave this pending
@@ -476,7 +443,7 @@ impl PendingChatChunk {
             role: self.delta.role.take(),
             content: self.delta.content.take(),
             tool_calls: self.delta.tool_calls.take(),
-            reasoning_content: self.delta.reasoning_content.take(),
+            reasoning: self.delta.reasoning.take(),
         }
     }
 }
@@ -538,26 +505,15 @@ fn start_chunk(
     response_model: &str,
     created: u64,
 ) -> ChatCompletionStreamResponse {
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![ChatStreamChoice {
-            index: 0,
-            delta: ChatMessageDelta {
-                role: Some("assistant".to_string()),
-                content: None,
-                tool_calls: None,
-                reasoning_content: None,
-            },
-            logprobs: None,
-            finish_reason: None,
-            matched_stop: None,
-        }],
-        usage: None,
-    }
+    let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(ChatCompletionStreamChoice {
+        delta: ChatMessageDelta {
+            role: Some("assistant".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    chunk
 }
 
 /// Build one content-delta SSE chunk from one internal assistant block delta.
@@ -570,37 +526,24 @@ fn block_delta_chunk(
 ) -> ChatCompletionStreamResponse {
     let delta = match kind {
         AssistantBlockKind::Text => ChatMessageDelta {
-            role: None,
             content: Some(delta),
-            tool_calls: None,
-            reasoning_content: None,
+            ..Default::default()
         },
         AssistantBlockKind::Reasoning => ChatMessageDelta {
-            role: None,
-            content: None,
-            tool_calls: None,
-            reasoning_content: Some(delta),
+            reasoning: Some(delta),
+            ..Default::default()
         },
         AssistantBlockKind::ToolCall => {
             unreachable!("tool calls must flow through dedicated tool-call chunks")
         }
     };
 
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![ChatStreamChoice {
-            index: 0,
-            delta,
-            logprobs: None,
-            finish_reason: None,
-            matched_stop: None,
-        }],
-        usage: None,
-    }
+    let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(ChatCompletionStreamChoice {
+        delta,
+        ..Default::default()
+    });
+    chunk
 }
 
 fn tool_call_start_chunk(
@@ -611,34 +554,23 @@ fn tool_call_start_chunk(
     id: String,
     name: String,
 ) -> ChatCompletionStreamResponse {
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![ChatStreamChoice {
-            index: 0,
-            delta: ChatMessageDelta {
-                role: None,
-                content: None,
-                tool_calls: Some(vec![ToolCallDelta {
-                    index: tool_index,
-                    id: Some(id),
-                    tool_type: Some("function".to_string()),
-                    function: Some(FunctionCallDelta {
-                        name: Some(name),
-                        arguments: None,
-                    }),
-                }]),
-                reasoning_content: None,
-            },
-            logprobs: None,
-            finish_reason: None,
-            matched_stop: None,
-        }],
-        usage: None,
-    }
+    let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(ChatCompletionStreamChoice {
+        delta: ChatMessageDelta {
+            tool_calls: Some(vec![ToolCallDelta {
+                index: tool_index,
+                id: Some(id),
+                tool_type: Some("function".to_string()),
+                function: Some(FunctionCallDelta {
+                    name: Some(name),
+                    arguments: None,
+                }),
+            }]),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    chunk
 }
 
 fn tool_call_arguments_chunk(
@@ -649,34 +581,23 @@ fn tool_call_arguments_chunk(
     id: String,
     delta: String,
 ) -> ChatCompletionStreamResponse {
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![ChatStreamChoice {
-            index: 0,
-            delta: ChatMessageDelta {
-                role: None,
-                content: None,
-                tool_calls: Some(vec![ToolCallDelta {
-                    index: tool_index,
-                    id: Some(id),
-                    tool_type: None,
-                    function: Some(FunctionCallDelta {
-                        name: None,
-                        arguments: Some(delta),
-                    }),
-                }]),
-                reasoning_content: None,
-            },
-            logprobs: None,
-            finish_reason: None,
-            matched_stop: None,
-        }],
-        usage: None,
-    }
+    let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(ChatCompletionStreamChoice {
+        delta: ChatMessageDelta {
+            tool_calls: Some(vec![ToolCallDelta {
+                index: tool_index,
+                id: Some(id),
+                tool_type: None,
+                function: Some(FunctionCallDelta {
+                    name: None,
+                    arguments: Some(delta),
+                }),
+            }]),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    chunk
 }
 
 fn logprobs_only_chunk(
@@ -685,26 +606,12 @@ fn logprobs_only_chunk(
     created: u64,
     logprobs: ChatLogProbs,
 ) -> ChatCompletionStreamResponse {
-    ChatCompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![ChatStreamChoice {
-            index: 0,
-            delta: ChatMessageDelta {
-                role: None,
-                content: None,
-                tool_calls: None,
-                reasoning_content: None,
-            },
-            logprobs: Some(logprobs),
-            finish_reason: None,
-            matched_stop: None,
-        }],
-        usage: None,
-    }
+    let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(ChatCompletionStreamChoice {
+        logprobs: Some(logprobs),
+        ..Default::default()
+    });
+    chunk
 }
 
 /// Build the terminal SSE chunk carrying the OpenAI finish reason.
@@ -715,22 +622,23 @@ fn final_chunk(
     finish_reason: FinishReason,
     saw_tool_calls: bool,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
-    let matched_stop = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?;
 
     debug!(
         request_id = %response_id,
         finish_reason = %finish_reason,
-        matched_stop = ?matched_stop,
+        stop_reason = ?stop_reason,
         "chat stream finished"
     );
 
-    Ok(
-        ChatCompletionStreamResponse::builder(response_id.to_string(), response_model.to_string())
-            .created(created)
-            .add_choice_finish_reason(0, finish_reason, matched_stop)
-            .build(),
-    )
+    let mut chunk = ChatCompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(ChatCompletionStreamChoice {
+        finish_reason: Some(finish_reason.to_string()),
+        stop_reason,
+        ..Default::default()
+    });
+    Ok(chunk)
 }
 
 fn chat_finish_reason_to_openai(
@@ -748,7 +656,7 @@ fn chat_finish_reason_to_openai(
     }
 }
 
-/// Convert one internal stop reason into the OpenAI-compatible `matched_stop` JSON shape.
+/// Convert one internal stop reason into the OpenAI-compatible `stop_reason` JSON shape.
 fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
@@ -756,7 +664,6 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt as _, stream};
-    use openai_protocol::common::ChatLogProbs;
     use serde_json::json;
     use vllm_chat::{AssistantBlockKind, ChatEvent, FinishReason};
     use vllm_engine_core_client::protocol::StopReason;
@@ -775,11 +682,11 @@ mod tests {
         );
         assert_eq!(chunk.choices[0].delta.role, None);
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
-        assert_eq!(chunk.choices[0].delta.reasoning_content, None);
+        assert_eq!(chunk.choices[0].delta.reasoning, None);
     }
 
     #[test]
-    fn reasoning_chunk_uses_reasoning_content_only_delta() {
+    fn reasoning_chunk_uses_reasoning_only_delta() {
         let chunk = block_delta_chunk(
             "chatcmpl-1",
             "model",
@@ -790,13 +697,13 @@ mod tests {
         assert_eq!(chunk.choices[0].delta.role, None);
         assert_eq!(chunk.choices[0].delta.content, None);
         assert_eq!(
-            chunk.choices[0].delta.reasoning_content.as_deref(),
+            chunk.choices[0].delta.reasoning.as_deref(),
             Some("thinking")
         );
     }
 
     #[test]
-    fn final_chunk_maps_stop_finish_reason_and_matched_stop() {
+    fn final_chunk_maps_stop_finish_reason_and_stop_reason() {
         let chunk = final_chunk(
             "chatcmpl-1",
             "model",
@@ -807,7 +714,7 @@ mod tests {
         .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
-        assert_eq!(chunk.choices[0].matched_stop, Some(json!("stop")));
+        assert_eq!(chunk.choices[0].stop_reason, Some(json!("stop")));
     }
 
     #[test]
@@ -816,7 +723,7 @@ mod tests {
             .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
-        assert_eq!(chunk.choices[0].matched_stop, None);
+        assert_eq!(chunk.choices[0].stop_reason, None);
     }
 
     #[test]
@@ -887,14 +794,9 @@ mod tests {
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[1].choices[0].delta.content.as_deref(), Some("hi"));
-        match chunks[1].choices[0].logprobs.as_ref().expect("logprobs") {
-            ChatLogProbs::Detailed {
-                content: Some(content),
-            } => {
-                assert_eq!(content[0].token, "hi");
-            }
-            other => panic!("unexpected chat logprobs shape: {other:?}"),
-        }
+        let logprobs = chunks[1].choices[0].logprobs.as_ref().expect("logprobs");
+        let content = logprobs.content.as_ref().expect("logprobs content");
+        assert_eq!(content[0].token, "hi");
     }
 
     #[tokio::test]
@@ -948,7 +850,7 @@ mod tests {
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(
-            chunks[1].choices[0].delta.reasoning_content.as_deref(),
+            chunks[1].choices[0].delta.reasoning.as_deref(),
             Some("think")
         );
         assert!(chunks[1].choices[0].logprobs.is_some());

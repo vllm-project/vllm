@@ -2173,7 +2173,7 @@ async fn prepared_openai_request_streams_text_events() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn reasoning_blocks_are_mapped_to_reasoning_content_sse_chunks() {
+async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
@@ -2215,8 +2215,8 @@ async fn reasoning_blocks_are_mapped_to_reasoning_content_sse_chunks() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
-    assert!(text.contains("\"reasoning_content\":\"think \""), "{text}");
-    assert!(text.contains("\"reasoning_content\":\"more\""), "{text}");
+    assert!(text.contains("\"reasoning\":\"think \""), "{text}");
+    assert!(text.contains("\"reasoning\":\"more\""), "{text}");
     assert!(text.contains("\"content\":\"answer\""), "{text}");
 }
 
@@ -2782,13 +2782,13 @@ async fn non_stream_completions_stop_string_excluded_from_output() {
 
     assert_eq!(json["choices"][0]["text"], "say ");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
-    assert_eq!(json["choices"][0]["matched_stop"], "wor");
+    assert_eq!(json["choices"][0]["stop_reason"], "wor");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_stop_string_included_in_output() {
-    // Same tokens but no_stop_trim=true includes the stop string in the output.
+    // Same tokens but include_stop_str_in_output=true includes the stop string in the output.
     let output_specs = vec![
         (bytes_to_token_ids(b"say"), None),
         (
@@ -2811,7 +2811,7 @@ async fn non_stream_completions_stop_string_included_in_output() {
                         "prompt": "hello",
                         "stream": false,
                         "stop": ["wor"],
-                        "no_stop_trim": true
+                        "include_stop_str_in_output": true
                     })
                     .to_string(),
                 ))
@@ -2830,7 +2830,7 @@ async fn non_stream_completions_stop_string_included_in_output() {
 
     assert_eq!(json["choices"][0]["text"], "say wor");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
-    assert_eq!(json["choices"][0]["matched_stop"], "wor");
+    assert_eq!(json["choices"][0]["stop_reason"], "wor");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2924,7 +2924,7 @@ async fn stream_completions_stop_string_included_in_output() {
                         "prompt": "hello",
                         "stream": true,
                         "stop": ["wor"],
-                        "no_stop_trim": true
+                        "include_stop_str_in_output": true
                     })
                     .to_string(),
                 ))
@@ -2953,7 +2953,7 @@ async fn stream_completions_stop_string_included_in_output() {
         }
     }
 
-    // With no_stop_trim, the stop string "wor" should be included.
+    // With include_stop_str_in_output, the stop string "wor" should be included.
     assert_eq!(full_text, "say wor", "full streamed text: {text}");
 
     assert!(
@@ -3002,8 +3002,8 @@ async fn non_stream_completions_no_stop_string_match_preserves_original_finish_r
     // Default output is "hi" (stop token '!' suppressed), finish_reason remains "stop" from EOS.
     assert_eq!(json["choices"][0]["text"], "hi");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
-    // No text stop string matched — matched_stop should be absent.
-    assert!(json["choices"][0]["matched_stop"].is_null());
+    // No text stop string matched — stop_reason should be absent.
+    assert!(json["choices"][0]["stop_reason"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3048,7 +3048,7 @@ async fn non_stream_completions_stop_string_array_matches_first_occurrence() {
     // " wo" is detected first (at byte 3), so output is truncated to "say".
     assert_eq!(json["choices"][0]["text"], "say");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
-    assert_eq!(json["choices"][0]["matched_stop"], " wo");
+    assert_eq!(json["choices"][0]["stop_reason"], " wo");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

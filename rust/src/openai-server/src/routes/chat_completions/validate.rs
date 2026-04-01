@@ -23,12 +23,6 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    reject_non_zero(
-        request.verbosity.map(|value| value as f32),
-        "verbosity",
-        "Verbosity control is not supported.",
-    )?;
-
     if request.top_logprobs.is_some() && !request.logprobs {
         bail_invalid_request!(
             param = "top_logprobs",
@@ -97,60 +91,9 @@ pub(super) fn validate_request_compat(
         "logit_bias is not supported.",
     )?;
     reject_non_default(
-        request.metadata.as_ref(),
-        "metadata",
-        "metadata is not supported.",
-    )?;
-    reject_non_default(
-        request.modalities.as_ref(),
-        "modalities",
-        "modalities are not supported.",
-    )?;
-    reject_non_default(
-        request.prompt_cache_key.as_ref(),
-        "prompt_cache_key",
-        "prompt_cache_key is not supported.",
-    )?;
-    reject_non_default(
         request.reasoning_effort.as_ref(),
         "reasoning_effort",
         "reasoning controls are not supported.",
-    )?;
-    reject_non_default(
-        request.safety_identifier.as_ref(),
-        "safety_identifier",
-        "safety_identifier is not supported.",
-    )?;
-    reject_non_default(
-        request.service_tier.as_ref(),
-        "service_tier",
-        "service_tier is not supported.",
-    )?;
-    #[expect(deprecated, reason = "OpenAI protocol still exposes legacy seed")]
-    reject_non_default(
-        request.seed.as_ref(),
-        "seed",
-        "seed is not supported, use sampling_seed instead.",
-    )?;
-    reject_non_default(
-        request.regex.as_ref(),
-        "regex",
-        "regex constraints are not supported.",
-    )?;
-    reject_non_default(
-        request.ebnf.as_ref(),
-        "ebnf",
-        "ebnf constraints are not supported.",
-    )?;
-    reject_non_default(
-        request.lora_path.as_ref(),
-        "lora_path",
-        "lora_path is not supported.",
-    )?;
-    reject_non_default(
-        request.session_params.as_ref(),
-        "session_params",
-        "session_params are not supported.",
     )?;
     reject_non_default(
         request
@@ -161,23 +104,18 @@ pub(super) fn validate_request_compat(
         "reasoning controls are not supported.",
     )?;
 
-    if request.no_stop_trim {
-        bail_invalid_request!(param = "no_stop_trim", "no_stop_trim is not supported.");
-    }
-
-    if request.return_hidden_states {
+    if request.use_beam_search {
         bail_invalid_request!(
-            param = "return_hidden_states",
-            "return_hidden_states is not supported."
+            param = "use_beam_search",
+            "use_beam_search is not supported."
         );
     }
-    Ok(())
-}
 
-/// Reject one numeric option unless it is absent or exactly zero.
-fn reject_non_zero(value: Option<f32>, param: &'static str, message: &str) -> Result<(), ApiError> {
-    if value.unwrap_or(0.0) != 0.0 {
-        bail_invalid_request!(param = param, "{}", message);
+    if request.structured_outputs.is_some() {
+        bail_invalid_request!(
+            param = "structured_outputs",
+            "structured_outputs is not supported."
+        );
     }
     Ok(())
 }
@@ -237,7 +175,7 @@ mod tests {
             presence_penalty: Some(0.25),
             min_p: Some(0.2),
             repetition_penalty: Some(1.1),
-            sampling_seed: Some(7),
+            seed: Some(7),
             ..base_request()
         };
         validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
@@ -300,17 +238,6 @@ mod tests {
             prompt_logprobs: Some(-2),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn validate_request_compat_rejects_deprecated_seed() {
-        let request = ChatCompletionRequest {
-            seed: Some(7),
-            ..base_request()
-        };
-
         assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
     }
 

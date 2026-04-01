@@ -158,7 +158,7 @@ pub struct EngineCoreSamplingParams {
     /// Maximum number of top tokens to consider. `0` means all tokens.
     pub top_k: i32,
     /// Random seed used by the sampler when present.
-    pub seed: Option<u64>,
+    pub seed: Option<i64>,
     /// Maximum number of tokens to generate per output sequence.
     pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.

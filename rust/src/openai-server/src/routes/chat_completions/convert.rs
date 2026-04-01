@@ -58,7 +58,7 @@ pub fn prepare_chat_request(
             temperature: request.temperature,
             top_p: request.top_p,
             top_k: request.top_k,
-            seed: request.sampling_seed,
+            seed: request.seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
             logprobs: request
@@ -73,7 +73,7 @@ pub fn prepare_chat_request(
             ignore_eos: request.ignore_eos,
         },
         chat_options: ChatOptions {
-            add_generation_prompt: !request.continue_final_message,
+            add_generation_prompt: request.add_generation_prompt && !request.continue_final_message,
             continue_final_message: request.continue_final_message,
             template_kwargs,
         },
@@ -267,6 +267,7 @@ mod tests {
             }]),
             name: None,
         }];
+        request.add_generation_prompt = false;
         request.continue_final_message = true;
         request.skip_special_tokens = false;
         request.chat_template_kwargs = Some(HashMap::from([("foo".to_string(), json!("bar"))]));
@@ -367,7 +368,7 @@ mod tests {
                 tools: [],
                 tool_choice: Auto,
                 decode_options: TextDecodeOptions {
-                    skip_special_tokens: false,
+                    skip_special_tokens: true,
                     include_stop_str_in_output: false,
                     stop_strings: None,
                 },
@@ -380,7 +381,7 @@ mod tests {
     #[test]
     fn prepare_chat_request_preserves_sampling_passthrough_fields() {
         let request = ChatCompletionRequest {
-            sampling_seed: Some(42),
+            seed: Some(42),
             min_p: Some(0.2),
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
@@ -435,7 +436,7 @@ mod tests {
                 tools: [],
                 tool_choice: Auto,
                 decode_options: TextDecodeOptions {
-                    skip_special_tokens: false,
+                    skip_special_tokens: true,
                     include_stop_str_in_output: false,
                     stop_strings: None,
                 },
@@ -531,7 +532,7 @@ mod tests {
                 tools: [],
                 tool_choice: Auto,
                 decode_options: TextDecodeOptions {
-                    skip_special_tokens: false,
+                    skip_special_tokens: true,
                     include_stop_str_in_output: false,
                     stop_strings: None,
                 },
@@ -646,7 +647,7 @@ mod tests {
                 ],
                 tool_choice: None,
                 decode_options: TextDecodeOptions {
-                    skip_special_tokens: false,
+                    skip_special_tokens: true,
                     include_stop_str_in_output: false,
                     stop_strings: None,
                 },

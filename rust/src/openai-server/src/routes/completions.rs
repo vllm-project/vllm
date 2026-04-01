@@ -11,7 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use openai_protocol::common::{LogProbs, Usage};
+use openai_protocol::common::LogProbs;
 use openai_protocol::validated::ValidatedJson;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
@@ -21,12 +21,13 @@ use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
     text_len,
 };
+use super::utils::types::Usage;
 use super::utils::unix_timestamp;
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::completions::convert::prepare_completion_request;
 use crate::routes::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
-    CompletionStreamChoice, CompletionStreamResponse, CompletionUsageChunk,
+    CompletionStreamChoice, CompletionStreamResponse,
 };
 use crate::state::AppState;
 
@@ -56,8 +57,6 @@ pub(super) async fn completions(
         "completion"
     );
 
-    // TODO: as optimization consider passing streaming flag so that underlying stream
-    //       doesn't need to produce delta strings
     let text_stream = match state.chat.text().generate(prepared.text_request).await {
         Ok(stream) => stream,
         Err(error) => {
@@ -118,7 +117,7 @@ async fn collect_completion(
         .await
         .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
     let finish_reason = collected.finish_reason.clone();
-    let matched_stop = finish_reason
+    let stop_reason = finish_reason
         .as_stop_reason()
         .map(|sr| serde_json::to_value(sr).expect("StopReason must serialize to JSON"));
 
@@ -157,11 +156,11 @@ async fn collect_completion(
         created,
         model: response_model,
         choices: vec![CompletionChoice {
-            text,
             index: 0,
+            text,
             logprobs,
             finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
-            matched_stop,
+            stop_reason,
             prompt_logprobs,
         }],
         usage: Some(Usage::from_counts(
@@ -270,19 +269,13 @@ fn delta_chunk(
     text: String,
     logprobs: Option<LogProbs>,
 ) -> CompletionStreamResponse {
-    CompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "text_completion".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![CompletionStreamChoice {
-            text,
-            index: 0,
-            logprobs,
-            finish_reason: None,
-        }],
-    }
+    let mut chunk = CompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(CompletionStreamChoice {
+        text,
+        logprobs,
+        ..Default::default()
+    });
+    chunk
 }
 
 fn final_chunk(
@@ -291,23 +284,14 @@ fn final_chunk(
     created: u64,
     finish_reason: FinishReason,
 ) -> Result<CompletionStreamResponse, ApiError> {
-    // Match the chat route's finish-reason policy so engine-native abort/error termination still
-    // becomes an OpenAI-style streamed error rather than an invalid terminal chunk.
     let finish_reason = completion_finish_reason_to_openai(finish_reason)?;
 
-    Ok(CompletionStreamResponse {
-        id: response_id.to_string(),
-        object: "text_completion".to_string(),
-        created,
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        choices: vec![CompletionStreamChoice {
-            text: String::new(),
-            index: 0,
-            logprobs: None,
-            finish_reason: Some(finish_reason.to_string()),
-        }],
-    })
+    let mut chunk = CompletionStreamResponse::new(response_id, response_model, created);
+    chunk.choices.push(CompletionStreamChoice {
+        finish_reason: Some(finish_reason.to_string()),
+        ..Default::default()
+    });
+    Ok(chunk)
 }
 
 fn completion_finish_reason_to_openai(
@@ -327,16 +311,10 @@ fn usage_chunk(
     response_model: &str,
     created: u64,
     usage: Usage,
-) -> CompletionUsageChunk {
-    CompletionUsageChunk {
-        id: response_id.to_string(),
-        object: "text_completion".to_string(),
-        created,
-        choices: Vec::new(),
-        model: response_model.to_string(),
-        system_fingerprint: None,
-        usage,
-    }
+) -> CompletionStreamResponse {
+    let mut chunk = CompletionStreamResponse::new(response_id, response_model, created);
+    chunk.usage = Some(usage);
+    chunk
 }
 
 /// Convert one chunk stream into OpenAI-style SSE events.
