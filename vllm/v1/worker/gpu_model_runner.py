@@ -6163,7 +6163,7 @@ class GPUModelRunner(
         # resolved cudagraph mode.
         self.compilation_config.cudagraph_mode = cudagraph_mode
         # When cp_world_size > 1, dycp is enabled; worst case all reqs are cp reqs
-        max_dycp_reqs = self.scheduler_config.max_num_seqs if self.cp_world_size > 1 else 0
+        max_dycp_reqs = self.scheduler_config.num_cp_seqs if self.cp_world_size > 1 else 0
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len, num_dycp_reqs=max_dycp_reqs
         )
