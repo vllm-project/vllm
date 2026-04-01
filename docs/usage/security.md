@@ -66,6 +66,10 @@ Restrict domains that vLLM can access for media URLs by setting
 `--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
 (e.g. `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`)
 
+This protection applies to both the online serving API (multimodal inputs) and
+the **batch runner** (`vllm run-batch`), where `file_url` values in batch
+transcription/translation requests are validated against the same allowlist.
+
 Without domain restrictions, a malicious user could supply URLs that:
 
 - **Target internal services**: Access internal network endpoints, cloud metadata
@@ -249,6 +253,18 @@ Passing `--api-key` together with `--grpc` is accepted by the CLI parser without
 1. **Network isolation**: Restrict access to the gRPC port using firewall rules or network policies so that only trusted clients can connect.
 2. **Reverse proxy with authentication**: Place the gRPC server behind a proxy (such as Envoy) that enforces authentication and TLS termination.
 3. **Kubernetes NetworkPolicy**: In Kubernetes deployments, use NetworkPolicy resources to restrict which pods can reach the gRPC port.
+
+## Request Parameter Resource Limits
+
+Certain API request parameters can have a large impact on resource consumption and may be abused to exhaust server resources. The `n` parameter in the `/v1/completions` and `/v1/chat/completions` endpoints controls how many independent output sequences are generated per request. A very large value causes the engine to allocate memory, CPU, and GPU time proportional to `n`, which can lead to out-of-memory conditions on the host and block the server from processing other requests.
+
+To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
+
+### Recommendations
+
+- **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
+- **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
+- **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
 
 ## Tool Server and MCP Security
 

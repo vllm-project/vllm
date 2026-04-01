@@ -90,6 +90,14 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+  - label: "Generate and upload wheel indices"
+    depends_on: "build-wheels"
+    allow_dependency_failure: true
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/generate-and-upload-nightly-index.sh"
+
   - group: "Build release Docker images"
     key: "build-release-images"
     steps:
@@ -603,7 +611,7 @@ steps:
       - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
     env:
       S3_BUCKET: "vllm-wheels"
-      VARIANT: "rocm700"
+      VARIANT: "rocm721"
 
   # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"
@@ -673,6 +681,7 @@ steps:
   - label: "Publish nightly ROCm image to DockerHub"
     depends_on:
       - build-rocm-release-image
+    if: build.env("NIGHTLY") == "1"
     agents:
       queue: small_cpu_queue_release
     commands:
