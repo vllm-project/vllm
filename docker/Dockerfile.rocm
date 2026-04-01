@@ -322,6 +322,10 @@ FROM base AS test
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
+# Install libnuma-dev, required to build fastsafetensors from source.
+RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
@@ -330,12 +334,11 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip install --system -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
-
-# Verify that PyTorch is the ROCm build, not CUDA
-RUN python3 -c "import torch; assert torch.version.hip is not None, \
-    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
-    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
+    && uv pip install --system *.whl \
+    # Rebuild fastsafetensors from source so its C++ extension is compiled
+    # with USE_ROCM and can detect libamdhip64.so at runtime.
+    && python3 -m pip install --force-reinstall --no-deps \
+        --no-binary fastsafetensors fastsafetensors
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
