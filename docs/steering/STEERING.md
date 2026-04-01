@@ -165,7 +165,7 @@ SAEs are trained.
 | `vllm/v1/worker/worker_base.py` | Three-tier global set/clear/status |
 | `vllm/v1/worker/gpu_model_runner.py` | Phase-aware index building, prefill→decode transition |
 | `vllm/v1/worker/gpu_input_batch.py` | Dual hash tracking (`prefill_steering_hash`, `decode_steering_hash`) |
-| `vllm/v1/core/sched/scheduler.py` | Dual-hash admission control |
+| `vllm/v1/core/sched/scheduler.py` | Transition-aware dual-hash admission control |
 | `vllm/v1/core/kv_cache_utils.py` | Prefill steering hash in block hash extra keys |
 | `vllm/sampling_params.py` | Three-tier fields + co-located scales |
 | `vllm/v1/request.py` | `prefill_steering_config_hash`, `decode_steering_config_hash` |

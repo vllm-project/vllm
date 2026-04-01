@@ -272,6 +272,248 @@ class TestSinglePhaseAdmission:
         assert not self._should_skip(configs, 333, max_configs)
 
 
+class TestTransitionAwareCapacity:
+    """Test transition-aware capacity counting and decode-start checks.
+
+    Fix A: When a running request will complete prefill this step
+    (num_computed + num_scheduled >= num_prompt), the scheduler must
+    also reserve the decode row in scheduled_steering_configs, because
+    the model runner's _handle_steering_transition will register the
+    decode config mid-step.
+
+    Fix B: A WAITING request that has a full prefix-cache hit
+    (num_computed_tokens >= num_prompt_tokens after cache resolution)
+    starts directly in decode.  The scheduler must verify decode
+    capacity at that point.
+    """
+
+    @staticmethod
+    def _build_running_set_transition_aware(
+        running_reqs: list[dict],
+    ) -> set[tuple[int, str]]:
+        """Reproduce the scheduler's transition-aware running-request
+        hash collection.
+
+        Each req dict: {prefill_hash, decode_hash, num_computed_tokens,
+                        num_prompt_tokens, num_scheduled_tokens}.
+        """
+        configs: set[tuple[int, str]] = set()
+        for req in running_reqs:
+            currently_prefilling = req["num_computed_tokens"] < req["num_prompt_tokens"]
+            if currently_prefilling:
+                if req["prefill_hash"] != 0:
+                    configs.add((req["prefill_hash"], "prefill"))
+                # Predict transition.
+                will_complete = (
+                    req["num_computed_tokens"] + req["num_scheduled_tokens"]
+                    >= req["num_prompt_tokens"]
+                )
+                if will_complete and req["decode_hash"] != 0:
+                    configs.add((req["decode_hash"], "decode"))
+            else:
+                if req["decode_hash"] != 0:
+                    configs.add((req["decode_hash"], "decode"))
+        return configs
+
+    @staticmethod
+    def _should_skip_decode_start(
+        scheduled_configs: set[tuple[int, str]],
+        decode_hash: int,
+        num_computed_tokens: int,
+        num_prompt_tokens: int,
+        max_configs: int,
+    ) -> bool:
+        """Reproduce the scheduler's post-cache decode-start check.
+
+        If the request has a full prefix-cache hit and a non-zero decode
+        hash, check whether the decode pair can fit in the capacity set.
+        """
+        if num_computed_tokens < num_prompt_tokens:
+            return False
+        if decode_hash == 0:
+            return False
+        decode_pair = (decode_hash, "decode")
+        return (
+            decode_pair not in scheduled_configs
+            and len(scheduled_configs) >= max_configs
+        )
+
+    # --- Fix A: Transition prediction for running requests ---
+
+    def test_transition_prediction_reserves_decode_row(self):
+        """A running request that will complete prefill this step
+        contributes BOTH its prefill and decode pairs."""
+        configs = self._build_running_set_transition_aware(
+            [
+                {
+                    "prefill_hash": 111,
+                    "decode_hash": 222,
+                    "num_computed_tokens": 90,
+                    "num_prompt_tokens": 100,
+                    "num_scheduled_tokens": 20,  # 90+20=110 >= 100
+                },
+            ]
+        )
+        assert (111, "prefill") in configs
+        assert (222, "decode") in configs
+        assert len(configs) == 2
+
+    def test_transition_prediction_no_false_positive(self):
+        """A running request that will NOT complete prefill this step
+        contributes only its prefill pair."""
+        configs = self._build_running_set_transition_aware(
+            [
+                {
+                    "prefill_hash": 111,
+                    "decode_hash": 222,
+                    "num_computed_tokens": 50,
+                    "num_prompt_tokens": 100,
+                    "num_scheduled_tokens": 10,  # 50+10=60 < 100
+                },
+            ]
+        )
+        assert configs == {(111, "prefill")}
+
+    def test_transition_prediction_exact_boundary(self):
+        """Transition fires at the exact boundary
+        (num_computed + num_scheduled == num_prompt)."""
+        configs = self._build_running_set_transition_aware(
+            [
+                {
+                    "prefill_hash": 111,
+                    "decode_hash": 222,
+                    "num_computed_tokens": 80,
+                    "num_prompt_tokens": 100,
+                    "num_scheduled_tokens": 20,  # 80+20=100 == 100
+                },
+            ]
+        )
+        assert (111, "prefill") in configs
+        assert (222, "decode") in configs
+
+    def test_transition_prediction_zero_decode_hash(self):
+        """Transition prediction does not add a zero decode hash."""
+        configs = self._build_running_set_transition_aware(
+            [
+                {
+                    "prefill_hash": 111,
+                    "decode_hash": 0,
+                    "num_computed_tokens": 90,
+                    "num_prompt_tokens": 100,
+                    "num_scheduled_tokens": 20,
+                },
+            ]
+        )
+        assert configs == {(111, "prefill")}
+
+    def test_transition_prediction_decode_req_unchanged(self):
+        """A running request already in decode is unchanged by the
+        transition-aware logic."""
+        configs = self._build_running_set_transition_aware(
+            [
+                {
+                    "prefill_hash": 111,
+                    "decode_hash": 222,
+                    "num_computed_tokens": 100,
+                    "num_prompt_tokens": 100,
+                    "num_scheduled_tokens": 1,
+                },
+            ]
+        )
+        assert configs == {(222, "decode")}
+
+    # --- Fix B: Decode-start capacity check for WAITING requests ---
+
+    def test_decode_start_capacity_check(self):
+        """A waiting request with a full prefix-cache hit is skipped
+        when decode capacity is full."""
+        # Capacity is 2 and both slots are occupied.
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert self._should_skip_decode_start(
+            scheduled,
+            decode_hash=333,
+            num_computed_tokens=100,
+            num_prompt_tokens=100,
+            max_configs=2,
+        )
+
+    def test_decode_start_admitted_when_capacity(self):
+        """A waiting request with a full prefix-cache hit is admitted
+        when decode capacity is available."""
+        # Capacity is 3, only 2 occupied -> room for 1 more.
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert not self._should_skip_decode_start(
+            scheduled,
+            decode_hash=333,
+            num_computed_tokens=100,
+            num_prompt_tokens=100,
+            max_configs=3,
+        )
+
+    def test_decode_start_existing_hash_always_fits(self):
+        """If the decode pair is already in the scheduled set, it always
+        fits regardless of capacity."""
+        scheduled = {(111, "prefill"), (333, "decode")}
+        assert not self._should_skip_decode_start(
+            scheduled,
+            decode_hash=333,
+            num_computed_tokens=100,
+            num_prompt_tokens=100,
+            max_configs=2,
+        )
+
+    def test_decode_start_no_check_when_still_prefilling(self):
+        """When num_computed < num_prompt, the decode-start check is
+        not triggered (the request will start in prefill, not decode)."""
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert not self._should_skip_decode_start(
+            scheduled,
+            decode_hash=333,
+            num_computed_tokens=50,
+            num_prompt_tokens=100,
+            max_configs=2,
+        )
+
+    def test_decode_start_zero_hash_bypasses_check(self):
+        """A request with decode_hash=0 bypasses the decode-start
+        capacity check."""
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert not self._should_skip_decode_start(
+            scheduled,
+            decode_hash=0,
+            num_computed_tokens=100,
+            num_prompt_tokens=100,
+            max_configs=2,
+        )
+
+    # --- Combined scenario ---
+
+    def test_transition_blocks_new_admission(self):
+        """A transitioning running request that reserves a decode row
+        should cause a new waiting request to be skipped if capacity
+        is full."""
+        max_configs = 2
+        # Running request completing prefill -> reserves both rows.
+        configs = self._build_running_set_transition_aware(
+            [
+                {
+                    "prefill_hash": 111,
+                    "decode_hash": 222,
+                    "num_computed_tokens": 95,
+                    "num_prompt_tokens": 100,
+                    "num_scheduled_tokens": 10,
+                },
+            ]
+        )
+        assert len(configs) == 2  # (111, "prefill") + (222, "decode")
+
+        # New waiting request with a new prefill hash -> would need a
+        # 3rd slot but max is 2.
+        new_hashes: set[tuple[int, str]] = {(333, "prefill")}
+        new_unique = new_hashes - configs
+        assert len(configs) + len(new_unique) > max_configs
+
+
 class TestSteeringAdmissionLogicLegacy:
     """Legacy single-hash admission tests kept for reference.
 
