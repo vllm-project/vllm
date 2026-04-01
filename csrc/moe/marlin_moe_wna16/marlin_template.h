@@ -260,7 +260,7 @@ __global__ void Marlin(
     // fp16 quantization scales. shape (k/groupsize, n)
     const int4* __restrict__ scales_ptr,
     // fp16 global scale (for nvfp4// only)
-    const uint16_t* __restrict__ global_scale_ptr,
+    const float* __restrict__ global_scale_ptr,
     // 4bit packed zero-points of shape
     // (k/groupsize, n/pack_factor)
     const int4* __restrict__ zp_ptr,
@@ -308,7 +308,14 @@ __global__ void Marlin(
   constexpr int moe_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
 
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
-  constexpr bool use_fp16_accum = a_type_id == vllm::kFloat16.id();
+  static constexpr auto num_bits =
+      vllm::ScalarType::from_id(b_type_id).size_bits();
+  // Disable use_fp16_accum for NVFP4 and cases when group_size == -1 &&
+  // num_bits == 4
+  constexpr bool use_fp16_accum =
+      a_type_id == vllm::kFloat16.id() &&
+      (!(b_type_id == vllm::kFE2M1f.id() && s_type_id == vllm::kFE4M3fn.id()) &&
+       !(group_blocks == -1 && num_bits == 4));
   #else
   constexpr bool use_fp16_accum = false;
   #endif
@@ -357,7 +364,7 @@ __global__ void Marlin(
       has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
       has_zp && !is_zp_float && !(b_type == vllm::kU8);
 
-  c_scalar_t2 global_scale;
+  float global_scale_f32 = 1.0f;
 
   constexpr bool has_act_order = group_blocks == 0;
 
@@ -507,11 +514,12 @@ __global__ void Marlin(
 
       if (mul_topk_weights) {
         idx = idx < prob_m_top_k ? idx : 0;
-        c_scalar_t2 topk_weight_val =
-            Cdtype::num2num2(Cdtype::float2num(topk_weights_ptr[idx]));
+        float topk_weight_tmp = topk_weights_ptr[idx];
         if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-          topk_weight_val = __hmul2(topk_weight_val, global_scale);
+          topk_weight_tmp *= global_scale_f32;
         }
+        c_scalar_t2 topk_weight_val =
+            Cdtype::num2num2(Cdtype::float2num(topk_weight_tmp));
         sh_block_topk_weights[threadIdx.x] = topk_weight_val;
       }
     }
@@ -532,8 +540,7 @@ __global__ void Marlin(
     expert_id = expert_ids_ptr[block_id];
 
     if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-      uint16_t val = global_scale_ptr[expert_id];
-      global_scale = Cdtype::num2num2(*reinterpret_cast<c_scalar_t*>(&val));
+      global_scale_f32 = global_scale_ptr[expert_id];
     }
 
     B_expert_off = expert_id * prob_n * prob_k / (pack_factor * 4);
@@ -1784,6 +1791,13 @@ __global__ void Marlin(
     // We first reorder in shared memory to guarantee the most efficient final
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
+      if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
+        if (!mul_topk_weights) {
+          c0 *= global_scale_f32;
+          c1 *= global_scale_f32;
+        }
+      }
+
       c_scalar_t2 res =
           Cdtype::nums2num2(Cdtype::float2num(c0), Cdtype::float2num(c1));
 
@@ -1800,11 +1814,6 @@ __global__ void Marlin(
         res = __hmul2(res, tmp_scale);
       }
 
-      if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-        if (!mul_topk_weights) {
-          res = __hmul2(res, global_scale);
-        }
-      }
       if (has_bias && last) {
         c_scalar_t2 tmp_bias = b_bias[0];
         if constexpr (m_block_size_8) {
