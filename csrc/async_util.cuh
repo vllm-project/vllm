@@ -16,12 +16,6 @@
 
 #pragma once
 
-// Global -> shared helpers used by kernels that issue NVIDIA cp.async on Ampere+.
-// - CUDA sm_80+: real cp.async PTX.
-// - CUDA sm_<80: synchronous vector loads (for fatbin / parser only; callers on
-//   those arches should not rely on async group semantics).
-// - ROCm: synchronous loads (no NV cp.async).
-// - Host compilation pass (__CUDA_ARCH__ undefined): no-op stubs for NVCC.
 
 namespace vllm {
 namespace cuda_async {
