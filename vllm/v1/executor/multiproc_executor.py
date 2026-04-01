@@ -829,7 +829,7 @@ class WorkerProc:
 
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
-            if worker.vllm_config.parallel_config.numa_bind:
+            if kwargs["vllm_config"].parallel_config.numa_bind:
                 numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
 
             worker.monitor_death_pipe(death_pipe, shutdown_requested)
