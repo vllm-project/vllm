@@ -48,7 +48,15 @@ def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]
     supported = True
 
     if backend == NvFp4LinearBackend.FLASHINFER_CUTLASS:
-        supported = current_platform.has_device_capability(100) and has_flashinfer()
+        # cutlass_fp4_supported() checks that the vLLM NVFP4 kernels (both
+        # quantization and GEMM) were compiled for the current SM version.
+        # FlashInfer backends still rely on the vLLM quantization kernels,
+        # so we gate them on the same check.
+        supported = (
+            cutlass_fp4_supported()
+            and current_platform.has_device_capability(100)
+            and has_flashinfer()
+        )
 
         if not supported:
             reason = "FlashInfer is required, >=sm_100 is required"

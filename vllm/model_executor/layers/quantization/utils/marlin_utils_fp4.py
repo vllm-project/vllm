@@ -27,10 +27,19 @@ def is_fp4_marlin_supported():
     return current_platform.is_cuda() and current_platform.has_device_capability(75)
 
 
-def _nvfp4_compute_scale_factor(marlin_scales: torch.Tensor) -> float:
+def _nvfp4_compute_scale_factor(
+    marlin_scales: torch.Tensor,
+    a_dtype: torch.dtype | None = None,
+) -> float:
     """Compute the power-of-2 scale_factor needed so that all non-zero
     values in marlin_scales * 2^7 are >= 2 after rescaling.
     Returns a Python float (power of 2, >= 1.0)."""
+
+    # Since half has a smaller dynamic range compared to bfloat16,
+    # no rescaling is applied here if active dtype is half.
+    if a_dtype is not None and a_dtype == torch.half:
+        return 1.0
+
     ws_float = marlin_scales.float() * (2**7)
     nonzero_mask = ws_float > 0
     if nonzero_mask.any():
@@ -44,6 +53,7 @@ def _nvfp4_compute_scale_factor(marlin_scales: torch.Tensor) -> float:
 def nvfp4_marlin_process_scales(
     marlin_scales: torch.Tensor,
     scale_factor: float | None = None,
+    a_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, float]:
     """Process NVFP4 weight scales into the special S0E5M3 format for Marlin.
 
@@ -91,7 +101,7 @@ def nvfp4_marlin_process_scales(
     # to fully utilize the E4M3 dynamic range (e.g., global_scale=1).
     # The caller must compensate by dividing global_scale by scale_factor.
     if scale_factor is None:
-        scale_factor = _nvfp4_compute_scale_factor(marlin_scales)
+        scale_factor = _nvfp4_compute_scale_factor(marlin_scales, a_dtype)
     if scale_factor > 1.0:
         marlin_scales = (marlin_scales.float() * scale_factor).to(torch.half)
 
@@ -119,12 +129,14 @@ def mxfp4_marlin_process_scales(marlin_scales, input_dtype=None):
     return marlin_scales
 
 
-def nvfp4_marlin_process_global_scale(global_scale):
-    assert global_scale.dtype in [torch.half, torch.bfloat16]
+def nvfp4_marlin_process_global_scale(global_scale, a_dtype: torch.dtype | None = None):
+    if a_dtype is None:
+        a_dtype = global_scale.dtype
+    assert a_dtype in [torch.half, torch.bfloat16]
     fp4_exponent = 2
-    if global_scale.dtype == torch.half:
+    if a_dtype == torch.half:
         target_exponent = 5
-    elif global_scale.dtype == torch.bfloat16:
+    elif a_dtype == torch.bfloat16:
         target_exponent = 8
     # exponent_bias_fp16 = 2 ** 4 - 2 ** 1 = 14
     # exponent_bias_bf16 = 2 ** 7 - 2 ** 1 = 126
@@ -244,11 +256,15 @@ def prepare_fp4_layer_for_marlin(
     )
 
     if is_nvfp4:
-        weight_scale, scale_factor = nvfp4_marlin_process_scales(weight_scale)
+        weight_scale, scale_factor = nvfp4_marlin_process_scales(
+            weight_scale, a_dtype=param_dtype
+        )
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
-        weight_global_scale = layer.weight_global_scale.to(param_dtype)
-        weight_global_scale = nvfp4_marlin_process_global_scale(weight_global_scale)
+        weight_global_scale = layer.weight_global_scale.to(torch.float32)
+        weight_global_scale = nvfp4_marlin_process_global_scale(
+            weight_global_scale, param_dtype
+        )
         weight_global_scale = weight_global_scale / scale_factor
         layer.weight_global_scale = torch.nn.Parameter(
             weight_global_scale, requires_grad=False
@@ -339,7 +355,6 @@ def prepare_nvfp4_moe_layer_for_marlin(
         scales: torch.Tensor, g_scales: torch.Tensor, name: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
         scales = scales.to(param_dtype)
-        g_scales = g_scales.to(param_dtype)
 
         tensor_list = []
         num_shards = 2 if is_act_and_mul else 1
@@ -350,7 +365,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
         # All experts share one global_scale, so compute the max
         # scale_factor across all experts first, then apply uniformly.
-        combined_scale_factor = _nvfp4_compute_scale_factor(scales)
+        combined_scale_factor = _nvfp4_compute_scale_factor(scales, param_dtype)
 
         for i in range(E):
             scale = scales[i].T
@@ -362,12 +377,12 @@ def prepare_nvfp4_moe_layer_for_marlin(
                 is_a_8bit=is_a_8bit,
             )
             marlin_scales, _ = nvfp4_marlin_process_scales(
-                marlin_scales, scale_factor=combined_scale_factor
+                marlin_scales, scale_factor=combined_scale_factor, a_dtype=param_dtype
             )
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-        g_scales = nvfp4_marlin_process_global_scale(g_scales)
+        g_scales = nvfp4_marlin_process_global_scale(g_scales, param_dtype)
         g_scales = g_scales / combined_scale_factor
         return scales, g_scales
 
@@ -438,7 +453,7 @@ def prepare_moe_fp4_layer_for_marlin(
             scales = scales.view(torch.float8_e8m0fnu)
         scales = scales.to(param_dtype)
         if is_nvfp4:
-            global_scale = getattr(layer, name + "_weight_scale_2").to(param_dtype)
+            global_scale = getattr(layer, name + "_weight_scale_2")
 
         tensor_list = []
         if "w13" in name:
@@ -449,7 +464,7 @@ def prepare_moe_fp4_layer_for_marlin(
         # For NVFP4: compute unified scale_factor across all experts
         combined_scale_factor = None
         if is_nvfp4:
-            combined_scale_factor = _nvfp4_compute_scale_factor(scales)
+            combined_scale_factor = _nvfp4_compute_scale_factor(scales, param_dtype)
 
         for i in range(e):
             scale = scales[i].T
@@ -463,7 +478,9 @@ def prepare_moe_fp4_layer_for_marlin(
             )
             if is_nvfp4:
                 marlin_scales, _ = nvfp4_marlin_process_scales(
-                    marlin_scales, scale_factor=combined_scale_factor
+                    marlin_scales,
+                    scale_factor=combined_scale_factor,
+                    a_dtype=param_dtype,
                 )
             else:
                 marlin_scales = mxfp4_marlin_process_scales(
@@ -477,7 +494,7 @@ def prepare_moe_fp4_layer_for_marlin(
 
         if is_nvfp4:
             assert combined_scale_factor is not None
-            global_scale = nvfp4_marlin_process_global_scale(global_scale)
+            global_scale = nvfp4_marlin_process_global_scale(global_scale, param_dtype)
             global_scale = global_scale / combined_scale_factor
             global_scale = torch.nn.Parameter(global_scale, requires_grad=False)
             setattr(layer, name + "_weight_scale_2", global_scale)
@@ -665,7 +682,7 @@ def rand_marlin_weight_nvfp4_like(weight, group_size, input_dtype=None):
     )
     marlin_scales, scale_factor = nvfp4_marlin_process_scales(marlin_scales)
 
-    global_scale = nvfp4_marlin_process_global_scale(global_scale)
+    global_scale = nvfp4_marlin_process_global_scale(global_scale).to(torch.float32)
     global_scale = global_scale / scale_factor
 
     return weight_ref.T, marlin_qweight, marlin_scales, global_scale

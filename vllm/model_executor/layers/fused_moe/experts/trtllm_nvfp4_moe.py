@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -15,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -25,6 +27,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+logger = init_logger(__name__)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -185,9 +189,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.quant_config.w2_scale is not None
 
         # Pack topk ids and weights into format expected by the kernel.
-        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-            torch.bfloat16
-        ).view(torch.int16)
+        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
 
         # trtllm_fp4_block_scale_routed_moe does not support autotuning
         # so skip this kernel during dummy run for autotuning.
@@ -258,6 +260,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
+            RoutingMethodType.Simulated,
         ]
 
     @staticmethod
@@ -267,13 +270,18 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> bool:
         """
         The FlashInfer TRTLLM NvFp4 kernel expects bfloat16 router_logits by default.
-        Only DeepSeekV3 routing supports float32 router_logits (which is converted
-        internally in the kernel).
+        DeepSeekV3 routing supports float32 router_logits (converted internally).
+        Simulated routing generates synthetic decisions and is agnostic to dtype.
         """
         if router_logits_dtype == torch.float32:
-            # Only DeepSeekV3 routing handles float32 logits
+            # DeepSeekV3 routing handles float32 logits internally.
+            # Simulated routing generates synthetic decisions, so the
+            # kernel doesn't care about the actual logits dtype.
             # https://github.com/flashinfer-ai/flashinfer/issues/2469
-            return routing_method == RoutingMethodType.DeepSeekV3
+            return routing_method in (
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Simulated,
+            )
         return True
 
     def apply(
@@ -313,6 +321,11 @@ class TrtLlmNvFp4ExpertsMonolithic(
             if self.routing_method_type == RoutingMethodType.DeepSeekV3
             else router_logits
         )
+
+        # Currently FI requires bfloat16 routing bias.
+        # https://github.com/flashinfer-ai/flashinfer/issues/2909
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         # Invoke kernel.
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
