@@ -205,54 +205,17 @@ direct_register_custom_op(
     fake_impl=flashinfer_mxfp8_e4m3_quantize_fake,
 )
 
-def _xpu_mxfp8_quantize_impl(
-    x: torch.Tensor, dtype: torch.dtype | None = None
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if dtype is not None:
-        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
-            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
-            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
-        )
-    else:
-        dtype = current_platform.fp8_dtype()
-
-    finfo = torch.finfo(dtype)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
-    eps = 1e-10
-    x_q = torch.empty_like(x, device=x.device, dtype=dtype)
-    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
-    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
-    torch.ops._C.per_token_group_fp8_quant(
-            x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
-        )
-    x_s = x_s.to(torch.float8_e8m0fnu)
-    return x_q, x_s
-
-def xpu_mxfp8_quantize_fake(
-    x: torch.Tensor, dtype: torch.dtype | None = None
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if not dtype is None:
-        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
-            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
-            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
-        )
-    else:
-        dtype = current_platform.fp8_dtype()
-    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
-
-    return x.to(dtype), torch.zeros(shape, device=x.device, dtype=torch.float32)
-
-direct_register_custom_op(
-    op_name="xpu_mxfp8_quantize",
-    op_func=_xpu_mxfp8_quantize_impl,
-    fake_impl=xpu_mxfp8_quantize_fake,
-)
 
 def xpu_mxfp8_quantize(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops.vllm.xpu_mxfp8_quantize(x, dtype)
+
+
+class Mxfp8LinearOp:
+    def __init__(self, backend: Mxfp8LinearBackend):
+        if backend not in Mxfp8LinearBackend:
+            raise ValueError(f"Unsupported backend: {backend}")
 
 
 class Mxfp8LinearOp:
