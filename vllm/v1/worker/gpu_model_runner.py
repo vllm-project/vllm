@@ -122,6 +122,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
+    NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
@@ -160,6 +161,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
@@ -208,7 +210,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -449,7 +451,6 @@ class GPUModelRunner(
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.inputs_embeds_size = model_config.get_inputs_embeds_size()
-        self.attention_chunk_size = model_config.attention_chunk_size
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = model_config.uses_alibi
 
@@ -515,6 +516,7 @@ class GPUModelRunner(
                 | NgramProposerGPU
                 | SuffixDecodingProposer
                 | EagleProposer
+                | DFlashProposer
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
@@ -546,6 +548,9 @@ class GPUModelRunner(
                 self._ngram_pinned_val_buf = torch.zeros(
                     self.max_num_reqs, dtype=torch.int32, pin_memory=True
                 )
+            elif self.speculative_config.use_dflash():
+                self.drafter = DFlashProposer(self.vllm_config, self.device, self)
+                self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
@@ -588,7 +593,6 @@ class GPUModelRunner(
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
-        self.comm_stream = torch.cuda.Stream()
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -1933,9 +1937,24 @@ class GPUModelRunner(
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            self.num_accepted_tokens.np[:num_reqs] = (
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            )
+            # Async mode: condense() reordered indices, use prev_positions mapping
+            if self.use_async_scheduling and prev_req_id_to_index:
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[
+                        np.where(new_mask, 0, prev_idx)
+                    ]
+                )
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                    self.num_accepted_tokens.np[:num_reqs]
+                )
+            else:
+                # Non-async mode: use values directly
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -2130,9 +2149,9 @@ class GPUModelRunner(
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
 
-            # Fill unused with -1. Needed for reshape_and_cache in full cuda
-            # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-            blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
+            # Fill unused block table entries with NULL_BLOCK_ID (null block)
+            # for CUDAGraph padding. Block 0 is reserved for padding.
+            blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
             return blk_table_tensor
 
         assert slot_mappings is not None
@@ -2289,7 +2308,7 @@ class GPUModelRunner(
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
+                if isinstance(self.drafter, (EagleProposer, DFlashProposer)):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -4202,7 +4221,10 @@ class GPUModelRunner(
                 # as inputs, and does not need to wait for bookkeeping to finish.
                 assert isinstance(
                     self.drafter,
-                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                    EagleProposer
+                    | DFlashProposer
+                    | DraftModelProposer
+                    | ExtractHiddenStatesProposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -4211,7 +4233,6 @@ class GPUModelRunner(
                     assert spec_decode_common_attn_metadata is not None
                     next_token_ids, valid_sampled_tokens_count = (
                         self.drafter.prepare_next_token_ids_padded(
-                            self.optimistic_seq_lens_cpu,
                             sampled_token_ids,
                             self.requests,
                             self.input_batch,
@@ -4578,7 +4599,6 @@ class GPUModelRunner(
             )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
-                    self.optimistic_seq_lens_cpu,
                     sampled_token_ids,
                     self.requests,
                     self.input_batch,
@@ -4589,8 +4609,14 @@ class GPUModelRunner(
                 next_token_ids, valid_sampled_tokens_count
             )
 
-        elif spec_config.use_eagle() or spec_config.uses_draft_model():
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+        elif (
+            spec_config.use_eagle()
+            or spec_config.use_dflash()
+            or spec_config.uses_draft_model()
+        ):
+            assert isinstance(
+                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+            )
 
             if spec_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -4617,7 +4643,6 @@ class GPUModelRunner(
                 )
                 next_token_ids, valid_sampled_tokens_count = (
                     self.drafter.prepare_next_token_ids_padded(
-                        self.optimistic_seq_lens_cpu,
                         sampled_token_ids,
                         self.requests,
                         self.input_batch,
@@ -4889,10 +4914,13 @@ class GPUModelRunner(
             return None
 
         hf_config = self.speculative_config.draft_model_config.hf_config
-        if not hasattr(hf_config, "eagle_aux_hidden_state_layer_ids"):
-            return None
 
-        layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
+        layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
+        if not layer_ids:
+            dflash_config = getattr(hf_config, "dflash_config", None)
+            if dflash_config and isinstance(dflash_config, dict):
+                layer_ids = dflash_config.get("target_layer_ids")
+
         if layer_ids and isinstance(layer_ids, (list, tuple)):
             return tuple(layer_ids)
 
@@ -5479,7 +5507,10 @@ class GPUModelRunner(
             ):
                 assert isinstance(
                     self.drafter,
-                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                    EagleProposer
+                    | DFlashProposer
+                    | DraftModelProposer
+                    | ExtractHiddenStatesProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -5569,6 +5600,7 @@ class GPUModelRunner(
             top_k=dummy_tensors(logits.size(1) - 1),
             generators={},
             max_num_logprobs=None,
+            logprob_token_ids=None,
             no_penalties=True,
             prompt_token_ids=None,
             frequency_penalties=dummy_tensors(0.1),
@@ -5800,7 +5832,7 @@ class GPUModelRunner(
         )
         self.cache_config.num_gpu_blocks_override = saved_override
 
-        self.initialize_kv_cache(minimal_config)
+        self.initialize_kv_cache(minimal_config, is_profiling=True)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks
 
         logger.debug("Initialized minimal KV cache for CUDA graph profiling")
@@ -5969,7 +6001,9 @@ class GPUModelRunner(
                 SupportsEncoderCudaGraph,
                 supports_encoder_cudagraph,
             )
-            from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+            from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
+                EncoderCudaGraphManager,
+            )
 
             raw_model = self.get_model()
             if supports_encoder_cudagraph(raw_model):
@@ -6121,7 +6155,11 @@ class GPUModelRunner(
             torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
 
-    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_attn_backend(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
         """
         Initialize the attention backends and attention metadata builders.
         """
@@ -6193,7 +6231,9 @@ class GPUModelRunner(
 
         # Resolve cudagraph_mode before actually initialize metadata_builders
         self._check_and_update_cudagraph_mode(
-            attention_backend_list, kv_cache_config.kv_cache_groups
+            attention_backend_list,
+            kv_cache_config.kv_cache_groups,
+            is_profiling=is_profiling,
         )
 
         # Check if attention backend supports PCP&DCP and related features.
@@ -6230,13 +6270,16 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(
+                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+            )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
+        is_profiling: bool = False,
     ) -> None:
         """
         Resolve the cudagraph_mode when there are multiple attention
@@ -6377,21 +6420,29 @@ class GPUModelRunner(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
             )
 
-        # If the model has Mamba layers and cudagraph mode includes FULL
-        # decode, cap cudagraph capture sizes to the number of available
-        # Mamba cache blocks. Each decode request needs one conv_state
-        # cache line, so capture batch sizes cannot exceed num_blocks.
-        # Only FULL decode graphs are affected because PIECEWISE captures
-        # run GDN/Mamba ops eagerly (prefill path, no causal_conv1d_update).
+        # For Mamba models with FULL decode cudagraphs, each decode
+        # sequence needs one Mamba cache block. The decode cudagraph
+        # dispatcher already caps batch sizes at max_num_seqs, so we just
+        # need to verify that enough blocks exist. Raising here instead
+        # of silently capping cudagraph_capture_sizes avoids unintended
+        # restrictions on PIECEWISE (prefill) cudagraphs.
         # See: https://github.com/vllm-project/vllm/issues/34094
-        if cudagraph_mode.has_full_cudagraphs():
+        if cudagraph_mode.has_full_cudagraphs() and not is_profiling:
             has_mamba = any(
                 isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
             )
             if has_mamba and self.kv_cache_config is not None:
-                self.compilation_config.adjust_cudagraph_sizes_for_mamba_cache(
-                    self.kv_cache_config.num_blocks
-                )
+                num_blocks = self.kv_cache_config.num_blocks
+                if self.max_num_reqs > num_blocks:
+                    raise ValueError(
+                        f"max_num_seqs ({self.max_num_reqs}) exceeds "
+                        f"available Mamba cache blocks ({num_blocks}). "
+                        f"Each decode sequence requires one Mamba cache "
+                        f"block, so CUDA graph capture cannot proceed. "
+                        f"Please lower max_num_seqs to at most "
+                        f"{num_blocks} or increase "
+                        f"gpu_memory_utilization."
+                    )
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
@@ -6405,7 +6456,10 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer)
+            assert isinstance(
+                self.drafter,
+                EagleProposer | DFlashProposer | ExtractHiddenStatesProposer,
+            )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -6638,12 +6692,12 @@ class GPUModelRunner(
                     raise NotImplementedError
 
         if has_attn and has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
+            self._update_hybrid_attention_mamba_layout(kv_caches, kernel_block_sizes)
 
         return kv_caches
 
     def _update_hybrid_attention_mamba_layout(
-        self, kv_caches: dict[str, torch.Tensor]
+        self, kv_caches: dict[str, torch.Tensor], kernel_block_sizes: list[int]
     ) -> None:
         """
         Update the layout of attention layers from (2, num_blocks, ...) to
@@ -6651,23 +6705,30 @@ class GPUModelRunner(
 
         Args:
             kv_caches: The KV cache buffer of each layer.
+            kernel_block_sizes: The kernel block sizes for each KV cache group.
         """
 
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                continue
+            block_dim = group.backend.get_kv_cache_block_dim(
+                kernel_block_sizes[group.kv_cache_group_id],
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=self.cache_config.cache_dtype,
+            )
+            # block_dim: 0 means (num_blocks, 2, ...); 1 means (2, num_blocks, ...).
+            if block_dim == 0:
+                continue
+            assert block_dim == 1
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
-                if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
-                    assert kv_cache.shape[1] != 2, (
-                        "Fail to determine whether the layout is "
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                        f"a tensor of shape {kv_cache.shape}"
-                    )
-                    hidden_size = kv_cache.shape[2:].numel()
-                    kv_cache.as_strided_(
-                        size=kv_cache.shape,
-                        stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                    )
+                hidden_size = kv_cache.shape[2:].numel()
+                kv_cache.as_strided_(
+                    size=kv_cache.shape,
+                    stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
+                )
 
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
@@ -6752,7 +6813,11 @@ class GPUModelRunner(
                 else:
                     break
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -6764,7 +6829,7 @@ class GPUModelRunner(
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
-        self.initialize_attn_backend(kv_cache_config)
+        self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention
         # backends for that group only supports block_size 64, we will return

@@ -308,7 +308,7 @@ class MinimaxM2ToolParser(ToolParser):
             invoke_str = complete_invokes[self.current_tool_index]
             tool_call = self._parse_single_invoke(
                 invoke_str,
-                request.tools if request else None,
+                self.tools,
             )
             if not tool_call:
                 self.current_tool_index += 1
@@ -358,9 +358,7 @@ class MinimaxM2ToolParser(ToolParser):
             for tool_call_match in self.tool_call_complete_regex.findall(model_output):
                 # Find all invokes within this tool_call
                 for invoke_match in self.invoke_complete_regex.findall(tool_call_match):
-                    tool_call = self._parse_single_invoke(
-                        invoke_match, request.tools if request else None
-                    )
+                    tool_call = self._parse_single_invoke(invoke_match, self.tools)
                     if tool_call:
                         tool_calls.append(tool_call)
 
