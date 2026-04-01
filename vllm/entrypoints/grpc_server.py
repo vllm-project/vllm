@@ -29,11 +29,13 @@ try:
     from grpc_reflection.v1alpha import reflection
     from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
     from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
-except ImportError:
+except ImportError as e:
     raise ImportError(
-        "smg-grpc-servicer is required for gRPC mode. "
-        "Install it with: pip install vllm[grpc]"
-    ) from None
+        "gRPC mode requires smg-grpc-servicer. "
+        "If not installed, run: pip install vllm[grpc]. "
+        "If already installed, there may be a broken import due to a "
+        "version mismatch — see the chained exception above for details."
+    ) from e
 
 import uvloop
 
