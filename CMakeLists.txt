@@ -600,33 +600,28 @@ define_extension_target(
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
-# add OR VLLM_GPU_LANG STREQUAL "HIP" here once
-# https://github.com/vllm-project/vllm/issues/35163 is resolved
-if(VLLM_GPU_LANG STREQUAL "CUDA")
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
   set(VLLM_STABLE_EXT_SRC
-    "csrc/libtorch_stable/torch_bindings.cpp"
-    "csrc/cutlass_extensions/common.cpp"
-    "csrc/cuda_utils_kernels.cu"
-    "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
-    "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
-    "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu")
+    "csrc/libtorch_stable/torch_bindings.cpp")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/cuda_utils_kernels.cu"
+      "csrc/cutlass_extensions/common.cpp"
+      "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
       "csrc/libtorch_stable/permute_cols.cu"
       "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
       "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu")
-  endif()
 
-  if(VLLM_GPU_LANG STREQUAL "CUDA")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
-  endif()
 
   # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -990,6 +985,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building hadacore")
   endif()
 
+  # if CUDA endif
+  endif()
+
   message(STATUS "Enabling C_stable extension.")
   define_extension_target(
     _C_stable_libtorch
@@ -1009,13 +1007,34 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   target_compile_definitions(_C_stable_libtorch PRIVATE
     TORCH_TARGET_VERSION=0x020A000000000000ULL)
 
-  # Needed to use cuda APIs from C-shim
-  target_compile_definitions(_C_stable_libtorch PRIVATE
-    USE_CUDA)
+  # Needed to use cuda/hip APIs from C-shim
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    # Needed by CUTLASS kernels
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+  elseif(VLLM_GPU_LANG STREQUAL "HIP")
+    target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
+  endif()
 
-  # Needed by CUTLASS kernels
-  target_compile_definitions(_C_stable_libtorch PRIVATE
-    CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+  # On ROCm, _C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
+  # get_device_prop()) which must resolve to the same libamdhip64.so that
+  # PyTorch uses.  When PyTorch bundles its own copy (pip/conda wheels),
+  # the raw HIP calls would otherwise resolve to the system ROCm copy,
+  # initializing a second HIP runtime that corrupts device state (wrong
+  # device on DeviceGuard, core dumps on multi-GPU tests).
+  #
+  # If PyTorch doesn't bundle libamdhip64 (built from source against system
+  # ROCm), there is only one copy in the process and no action is needed —
+  # the HIP compiler already links the system libamdhip64 automatically.
+  if(VLLM_GPU_LANG STREQUAL "HIP")
+    find_library(_STABLE_TORCH_AMDHIP64 amdhip64
+      PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH)
+    if(_STABLE_TORCH_AMDHIP64)
+      message(STATUS "Found PyTorch-bundled libamdhip64 at ${_STABLE_TORCH_AMDHIP64}")
+      target_link_libraries(_C_stable_libtorch PRIVATE ${_STABLE_TORCH_AMDHIP64})
+    endif()
+  endif()
 endif()
 
 #
