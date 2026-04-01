@@ -119,7 +119,7 @@ This design enables finer-grained control over latency and resource utilization,
   pip install vllm-router
 
   # Step 1: Start Router
-  cargo run --release -- \
+   vllm-router \
     --policy consistent_hash \
     --vllm-pd-disaggregation \
     --vllm-discovery-address $ZMQ_DISCOVERY_IP:$ZMQ_DISCOVERY_PORT \
@@ -154,17 +154,13 @@ This design enables finer-grained control over latency and resource utilization,
   -H "Content-Type: application/json" \
   -d  '{"model":"$MODEL_NAME","prompt":"Who won the world series in 2020?","max_tokens":64,"temperature":0.0}'
 ```
-Get more informations, https://github.com/vllm-project/vllm/blob/main/docs/design/p2p_nccl_connector.md
+
+Get more informations, [P2P NCCL Connector](../design/p2p_nccl_connector.md)
 
 ### NIXL Connector
 ```bash
   # Install Nixl
   pip install "nixl[cu13]"
-
-  # Install flashinfer related cubin and jit to skip local compilation
-  pip install flashinfer-cubin==0.6.4
-  pip install flashinfer-jit-cache==0.6.4 --index-url https://flashinfer.ai/whl/cu130
-  pip install fastsafetensors # to enable --load-format "fastsafetensors"
 
   # Install Router
   pip install vllm-router
@@ -180,13 +176,11 @@ Get more informations, https://github.com/vllm-project/vllm/blob/main/docs/desig
   export MODEL_NAME=Qwen/Qwen3-0.6B
 
   # Step 1: Start Router
-  cargo run --release -- \
+  vllm-router \
     --policy round_robin \
     --vllm-pd-disaggregation \
     --prefill http://$PREFILL_INSTANCE_IP_1:$PREFILL_INSTANCE_PORT_1 \
-    #--prefill http://$PREFILL_INSTANCE_IP_2:$PREFILL_INSTANCE_PORT_2 \
     --decode http://$DECODE_INSTANCE_IP_1:$DECODE_INSTANCE_PORT_1 \
-    #--decode http://$DECODE_INSTANCE_IP_2:$DECODE_INSTANCE_PORT_2 \
     --host 127.0.0.1 \
     --port $ROUTER_PORT \
     --intra-node-data-parallel-size 4
@@ -236,7 +230,7 @@ vLLM currently supports multiple connector implementations for disaggregated pre
 
     # When vLLM runs the NIXL connector, prefill/decode URLs are required.
     # See a working example in scripts/llama3.1/ folder.
-    cargo run --release -- \
+    vllm-router \
       --policy consistent_hash \
       --vllm-pd-disaggregation \
       --prefill http://127.0.0.1:8100 \
