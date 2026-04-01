@@ -7,12 +7,13 @@ Runs in background threads inside the worker process. Each KV tensor
 is backed by a single pre-allocated file on NVMe. Blocks are stored
 at fixed offsets: disk_block_id * block_size_bytes.
 
-Writes are fire-and-forget (write-through from CPU after GPU→CPU).
-Reads are prefetches (disk→CPU before CPU→GPU load).
+Writes use a single dedicated thread with a queue to avoid GIL
+contention from multiple ThreadPoolExecutor workers.
+Reads use a thread pool for parallel prefetch I/O.
 """
 import os
+import queue
 import threading
-from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
@@ -26,8 +27,8 @@ class DiskIOWorker:
     """
     Background disk I/O worker for KV cache blocks.
 
-    Manages a thread pool that reads/writes blocks between CPU tensors
-    and NVMe-backed files. Each tensor has its own file.
+    Writes go through a single dedicated thread (minimal GIL contention).
+    Reads go through a thread pool for parallelism.
     """
 
     def __init__(
@@ -51,25 +52,43 @@ class DiskIOWorker:
                 os.ftruncate(fd, needed)
             self._fds.append(fd)
 
-        self._pool = ThreadPoolExecutor(
-            max_workers=io_threads,
-            thread_name_prefix="kv-disk",
+        # Single writer thread with queue — avoids GIL contention
+        self._write_queue: queue.SimpleQueue[
+            list[tuple[int, int]] | None
+        ] = queue.SimpleQueue()
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            name="kv-disk-writer",
+            daemon=True,
         )
-        self._pending_writes: deque[Future] = deque()
-        self._pending_reads: deque[Future] = deque()
-        self._lock = threading.Lock()
+        self._writer_thread.start()
+
+        # Thread pool for reads (need parallelism for prefetch)
+        self._read_pool = ThreadPoolExecutor(
+            max_workers=io_threads,
+            thread_name_prefix="kv-disk-read",
+        )
 
         logger.info(
-            "DiskIOWorker: %d tensors, %d blocks, %d threads, path=%s",
-            len(cpu_tensors), num_disk_blocks, io_threads, disk_path,
+            "DiskIOWorker: %d tensors, %d blocks, path=%s",
+            len(cpu_tensors), num_disk_blocks, disk_path,
         )
 
-    def _write_block(self, tensor_idx: int, cpu_block: int,
-                     disk_block: int) -> None:
-        """Copy one block from CPU tensor to disk file."""
-        bsize = self.block_sizes[tensor_idx]
-        data = self.cpu_tensors[tensor_idx][cpu_block].numpy().tobytes()
-        os.pwrite(self._fds[tensor_idx], data, disk_block * bsize)
+    def _writer_loop(self) -> None:
+        """Dedicated writer thread. Processes batches from the queue."""
+        while True:
+            batch = self._write_queue.get()
+            if batch is None:
+                break  # Shutdown signal
+            for cpu_bid, disk_bid in batch:
+                for tidx in range(len(self.cpu_tensors)):
+                    try:
+                        bsize = self.block_sizes[tidx]
+                        # Pass numpy array directly — avoids .tobytes() copy
+                        data = self.cpu_tensors[tidx][cpu_bid].numpy()
+                        os.pwrite(self._fds[tidx], bytes(data), disk_bid * bsize)
+                    except Exception as e:
+                        logger.warning("Disk write failed: %s", e)
 
     def _read_block(self, tensor_idx: int, cpu_block: int,
                     disk_block: int) -> None:
@@ -85,16 +104,14 @@ class DiskIOWorker:
     ) -> None:
         """
         Queue background writes for a batch of blocks.
-        Each (cpu_block, disk_block) pair writes ALL tensors for that block.
-        Fire-and-forget — we don't wait for completion.
+        Non-blocking — just puts the batch on the writer queue.
         """
-        for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
-            for tidx in range(len(self.cpu_tensors)):
-                fut = self._pool.submit(
-                    self._write_block, tidx, cpu_bid, disk_bid
-                )
-                with self._lock:
-                    self._pending_writes.append(fut)
+        batch = list(zip(cpu_block_ids, disk_block_ids))
+        self._write_queue.put(batch)
+
+    def drain_completed_writes(self) -> int:
+        """No-op — single writer thread handles everything."""
+        return 0
 
     def submit_reads(
         self, cpu_block_ids: list[int], disk_block_ids: list[int]
@@ -106,7 +123,7 @@ class DiskIOWorker:
         futures: list[Future] = []
         for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
             for tidx in range(len(self.cpu_tensors)):
-                fut = self._pool.submit(
+                fut = self._read_pool.submit(
                     self._read_block, tidx, cpu_bid, disk_bid
                 )
                 futures.append(fut)
@@ -121,7 +138,7 @@ class DiskIOWorker:
         """
         for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
             for tidx in range(len(self.cpu_tensors)):
-                self._pool.submit(
+                self._read_pool.submit(
                     self._read_block, tidx, cpu_bid, disk_bid
                 )
 
@@ -130,33 +147,19 @@ class DiskIOWorker:
     ) -> list[Future]:
         """
         Queue reads without waiting, return futures for completion tracking.
-        Caller can check futures to know when data is ready.
         """
         futures: list[Future] = []
         for cpu_bid, disk_bid in zip(cpu_block_ids, disk_block_ids):
             for tidx in range(len(self.cpu_tensors)):
-                fut = self._pool.submit(
+                fut = self._read_pool.submit(
                     self._read_block, tidx, cpu_bid, disk_bid
                 )
                 futures.append(fut)
         return futures
 
-    def drain_completed_writes(self) -> int:
-        """Drain completed write futures. Returns count drained."""
-        count = 0
-        with self._lock:
-            while self._pending_writes:
-                if self._pending_writes[0].done():
-                    fut = self._pending_writes.popleft()
-                    exc = fut.exception()
-                    if exc is not None:
-                        logger.warning("Disk write failed: %s", exc)
-                    count += 1
-                else:
-                    break
-        return count
-
     def shutdown(self) -> None:
-        self._pool.shutdown(wait=True)
+        self._write_queue.put(None)  # Signal writer to stop
+        self._writer_thread.join(timeout=5)
+        self._read_pool.shutdown(wait=True)
         for fd in self._fds:
             os.close(fd)

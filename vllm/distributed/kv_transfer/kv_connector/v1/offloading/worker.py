@@ -317,12 +317,6 @@ class OffloadingConnectorWorker:
                 self.worker.wait(job_ids)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
-        # Flush deferred disk write-through from previous step's
-        # get_finished (outside the critical get_finished path).
-        for handler in self.worker.handlers:
-            if hasattr(handler, 'flush_write_through'):
-                handler.flush_write_through()
-
         # Submit disk→CPU prefetches (non-blocking, async reads).
         if metadata.disk_prefetches:
             handlers = self._get_disk_handlers()
