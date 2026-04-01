@@ -390,8 +390,6 @@ struct Sm90ColOrScalarBroadcast {
       // tCgCol has layout (CPY,CPY_M,CPY_N,EPI_M,EPI_N) where CPY_N and
       // EPI_N are stride-0 for the column broadcast. Slice those modes at
       // index 0 to avoid redundant copies AND ensure pred/data consistency
-      // (filter() would collapse stride-0 modes in the data tensor but not
-      // in the coordinate tensor, causing predicate/address mismatches).
       static_assert(decltype(stride<2>(tCgCol))::value == 0, "Expected stride-0 CPY_N for col broadcast");
       static_assert(decltype(stride<4>(tCgCol))::value == 0, "Expected stride-0 EPI_N for col broadcast");
 
