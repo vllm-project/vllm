@@ -93,6 +93,11 @@ class ActiveKVConnector(KVConnector):
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
+        # Disk prefetch completions (tiered offloading)
+        if hasattr(self.kv_connector, 'get_completed_disk_prefetches'):
+            output.completed_disk_prefetches = (
+                self.kv_connector.get_completed_disk_prefetches()
+            )
         if clear_metadata:
             self.kv_connector.clear_connector_metadata()
         return output

@@ -661,9 +661,11 @@ class VllmConfig:
 
         if kv_offloading_backend == "native":
             self.kv_transfer_config.kv_connector = "OffloadingConnector"
-            self.kv_transfer_config.kv_connector_extra_config.update(
-                {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
-            )
+            extra: dict = {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
+            if self.cache_config.kv_offloading_disk_path is not None:
+                extra["disk_path"] = self.cache_config.kv_offloading_disk_path
+                extra["spec_name"] = "TieredOffloadingSpec"
+            self.kv_transfer_config.kv_connector_extra_config.update(extra)
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
             kv_gb_per_rank = kv_offloading_size / num_kv_ranks

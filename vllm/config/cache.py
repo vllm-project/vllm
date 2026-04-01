@@ -162,6 +162,14 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    kv_offloading_disk_path: str | None = None
+    """Path to a directory (ideally on NVMe) for tiered KV cache
+    offloading (GPU -> CPU pinned RAM -> NVMe disk). When set, blocks
+    stored to CPU are also written to disk in the background
+    (write-through). Disk-cached blocks survive CPU eviction and can
+    be promoted back to CPU on cache hit.
+    Only used with the 'native' offloading backend."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

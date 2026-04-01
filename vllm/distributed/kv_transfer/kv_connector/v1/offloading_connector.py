@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -41,7 +42,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 
-class OffloadingConnector(KVConnectorBase_V1):
+class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
@@ -131,6 +132,14 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
+        # Process completed disk prefetches
+        if connector_output.completed_disk_prefetches:
+            from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
+            mgr = self.connector_scheduler.manager
+            if isinstance(mgr, TieredOffloadingManager):
+                for cpu_ids, _ in connector_output.completed_disk_prefetches:
+                    mgr.mark_completed_by_cpu_ids(cpu_ids)
+
     def request_finished(
         self,
         request: "Request",
@@ -139,9 +148,32 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, block_ids)
+
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
+
+    def get_completed_disk_prefetches(
+        self,
+    ) -> list[tuple[list, list[int]]] | None:
+        """Return completed disk→CPU prefetches for scheduler processing."""
+        if self.connector_worker is None:
+            return None
+        completed = self.connector_worker._completed_disk_prefetches
+        if not completed:
+            return None
+        result = [
+            (p.cpu_block_ids, p.disk_block_ids) for p in completed
+        ]
+        self.connector_worker._completed_disk_prefetches = []
+        return result
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:

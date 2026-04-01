@@ -9,6 +9,7 @@ from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    DiskPrefetchSpec,
     OffloadingConnectorMetadata,
     ReqId,
 )
@@ -70,25 +71,6 @@ class OffloadingConnectorScheduler:
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded beyond the
-        num_computed_tokens.
-
-        Args:
-            request (Request): the request object.
-            num_computed_tokens (int): the number of locally
-                computed tokens for this request
-
-        Returns:
-            A tuple with the following elements:
-                - The number of tokens that can be loaded beyond what is
-                  already computed.
-                  If None, it means that the connector needs more time to
-                  determine the number of matched tokens, and the scheduler
-                  should query for this request again later.
-                - `True` if tokens will be loaded asynchronously
-                  (between scheduler steps).
-        """
         num_blocks = request.num_tokens // self.offloaded_block_size
 
         assert len(request.block_hashes) // self.block_size_factor == num_blocks
@@ -98,15 +80,14 @@ class OffloadingConnectorScheduler:
 
         full_block_tokens = self.offloaded_block_size * num_blocks
         if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
-            # we can load less than a block, skip
             return 0, False
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         hits = self.manager.lookup(
             self._get_block_hashes(request, start_idx=start_block_idx)
         )
+
         if hits is None:
-            # indicates a lookup that should be tried later
             return None, False
         if hits == 0:
             return 0, False
@@ -269,10 +250,14 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # Disk prefetch disabled for testing
+        disk_prefetches: list[DiskPrefetchSpec] = []
+
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
             reqs_to_flush=scheduler_output.preempted_req_ids,
+            disk_prefetches=disk_prefetches,
         )
         self._reqs_to_load = {}
 

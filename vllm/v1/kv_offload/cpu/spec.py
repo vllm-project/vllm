@@ -25,16 +25,18 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
         # calculate kv_bytes_per_offloaded_block
+        # Derive bytes-per-block from the tensor sizes and GPU block count.
+        # This is consistent across scheduler and worker regardless of how
+        # kv_cache_groups are structured (they may differ due to HMA
+        # processing), because kv_cache_tensors and num_blocks are the same.
         assert kv_cache_config is not None
-        page_sizes = {
-            kv_cache_group.kv_cache_spec.page_size_bytes
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        }
-        assert len(page_sizes) == 1
-        page_size_bytes = page_sizes.pop()
+        assert kv_cache_config.num_blocks > 0
+        total_kv_bytes_per_worker = sum(
+            t.size for t in kv_cache_config.kv_cache_tensors
+        )
+        page_size_bytes = total_kv_bytes_per_worker // kv_cache_config.num_blocks
         kv_bytes_per_block = (
             page_size_bytes
-            * len(kv_cache_config.kv_cache_tensors)
             * vllm_config.parallel_config.world_size
         )
 
@@ -45,6 +47,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             else 0
         )
 
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -52,6 +55,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._handlers: CpuGpuOffloadingHandlers | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        self.disk_path: str | None = self.extra_config.get("disk_path")
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -99,6 +103,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_caches=kv_caches,
                 block_size_factor=self.block_size_factor,
                 num_cpu_blocks=self.num_blocks,
+                disk_path=self.disk_path,
             )
 
         assert self._handlers is not None

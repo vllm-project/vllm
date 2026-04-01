@@ -58,6 +58,7 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
+        self._completed_disk_prefetches: list = []
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -65,8 +66,17 @@ class OffloadingConnectorWorker:
         return job_id
 
     def _register_handlers(self, kv_caches: CanonicalKVCaches):
+        self._cpu_gpu_handlers = None
         for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
             self.worker.register_handler(src_cls, dst_cls, handler)
+        # Stash reference to handlers for disk prefetch access
+        from vllm.v1.kv_offload.disk.spec import TieredOffloadingSpec
+        if isinstance(self.spec, TieredOffloadingSpec) and self.spec._handlers:
+            self._cpu_gpu_handlers = self.spec._handlers
+
+    def _get_disk_handlers(self):
+        """Get CpuGpuOffloadingHandlers if disk is enabled."""
+        return self._cpu_gpu_handlers
 
     def register_kv_caches(
         self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
@@ -307,6 +317,19 @@ class OffloadingConnectorWorker:
                 self.worker.wait(job_ids)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
+        # Submit disk→CPU prefetches (non-blocking, async reads).
+        if metadata.disk_prefetches:
+            handlers = self._get_disk_handlers()
+            if handlers:
+                handlers.process_prefetch_requests(metadata.disk_prefetches)
+
+        # Check if any previously submitted prefetches have completed.
+        handlers = self._get_disk_handlers()
+        if handlers:
+            newly_completed = handlers.check_prefetch_completion()
+            if newly_completed:
+                self._completed_disk_prefetches.extend(newly_completed)
+
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success

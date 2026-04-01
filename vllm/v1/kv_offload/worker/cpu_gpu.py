@@ -27,6 +27,8 @@ class Transfer:
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
+    # Destination block IDs for write-through to disk (GPU→CPU only)
+    dst_block_ids: np.ndarray | None = None
 
 
 def expand_block_ids(
@@ -148,6 +150,11 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
+        # Callback for write-through: called with CPU block IDs after
+        # GPU→CPU transfer completes. Set by CpuGpuOffloadingHandlers.
+        self._on_write_complete: (
+            "Callable[[np.ndarray], None] | None"
+        ) = None
 
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
@@ -211,6 +218,10 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
+        # Track CPU destination block IDs for write-through to disk
+        cpu_dst_ids = (
+            src_to_dst[:, 1].copy() if self.gpu_to_cpu else None
+        )
         self._transfers.append(
             Transfer(
                 job_id=job_id,
@@ -218,6 +229,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 start_event=start_event,
                 end_event=end_event,
                 num_bytes=dst_sub_block_count * self.group_block_size_in_bytes[0],
+                dst_block_ids=cpu_dst_ids,
             )
         )
 
@@ -239,6 +251,13 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 transfer_type=self.transfer_type,
             )
 
+            # Write-through: after GPU→CPU completes, fire disk write
+            if (
+                transfer.dst_block_ids is not None
+                and self._on_write_complete is not None
+            ):
+                self._on_write_complete(transfer.dst_block_ids)
+
             results.append(result)
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
@@ -259,9 +278,14 @@ class CpuGpuOffloadingHandlers:
         kv_caches: CanonicalKVCaches,
         block_size_factor: int,
         num_cpu_blocks: int,
+        disk_path: str | None = None,
     ):
         pin_memory = is_pin_memory_available()
-        logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
+        logger.info(
+            "Allocating %d CPU tensors with num_cpu_blocks=%d",
+            len(kv_caches.tensors), num_cpu_blocks,
+        )
+
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
@@ -295,3 +319,66 @@ class CpuGpuOffloadingHandlers:
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
         )
+
+        # Disk write-through: if disk_path is set, create a DiskIOWorker
+        # for background writes after GPU→CPU completes.
+        self._disk_io: "DiskIOWorker | None" = None
+        if disk_path:
+            from vllm.v1.kv_offload.worker.cpu_disk import DiskIOWorker
+            num_disk_blocks = num_cpu_blocks * 3  # default 3x CPU
+            self._disk_io = DiskIOWorker(
+                cpu_tensors=cpu_tensors,
+                disk_path=disk_path,
+                num_disk_blocks=num_disk_blocks,
+            )
+            # TEMPORARILY DISABLED: disk write-through
+            # self.gpu_to_cpu_handler._on_write_complete = (
+            #     self._disk_write_through
+            # )
+        # Inflight prefetch tracking: list of (DiskPrefetchSpec, [futures])
+        self._inflight_prefetches: list[tuple] = []
+
+    def _disk_write_through(self, cpu_block_ids: "np.ndarray") -> None:
+        """Background write-through: copy completed CPU blocks to disk."""
+        if self._disk_io is None:
+            return
+        # Use same block IDs for disk (1:1 mapping CPU→disk)
+        block_list = cpu_block_ids.tolist()
+        self._disk_io.submit_writes(block_list, block_list)
+        self._disk_io.drain_completed_writes()
+
+    def process_prefetch_requests(self, requests: list) -> None:
+        """Submit disk→CPU prefetch requests (non-blocking).
+
+        Submits reads to background threads and returns immediately.
+        Does NOT block the engine step. Call check_prefetch_completion()
+        to see which prefetches have finished.
+        """
+        if self._disk_io is None:
+            return
+        for req in requests:
+            futs = self._disk_io.submit_async_reads_tracked(
+                req.cpu_block_ids, req.disk_block_ids
+            )
+            self._inflight_prefetches.append((req, futs))
+
+    def check_prefetch_completion(self) -> list:
+        """Check which async prefetch reads have completed.
+
+        Returns the DiskPrefetchSpec objects whose reads are done.
+        Called each engine step — non-blocking check.
+        """
+        completed = []
+        still_inflight = []
+        for req, futs in self._inflight_prefetches:
+            if all(f.done() for f in futs):
+                # Check for errors
+                for f in futs:
+                    exc = f.exception()
+                    if exc is not None:
+                        logger.warning("Disk prefetch read failed: %s", exc)
+                completed.append(req)
+            else:
+                still_inflight.append((req, futs))
+        self._inflight_prefetches = still_inflight
+        return completed

@@ -68,3 +68,13 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
     @staticmethod
     def medium() -> str:
         return "CPU"
+
+
+class DiskLoadStoreSpec(BlockIDsLoadStoreSpec):
+    """
+    Spec for loading/storing a KV block to NVMe disk.
+    """
+
+    @staticmethod
+    def medium() -> str:
+        return "Disk"

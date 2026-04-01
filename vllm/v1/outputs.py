@@ -132,6 +132,9 @@ class KVConnectorOutput:
     kv_connector_stats: KVConnectorStats | None = None
     kv_cache_events: KVConnectorKVEvents | None = None
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
+    # Completed disk→CPU prefetches: list of (block_hashes, cpu_block_ids)
+    # Transported from worker → scheduler to mark blocks ready in CPU policy
+    completed_disk_prefetches: list[tuple[list, list[int]]] | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)

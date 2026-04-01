@@ -34,11 +34,22 @@ class LRUCachePolicy(CachePolicy):
         if n == 0:
             return []
         candidates: list[tuple[BlockHash, BlockStatus]] = []
+        # First pass: prefer evicting not-ready blocks (ref_cnt == -1).
+        # These are speculative prefetch blocks with no valid data —
+        # they're expendable and should be evicted before confirmed data.
         for block_hash, block in self.blocks.items():
-            if block.ref_cnt == 0 and block_hash not in protected:
+            if block.ref_cnt == -1 and block_hash not in protected:
                 candidates.append((block_hash, block))
                 if len(candidates) == n:
                     break
+        # Second pass: evict ready blocks (ref_cnt == 0) if still needed.
+        if len(candidates) < n:
+            for block_hash, block in self.blocks.items():
+                if block.ref_cnt == 0 and block_hash not in protected:
+                    if (block_hash, block) not in candidates:
+                        candidates.append((block_hash, block))
+                        if len(candidates) == n:
+                            break
         if len(candidates) < n:
             return None
         for block_hash, _ in candidates:
