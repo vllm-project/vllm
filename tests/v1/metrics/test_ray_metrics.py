@@ -5,6 +5,7 @@ import pytest
 import ray
 
 from vllm.config.model import ModelDType
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
 from vllm.v1.metrics.ray_wrappers import RayPrometheusMetric, RayPrometheusStatLogger
@@ -12,6 +13,11 @@ from vllm.v1.metrics.ray_wrappers import RayPrometheusMetric, RayPrometheusStatL
 MODELS = [
     "distilbert/distilgpt2",
 ]
+
+
+def get_engine_input(engine: AsyncLLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -40,7 +46,7 @@ def test_engine_log_metrics_ray(
             for i, prompt in enumerate(example_prompts):
                 results = engine.generate(
                     request_id=f"request-id-{i}",
-                    prompt=prompt,
+                    prompt=get_engine_input(engine, prompt),
                     sampling_params=SamplingParams(max_tokens=max_tokens),
                 )
 
