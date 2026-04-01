@@ -192,7 +192,7 @@ class RoutedExpertsCapturer:
                 start_loc = 0
                 end_loc = token_num_per_dp
             else:
-                logger.warning(
+                logger.error(
                     "RoutedExpertsCapturer: unexpected topk_ids batch dim %s "
                     "(expected %s or %s for dp_rank=%s); skipping capture",
                     n,
