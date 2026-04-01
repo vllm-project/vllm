@@ -45,7 +45,9 @@ async def client(server):
         yield async_client
 
 
-def test_tokenize_then_chat_completion_with_image(
+@pytest.mark.asyncio
+async def test_tokenize_then_chat_completion_with_image(
+    client: openai.AsyncOpenAI,
     server: RemoteOpenAIServer,
     local_asset_server,
 ):
@@ -63,7 +65,6 @@ def test_tokenize_then_chat_completion_with_image(
         }
     ]
 
-    # Step 1: tokenize (this triggers multimodal processing in the renderer)
     tok_resp = requests.post(
         server.url_for("tokenize"),
         json={"model": MODEL_NAME, "messages": messages},
@@ -72,54 +73,6 @@ def test_tokenize_then_chat_completion_with_image(
     tok_data = tok_resp.json()
     assert tok_data["count"] > 0, "Tokenization must return tokens"
 
-    # Step 2: chat completion with the SAME multimodal message
-    chat_resp = requests.post(
-        server.url_for("v1/chat/completions"),
-        json={
-            "model": MODEL_NAME,
-            "messages": messages,
-            "max_tokens": 10,
-            "temperature": 0.0,
-        },
-    )
-
-    assert chat_resp.status_code == 200, (
-        f"Chat completion failed after tokenize: "
-        f"status={chat_resp.status_code}, body={chat_resp.text}"
-    )
-    chat_data = chat_resp.json()
-    assert chat_data["choices"][0]["message"]["content"], (
-        "Chat completion must produce non-empty content"
-    )
-
-
-@pytest.mark.asyncio
-async def test_tokenize_then_chat_completion_with_image_async(
-    client: openai.AsyncOpenAI,
-    server: RemoteOpenAIServer,
-    local_asset_server,
-):
-    """Async variant: tokenize then chat complete with the same image."""
-
-    image_url = local_asset_server.url_for("stop_sign.jpg")
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": image_url}},
-                {"type": "text", "text": "Describe this image briefly."},
-            ],
-        }
-    ]
-
-    # Step 1: tokenize
-    tok_resp = requests.post(
-        server.url_for("tokenize"),
-        json={"model": MODEL_NAME, "messages": messages},
-    )
-    tok_resp.raise_for_status()
-
-    # Step 2: chat completion via the OpenAI async client
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
