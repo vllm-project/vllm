@@ -1,8 +1,9 @@
+use futures::Stream;
 use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use vllm_engine_core_client::protocol::StopReason;
-use vllm_llm::{FinishReason, GenerateOutputStream};
+use vllm_llm::{FinishReason, GenerateOutput};
 
 use super::logprobs::{
     DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
@@ -18,6 +19,9 @@ pub struct TextDecodeOptions {
     pub skip_special_tokens: bool,
     pub include_stop_str_in_output: bool,
     pub stop_strings: Option<Vec<String>>,
+    /// Minimum number of tokens to generate before stop-string checking kicks in.
+    /// Stop strings found within the first `min_tokens` tokens are ignored.
+    pub min_tokens: u32,
 }
 
 impl Default for TextDecodeOptions {
@@ -26,6 +30,7 @@ impl Default for TextDecodeOptions {
             skip_special_tokens: true,
             include_stop_str_in_output: false,
             stop_strings: None,
+            min_tokens: 0,
         }
     }
 }
@@ -76,7 +81,7 @@ pub enum DecodedTextEvent {
 pub async fn decoded_text_event_stream(
     request_id: String,
     tokenizer: DynTokenizer,
-    raw_stream: GenerateOutputStream,
+    raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
     mut decode_options: TextDecodeOptions,
     intermediate: bool,
 ) {
@@ -155,10 +160,11 @@ pub async fn decoded_text_event_stream(
 
         let mut delta: Option<String> = None;
         let mut truncate_output_to = None;
-        let mut tuncate_tokens_to = None;
+        let mut truncate_tokens_to = None;
         for (tok_idx, &token_id) in decodable_token_ids.iter().enumerate() {
             let new_bytes = decoder.push_token(token_id)?;
-            if let Some(stops) = decode_options.stop_strings.as_mut()
+            if output_token_count + tok_idx + 1 > decode_options.min_tokens as usize
+                && let Some(stops) = decode_options.stop_strings.as_mut()
                 && let Some((idx, off)) = matches_stop_string(stops, decoder.output(), new_bytes)
             {
                 let stop_str = stops.swap_remove(idx);
@@ -167,7 +173,7 @@ pub async fn decoded_text_event_stream(
                     false => Some(off),
                 };
                 finish_reason = Some(FinishReason::Stop(Some(StopReason::Text(stop_str))));
-                tuncate_tokens_to = Some(tok_idx + 1);
+                truncate_tokens_to = Some(tok_idx + 1);
                 break;
             }
 
@@ -183,7 +189,7 @@ pub async fn decoded_text_event_stream(
         let mut new_token_ids = take(&mut output.token_ids);
 
         // Trim tokens and logprobs if we matched stop string.
-        if let Some(num_tokens) = tuncate_tokens_to {
+        if let Some(num_tokens) = truncate_tokens_to {
             new_token_ids.truncate(num_tokens);
             if let Some(logprobs) = &mut output.logprobs {
                 logprobs.positions.truncate(num_tokens);
@@ -287,7 +293,154 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use futures::stream;
+    use vllm_engine_core_client::protocol::EngineCoreFinishReason;
+    use vllm_llm::GenerateOutput;
+
     use super::*;
+    use crate::output::TextOutputStreamExt as _;
+    use crate::tokenizers::Tokenizer;
+
+    /// Backend that treats each token ID as a raw byte, producing lossy UTF-8.
+    struct ByteTokenizer;
+
+    impl Tokenizer for ByteTokenizer {
+        fn encode(&self, _text: &str) -> crate::error::Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn decode(
+            &self,
+            token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> crate::error::Result<String> {
+            let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+    }
+
+    /// Helper: run `decoded_text_event_stream` to completion and return the collected output.
+    async fn run_to_completion(
+        token_ids: Vec<u32>,
+        decode_options: TextDecodeOptions,
+    ) -> crate::output::CollectedTextOutput {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let raw_stream = stream::iter(vec![Ok(GenerateOutput::for_test(
+            Some(prompt),
+            token_ids,
+            Some(EngineCoreFinishReason::Length),
+        ))]);
+        let tokenizer: DynTokenizer = Arc::new(ByteTokenizer);
+        decoded_text_event_stream("test".into(), tokenizer, raw_stream, decode_options, false)
+            .collect_output()
+            .await
+            .unwrap()
+    }
+
+    /// Convert ASCII string to token IDs (one byte per token).
+    fn ascii_tokens(s: &str) -> Vec<u32> {
+        s.bytes().map(u32::from).collect()
+    }
+
+    fn opts(stop: &[&str], min_tokens: u32) -> TextDecodeOptions {
+        TextDecodeOptions {
+            stop_strings: Some(stop.iter().map(|s| s.to_string()).collect()),
+            min_tokens,
+            ..Default::default()
+        }
+    }
+
+    // --- stop string stream tests ---
+
+    #[tokio::test]
+    async fn stream_stop_string_truncates_at_match() {
+        let output = run_to_completion(ascii_tokens("hello"), opts(&["e"], 0)).await;
+        assert_eq!(output.text, "h");
+        assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_at_end() {
+        let output = run_to_completion(ascii_tokens("abcxyz"), opts(&["xyz"], 0)).await;
+        assert_eq!(output.text, "abc");
+        assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_first_token() {
+        let output = run_to_completion(ascii_tokens("xhello"), opts(&["x"], 0)).await;
+        assert_eq!(output.text, "");
+        assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_no_match_runs_to_completion() {
+        let output = run_to_completion(ascii_tokens("hello"), opts(&["z"], 0)).await;
+        assert_eq!(output.text, "hello");
+        assert_eq!(output.finish_reason, FinishReason::Length);
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_multi_char() {
+        let output = run_to_completion(ascii_tokens("say hello world"), opts(&["lo"], 0)).await;
+        assert_eq!(output.text, "say hel");
+        assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_first_of_multiple_wins() {
+        // Both "ll" and "lo" are present; "ll" appears first in the output.
+        let output = run_to_completion(ascii_tokens("hello"), opts(&["ll", "lo"], 0)).await;
+        assert_eq!(output.text, "he");
+        assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_include_in_output() {
+        let output = run_to_completion(
+            ascii_tokens("hello"),
+            TextDecodeOptions {
+                stop_strings: Some(vec!["ll".to_string()]),
+                include_stop_str_in_output: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(output.text, "hell");
+        assert!(output.finish_reason.is_stop());
+    }
+
+    // --- min_tokens + stop string interaction ---
+
+    #[tokio::test]
+    async fn min_tokens_suppresses_early_stop_string() {
+        // stop="e", min_tokens=3: the 'e' at token 2 is within the first 3 tokens,
+        // so it should be skipped. No later 'e' exists, so output runs to completion.
+        let output = run_to_completion(ascii_tokens("hello"), opts(&["e"], 3)).await;
+        assert_eq!(output.text, "hello");
+        assert_eq!(output.finish_reason, FinishReason::Length);
+    }
+
+    #[tokio::test]
+    async fn min_tokens_allows_stop_string_after_threshold() {
+        // stop="e", min_tokens=2: the first 'e' at token 3 is past the threshold.
+        let output = run_to_completion(ascii_tokens("greet"), opts(&["e"], 2)).await;
+        assert_eq!(output.text, "gr");
+        assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn min_tokens_zero_behaves_like_absent() {
+        let output = run_to_completion(ascii_tokens("hello"), opts(&["e"], 0)).await;
+        assert_eq!(output.text, "h");
+        assert!(output.finish_reason.is_stop());
+    }
 
     #[test]
     fn stop_string_matches_at_end() {

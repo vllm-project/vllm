@@ -3,6 +3,9 @@ name = "vllm-llm"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-util = []
+
 [dependencies]
 enum-as-inner.workspace = true
 futures.workspace = true

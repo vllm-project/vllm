@@ -80,6 +80,7 @@ pub fn prepare_completion_request(
                 StringOrArray::String(string) => vec![string.clone()],
                 StringOrArray::Array(arr) => arr.clone(),
             }),
+            min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
     };

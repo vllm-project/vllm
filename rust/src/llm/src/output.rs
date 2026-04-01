@@ -132,6 +132,30 @@ impl GenerateOutput {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+impl GenerateOutput {
+    /// Build a [`GenerateOutput`] for tests.
+    pub fn for_test(
+        prompt_token_ids: Option<Arc<[u32]>>,
+        token_ids: Vec<u32>,
+        finish_reason: Option<EngineCoreFinishReason>,
+    ) -> Self {
+        Self {
+            request_id: String::new(),
+            prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
+                prompt_token_ids: ids,
+                prompt_logprobs: None,
+            }),
+            token_ids,
+            logprobs: None,
+            raw: EngineCoreOutput {
+                finish_reason,
+                ..Default::default()
+            },
+        }
+    }
+}
+
 /// Stream of per-request generate outputs for one request.
 ///
 /// - A normal termination of the stream represents a clean completion of the request.

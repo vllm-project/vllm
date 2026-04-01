@@ -27,8 +27,10 @@ vllm-llm.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+futures.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+vllm-llm = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
