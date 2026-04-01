@@ -95,7 +95,7 @@ def nvfp4_marlin_process_scales(
     if scale_factor > 1.0:
         marlin_scales = (marlin_scales.float() * scale_factor).to(torch.half)
 
-    marlin_scales = (marlin_scales * (2**7))
+    marlin_scales = marlin_scales * (2**7)
     marlin_scales[marlin_scales < 2] = 0
     marlin_scales = marlin_scales.view(torch.int16) << 1
     marlin_scales = marlin_scales.view(torch.float8_e4m3fn)
