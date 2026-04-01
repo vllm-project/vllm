@@ -20,4 +20,5 @@ steps:
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
-  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
+  # devices 0,1 have some memory in use at this point and the test OOMs. Use 2,3 to avoid the issue.
+  - CUDA_VISIBLE_DEVICES=2,3 VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
