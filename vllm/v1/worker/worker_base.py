@@ -427,6 +427,27 @@ class WorkerBase:
                                 result[layer_idx][hp_str][f"{phase_name}_norm"] = round(
                                     norm, 6
                                 )
+            else:
+                # Phase-specific norms from pending globals (before manager init)
+                pending = getattr(
+                    self.model_runner, "_pending_steering_globals", None
+                )
+                if pending:
+                    for captured_vectors, phase in pending:
+                        if phase == "base":
+                            continue  # base vectors are in layer buffers
+                        phase_name = phase  # "prefill" or "decode"
+                        for hp_str, layer_vecs in captured_vectors.items():
+                            for layer_idx, vec in layer_vecs.items():
+                                norm = vec.norm().item()
+                                if norm > 0.0:
+                                    if layer_idx not in result:
+                                        result[layer_idx] = {}
+                                    if hp_str not in result[layer_idx]:
+                                        result[layer_idx][hp_str] = {}
+                                    result[layer_idx][hp_str][
+                                        f"{phase_name}_norm"
+                                    ] = round(norm, 6)
         return result
 
     def get_model_inspection(self) -> str:
