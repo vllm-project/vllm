@@ -205,19 +205,11 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         # Attention/MLA layers are processed after all other layers
         if isinstance(layer, (Attention, MLAAttention)):
-            if info.load_numel > 0:
-                raise NotImplementedError(
-                    "Layerwise reloading of Q/K/V scale weights is not implemented yet"
-                )
-
-            elif info.kernel_tensors is None:
-                raise NotImplementedError(
-                    "Layerwise loading of Q/K/V scale weights is not implemented yet"
-                )
-
+            if info.load_numel > 0 or info.kernel_tensors is None:
+                _layerwise_process(layer, info)
             else:
                 _place_kernel_tensors(layer, info)
-                layer.process_weights_after_loading(model_config.dtype)
+            layer.process_weights_after_loading(model_config.dtype)
 
         # No weights were loaded
         elif info.load_numel <= 0:
@@ -275,7 +267,9 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param.weight_loader(*args.args, **args.kwargs)
 
     # Process weights (quantization, repacking, etc.)
-    # Attention/MLA are processed in `finalize_layerwise_reload`
+    # For Attention/MLA, this handles quant_method processing (e.g. KV scales).
+    # Attention-specific processing (impl init, MLA decompression) is called
+    # separately in finalize_layerwise_processing.
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
