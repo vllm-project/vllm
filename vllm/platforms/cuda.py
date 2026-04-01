@@ -123,6 +123,15 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
+        if kv_cache_dtype == "turboquant":
+            # TurboQuant only supports DECODER attention type.
+            # Fallback backends handle encoder/sliding-window layers
+            # in hybrid models (e.g., Qwen3.5).
+            return [
+                AttentionBackendEnum.TURBOQUANT,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+            ]
         if device_capability.major == 10:
             return [
                 AttentionBackendEnum.FLASHINFER,

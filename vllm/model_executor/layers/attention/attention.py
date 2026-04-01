@@ -265,6 +265,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window,
             )
 
+        # TurboQuant only supports full DECODER attention. Auto-skip for
+        # encoder layers and sliding-window layers in hybrid models.
+        if kv_cache_dtype == "turboquant" and (
+            attn_type != AttentionType.DECODER or sliding_window is not None
+        ):
+            kv_cache_dtype = "auto"
+            calculate_kv_scales = False
+
+        backend_kv_cache_dtype = kv_cache_dtype
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
@@ -296,7 +305,7 @@ class Attention(nn.Module, AttentionLayerBase):
             self.attn_backend = get_attn_backend(
                 head_size,
                 dtype,
-                kv_cache_dtype,
+                backend_kv_cache_dtype,
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,
@@ -334,6 +343,8 @@ class Attention(nn.Module, AttentionLayerBase):
             cache_config.enable_prefix_caching = False
 
         impl_cls = self.attn_backend.get_impl_cls()
+        # Pass original kv_cache_dtype to impl so it can detect turboquant,
+        # even though backend selection used "auto" for compatibility.
         self.impl = impl_cls(
             num_heads,
             head_size,
@@ -378,6 +389,64 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
+
+        # Fallback: if user only passed --kv-cache-dtype turboquant
+        # without --quantization, create default TurboQuantConfig
+        if kv_cache_dtype == "turboquant" and not hasattr(self, "_turboquant_config"):
+            import os
+
+            from vllm.model_executor.layers.quantization.turboquant import (
+                TurboQuantConfig,
+            )
+
+            tq_lite = os.environ.get("TQ_LITE", "0") in ("1", "true", "True")
+            tq_bits = int(os.environ.get("TQ_BITS", "4"))
+            self._turboquant_config = TurboQuantConfig(
+                bit_width=tq_bits,
+                outlier_fraction=0.15,
+                lite_mode=tq_lite,
+            )
+
+        # Initialize TurboQuantState eagerly (not in forward) to avoid
+        # torch.compile graph breaks from torch.Generator in rotation matrix
+        if kv_cache_dtype == "turboquant":
+            from vllm.model_executor.layers.quantization.turboquant import (
+                TurboQuantState,
+            )
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            layer_idx = extract_layer_index(prefix)
+            # Initialize on CUDA if available, CPU otherwise
+            init_device = (
+                torch.device("cuda")
+                if torch.cuda.is_available()
+                else torch.device("cpu")
+            )
+            self._tq_k_state = TurboQuantState(
+                config=self._turboquant_config,
+                head_size=head_size,
+                layer_idx=layer_idx,
+                device=init_device,
+            )
+            # Use a separate config for V if asymmetric bit allocation
+            # is enabled (value_bit_width != key bit_width).
+            v_cfg = self._turboquant_config
+            if self._turboquant_config.value_bit_width is not None:
+                from dataclasses import replace
+
+                v_cfg = replace(
+                    self._turboquant_config,
+                    bit_width=self._turboquant_config.value_bit_width,
+                    value_bit_width=None,
+                )
+            self._tq_v_state = TurboQuantState(
+                config=v_cfg,
+                head_size=head_size,
+                layer_idx=layer_idx + 10000,
+                device=init_device,
+            )
+            # Calibrate outlier channels on first batch
+            self._tq_needs_calibration = self._turboquant_config.outlier_fraction > 0
 
         # for attn backends supporting query quantization
         self.query_quant = None
@@ -539,6 +608,36 @@ class Attention(nn.Module, AttentionLayerBase):
         block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
+
+        # TurboQuant: packed uint8 storage with outlier-aware layout.
+        # Slot = [outlier_bf16_bytes | packed_tq_indices | norm_fp16_bytes]
+        if self.kv_cache_dtype == "turboquant":
+            import math
+
+            cfg = self._turboquant_config
+            n_outliers = (
+                max(1, int(self.head_size * cfg.outlier_fraction))
+                if cfg.outlier_fraction > 0
+                else 0
+            )
+            normal_size = self.head_size - n_outliers
+            # Asymmetric K/V: use max bit-width for slot sizing so both
+            # K and V fit in the same slot layout.
+            k_bits = int(cfg.bit_width)
+            v_bits = int(cfg.effective_value_bit_width)
+            bits = max(k_bits, v_bits)
+            outlier_bytes = n_outliers * 2  # bf16
+            packed_bytes = math.ceil(normal_size * bits / 8)
+            norm_bytes = 2  # fp16
+            slot_bytes = outlier_bytes + packed_bytes + norm_bytes
+            return FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=slot_bytes,
+                head_size_v=slot_bytes,
+                dtype=torch.uint8,
+            )
+
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
