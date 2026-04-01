@@ -67,7 +67,7 @@ _IMAGE_TOKEN_ID = 100256  # <|dummy_0|> in the Phi-4 tokenizer
 # ---------------------------------------------------------------------------
 
 
-class Phi4VisionRProcessingInfo(BaseProcessingInfo):
+class Phi4SiglipProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
@@ -114,8 +114,8 @@ class Phi4VisionRProcessingInfo(BaseProcessingInfo):
         return {"image": self._get_max_num_patches()}
 
 
-class Phi4VisionRDummyInputsBuilder(
-    BaseDummyInputsBuilder[Phi4VisionRProcessingInfo],
+class Phi4SiglipDummyInputsBuilder(
+    BaseDummyInputsBuilder[Phi4SiglipProcessingInfo],
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -139,8 +139,8 @@ class Phi4VisionRDummyInputsBuilder(
         }
 
 
-class Phi4VisionRMultiModalProcessor(
-    BaseMultiModalProcessor[Phi4VisionRProcessingInfo],
+class Phi4SiglipMultiModalProcessor(
+    BaseMultiModalProcessor[Phi4SiglipProcessingInfo],
 ):
     def _call_hf_processor(
         self,
@@ -226,7 +226,7 @@ class Phi4VisionRMultiModalProcessor(
 # ---------------------------------------------------------------------------
 
 
-class Phi4VisionRImagePixelInputs(TensorSchema):
+class Phi4SiglipImagePixelInputs(TensorSchema):
     """
     Dimensions:
         - bn: Batch size * number of images
@@ -246,9 +246,9 @@ class Phi4VisionRImagePixelInputs(TensorSchema):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Phi4VisionRMultiModalProcessor,
-    info=Phi4VisionRProcessingInfo,
-    dummy_inputs=Phi4VisionRDummyInputsBuilder,
+    Phi4SiglipMultiModalProcessor,
+    info=Phi4SiglipProcessingInfo,
+    dummy_inputs=Phi4SiglipDummyInputsBuilder,
 )
 class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
@@ -348,14 +348,14 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Phi4VisionRImagePixelInputs | None:
+    ) -> Phi4SiglipImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         pixel_attention_mask = kwargs.pop("pixel_attention_mask", None)
         spatial_shapes = kwargs.pop("spatial_shapes", None)
         if pixel_values is None:
             return None
 
-        return Phi4VisionRImagePixelInputs(
+        return Phi4SiglipImagePixelInputs(
             type="pixel_values",
             pixel_values=pixel_values,
             pixel_attention_mask=pixel_attention_mask,
@@ -363,7 +363,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def _process_image_input(
-        self, image_input: Phi4VisionRImagePixelInputs
+        self, image_input: Phi4SiglipImagePixelInputs
     ) -> MultiModalEmbeddings:
         pixel_values = image_input["pixel_values"]
         pixel_attention_mask = image_input["pixel_attention_mask"]
