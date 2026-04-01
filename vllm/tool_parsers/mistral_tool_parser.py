@@ -142,18 +142,18 @@ class MistralToolParser(ToolParser):
             "whitespace_pattern",
             "structural_tag",
         ]
-        structured_outputs = request.structured_outputs
-        response_format = request.response_format
-        any_so_non_supported_active = structured_outputs is not None and any(
-            getattr(structured_outputs, attribute) is not None
+        any_so_non_supported_active = request.structured_outputs is not None and any(
+            getattr(request.structured_outputs, attribute) is not None
             for attribute in so_non_supported_attributes
         )
         response_format_non_supported_active = (
-            response_format is not None and response_format.type == "structural_tag"
+            request.response_format is not None
+            and request.response_format.type == "structural_tag"
         )
 
         if (
             not is_mistral_tokenizer(self.model_tokenizer)
+            or isinstance(request, ResponsesRequest)
             or not self.model_tokenizer.supports_grammar
             or any_so_non_supported_active
             or response_format_non_supported_active
@@ -169,31 +169,34 @@ class MistralToolParser(ToolParser):
             return request
 
         json_schema: dict[str, Any] | None = None
-        if structured_outputs is not None:
-            if structured_outputs.json_object is not None:
+        if request.structured_outputs is not None:
+            if request.structured_outputs.json_object is not None:
                 json_schema = _DEFAULT_JSON_SCHEMA
-            elif structured_outputs.json is not None:
-                if isinstance(structured_outputs.json, str):
-                    json_schema = json.loads(structured_outputs.json)
+            elif request.structured_outputs.json is not None:
+                if isinstance(request.structured_outputs.json, str):
+                    json_schema = json.loads(request.structured_outputs.json)
                 else:
-                    json_schema = structured_outputs.json
+                    json_schema = request.structured_outputs.json
             else:
                 raise ValueError(
                     "Unsupported request.structured_outputs for MistralToolParser. "
                     "Only `json` and `json_object` are supported."
                 )
-        elif response_format is not None and response_format.type != "text":
-            if response_format.type == "json_object":
+        elif (
+            request.response_format is not None
+            and request.response_format.type != "text"
+        ):
+            if request.response_format.type == "json_object":
                 json_schema = _DEFAULT_JSON_SCHEMA
-            elif response_format.type == "json_schema":
-                if response_format.json_schema is not None:
-                    json_schema = response_format.json_schema.json_schema
+            elif request.response_format.type == "json_schema":
+                if request.response_format.json_schema is not None:
+                    json_schema = request.response_format.json_schema.json_schema
                 else:
                     json_schema = _DEFAULT_JSON_SCHEMA
             else:
                 raise ValueError(
                     "MistralToolParser only accepts `text`, `json_object` or "
-                    f"`json_schema` for request.response_format, got {response_format=}"
+                    f"`json_schema`, got {request.response_format=}"
                 )
             # Structured Outputs will be defined.
             request.response_format = None
