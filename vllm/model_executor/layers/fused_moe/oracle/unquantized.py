@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 class UnquantizedMoeBackend(Enum):
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
+    SONIC = "Sonic MoE"
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
@@ -67,6 +68,7 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         _AVAILABLE_BACKENDS = [
             UnquantizedMoeBackend.FLASHINFER_TRTLLM,
             UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+            UnquantizedMoeBackend.SONIC,
             UnquantizedMoeBackend.TRITON,
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
@@ -119,6 +121,11 @@ def backend_to_kernel_cls(
         )
 
         return BatchedTritonExperts
+
+    elif backend == UnquantizedMoeBackend.SONIC:
+        from vllm.model_executor.layers.fused_moe.sonic_moe import SonicMoeExperts
+
+        return SonicMoeExperts
 
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExperts
@@ -304,6 +311,13 @@ def convert_to_unquantized_kernel_format(
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
+
+    elif unquantized_backend == UnquantizedMoeBackend.SONIC:
+        from vllm.model_executor.layers.fused_moe.sonic_moe import (
+            prepare_weights_for_sonic,
+        )
+
+        w13_weight, w2_weight = prepare_weights_for_sonic(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         # Swap halves to arrange as [w3; w1] (kernel expectation)
