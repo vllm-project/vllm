@@ -5,14 +5,18 @@ Test for the fused QK RMSNorm + RoPE + KV Cache + FP8-Quant CUDA kernel.
 
 Run:
     python tests/kernels/test_fused_qk_norm_rope_cache_quant.py
+    python tests/kernels/test_fused_qk_norm_rope_cache_quant.py --bench
+    python tests/kernels/test_fused_qk_norm_rope_cache_quant.py --bench-only
 
-The test JIT-compiles the .cu file and validates against a pure-PyTorch
-reference implementation.
+JIT compiles a single .cu (minimal translation unit). Compilation is scoped to
+the *current* GPU via TORCH_CUDA_ARCH_LIST so nvcc does not generate SASS for
+every supported architecture.
 """
 
-import math
+import argparse
 import os
 import pathlib
+import time
 
 import torch
 
@@ -26,15 +30,29 @@ _CSRC = _HERE.parent.parent / "csrc" / "fused_qk_norm_rope_cache_quant.cu"
 assert _CSRC.exists(), f"CUDA source not found: {_CSRC}"
 
 
-def _load_extension():
+def _load_extension(*, verbose: bool | None = None):
+    """JIT-load the lone .cu file; restrict NVCC to the active device's arch."""
     from torch.utils.cpp_extension import load
 
-    return load(
-        name="fused_qknrc",
-        sources=[str(_CSRC)],
-        extra_cuda_cflags=["-O3", "--use_fast_math"],
-        verbose=True,
-    )
+    if verbose is None:
+        verbose = os.environ.get("VLLM_FUSED_QKNRC_JIT_VERBOSE", "") == "1"
+
+    major, minor = torch.cuda.get_device_capability()
+    arch_list = f"{major}.{minor}"
+    old_arch = os.environ.get("TORCH_CUDA_ARCH_LIST")
+    os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+    try:
+        return load(
+            name="fused_qknrc",
+            sources=[str(_CSRC)],
+            extra_cuda_cflags=["-O3", "--use_fast_math"],
+            verbose=verbose,
+        )
+    finally:
+        if old_arch is None:
+            os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+        else:
+            os.environ["TORCH_CUDA_ARCH_LIST"] = old_arch
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -193,15 +211,23 @@ def run_test(
     # Slot mapping: assign each token to a unique slot
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=device)
 
-    # Allocate KV caches
-    cache_dtype = torch.float8_e4m3fn if is_fp8 else dtype
+    # Allocate KV caches (CUDA extension uses uint8 storage when is_fp8; ref uses float8)
     k_cache_ref = torch.zeros(
         num_blocks, block_size, num_heads_kv, head_dim,
-        dtype=cache_dtype, device=device,
+        dtype=(torch.float8_e4m3fn if is_fp8 else dtype),
+        device=device,
     )
     v_cache_ref = torch.zeros_like(k_cache_ref)
-    k_cache_test = torch.zeros_like(k_cache_ref)
-    v_cache_test = torch.zeros_like(v_cache_ref)
+    if is_fp8:
+        k_cache_test = torch.zeros(
+            num_blocks, block_size, num_heads_kv, head_dim,
+            dtype=torch.uint8,
+            device=device,
+        )
+        v_cache_test = torch.zeros_like(k_cache_test)
+    else:
+        k_cache_test = torch.zeros_like(k_cache_ref)
+        v_cache_test = torch.zeros_like(v_cache_ref)
 
     # ── Reference ──
     q_out_ref = reference_fused_qk_norm_rope_cache_quant(
@@ -229,10 +255,10 @@ def run_test(
 
     # KV cache
     if is_fp8:
-        # FP8 has limited precision; compare as float
-        k_test_f = k_cache_test.float()
+        # FP8 has limited precision; compare as float (kernel writes raw uint8)
+        k_test_f = k_cache_test.view(torch.float8_e4m3fn).float()
         k_ref_f = k_cache_ref.float()
-        v_test_f = v_cache_test.float()
+        v_test_f = v_cache_test.view(torch.float8_e4m3fn).float()
         v_ref_f = v_cache_ref.float()
         kv_atol = 2.0  # FP8 E4M3 has ~1 ULP error around typical values
     else:
@@ -266,11 +292,181 @@ def run_test(
     return status == "PASS"
 
 
+def _alloc_for_kernel(
+    num_tokens: int,
+    num_heads_q: int,
+    num_heads_kv: int,
+    head_dim: int,
+    block_size: int,
+    num_blocks: int,
+    max_pos: int,
+    dtype: torch.dtype,
+    is_fp8: bool,
+    device: str = "cuda",
+    seed: int | None = None,
+):
+    """Tensors for fused kernel only (KV cache uint8 when is_fp8)."""
+    if seed is not None:
+        torch.manual_seed(seed)
+    q_size = num_heads_q * head_dim
+    kv_size = num_heads_kv * head_dim
+    total_size = q_size + 2 * kv_size
+    qkv = torch.randn(num_tokens, total_size, dtype=dtype, device=device)
+    q_weight = torch.randn(head_dim, dtype=dtype, device=device).abs() + 0.1
+    k_weight = torch.randn(head_dim, dtype=dtype, device=device).abs() + 0.1
+    cos_sin_cache = _make_cos_sin_cache(max_pos, head_dim, dtype)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.long, device=device
+    )
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=device)
+    q_out = torch.empty(num_tokens, q_size, dtype=dtype, device=device)
+    if is_fp8:
+        k_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            num_heads_kv,
+            head_dim,
+            dtype=torch.uint8,
+            device=device,
+        )
+        v_cache = torch.zeros_like(k_cache)
+    else:
+        k_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            num_heads_kv,
+            head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        v_cache = torch.zeros_like(k_cache)
+    return (
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        slot_mapping,
+        q_out,
+        k_cache,
+        v_cache,
+    )
+
+
+def benchmark_fused_kernel(
+    ext,
+    *,
+    num_tokens: int,
+    num_heads_q: int = 32,
+    num_heads_kv: int = 8,
+    head_dim: int = 128,
+    block_size: int = 16,
+    num_blocks: int = 64,
+    max_pos: int = 4096,
+    dtype: torch.dtype = torch.bfloat16,
+    is_fp8: bool = False,
+    epsilon: float = 1e-6,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    warmup: int = 20,
+    iters: int = 200,
+):
+    """Time `fused_qk_norm_rope_cache_quant` only (CUDA events)."""
+    (
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        slot_mapping,
+        q_out,
+        k_cache,
+        v_cache,
+    ) = _alloc_for_kernel(
+        num_tokens,
+        num_heads_q,
+        num_heads_kv,
+        head_dim,
+        block_size,
+        num_blocks,
+        max_pos,
+        dtype,
+        is_fp8,
+        seed=0,
+    )
+
+    def launch():
+        ext.fused_qk_norm_rope_cache_quant(
+            q_out,
+            k_cache,
+            v_cache,
+            qkv,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            positions,
+            slot_mapping,
+            k_scale,
+            v_scale,
+            epsilon,
+            num_heads_q,
+            num_heads_kv,
+            head_dim,
+            block_size,
+            True,
+            is_fp8,
+        )
+
+    for _ in range(warmup):
+        launch()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(iters):
+        launch()
+    end.record()
+    torch.cuda.synchronize()
+    ms_per = start.elapsed_time(end) / iters
+    tok_per_s = num_tokens / (ms_per * 1e-3)
+    mode = "fp8_kv" if is_fp8 else str(dtype).split(".")[-1]
+    print(
+        f"bench T={num_tokens} nq={num_heads_q} nkv={num_heads_kv} hd={head_dim} "
+        f"{mode}: {ms_per:.4f} ms/call  {tok_per_s:.1f} eff tok/s"
+    )
+    return ms_per
+
+
+def run_benchmark_suite(ext):
+    print("=" * 60)
+    print("Benchmark: fused_qk_norm_rope_cache_quant (CUDA events, iters=200)")
+    print("=" * 60)
+    for T in [1, 4, 16, 64, 256, 1024]:
+        benchmark_fused_kernel(ext, num_tokens=T, dtype=torch.bfloat16, is_fp8=False)
+    cap = torch.cuda.get_device_capability()
+    if cap >= (8, 9):
+        print()
+        for T in [1, 4, 16, 64, 256]:
+            benchmark_fused_kernel(ext, num_tokens=T, dtype=torch.bfloat16, is_fp8=True)
+    else:
+        print(f"\n(skip FP8 bench: SM {cap[0]}.{cap[1]} < 8.9)")
+    print("=" * 60)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--bench", action="store_true", help="Run benchmark after correctness."
+    )
+    parser.add_argument(
+        "--bench-only", action="store_true", help="Only compile + benchmark."
+    )
+    args = parser.parse_args()
+
     if not torch.cuda.is_available():
         print("CUDA not available, skipping.")
         exit(0)
@@ -278,6 +474,10 @@ if __name__ == "__main__":
     print("Compiling CUDA extension …")
     ext = _load_extension()
     print("Compilation done.\n")
+
+    if args.bench_only:
+        run_benchmark_suite(ext)
+        exit(0)
 
     all_pass = True
 
@@ -333,4 +533,9 @@ if __name__ == "__main__":
     else:
         print("SOME TESTS FAILED")
     print("=" * 60)
+
+    if args.bench:
+        print()
+        run_benchmark_suite(ext)
+
     exit(0 if all_pass else 1)
