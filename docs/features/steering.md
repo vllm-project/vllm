@@ -384,9 +384,17 @@ the model runner releases the prefill config and attempts to register the
 decode config.  If the `SteeringManager` is at capacity (all per-request
 rows are occupied), the decode registration is deferred to
 `_pending_decode_registrations` and retried on the next scheduler step.
-During the deferral period, `get_row_for_config` returns row 2 (global
-decode effective) for the unregistered decode hash, so the request falls
-back to global-only decode steering instead of crashing.
+Each deferred entry is a `(req_id, decode_hash, vectors)` tuple so that
+entries can be cleaned up when the owning request finishes.  During the
+deferral period, `get_row_for_config` returns row 2 (global decode
+effective) for the unregistered decode hash, so the request falls back to
+global-only decode steering instead of crashing.
+
+**Deferred entry cleanup:** When a request finishes, the finish path in
+`_update_states` filters `_pending_decode_registrations` to remove entries
+whose `req_id` matches the finished request.  This prevents a leak where
+a deferred registration for a dead request would eventually succeed on
+retry, allocating a steering row that is never released.
 
 The `_req_steering_phase` dict tracks which single phase config is active
 per request.  This ensures that on request completion, only the correct
@@ -410,10 +418,15 @@ request had already transitioned to decode.
 
 Base norms reflect the shared layer buffers (written by
 `set_steering_vectors` for base vectors).  Phase-specific norms come from
-the `SteeringManager`'s internal dictionaries and are only present when
-those phase-specific global vectors have been set via the
-`prefill_vectors` or `decode_vectors` parameters of the `/v1/steering/set`
-endpoint.
+the `SteeringManager`'s internal dictionaries when the manager is
+initialized, or from `_pending_steering_globals` on the model runner
+before the first forward pass triggers lazy init.  This ensures that
+calling `GET /v1/steering` immediately after `POST /v1/steering/set`
+reports the pending phase-specific vectors even before any request has
+been served.  Base-phase pending entries are skipped (those norms already
+come from layer buffers).  Phase-specific norms are only present when
+those vectors have been set via the `prefill_vectors` or
+`decode_vectors` parameters of the `/v1/steering/set` endpoint.
 
 ## File Reference
 
@@ -478,7 +491,7 @@ Key design decisions:
 5. **The steering_index tensor is shared across all layers and all hook points.** One in-place update is visible to all decoder layers. Token-to-row mapping is independent of hook point.
 6. **All four hook point buffers are always allocated.** The memory cost is trivial. Zero rows make unused hook points a no-op.
 7. **The custom op is not a splitting op.** It prevents constant-folding but does not partition the compiled graph.
-8. **One-active-at-a-time registration.** Only one phase's config is registered per request at any time. The initial phase is detected at registration time: if `num_computed_tokens >= num_prompt_tokens` (full prefix-cache hit), the decode config is registered directly; otherwise, the prefill config is registered and the decode config is registered on the prefill-to-decode transition. The `_req_steering_phase` dict tracks which phase is active per request so that on completion only the correct config is released. If decode registration is deferred due to capacity exhaustion, the phase is still tracked as "decode" and the request falls back to global-only decode steering until the next step retries the registration.
+8. **One-active-at-a-time registration.** Only one phase's config is registered per request at any time. The initial phase is detected at registration time: if `num_computed_tokens >= num_prompt_tokens` (full prefix-cache hit), the decode config is registered directly; otherwise, the prefill config is registered and the decode config is registered on the prefill-to-decode transition. The `_req_steering_phase` dict tracks which phase is active per request so that on completion only the correct config is released. If decode registration is deferred due to capacity exhaustion, the phase is still tracked as "decode" and the request falls back to global-only decode steering until the next step retries the registration. Deferred entries include the `req_id` and are cleaned up when the request finishes to prevent leaking rows for dead requests.
 9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all three vector fields before any request processing begins.
 10. **Additive composition is pre-scaled.** `resolve_effective_vectors()` applies co-located scales before summing base and phase-specific vectors.
 11. **Phase detection is token-count based.** `num_computed_tokens < num_prompt_tokens` determines prefill vs decode, not the `n_tokens == 1` heuristic.
