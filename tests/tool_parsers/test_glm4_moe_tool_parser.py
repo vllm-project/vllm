@@ -822,3 +822,108 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_r
     # Boolean should be deserialized as bool
     assert args["enabled"] is True
     assert isinstance(args["enabled"], bool)
+
+
+def test_zero_argument_tool_call(glm4_moe_tool_parser, mock_request):
+    """Regression: zero-argument tool call crash (PR #32321)."""
+    model_output = """<tool_call>get_time
+</tool_call>"""
+
+    extracted = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=mock_request
+    )  # type: ignore[arg-type]
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "get_time"
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args == {}
+
+
+def test_malformed_tool_call_no_regex_match(glm4_moe_tool_parser, mock_request):
+    """Regression: malformed tool_call with no regex match (PR #32321)."""
+    model_output = "<tool_call>   </tool_call>"
+
+    extracted = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=mock_request
+    )  # type: ignore[arg-type]
+
+    assert extracted.tools_called is False
+    assert extracted.tool_calls == []
+
+
+def test_delimiter_preserved_transformers_5x(glm4_moe_tool_parser):
+    """Regression: adjust_request sets skip_special_tokens=False (PR #31622)."""
+    # Tools enabled
+    request_with_tools = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    )  # type: ignore
+    adjusted = glm4_moe_tool_parser.adjust_request(request_with_tools)
+    assert adjusted.skip_special_tokens is False
+
+    # tool_choice="none"
+    request_no_choice = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        tool_choice="none",
+    )  # type: ignore
+    adjusted_none = glm4_moe_tool_parser.adjust_request(request_no_choice)
+    assert adjusted_none.skip_special_tokens is True
+
+    # No tools at all
+    request_no_tools = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+    )  # type: ignore
+    adjusted_empty = glm4_moe_tool_parser.adjust_request(request_no_tools)
+    assert adjusted_empty.skip_special_tokens is True
+
+
+def test_unicode_characters_preserved(glm4_moe_tool_parser, mock_request):
+    """Regression: Unicode chars must not be escaped to \\uXXXX (PR #30920)."""
+    model_output = """<tool_call>send_message
+<arg_key>greeting</arg_key>
+<arg_value>你好世界</arg_value>
+<arg_key>emoji</arg_key>
+<arg_value>🎉</arg_value>
+</tool_call>"""
+
+    extracted = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=mock_request
+    )  # type: ignore[arg-type]
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+
+    raw_args = extracted.tool_calls[0].function.arguments
+    assert "你好世界" in raw_args
+    assert "🎉" in raw_args
+    assert "\\u4f60" not in raw_args
+    parsed_args = json.loads(raw_args)
+    assert parsed_args["greeting"] == "你好世界"
+    assert parsed_args["emoji"] == "🎉"
