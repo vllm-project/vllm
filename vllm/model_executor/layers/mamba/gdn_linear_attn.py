@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fla.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
+from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -581,11 +582,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         results are cached globally, so only the first layer incurs
         actual benchmarking cost.
 
-        Most kernels use a fixed ``BT = chunk_size`` (64), but
-        ``chunk_fwd_kernel_o`` recomputes ``BT`` from the sequence
-        length: ``min(64, max(16, next_power_of_2(T)))``.  Since ``BT``
-        is part of its autotune key, we run warmup passes with T = 16,
-        32, and 64 to cover all possible ``BT`` values.
+        All kernels including ``chunk_fwd_kernel_o`` now use a fixed
+        ``BT = chunk_size`` (64).  A single warmup pass with T = 64
+        is sufficient to populate the autotuner cache.
 
         The decode path uses ``fused_sigmoid_gating_delta_rule_update``
         which has fixed kernel parameters (no autotuning), so only the
@@ -601,66 +600,58 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         num_v_heads = self.num_v_heads // self.tp_size
         _, state_dtype = self.get_state_dtype()
 
-        # Run warmup for each possible BT value of chunk_fwd_kernel_o:
-        #   T=16 → BT=16, T=32 → BT=32, T=64 → BT=64.
-        # Other kernels always use BT=chunk_size(64), so their autotune
-        # cache is populated on the first pass and reused thereafter.
-        for T in (16, 32, 64):
-            q = torch.randn(
-                1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype
-            )
-            k = torch.randn(
-                1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype
-            )
-            v = torch.randn(
-                1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype
-            )
-            # NOTE: g and beta must have the same dtypes as during
-            # inference, so we construct them with the same function
-            # (fused_gdn_gating). dummy_a and dummy_b are throwaway
-            # inputs required by that function.
-            dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
-            dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
-            g, beta = fused_gdn_gating(self.A_log, dummy_a, dummy_b, self.dt_bias)
-            state = torch.zeros(
-                1,
-                num_v_heads,
-                self.head_v_dim,
-                self.head_k_dim,
-                device=device,
-                dtype=state_dtype,
-            )
-            cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
+        # All kernels use BT = chunk_size (FLA_CHUNK_SIZE4), so a single pass with
+        # T = chunk_size is sufficient to populate every autotuner cache.
+        T = FLA_CHUNK_SIZE
+        q = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
+        k = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
+        v = torch.randn(1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype)
+        # NOTE: g and beta must have the same dtypes as during
+        # inference, so we construct them with the same function
+        # (fused_gdn_gating). dummy_a and dummy_b are throwaway
+        # inputs required by that function.
+        dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+        dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+        g, beta = fused_gdn_gating(self.A_log, dummy_a, dummy_b, self.dt_bias)
+        state = torch.zeros(
+            1,
+            num_v_heads,
+            self.head_v_dim,
+            self.head_k_dim,
+            device=device,
+            dtype=state_dtype,
+        )
+        cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
 
-            try:
-                self.chunk_gated_delta_rule(
-                    q=q,
-                    k=k,
-                    v=v,
-                    g=g,
-                    beta=beta,
-                    initial_state=state,
-                    output_final_state=True,
-                    cu_seqlens=cu_seqlens,
-                    use_qk_l2norm_in_kernel=True,
-                )
-            except Exception:
-                logger.warning(
-                    "GDN prefill kernel warmup (T=%d) failed for "
-                    "layer %s. First inference may OOM due to "
-                    "autotuner.",
-                    T,
-                    self.prefix,
-                    exc_info=True,
-                )
-            else:
-                logger.debug(
-                    "GDN prefill kernel warmup (T=%d) completed for layer %s",
-                    T,
-                    self.prefix,
-                )
-            finally:
-                del q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
+        try:
+            self.chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True,
+            )
+        except Exception:
+            logger.warning(
+                "GDN prefill kernel warmup (T=%d) failed for "
+                "layer %s. First inference may OOM due to "
+                "autotuner.",
+                T,
+                self.prefix,
+                exc_info=True,
+            )
+        else:
+            logger.debug(
+                "GDN prefill kernel warmup (T=%d) completed for layer %s",
+                T,
+                self.prefix,
+            )
+        finally:
+            del q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
 
         torch.accelerator.empty_cache()
 

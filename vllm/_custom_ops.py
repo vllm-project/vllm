@@ -56,11 +56,11 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        return torch.empty(
+        return torch.zeros(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
-        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
+        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
 
 
 def create_fp4_output_tensors(
@@ -264,9 +264,16 @@ def merge_attn_states(
     suffix_output: torch.Tensor,
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
+    prefill_tokens_with_context: int | None = None,
 ) -> None:
     torch.ops._C.merge_attn_states(
-        output, output_lse, prefix_output, prefix_lse, suffix_output, suffix_lse
+        output,
+        output_lse,
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        prefill_tokens_with_context,
     )
 
 
@@ -2965,6 +2972,38 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         M = mat1.size(0)
         N = mat2.size(0)
         return torch.empty((M, N), dtype=out_dtype)
+
+
+if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
+
+    @register_fake("_C::convert_weight_packed_scale_zp")
+    def convert_weight_packed_scale_zp_fake(
+        qweight: torch.Tensor,
+        qzeros: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.empty_like(qweight),
+            torch.empty_like(qzeros),
+            torch.empty_like(scales),
+        )
+
+
+if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
+
+    @register_fake("_C::int4_scaled_mm_cpu")
+    def int4_scaled_mm_cpu_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        w_zeros: torch.Tensor,
+        w_scales: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        N = w_scales.size(0) * w_scales.size(-1)
+        return torch.empty((x.size(0), N), dtype=x.dtype, device=x.device)
+
+
+_supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
 
 
 class CPUDNNLGEMMHandler:
