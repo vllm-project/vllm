@@ -52,8 +52,10 @@ if TYPE_CHECKING:
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
+    VLLM_CPU_INT4_W4A8: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
+    VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -64,6 +66,9 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_CACHE: str = ""
+    VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
+    VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
@@ -86,6 +91,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
+    VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -117,7 +123,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
-    VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -170,7 +175,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "trtllm"
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -248,6 +253,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
 
 
 def get_default_cache_root():
@@ -724,6 +730,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
         int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
     ),
+    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ.
+    "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
     # different pipeline-parallel stages.
@@ -774,6 +782,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT": lambda: int(
         os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")
+    ),
+    # Directory for caching media downloads (images, video, audio fetched
+    # from URLs during inference). Empty string disables caching.
+    "VLLM_MEDIA_CACHE": lambda: os.getenv("VLLM_MEDIA_CACHE", ""),
+    # Maximum cache size in MB. When exceeded, least-recently-used entries
+    # are evicted. Default is 5120 (5 GB).
+    "VLLM_MEDIA_CACHE_MAX_SIZE_MB": lambda: int(
+        os.getenv("VLLM_MEDIA_CACHE_MAX_SIZE_MB", "5120")
+    ),
+    # Time-to-live in hours for cached media files. Entries older than this
+    # are evicted regardless of cache size. Default is 24 hours.
+    "VLLM_MEDIA_CACHE_TTL_HOURS": lambda: float(
+        os.getenv("VLLM_MEDIA_CACHE_TTL_HOURS", "24")
     ),
     # Maximum number of retries for fetching media (images, audio, video)
     # from URLs. Each retry quadruples the timeout. Default is 3.
@@ -841,6 +862,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
+    # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.
+    # Default: 512 MB
+    "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
+        os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(
@@ -869,6 +896,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
+    ),
+    # Maximum allowed value for the `n` sampling parameter (number of output
+    # sequences per request). Limits resource consumption to prevent
+    # denial-of-service via excessively large fan-out. Default: 16384.
+    "VLLM_MAX_N_SEQUENCES": lambda: int(
+        os.environ.get("VLLM_MAX_N_SEQUENCES", "16384")
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
@@ -1001,10 +1034,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
-    # custom paged attention kernel for MI3* cards
-    "VLLM_ROCM_CUSTOM_PAGED_ATTN": lambda: (
-        os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in ("true", "1")
-    ),
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
@@ -1309,14 +1338,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["throughput", "latency", "masked_gemm"],
     ),
     # Flashinfer fused allreduce backend.
-    # "auto" will default to "mnnvl", which performs mostly same/better than "trtllm".
-    # But "mnnvl" backend does not support fuse with quantization.
-    # TODO: Default is "trtllm" right now because "mnnvl" has issues with cudagraph:
-    # https://github.com/vllm-project/vllm/issues/35772
-    # Should switch back to "auto" if the issue is resolved.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
-        "trtllm",
+        "auto",
         ["auto", "trtllm", "mnnvl"],
     ),
     # Control the workspace buffer size for the FlashInfer backend.
@@ -1658,6 +1682,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
     ),
+    # Whether enable XPU graph on Intel GPU
+    "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
+        int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+    ),
+    # Enable simple KV offload.
+    "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
+        int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
+    ),
 }
 
 
@@ -1780,6 +1812,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
         "VLLM_AUDIO_FETCH_TIMEOUT",
+        "VLLM_MEDIA_CACHE",
+        "VLLM_MEDIA_CACHE_MAX_SIZE_MB",
+        "VLLM_MEDIA_CACHE_TTL_HOURS",
         "VLLM_MEDIA_FETCH_MAX_RETRIES",
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
