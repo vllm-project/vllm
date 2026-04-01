@@ -38,6 +38,7 @@ from vllm.config import ModelConfig, ParallelConfig
 from vllm.config.utils import hash_factors
 from vllm.distributed.parallel_state import (
     get_ep_group,
+    get_eplb_group,
     get_node_count,
     in_the_same_node_as,
 )
@@ -47,6 +48,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
+from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     RecvMetadata,
@@ -225,6 +227,10 @@ class EplbModelState:
     cuda_device_index: int | None
     """
     CUDA device index for the async EPLB worker thread.
+    """
+    communicator: EplbCommunicator
+    """
+    The communicator for expert weight transfers.
     """
     new_physical_to_logical_map: torch.Tensor | None = None
     """
@@ -473,6 +479,12 @@ class EplbState:
         self._init_should_record_tensor(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend=self.parallel_config.eplb_config.communicator,
+            expert_weights=model.expert_weights[0],
+        )
+
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
             logical_to_physical_map=logical_to_physical_map,
@@ -499,6 +511,7 @@ class EplbState:
                 recv_dst_rows=np.array([]),
             ),
             cuda_device_index=self.cuda_device_index,
+            communicator=communicator,
             new_physical_to_logical_map=None,
         )
         model_factors = model_config.compile_factors()
@@ -803,6 +816,7 @@ class EplbState:
                     new_physical_to_logical_map,
                     eplb_model_state.model.expert_weights,
                     ep_group,
+                    eplb_model_state.communicator,
                     is_profile,
                     rank_mapping,
                 )
@@ -926,11 +940,8 @@ class EplbState:
                 new_indices=new_indices,
                 ep_rank=ep_group.rank(),
             )
-            # Record event after consuming buffer to signal async thread
-            # that it's safe to overwrite the intermediate buffer
-            consumed_event = torch.cuda.Event()
-            consumed_event.record()
-            model_state.buffer_consumed_event = consumed_event
+
+            transferred_layer = model_state.layer_to_transfer
 
             transferred_layer = model_state.layer_to_transfer
             assert model_state.new_physical_to_logical_map is not None
@@ -939,6 +950,13 @@ class EplbState:
                 new_physical_to_logical_map=model_state.new_physical_to_logical_map,
                 layer=transferred_layer,
             )
+
+            # Record event after consuming buffer to signal async thread
+            # that it's safe to overwrite the intermediate buffer
+            consumed_event = torch.cuda.Event()
+            consumed_event.record()
+            model_state.buffer_consumed_event = consumed_event
+
             # After the main thread consumes, advance layer_to_transfer
             model_state.layer_to_transfer += 1
             model_state.ep_buffer_ready = 0
