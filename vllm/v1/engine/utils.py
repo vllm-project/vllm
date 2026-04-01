@@ -142,7 +142,9 @@ class CoreEngineProcManager:
                 # Adjust device control in DP for non-CUDA platforms
                 # as well as external and ray launchers
                 # For CUDA platforms, we use torch.accelerator.set_device_index()()
-                device_control_context = contextlib.nullcontext()
+                device_control_context: contextlib.AbstractContextManager[None] = (
+                    contextlib.nullcontext()
+                )
                 if is_dp and (
                     not current_platform.is_cuda_alike()
                     or vllm_config.parallel_config.use_ray
