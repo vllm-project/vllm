@@ -284,6 +284,9 @@ class ServingTokens(OpenAIServing):
                     delta_token_ids = output.token_ids
                     num_generated_tokens[i] += len(delta_token_ids)
 
+                    finish_reason = output.finish_reason
+                    self._raise_if_error(finish_reason, request_id)
+
                     if not delta_token_ids:
                         continue
 
@@ -297,9 +300,6 @@ class ServingTokens(OpenAIServing):
                         )
                     else:
                         logprobs = None
-
-                    finish_reason = output.finish_reason
-                    self._raise_if_error(finish_reason, request_id)
 
                     chunk = GenerateStreamResponse(
                         request_id=request_id,

@@ -17,9 +17,8 @@ from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.renderers.hf import HfRenderer
+from vllm.renderers import renderer_from_config
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -56,6 +55,7 @@ class MockModelConfig:
     skip_tokenizer_init = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -73,10 +73,8 @@ class MockVllmConfig:
 
 
 def _build_renderer(model_config: MockModelConfig):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-    return HfRenderer.from_config(
+    return renderer_from_config(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
 
@@ -235,6 +233,38 @@ async def test_stream_error_mid_generation():
         chunks.append(chunk)
 
     assert len(chunks) >= 2
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_stream_error_with_empty_delta():
+    """finish_reason='error' with empty delta_token_ids still raises."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[], finish_reason="error", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
     assert any("Internal server error" in chunk for chunk in chunks), (
         f"Expected error message in chunks: {chunks}"
     )
