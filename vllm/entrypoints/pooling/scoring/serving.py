@@ -236,10 +236,10 @@ class ServingScores(PoolingServing):
         )
 
         assert (
-            len(query_ctx.pooling_params)
+            n_queries
+            == len(query_ctx.pooling_params)
             == len(query_ctx.engine_inputs)
             == len(query_ctx.prompt_request_ids)
-            == n_queries
         )
 
         await self._prepare_generators(query_ctx)
@@ -275,10 +275,10 @@ class ServingScores(PoolingServing):
         )
 
         assert (
-            len(doc_ctx.pooling_params)
+            n_docs
+            == len(doc_ctx.pooling_params)
             == len(doc_ctx.engine_inputs)
             == len(doc_ctx.prompt_request_ids)
-            == n_docs
         )
 
         await self._prepare_generators(doc_ctx)
