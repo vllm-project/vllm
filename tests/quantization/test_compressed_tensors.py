@@ -61,6 +61,41 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def _make_moe_inputs(layer, num_tokens: int = 4) -> tuple[torch.Tensor, torch.Tensor]:
+    device = next(layer.parameters()).device
+    hidden_states = torch.randn(
+        num_tokens,
+        layer.hidden_size,
+        device=device,
+        dtype=layer.moe_config.in_dtype,
+    )
+    router_logits = torch.randn(
+        num_tokens,
+        layer.moe_config.num_logical_experts,
+        device=device,
+        dtype=layer.moe_config.router_logits_dtype,
+    )
+    return hidden_states, router_logits
+
+
+def _assert_moe_outputs_close(
+    actual: tuple[torch.Tensor, ...],
+    expected: tuple[torch.Tensor, ...],
+) -> None:
+    assert isinstance(actual, tuple)
+    assert isinstance(expected, tuple)
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        assert actual_tensor is not None
+        assert expected_tensor is not None
+        torch.testing.assert_close(
+            actual_tensor,
+            expected_tensor,
+            rtol=1e-2,
+            atol=1e-2,
+            equal_nan=True,
+        )
+
+
 @pytest.mark.parametrize(
     "model_args",
     [
@@ -566,19 +601,7 @@ def test_w4a16_moe_torch_compile(vllm_runner, monkeypatch):
             assert layer_quantized.quant_method.moe_quant_config is not None
 
             def check_compiled_layer(layer):
-                device = next(layer.parameters()).device
-                hidden_states = torch.randn(
-                    4,
-                    layer.hidden_size,
-                    device=device,
-                    dtype=layer.moe_config.in_dtype,
-                )
-                router_logits = torch.randn(
-                    4,
-                    layer.moe_config.num_logical_experts,
-                    device=device,
-                    dtype=layer.moe_config.router_logits_dtype,
-                )
+                hidden_states, router_logits = _make_moe_inputs(layer)
 
                 with torch.inference_mode():
                     eager_out = layer.forward_native(
@@ -597,18 +620,7 @@ def test_w4a16_moe_torch_compile(vllm_runner, monkeypatch):
                         router_logits.clone(),
                     )
 
-                assert isinstance(eager_out, tuple)
-                assert isinstance(compiled_out, tuple)
-                for eager_tensor, compiled_tensor in zip(eager_out, compiled_out):
-                    assert eager_tensor is not None
-                    assert compiled_tensor is not None
-                    torch.testing.assert_close(
-                        compiled_tensor,
-                        eager_tensor,
-                        rtol=1e-2,
-                        atol=1e-2,
-                        equal_nan=True,
-                    )
+                _assert_moe_outputs_close(compiled_out, eager_out)
 
             check_compiled_layer(layer_quantized)
             check_compiled_layer(layer_unquantized)
@@ -628,19 +640,7 @@ def test_w4a16_moe_unquantized_explicit_unwrap(vllm_runner, monkeypatch):
             assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
             assert layer_unquantized.runner.forward_mode == "unwrapped"
 
-            device = next(layer_unquantized.parameters()).device
-            hidden_states = torch.randn(
-                4,
-                layer_unquantized.hidden_size,
-                device=device,
-                dtype=layer_unquantized.moe_config.in_dtype,
-            )
-            router_logits = torch.randn(
-                4,
-                layer_unquantized.moe_config.num_logical_experts,
-                device=device,
-                dtype=layer_unquantized.moe_config.router_logits_dtype,
-            )
+            hidden_states, router_logits = _make_moe_inputs(layer_unquantized)
 
             eager_out = layer_unquantized.forward_native(
                 hidden_states.clone(),
@@ -669,18 +669,7 @@ def test_w4a16_moe_unquantized_explicit_unwrap(vllm_runner, monkeypatch):
                 original_hidden_dims,
             )
 
-            assert isinstance(eager_out, tuple)
-            assert isinstance(manual_out, tuple)
-            for eager_tensor, manual_tensor in zip(eager_out, manual_out):
-                assert eager_tensor is not None
-                assert manual_tensor is not None
-                torch.testing.assert_close(
-                    eager_tensor,
-                    manual_tensor,
-                    rtol=1e-2,
-                    atol=1e-2,
-                    equal_nan=True,
-                )
+            _assert_moe_outputs_close(eager_out, manual_out)
 
         llm.apply_model(check_model)
 

@@ -231,7 +231,7 @@ class DefaultMoERunner(MoERunner):
         )
 
         self.forward_mode = self._resolve_forward_mode(layer)
-        self.forward_entry, self.forward_impl = self._select_wrapped_forward(layer)
+        self.forward_entry, self.forward_impl = self._select_wrapped_forward()
         if self.forward_mode == "unwrapped":
             backend = getattr(self.quant_method, "unquantized_backend", None)
             backend_name = f" ({backend.name})" if backend is not None else ""
@@ -292,9 +292,7 @@ class DefaultMoERunner(MoERunner):
             "unwrapped" if self._supports_auto_unwrapped_forward(layer) else "wrapped"
         )
 
-    def _select_wrapped_forward(
-        self, layer: torch.nn.Module
-    ) -> tuple[Callable, Callable]:
+    def _select_wrapped_forward(self) -> tuple[Callable, Callable]:
         # Select implementation based on presence of DP chunking.
         forward_impl_fn = (
             self._forward_impl_chunked if self.use_dp_chunking else self._forward_impl
@@ -550,6 +548,8 @@ class DefaultMoERunner(MoERunner):
         )
 
     def _sequence_parallel_context(self):
+        # Layer-local unwrapped forwards used by tests and compilation checks do
+        # not run under a model forward context.
         if not is_forward_context_available():
             return nullcontext()
 
