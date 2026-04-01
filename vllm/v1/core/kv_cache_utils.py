@@ -18,6 +18,7 @@ from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import format_gib
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
@@ -911,6 +912,53 @@ def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool
     return len(page_sizes) == 1
 
 
+def _unify_page_size_per_token(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> dict[str, KVCacheSpec]:
+    """Unify page sizes when per-token scales are present.
+
+    Scale bytes break exact divisibility between layers with different
+    num_kv_heads.  We unify on the data-only portion (real_page_size_bytes)
+    which always has clean integer ratios, then pad to align the final
+    page_size_bytes (data + scales).
+    """
+    data_sizes = {
+        name: spec.real_page_size_bytes
+        if isinstance(spec, AttentionSpec)
+        else spec.page_size_bytes
+        for name, spec in kv_cache_spec.items()
+    }
+    max_data_size = max(data_sizes.values())
+
+    new_kv_cache_spec = {}
+    for layer_name, layer_spec in kv_cache_spec.items():
+        data_size = data_sizes[layer_name]
+        if data_size == max_data_size:
+            new_kv_cache_spec[layer_name] = layer_spec
+        else:
+            if max_data_size % data_size != 0:
+                raise NotImplementedError(
+                    "The data page size of the layer is not divisible by "
+                    "the maximum data page size. Cannot unify by adjusting "
+                    "block_size."
+                )
+            ratio = max_data_size // data_size
+            new_block_size = layer_spec.block_size * ratio
+            new_kv_cache_spec[layer_name] = replace(
+                layer_spec, block_size=new_block_size
+            )
+
+    # Data portions now match, but scale bytes may cause slight differences
+    # in page_size_bytes.  Pad smaller layers to the maximum.
+    adjusted_sizes = {s.page_size_bytes for s in new_kv_cache_spec.values()}
+    if len(adjusted_sizes) > 1:
+        target = max(adjusted_sizes)
+        for layer_name, spec in new_kv_cache_spec.items():
+            if spec.page_size_bytes < target:
+                new_kv_cache_spec[layer_name] = replace(spec, page_size_padded=target)
+    return new_kv_cache_spec
+
+
 def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
@@ -930,6 +978,13 @@ def unify_kv_cache_spec_page_size(
     if len(page_sizes) <= 1:
         # All layers have the same page size, no need to unify.
         return kv_cache_spec
+
+    has_per_token = any(
+        isinstance(s, AttentionSpec) and s.kv_quant_mode.is_per_token
+        for s in kv_cache_spec.values()
+    )
+    if has_per_token:
+        return _unify_page_size_per_token(kv_cache_spec)
 
     max_page_size = max(page_sizes)
     new_kv_cache_spec = {}
