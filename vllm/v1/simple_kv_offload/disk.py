@@ -63,15 +63,18 @@ class DiskBlockIndex:
         if bh in self._index:
             self._index.move_to_end(bh)
 
-    def allocate(self, bh: BlockHash) -> int | None:
+    def allocate(self, bh: BlockHash) -> tuple[int | None, bool]:
         """Allocate a disk block for the given hash.
+
+        Returns (block_id, is_new). is_new=False means the hash already
+        exists on disk — caller should skip the write (deduplication).
 
         If disk is full, evicts the least recently used block
         to make room. Always succeeds unless num_blocks == 0.
         """
         if bh in self._index:
             self._index.move_to_end(bh)
-            return self._index[bh]
+            return self._index[bh], False  # Already on disk, skip write
 
         if self._free_list:
             bid = self._free_list.pop()
@@ -81,12 +84,12 @@ class DiskBlockIndex:
         else:
             # Disk full — evict LRU (oldest entry at front)
             if not self._index:
-                return None
+                return None, False
             _, evicted_bid = self._index.popitem(last=False)
             bid = evicted_bid
 
         self._index[bh] = bid
-        return bid
+        return bid, True  # New allocation, needs write
 
     def free(self, bh: BlockHash) -> None:
         bid = self._index.pop(bh, None)

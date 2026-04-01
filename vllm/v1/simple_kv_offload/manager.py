@@ -241,13 +241,13 @@ class SimpleCPUOffloadScheduler:
         while node is not None and node is not tail and captured < n:
             bhash = node.block_hash
             if bhash is not None and not node.is_null:
-                # Only write to disk if not already there
-                if not self._disk_index.contains(bhash):
-                    disk_bid = self._disk_index.allocate(bhash)
-                    if disk_bid is not None:
-                        self._pending_disk_writes_cpu.append(node.block_id)
-                        self._pending_disk_writes_disk.append(disk_bid)
-                        self._disk_stores_since_save += 1
+                disk_bid, is_new = self._disk_index.allocate(bhash)
+                if disk_bid is not None and is_new:
+                    # Only queue write for NEW allocations (dedup)
+                    # Existing entries are already on disk — skip I/O
+                    self._pending_disk_writes_cpu.append(node.block_id)
+                    self._pending_disk_writes_disk.append(disk_bid)
+                    self._disk_stores_since_save += 1
             captured += 1
             node = node.next_free_block
 
@@ -351,18 +351,24 @@ class SimpleCPUOffloadScheduler:
         # CPU miss — check disk tier for consecutive hits
         if self._disk_enabled and self._disk_index is not None:
             disk_hits = 0
+            disk_block_ids: list[int] = []
             for bh in remaining_hashes:
-                if self._disk_index.contains(bh):
+                dbid = self._disk_index.get_block_id(bh)
+                if dbid is not None:
                     disk_hits += 1
+                    disk_block_ids.append(dbid)
                 else:
                     break
             disk_hit_tokens = disk_hits * self.block_size
             # Only prefetch if enough blocks to be worthwhile
             if disk_hit_tokens >= self.block_size * 4:
-                # Cap to max_hit_len
+                # Issue fadvise WILLNEED hint — triggers kernel async
+                # readahead NOW so data is in page cache when we
+                # actually pread it next step. Hides disk latency.
+                if disk_block_ids and hasattr(self, '_prefetch_hint_fn'):
+                    self._prefetch_hint_fn(disk_block_ids)
+
                 disk_hit_tokens = min(disk_hit_tokens, max_hit_len)
-                # Return None to defer — next step we'll have the data in CPU
-                # after the disk prefetch completes
                 self._schedule_disk_prefetch(
                     request, skipped, disk_hits, remaining_hashes
                 )

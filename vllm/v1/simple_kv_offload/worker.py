@@ -282,8 +282,12 @@ class SimpleCPUOffloadWorker:
                 and metadata.disk_read_cpu_blocks
             ):
                 assert self.cpu_kv_caches is not None
-                # Try GDS direct-to-GPU first
-                # (not applicable here since we need CPU blocks filled)
+                # Issue fadvise WILLNEED hint to trigger kernel
+                # readahead before the blocking pread calls
+                if hasattr(self._disk_backend, 'prefetch_hint'):
+                    self._disk_backend.prefetch_hint(
+                        metadata.disk_read_disk_blocks
+                    )
                 self._disk_backend.read_blocks_to_cpu(
                     self.cpu_kv_caches,
                     metadata.disk_read_cpu_blocks,
