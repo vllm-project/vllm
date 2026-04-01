@@ -3,6 +3,7 @@
 
 
 import functools
+
 import numpy
 import torch
 
@@ -27,6 +28,7 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # CUDA driver / toolkit version helpers shared by all Marlin-based configs
 # ---------------------------------------------------------------------------
+
 
 def _parse_cuda_version(version: str | None) -> tuple[int, int] | None:
     if not version:
@@ -326,7 +328,10 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
         and intermediate_size_per_partition % max(64, group_size) == 0
     )
     supports_group_size = group_size in [-1, 32, 64, 128]
-    return supports_shape and supports_group_size and supports_router_weight
+    supported = supports_shape and supports_group_size and supports_router_weight
+    if supported and current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
+    return supported
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):

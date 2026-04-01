@@ -49,7 +49,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
     moe_awq_to_marlin_zero_points,
     verify_marlin_supported,
-    verify_marlin_supports_shape,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead

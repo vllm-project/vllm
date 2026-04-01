@@ -12,10 +12,10 @@ import vllm.model_executor.layers.quantization.utils.marlin_utils as marlin_util
 from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _reset_warn_cache():
     """Clear the lru_cache on warn_marlin_cuda_driver_mismatch between tests."""
@@ -32,16 +32,20 @@ def _patch_mismatch(monkeypatch, *, driver=(12, 8), toolkit=(12, 9), compat=Fals
 # warn_marlin_cuda_driver_mismatch unit tests
 # ---------------------------------------------------------------------------
 
+
 def test_warning_emitted_on_driver_mismatch(monkeypatch):
     _reset_warn_cache()
     _patch_mismatch(monkeypatch, driver=(12, 8), toolkit=(12, 9), compat=False)
 
     from unittest.mock import patch
+
     with patch.object(marlin_utils.logger, "warning") as mock_warn:
         marlin_utils.warn_marlin_cuda_driver_mismatch()
 
     assert mock_warn.called
-    assert any("cudaErrorUnsupportedPtxVersion" in str(a) for a in mock_warn.call_args[0])
+    assert any(
+        "cudaErrorUnsupportedPtxVersion" in str(a) for a in mock_warn.call_args[0]
+    )
 
 
 def test_no_warning_when_compat_enabled(monkeypatch):
@@ -49,6 +53,7 @@ def test_no_warning_when_compat_enabled(monkeypatch):
     _patch_mismatch(monkeypatch, driver=(12, 8), toolkit=(12, 9), compat=True)
 
     from unittest.mock import patch
+
     with patch.object(marlin_utils.logger, "warning") as mock_warn:
         marlin_utils.warn_marlin_cuda_driver_mismatch()
 
@@ -60,6 +65,7 @@ def test_no_warning_when_driver_matches_toolkit(monkeypatch):
     _patch_mismatch(monkeypatch, driver=(12, 9), toolkit=(12, 9), compat=False)
 
     from unittest.mock import patch
+
     with patch.object(marlin_utils.logger, "warning") as mock_warn:
         marlin_utils.warn_marlin_cuda_driver_mismatch()
 
@@ -71,6 +77,7 @@ def test_no_warning_when_driver_newer(monkeypatch):
     _patch_mismatch(monkeypatch, driver=(12, 9), toolkit=(12, 8), compat=False)
 
     from unittest.mock import patch
+
     with patch.object(marlin_utils.logger, "warning") as mock_warn:
         marlin_utils.warn_marlin_cuda_driver_mismatch()
 
@@ -80,6 +87,7 @@ def test_no_warning_when_driver_newer(monkeypatch):
 # ---------------------------------------------------------------------------
 # awq_marlin: marlin is still selected regardless of driver mismatch
 # ---------------------------------------------------------------------------
+
 
 def _force_awq_marlin_compatible(monkeypatch):
     monkeypatch.setattr(
@@ -95,7 +103,8 @@ def test_awq_marlin_selected_despite_driver_mismatch(monkeypatch):
     _force_awq_marlin_compatible(monkeypatch)
     _patch_mismatch(monkeypatch, driver=(12, 8), toolkit=(12, 9), compat=False)
 
-    assert AWQMarlinConfig.override_quantization_method({}, user_quant=None) == "awq_marlin"
+    result = AWQMarlinConfig.override_quantization_method({}, user_quant=None)
+    assert result == "awq_marlin"
 
 
 def test_awq_marlin_selected_with_compat_enabled(monkeypatch):
@@ -103,12 +112,14 @@ def test_awq_marlin_selected_with_compat_enabled(monkeypatch):
     _force_awq_marlin_compatible(monkeypatch)
     _patch_mismatch(monkeypatch, driver=(12, 8), toolkit=(12, 9), compat=True)
 
-    assert AWQMarlinConfig.override_quantization_method({}, user_quant=None) == "awq_marlin"
+    result = AWQMarlinConfig.override_quantization_method({}, user_quant=None)
+    assert result == "awq_marlin"
 
 
 # ---------------------------------------------------------------------------
 # gptq_marlin: marlin is still selected regardless of driver mismatch
 # ---------------------------------------------------------------------------
+
 
 def _force_gptq_marlin_compatible(monkeypatch):
     monkeypatch.setattr(

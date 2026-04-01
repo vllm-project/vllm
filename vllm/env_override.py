@@ -147,6 +147,7 @@ def _maybe_set_cuda_compatibility_path():
     if compat_path:
         _prepend_ld_library_path(compat_path)
         import sys
+
         print(
             f"[vllm] CUDA driver {driver_ver[0]}.{driver_ver[1]} is older than "
             f"the PyTorch CUDA toolkit {torch_cuda_version}. "
