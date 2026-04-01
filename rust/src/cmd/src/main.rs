@@ -30,8 +30,8 @@ async fn ctrl_c() {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
     logging::init_tracing();
+    let cli = Cli::parse();
 
     match cli.command {
         Command::Frontend(args) => vllm_openai_server::serve(args.into_config(), ctrl_c()).await,

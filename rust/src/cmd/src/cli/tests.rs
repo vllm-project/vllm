@@ -105,61 +105,7 @@ fn serve_args_keep_frontend_unsupported_args_before_separator() {
 }
 
 #[test]
-fn serve_args_reject_unsupported_flag_arg() {
-    let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--trust-remote-code"])
-        .unwrap_err();
-
-    expect![[r#"
-        error: invalid value 'true' for '--trust-remote-code [<TRUST_REMOTE_CODE>]': argument is not implemented in Rust frontend yet
-
-        Remove this unsupported argument to continue.
-
-        Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-        This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
-
-        For more information, try '--help'.
-    "#]]
-    .assert_eq(&error.to_string());
-}
-
-#[test]
-fn serve_args_reject_unsupported_no_flag_alias() {
-    let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--no-enable-lora"])
-        .unwrap_err();
-
-    expect![[r#"
-        error: invalid value 'true' for '--enable-lora [<ENABLE_LORA>]': argument is not implemented in Rust frontend yet
-
-        Remove this unsupported argument to continue.
-
-        Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-        This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
-
-        For more information, try '--help'.
-    "#]]
-    .assert_eq(&error.to_string());
-}
-
-#[test]
-fn serve_args_reject_unsupported_bare_hf_token() {
-    let error =
-        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--hf-token"]).unwrap_err();
-
-    expect![[r#"
-        error: invalid value 'true' for '--hf-token [<HF_TOKEN>]': argument is not implemented in Rust frontend yet
-
-        Remove this unsupported argument to continue.
-
-        Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-        This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
-
-        For more information, try '--help'.
-    "#]]
-    .assert_eq(&error.to_string());
-}
-
-#[test]
-fn serve_args_reject_unsupported_server_value_arg() {
+fn serve_args_reject_unsupported_value_arg() {
     let error = Cli::try_parse_from([
         "vllm-rs",
         "serve",
@@ -183,7 +129,7 @@ fn serve_args_reject_unsupported_server_value_arg() {
 }
 
 #[test]
-fn serve_args_reject_unsupported_server_flag_arg() {
+fn serve_args_reject_unsupported_flag_arg() {
     let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--allow-credentials"])
         .unwrap_err();
 
@@ -201,7 +147,7 @@ fn serve_args_reject_unsupported_server_flag_arg() {
 }
 
 #[test]
-fn serve_args_reject_unsupported_server_no_flag_alias() {
+fn serve_args_reject_unsupported_no_flag_alias() {
     let error = Cli::try_parse_from([
         "vllm-rs",
         "serve",

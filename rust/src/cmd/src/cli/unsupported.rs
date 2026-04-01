@@ -3,6 +3,7 @@
 use std::str::FromStr;
 
 use clap::Args;
+use clap::builder::{TypedValueParser, ValueParserFactory};
 
 /// Marker type for frontend-owned `serve` arguments that `vllm-rs` recognizes but does not
 /// support yet.
@@ -20,6 +21,37 @@ Remove this unsupported argument to continue.
 Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
 This may lead to unexpected behavior as the Rust frontend will completely ignore that argument."
             .to_string())
+    }
+}
+
+/// Marker type for no-op arguments that are accepted by the Rust frontend but have no effect.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Noop;
+
+impl ValueParserFactory for Noop {
+    type Parser = NoopValueParser;
+
+    fn value_parser() -> Self::Parser {
+        NoopValueParser
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct NoopValueParser;
+
+impl TypedValueParser for NoopValueParser {
+    type Value = Noop;
+
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        _value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        if let Some(arg) = arg {
+            tracing::warn!("argument '{arg}' has no effect in Rust frontend, ignoring");
+        }
+        Ok(Noop)
     }
 }
 
@@ -48,8 +80,8 @@ pub struct UnsupportedArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
 pub struct TopLevelUnsupportedArgs {
     /// How many API server processes to run. Defaults to data_parallel_size if not specified.
-    #[arg(long)]
-    pub api_server_count: Option<Unsupported>,
+    #[arg(long, hide = true)]
+    pub api_server_count: Option<Noop>,
 
     /// Read CLI options from a config file. Must be a YAML with the following options:
     /// https://docs.vllm.ai/en/latest/configuration/serve_args.html
@@ -98,24 +130,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub tokenizer_mode: Option<Unsupported>,
 
-    /// Trust remote code (e.g., from HuggingFace) when downloading the model
-    /// and tokenizer.
-    #[arg(
-        long,
-        visible_alias = "no-trust-remote-code",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub trust_remote_code: Option<Unsupported>,
-
-    /// Random seed for reproducibility.
-    ///
-    /// We must set the global seed because otherwise,
-    /// different tensor parallel workers would sample different tokens,
-    /// leading to inconsistent results.
-    #[arg(long)]
-    pub seed: Option<Unsupported>,
-
     /// Name or path of the Hugging Face config to use. If unspecified, model
     /// name or path will be used.
     #[arg(long)]
@@ -144,15 +158,6 @@ pub struct EngineUnsupportedArgs {
     /// vocab_size) logprobs are allowed to be returned and it may cause OOM.
     #[arg(long)]
     pub max_logprobs: Option<Unsupported>,
-
-    /// Indicates the content returned in the logprobs and prompt_logprobs.
-    /// Supported mode:
-    /// 1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
-    /// Raw means the values before applying any logit processors, like bad words.
-    /// Processed means the values after applying all processors, including
-    /// temperature and top_k/top_p.
-    #[arg(long)]
-    pub logprobs_mode: Option<Unsupported>,
 
     /// Skip initialization of tokenizer and detokenizer. Expects valid
     /// `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -300,10 +305,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// Maximum number of sequences to be processed in a single iteration.
-    #[arg(long)]
-    pub max_num_seqs: Option<Unsupported>,
-
     /// The interval (or buffer size) for streaming in terms of token length.
     #[arg(long)]
     pub stream_interval: Option<Unsupported>,
@@ -406,9 +407,10 @@ pub struct ServerUnsupportedArgs {
         long,
         visible_alias = "no-disable-frontend-multiprocessing",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub disable_frontend_multiprocessing: Option<Unsupported>,
+    pub disable_frontend_multiprocessing: Option<Noop>,
 
     /// Enable auto tool choice for supported models. Use `--tool-call-parser`
     /// to specify which parser to use.
@@ -416,9 +418,10 @@ pub struct ServerUnsupportedArgs {
         long,
         visible_alias = "no-enable-auto-tool-choice",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_auto_tool_choice: Option<Unsupported>,
+    pub enable_auto_tool_choice: Option<Noop>,
 
     /// If specified, exclude tool definitions in prompts when
     /// tool_choice='none'.
