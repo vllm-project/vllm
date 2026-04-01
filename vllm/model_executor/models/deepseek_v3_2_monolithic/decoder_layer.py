@@ -14,6 +14,10 @@ from torch import nn
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
 from .allreduce_rms import AllReduceRMSParams, allreduce_add_rms_norm
@@ -45,6 +49,7 @@ class MonolithicDecoderLayer(nn.Module):
         config,
         layer_idx: int,
         topk_indices_buffer: torch.Tensor,
+        topk_page_indices_buffer: torch.Tensor,
         prefix: str = "",
         fi_params: AllReduceRMSParams | None = None,
     ) -> None:
@@ -102,6 +107,7 @@ class MonolithicDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             topk_indices_buffer=topk_indices_buffer,
+            topk_page_indices_buffer=topk_page_indices_buffer,
             prefix=f"{prefix}.self_attn",
         )
         self.attn.o_proj.reduce_results = False
@@ -321,6 +327,7 @@ class MonolithicDecoderLayer(nn.Module):
             self.max_model_len,
             self.indexer_workspace_size,
             self.attn.topk_indices_buffer,
+            self.attn.topk_page_indices_buffer,
         )
 
         # Step 6. MLA sparse decode attention (inlined).
@@ -378,6 +385,8 @@ class MonolithicDecoderLayer(nn.Module):
         # When fused_allreduce_rms is enabled, the MLP/MoE AllReduce is
         # deferred — it will be fused with the next layer's input norm.
         if self.is_moe:
+            import flashinfer
+
             moe = self.mlp
             experts = moe.experts
             runner = experts.runner
@@ -393,6 +402,7 @@ class MonolithicDecoderLayer(nn.Module):
             assert quant_method.is_monolithic
             assert moe.shared_experts is not None
             assert moe.gate is not None
+            assert experts.routing_method_type.name == "DeepSeekV3"
 
             hidden_states = hidden_states.view(-1, self.hidden_size)
 
@@ -405,23 +415,76 @@ class MonolithicDecoderLayer(nn.Module):
             runner.use_shared_experts_stream = use_shared_experts_stream
 
             if use_shared_experts_stream:
-                runner._maybe_setup_shared_experts_stream(
-                    hidden_states,
-                    hidden_states,
-                )
+                shared_experts_stream = runner.shared_experts_stream
+                assert shared_experts_stream is not None
+                assert experts.moe_config.disable_inplace
+                hidden_states.record_stream(shared_experts_stream)
+                shared_experts_stream.wait_stream(torch.cuda.current_stream())
                 shared_output = None
             else:
                 shared_output = moe.shared_experts(hidden_states)
 
             router_logits, _ = moe.gate(hidden_states)
-            routed_output = quant_method.apply_monolithic(
-                experts,
-                hidden_states,
-                router_logits,
+            quant_config = experts.quant_method.moe_quant_config
+            assert quant_config is not None
+            input_sf = (
+                quant_config.a1_gscale
+                if quant_config.use_nvfp4_w4a4
+                else quant_config.a1_scale
             )
+            assert input_sf is not None
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                hidden_states,
+                input_sf,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape,
+                is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+            )
+            assert a1q_scale is not None
+            assert quant_config.w1_scale is not None
+            assert quant_config.w2_scale is not None
+            assert quant_config.g1_alphas is not None
+            assert quant_config.g2_alphas is not None
+
+            routed_output = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+                routing_logits=router_logits.to(torch.float32),
+                routing_bias=experts.e_score_correction_bias,
+                hidden_states=a1q,
+                hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+                    *a1q.shape[:-1], -1
+                ),
+                gemm1_weights=experts.w13_weight,
+                gemm1_weights_scale=quant_config.w1_scale.view(torch.float8_e4m3fn),
+                gemm1_bias=None,
+                gemm1_alpha=None,
+                gemm1_beta=None,
+                gemm1_clamp_limit=None,
+                gemm2_weights=experts.w2_weight,
+                gemm2_weights_scale=quant_config.w2_scale.view(torch.float8_e4m3fn),
+                gemm2_bias=None,
+                output1_scale_scalar=experts.g1_scale_c,
+                output1_scale_gate_scalar=quant_config.g1_alphas,
+                output2_scale_scalar=quant_config.g2_alphas,
+                num_experts=experts.global_num_experts,
+                top_k=experts.top_k,
+                n_group=(experts.num_expert_group or 0),
+                topk_group=(experts.topk_group or 0),
+                intermediate_size=experts.moe_config.intermediate_size_per_partition,
+                local_expert_offset=0,
+                local_num_experts=experts.local_num_experts,
+                routed_scaling_factor=experts.routed_scaling_factor,
+                routing_method_type=experts.routing_method_type,
+                do_finalize=True,
+                activation_type=activation_to_flashinfer_int(experts.activation),
+            )[0]
 
             if use_shared_experts_stream:
-                shared_output = runner._apply_shared_experts(hidden_states, True)
+                shared_experts_stream = runner.shared_experts_stream
+                assert shared_experts_stream is not None
+                with torch.cuda.stream(shared_experts_stream):
+                    shared_output = moe.shared_experts(hidden_states)
+                torch.cuda.current_stream().wait_stream(shared_experts_stream)
 
             assert shared_output is not None
 
