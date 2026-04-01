@@ -288,7 +288,6 @@ set(VLLM_EXT_SRC
   "csrc/attention/merge_attn_states.cu"
   "csrc/attention/vertical_slash_index.cu"
   "csrc/pos_encoding_kernels.cu"
-  "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
   "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/layernorm_quant_kernels.cu"
@@ -605,7 +604,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
   set(VLLM_STABLE_EXT_SRC
-    "csrc/libtorch_stable/torch_bindings.cpp")
+    "csrc/libtorch_stable/torch_bindings.cpp"
+    "csrc/libtorch_stable/activation_kernels.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC

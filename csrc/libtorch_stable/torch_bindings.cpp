@@ -247,6 +247,34 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Hadamard transforms
   // conditionally compiled so impl registration is in source file
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
+
+  // Activation ops
+  // Activation function used in SwiGLU.
+  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
+  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
+
+  // Activation function used in GeGLU with `none` approximation.
+  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
+
+  // Activation function used in GeGLU with `tanh` approximation.
+  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
+
+  // FATReLU implementation.
+  ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
+
+  ops.def(
+      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
+      "limit=7.0) "
+      "-> ()");
+
+  // GELU implementation used in GPT-2.
+  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
+
+  // Approximate GELU implementation.
+  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
+
+  // Quick GELU implementation.
+  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -294,6 +322,17 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // AllSpark ops: conditionally compiled so impl registrations are in source
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
+
+  // Activation kernels (shared CUDA/ROCm)
+  ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
+  ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
+  ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));
+  ops.impl("gelu_tanh_and_mul", TORCH_BOX(&gelu_tanh_and_mul));
+  ops.impl("fatrelu_and_mul", TORCH_BOX(&fatrelu_and_mul));
+  ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
+  ops.impl("gelu_new", TORCH_BOX(&gelu_new));
+  ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
+  ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
 }
 
 // These capability-check functions take only primitive args (no tensors), so
