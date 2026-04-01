@@ -10,7 +10,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -169,7 +174,9 @@ class StaticSinkAttention(Attention, CustomOp):
         )
         if not self.sink_populated:
             self_kv_cache = self.kv_cache
-            torch.ops.vllm.maybe_populate_sink(self_kv_cache, self.layer_name)
+            torch.ops.vllm.maybe_populate_sink(
+                self_kv_cache, _encode_layer_name(self.layer_name)
+            )
 
         return super().forward(query, key, value, output_shape)
 
@@ -222,8 +229,9 @@ class StaticSinkAttention(Attention, CustomOp):
 
 def maybe_populate_sink(
     self_kv_cache: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     if self.sink_populated or self_kv_cache.numel() == 0:
@@ -233,7 +241,7 @@ def maybe_populate_sink(
 
 def maybe_populate_sink_fake(
     self_kv_cache: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     return
 

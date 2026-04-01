@@ -33,7 +33,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     HAS_OPAQUE_TYPE,
-    ModuleName,
+    LayerName,
     aux_stream,
     current_stream,
     direct_register_custom_op,
@@ -60,25 +60,25 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
     return forward_context.no_compile_layers[layer_name]
 
 
-# On torch >= 2.11, layer_name is a hoisted ModuleName opaque object;
+# On torch >= 2.11, layer_name is a hoisted LayerName opaque object;
 # on older versions it remains a plain str.
 if TYPE_CHECKING:
     from typing import TypeAlias
 
-    _layer_name_type: TypeAlias = str | ModuleName
+    LayerNameType: TypeAlias = str | LayerName
 else:
-    _layer_name_type = ModuleName if HAS_OPAQUE_TYPE else str
+    LayerNameType = LayerName if HAS_OPAQUE_TYPE else str
 
 
-def _resolve_layer_name(layer_name: str | ModuleName) -> str:
-    return layer_name.value if isinstance(layer_name, ModuleName) else layer_name
+def _resolve_layer_name(layer_name: str | LayerName) -> str:
+    return layer_name.value if isinstance(layer_name, LayerName) else layer_name
 
 
 def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: _layer_name_type,
+    layer_name: LayerNameType,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     # TODO(bnell): this can be removed after MK migration is complete.
@@ -105,7 +105,7 @@ def _moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: _layer_name_type,
+    layer_name: LayerNameType,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -114,7 +114,7 @@ def _moe_forward_shared(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: _layer_name_type,
+    layer_name: LayerNameType,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     # TODO(bnell): this can be removed after MK migration is complete.
@@ -141,7 +141,7 @@ def _moe_forward_shared_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
-    layer_name: _layer_name_type,
+    layer_name: LayerNameType,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Output shapes:
     # - fused_out: same as hidden_states (routed experts use transformed size)
@@ -433,9 +433,9 @@ class DefaultMoERunner(MoERunner):
             assert len(trunc_sizes) == 1
             return func(states, trunc_sizes[0])
 
-    def _encode_layer_name(self) -> str | ModuleName:
+    def _encode_layer_name(self) -> str | LayerName:
         if HAS_OPAQUE_TYPE:
-            return ModuleName(self.layer_name)
+            return LayerName(self.layer_name)
         # Can be unavailable or None in unittests
         if (
             is_forward_context_available()
