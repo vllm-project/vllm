@@ -573,7 +573,24 @@ class LayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
 
+    @staticmethod
+    def _forward_static(
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        dim: int,
+        eps: float,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return F.layer_norm(x.float(), (dim,), weight, bias, eps).type_as(x)
+
     def forward(self, x: torch.Tensor):
-        return F.layer_norm(
-            x.float(), (self.dim,), self.weight, self.bias, self.eps
-        ).type_as(x)
+        if (
+            current_platform.is_cuda_alike()
+            and not torch.compiler.is_compiling()
+            and not getattr(self, "_is_compiled", False)
+        ):
+            self._forward_static = torch.compile(  # type: ignore
+                self._forward_static
+            )
+            self._is_compiled = True
+        return self._forward_static(self.weight, self.bias, self.dim, self.eps, x)
