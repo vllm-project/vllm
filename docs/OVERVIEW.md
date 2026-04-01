@@ -34,10 +34,14 @@ Features Index:
             model: base vectors (both phases) + prefill-specific +
             decode-specific.  Co-located scale factors and four hook points
             (pre_attn, post_attn, post_mlp_pre_ln, post_mlp_post_ln).
+            Scheduler predicts mid-step prefill-to-decode transitions and
+            reserves capacity for both phases; model runner gracefully defers
+            decode registration when capacity is temporarily exhausted.
+            Status endpoint reports base, prefill, and decode vector norms.
         entry_points:
             - POST /v1/steering/set (global)
             - POST /v1/steering/clear (global)
-            - GET /v1/steering (status)
+            - GET /v1/steering (status with phase-specific norms)
             - SamplingParams.steering_vectors (per-request base)
             - SamplingParams.prefill_steering_vectors (per-request prefill)
             - SamplingParams.decode_steering_vectors (per-request decode)

@@ -80,18 +80,35 @@ Zero all steering vectors across all layers.
 
 ### GET /v1/steering
 
-Return which layers currently have non-zero steering vectors.
+Return which layers currently have non-zero steering vectors, including
+phase-specific global vector norms when set.
 
 **Success response** (200):
 
 ```json
 {
   "active_layers": {
-    "14": {"norm": 1.234567},
-    "20": {"norm": 0.567890}
+    "14": {
+      "post_mlp_pre_ln": {
+        "norm": 1.234567,
+        "prefill_norm": 0.891234,
+        "decode_norm": 0.456789
+      }
+    },
+    "20": {
+      "post_mlp_pre_ln": {
+        "norm": 0.567890
+      }
+    }
   }
 }
 ```
+
+| Key | Type | Description |
+| --- | ---- | ----------- |
+| `norm` | `float` | L2 norm of the base steering vector (from layer buffers). Always present for active layers/hook-points. |
+| `prefill_norm` | `float` | L2 norm of the prefill-specific global vector. Only present when prefill-specific globals have been set and are non-zero. |
+| `decode_norm` | `float` | L2 norm of the decode-specific global vector. Only present when decode-specific globals have been set and are non-zero. |
 
 Returns an empty `active_layers` object when no steering is active.
 
