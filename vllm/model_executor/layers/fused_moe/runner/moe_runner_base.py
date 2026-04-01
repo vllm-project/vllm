@@ -16,7 +16,6 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -37,8 +36,6 @@ from vllm.utils.torch_utils import (
     ModuleName,
     direct_register_custom_op,
 )
-
-logger = init_logger(__name__)
 
 
 def get_layer_from_name(layer_name: str) -> torch.nn.Module:

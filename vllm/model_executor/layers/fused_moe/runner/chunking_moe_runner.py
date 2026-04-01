@@ -6,13 +6,10 @@ import torch
 from vllm.forward_context import (
     get_forward_context,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import MoERunnerBase
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from vllm.v1.worker.workspace import current_workspace_manager
-
-logger = init_logger(__name__)
 
 
 class ChunkingMoERunner(MoERunnerBase):
@@ -55,6 +52,9 @@ class ChunkingMoERunner(MoERunnerBase):
         # so ChunkingMoERunner's own attributes and methods take priority.
         return getattr(self._inner, name)
 
+    # Reducing results when chunking is handled by the MK finalize operations
+    # when DP chunking is enabled..
+    # This will be removed by #35949
     @property
     def reduce_results(self) -> bool:
         return False

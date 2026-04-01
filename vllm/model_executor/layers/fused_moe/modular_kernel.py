@@ -1007,7 +1007,7 @@ class FusedMoEKernelModularImpl:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         fused_experts: FusedMoEExpertsModular,
-        shared_experts: SharedExperts | None = None,
+        shared_experts: SharedExperts | None,
         inplace: bool = False,
     ):
         self.prepare_finalize = prepare_finalize
