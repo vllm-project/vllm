@@ -16,7 +16,7 @@ from vllm.entrypoints.pooling.typing import (
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
-from vllm.tasks import PoolingTask, ScoreType
+from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
@@ -174,7 +174,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
 
 class LateInteractionIOProcessor(BiEncoderIOProcessor):
-    name: ScoreType = "late-interaction"
+    name = "late-interaction"
     pooling_task: PoolingTask = "token_embed"
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):

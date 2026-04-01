@@ -3,6 +3,7 @@
 
 from fastapi.responses import JSONResponse, Response
 
+from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
@@ -56,7 +57,7 @@ class ServingScores(PoolingServing):
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
     ) -> PoolingIOProcessor:
-        score_type = model_config.score_type
+        score_type: str = model_config.score_type
         if self.enable_flash_late_interaction:
             score_type = "flash-late-interaction"
 
@@ -205,7 +206,9 @@ class ServingScores(PoolingServing):
         return await self._build_response(ctx)
 
     async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
-        assert isinstance(ctx.n_queries, int)
+        assert ctx.n_queries is not None
+        assert ctx.engine_inputs is not None
+        assert isinstance(ctx.pooling_params, PoolingParams)
 
         n_queries = ctx.n_queries
         n_docs = len(ctx.engine_inputs) - n_queries
@@ -246,7 +249,9 @@ class ServingScores(PoolingServing):
         await self._collect_batch(query_ctx)
 
     async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
-        assert isinstance(ctx.n_queries, int)
+        assert ctx.n_queries is not None
+        assert ctx.engine_inputs is not None
+        assert isinstance(ctx.pooling_params, PoolingParams)
 
         n_queries = ctx.n_queries
         n_docs = len(ctx.engine_inputs) - n_queries
