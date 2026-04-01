@@ -1776,6 +1776,17 @@ class VllmConfig:
             )
 
     @model_validator(mode="after")
+    def validate_mamba_all_mode_no_spec_decode(self) -> "VllmConfig":
+        if self.cache_config.mamba_cache_mode == "all" and (
+            self.speculative_config is not None
+        ):
+            raise ValueError(
+                "Mamba all-mode prefix caching (--mamba-cache-mode all) is not "
+                "compatible with speculative decoding. Please disable one of them."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":
         if self.model_config is None:
             return self
