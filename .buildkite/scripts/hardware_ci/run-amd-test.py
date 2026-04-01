@@ -282,6 +282,23 @@ def _validate_image_arch(image_name):
     info(f"Architecture '{arch}' is registered and supported")
 
 
+def _extract_arch_from_image(image_name):
+    # type: (str) -> str | None
+    """Extract the GPU architecture suffix from a per-arch image tag.
+
+    Returns the arch string (e.g., "gfx942") or None if no valid arch
+    suffix is found.  Used by wheel artifact fallback to try arch-specific
+    artifacts before fat/legacy ones.
+    """
+    if ":" not in image_name:
+        return None
+    tag = image_name.rsplit(":", 1)[1]
+    if "-" not in tag:
+        return None
+    arch = tag.rsplit("-", 1)[1]
+    return arch if arch in SUPPORTED_ROCM_ARCHS else None
+
+
 # Line number of SUPPORTED_ROCM_ARCHS for error messages. This trick
 # avoids hardcoding a line number that goes stale on every edit.
 # We search for the frozenset assignment in our own source.
@@ -417,6 +434,23 @@ RESULTS_MOUNT = "/tmp/vllm-ci-results"
 # Override env vars:
 #   VLLM_CI_CACHE_ROOT         Hot tier path (default: ~/vllm-ci-cache)
 #   VLLM_CI_CACHE_BACKING_ROOT Warm tier path (default: unset = single-tier)
+#   VLLM_HF_CACHE              Legacy HF host path kept outside CACHE_ROOT
+#                              so existing warmed nodes are still reused.
+#   VLLM_CACHE_MAX_<ENV_VAR>   Override one cache's L1 budget in GB.
+#   VLLM_CACHE_L2_MAX_DAYS     Default L2 stale-file eviction age in days.
+#   VLLM_CACHE_L1_FS_MIN_HEADROOM_GB
+#                              Minimum free space to leave on the shared L1
+#                              filesystem after seeding or sync work. This is
+#                              a filesystem-wide brake, not a per-cache limit.
+#   VLLM_CACHE_L1_FS_MAX_UTIL_PCT
+#                              Maximum allowed utilization of the shared L1
+#                              filesystem for cache growth. Seeding and
+#                              watchdog sync stop early if this cap is hit.
+#
+# Safety:
+#   VLLM_CI_CACHE_ROOT must not be nested inside VLLM_HF_CACHE (or vice versa).
+#   Overlapping host cache roots make per-cache budgets double-count disk usage,
+#   which can defeat eviction guardrails and trigger node or pod disk pressure.
 # ---------------------------------------------------------------------------
 
 # Hot tier: fast local storage. Container mounts point here.
@@ -479,6 +513,15 @@ _HF_CACHE_HOST = Path(os.environ.get("VLLM_HF_CACHE", str(Path.home() / "hugging
 # are evicted from NFS/PVC. Override per-cache or globally via env var.
 L2_DEFAULT_MAX_DAYS = int(os.environ.get("VLLM_CACHE_L2_MAX_DAYS", "21"))
 
+# Filesystem-wide L1 safety rails. Per-cache max_gb limits are necessary but
+# not sufficient because all caches share the same underlying host filesystem.
+# These caps keep seed/sync work from consuming the last free space on NVMe and
+# reduce the risk of kubelet disk-pressure evictions.
+#   VLLM_CACHE_L1_FS_MIN_HEADROOM_GB keeps a minimum amount of free space.
+#   VLLM_CACHE_L1_FS_MAX_UTIL_PCT   caps overall filesystem utilization.
+L1_FS_MIN_HEADROOM_GB = float(os.environ.get("VLLM_CACHE_L1_FS_MIN_HEADROOM_GB", "100"))
+L1_FS_MAX_UTIL_PCT = float(os.environ.get("VLLM_CACHE_L1_FS_MAX_UTIL_PCT", "85"))
+
 CACHES = [
     {
         "host_subdir": "__hf_legacy__",
@@ -518,7 +561,9 @@ CACHES = [
         "description": "vLLM runtime cache (compiled kernels)",
     },
     {
-        "host_subdir": "vllm/media_cache",
+        # Keep this outside the main vLLM host directory so L1/L2 eviction
+        # budgets do not double-count media files as part of VLLM_CACHE_ROOT.
+        "host_subdir": "vllm-media-cache",
         "container_path": "/root/.cache/vllm/media_cache",
         "env_var": "VLLM_MEDIA_CACHE",
         "max_gb": 16,
@@ -601,7 +646,10 @@ LOCAL_IMAGE_CACHE = os.environ.get("VLLM_LOCAL_IMAGE_CACHE", "")
 # CI base image for local assembly (Tier 1). The hooks pre-load this
 # from NVMe tar into DinD. Must match what Dockerfile.rocm uses as
 # the FROM image for the test stage.
-CI_BASE_IMAGE = os.environ.get("VLLM_CI_BASE_IMAGE", "rocm/vllm-dev:ci_base")
+CI_BASE_IMAGE = os.environ.get(
+    "VLLM_CI_BASE_IMAGE",
+    os.environ.get("CI_BASE_IMAGE", "rocm/vllm-dev:ci_base"),
+)
 
 # Maximum number of PIDs allowed inside the test container.
 # Prevents fork-bomb scenarios from killing the K8s node.
@@ -655,6 +703,12 @@ CONTAINER_TIMEOUT_S = int(os.environ.get("VLLM_TEST_TIMEOUT", "10200"))  # 170 m
 # VLLM_ROCM_CI_WATCHDOG_CACHE_PRESSURE_PCT L1 usage threshold (% of max_gb)
 #                                           that triggers pressure mode, causing
 #                                           more frequent syncs. Default: 80.
+#
+# VLLM_CI_POD_MEMORY_WARN_PCT               Warn when current cgroup/container
+#                                           memory usage crosses this percent
+#                                           of the pod limit. This is a logging
+#                                           threshold only; the outer timeout
+#                                           still owns hard-stop behavior.
 # --------------------------------------------------------------------------
 
 WATCHDOG_INTERVAL_S = int(os.environ.get("VLLM_ROCM_CI_WATCHDOG_INTERVAL", "120"))
@@ -667,6 +721,12 @@ WATCHDOG_SYNC_PRESSURE_INTERVAL_S = int(
 WATCHDOG_CACHE_PRESSURE_PCT = int(
     os.environ.get("VLLM_ROCM_CI_WATCHDOG_CACHE_PRESSURE_PCT", "80")
 )
+POD_MEMORY_WARN_PCT = int(os.environ.get("VLLM_CI_POD_MEMORY_WARN_PCT", "90"))
+
+# Runtime cache state. If setup_caches() fails, container cache mounts must be
+# disabled so tests still run without inheriting a partial cache layout.
+CACHE_RUNTIME_FAILED = False
+OVERLAY_ACTIVE_SUBDIRS = set()  # type: set[str]
 
 
 # ==========================================================================
@@ -1012,6 +1072,9 @@ def log_effective_config():
         f"  WATCHDOG_SYNC_PRESSURE_S:  {WATCHDOG_SYNC_PRESSURE_INTERVAL_S}s "
         f"(at >{WATCHDOG_CACHE_PRESSURE_PCT}% L1 usage)"
     )
+    info(f"  POD_MEMORY_WARN_PCT:       {POD_MEMORY_WARN_PCT}%")
+    info(f"  L1_FS_MAX_UTIL_PCT:        {L1_FS_MAX_UTIL_PCT}%")
+    info(f"  L1_FS_MIN_HEADROOM_GB:     {L1_FS_MIN_HEADROOM_GB}GB")
 
     # Log env var overrides so operators can see what was customized.
     overrides = []  # type: list[str]
@@ -1046,6 +1109,9 @@ def log_effective_config():
         "VLLM_ROCM_CI_WATCHDOG_SYNC_INTERVAL",
         "VLLM_ROCM_CI_WATCHDOG_SYNC_PRESSURE_INTERVAL",
         "VLLM_ROCM_CI_WATCHDOG_CACHE_PRESSURE_PCT",
+        "VLLM_CI_POD_MEMORY_WARN_PCT",
+        "VLLM_CACHE_L1_FS_MAX_UTIL_PCT",
+        "VLLM_CACHE_L1_FS_MIN_HEADROOM_GB",
     ]:
         val = os.environ.get(var)
         if val is not None:
@@ -1104,13 +1170,16 @@ def upload_artifacts(*globs):
     if not _has_buildkite_agent():
         return
     for pattern in globs:
-        r = sh(
-            ["buildkite-agent", "artifact", "upload", pattern],
-            capture=True,
-            timeout=60,
-        )
-        if r.returncode != 0:
-            warn(f"Artifact upload failed for '{pattern}'")
+        try:
+            r = sh(
+                ["buildkite-agent", "artifact", "upload", pattern],
+                capture=True,
+                timeout=60,
+            )
+            if r.returncode != 0:
+                warn(f"Artifact upload failed for '{pattern}'")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            warn(f"Artifact upload crashed for '{pattern}': {exc}")
 
 
 def annotate_build(body, style="error", context="test-result"):
@@ -1134,14 +1203,17 @@ def annotate_build(body, style="error", context="test-result"):
     if not _has_buildkite_agent():
         return
     # Pipe body via stdin to avoid shell-escaping issues in the markdown.
-    proc = subprocess.run(
-        ["buildkite-agent", "annotate", "--style", style, "--context", context],
-        input=body,
-        text=True,
-        timeout=30,
-    )
-    if proc.returncode != 0:
-        warn("buildkite-agent annotate failed")
+    try:
+        proc = subprocess.run(
+            ["buildkite-agent", "annotate", "--style", style, "--context", context],
+            input=body,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            warn("buildkite-agent annotate failed")
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        warn(f"buildkite-agent annotate crashed: {exc}")
 
 
 def set_buildkite_meta(key, value):
@@ -1764,6 +1836,58 @@ def log_k8s_context():
     )
     if allocated:
         info(f"K8s device-plugin allocated GPUs: {allocated}")
+
+
+def _read_int_file(path):
+    # type: (Path) -> int | None
+    """Read an integer-like sysfs/cgroup value from disk.
+
+    Returns None on I/O failure, parse failure, or when the kernel reports
+    ``max`` for an unlimited cgroup value.
+    """
+    try:
+        content = path.read_text().strip()
+    except OSError:
+        return None
+    if not content or content == "max":
+        return None
+    try:
+        return int(content)
+    except ValueError:
+        return None
+
+
+def get_cgroup_memory_usage():
+    # type: () -> tuple[int | None, int | None]
+    """Return (used_bytes, limit_bytes) for the current container cgroup.
+
+    Supports both cgroup v2 and legacy v1 layouts so the watchdog can emit
+    pod-aware memory diagnostics on mixed CI node images.
+    """
+    v2_current = Path("/sys/fs/cgroup/memory.current")
+    v2_max = Path("/sys/fs/cgroup/memory.max")
+    if v2_current.is_file():
+        return _read_int_file(v2_current), _read_int_file(v2_max)
+
+    v1_current = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    v1_limit = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    return _read_int_file(v1_current), _read_int_file(v1_limit)
+
+
+def get_container_uptime_s():
+    # type: () -> float | None
+    """Return PID 1 runtime in seconds as a proxy for container/pod uptime.
+
+    This is more meaningful in Kubernetes than host uptime because it reflects
+    when the current pod started, not when the underlying node booted.
+    """
+    r = sh(["ps", "-o", "etimes=", "-p", "1"], capture=True, timeout=5)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return None
 
 
 # ==========================================================================
@@ -2480,6 +2604,8 @@ def setup_caches():
     """
     section("Persistent cache setup")
 
+    validate_cache_layout()
+
     # Log tier configuration and storage types.
     hot_type = _detect_storage_type(
         CACHE_ROOT if CACHE_ROOT.exists() else CACHE_ROOT.parent
@@ -2501,17 +2627,17 @@ def setup_caches():
         info(f"  Creating cache root: {CACHE_ROOT}")
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # Try OverlayFS first (L1+L2 merged transparently by kernel).
-    # If overlay works, seeding is unnecessary -- L2 reads are automatic.
-    # If overlay fails, fall back to frequency-aware seeding.
-    _overlay_active = mount_overlay_caches()
-    if not _overlay_active:
-        sync_caches_from_backing()
+    # Try OverlayFS first (L1+L2 merged transparently by kernel). If some
+    # caches fail to mount, seed only those caches from backing so partial
+    # overlay failure does not leave them completely cold.
+    mounted_subdirs = mount_overlay_caches()
+    sync_caches_from_backing(skip_subdirs=mounted_subdirs)
 
     # Show the top-K access frequency table so operators can see which
     # models are hot across jobs and tune cache budgets accordingly.
     log_top_k_access_counts()
 
+    cache_bytes = {}  # type: dict[str, int]
     for cache in CACHES:
         host_dir = _get_cache_host_dir(cache)
         host_dir.mkdir(parents=True, exist_ok=True)
@@ -2529,8 +2655,18 @@ def setup_caches():
                 capture=True,
             )
             count = r2.stdout.strip() if r2.returncode == 0 else "?"
+            r3 = sh(
+                f"du -sb '{host_dir}' 2>/dev/null | cut -f1",
+                capture=True,
+            )
+            cache_bytes[cache["env_var"]] = (
+                int(r3.stdout.strip())
+                if r3.returncode == 0 and r3.stdout.strip()
+                else 0
+            )
         except (OSError, subprocess.SubprocessError):
             size, count = "?", "?"
+            cache_bytes[cache["env_var"]] = 0
 
         try:
             is_warm = count != "?" and int(count) > 0
@@ -2541,6 +2677,8 @@ def setup_caches():
         limit = f"{max_gb}GB" if max_gb > 0 else "unlimited"
         env = cache["env_var"]
         info(f"  {env:25s} {size:>8s} ({count} files) [{status}] limit={limit}")
+
+    log_cache_budget_guardrails(cache_bytes)
 
     return CACHES
 
@@ -2560,7 +2698,7 @@ def build_cache_docker_args():
         List of docker CLI arguments (strings).
         Empty list if ENABLE_CACHE is False.
     """
-    if not ENABLE_CACHE:
+    if not ENABLE_CACHE or CACHE_RUNTIME_FAILED:
         return []
     args = []  # type: list[str]
     for cache in CACHES:
@@ -2570,6 +2708,7 @@ def build_cache_docker_args():
         overlay_merged = CACHE_OVERLAY_ROOT / cache["host_subdir"]
         if (
             not cache.get("host_dir_override")
+            and cache["host_subdir"] in OVERLAY_ACTIVE_SUBDIRS
             and overlay_merged.exists()
             and overlay_merged.is_mount()
         ):
@@ -2632,6 +2771,203 @@ def _get_cache_backing_dir(cache):
     return CACHE_BACKING_ROOT / cache["host_subdir"]
 
 
+def _get_filesystem_usage_bytes(path):
+    # type: (Path) -> tuple[int, int, int]
+    """Return (used, free, total) bytes for the filesystem containing path.
+
+    Cache guardrails are applied at the shared-filesystem level because
+    multiple caches may be individually below budget while the underlying
+    NVMe volume is still close to eviction pressure.
+    """
+    probe = path if path.exists() else path.parent
+    usage = shutil.disk_usage(str(probe))
+    return usage.used, usage.free, usage.total
+
+
+def _get_filesystem_growth_budget_bytes(path):
+    # type: (Path) -> int
+    """Return how many more bytes may safely be written to this filesystem.
+
+    The returned budget respects both L1 safety env vars:
+      - ``VLLM_CACHE_L1_FS_MIN_HEADROOM_GB``
+      - ``VLLM_CACHE_L1_FS_MAX_UTIL_PCT``
+
+    The smaller remaining allowance wins. If neither allows more growth,
+    callers should treat the filesystem as under pressure.
+    """
+    try:
+        used, free, total = _get_filesystem_usage_bytes(path)
+    except OSError:
+        return 0
+
+    headroom_gb = min(L1_FS_MIN_HEADROOM_GB, (total / (1024**3)) * 0.1)
+    headroom_bytes = int(headroom_gb * 1024**3)
+    allowed_by_headroom = max(0, free - headroom_bytes)
+    if L1_FS_MAX_UTIL_PCT > 0:
+        max_used_bytes = int(total * (L1_FS_MAX_UTIL_PCT / 100.0))
+        allowed_by_util = max(0, max_used_bytes - used)
+        return min(allowed_by_headroom, allowed_by_util)
+    return allowed_by_headroom
+
+
+def get_cache_seed_budget_bytes(cache):
+    # type: (dict) -> int
+    """Return how many bytes may be seeded into L1 for this cache.
+
+    This budget is the minimum of:
+      1. The cache's remaining L1 budget (``max_gb - current_size``).
+      2. The shared filesystem growth budget for the cache's host path.
+
+    That keeps startup seeding from overfilling a warm cache or blowing past
+    node-level disk headroom just because L2 contains more reusable data.
+    """
+    host_dir = _get_cache_host_dir(cache)
+    current_bytes = _get_dir_size_bytes(host_dir) if host_dir.exists() else 0
+    fs_budget = _get_filesystem_growth_budget_bytes(host_dir)
+    if fs_budget <= 0:
+        return 0
+
+    max_gb = _get_cache_max_gb(cache)
+    if max_gb <= 0:
+        return fs_budget
+
+    max_bytes = max_gb * 1024 * 1024 * 1024
+    per_cache_remaining = max(0, max_bytes - current_bytes)
+    return min(per_cache_remaining, fs_budget)
+
+
+def cache_under_pressure(cache):
+    # type: (dict) -> bool
+    """Return True when a cache or its filesystem should sync aggressively.
+
+    Pressure is triggered by either:
+      - the shared L1 filesystem having no remaining growth budget, or
+      - the cache exceeding ``WATCHDOG_CACHE_PRESSURE_PCT`` of its L1 budget.
+
+    The watchdog uses this to switch from normal to fast L1->L2 sync cadence.
+    """
+    host_dir = _get_cache_host_dir(cache)
+    if not host_dir.exists():
+        return False
+
+    if _get_filesystem_growth_budget_bytes(host_dir) <= 0:
+        return True
+
+    max_gb = _get_cache_max_gb(cache)
+    if max_gb <= 0:
+        return False
+
+    current_gb = _get_dir_size_bytes(host_dir) / (1024 * 1024 * 1024)
+    return current_gb > max_gb * (WATCHDOG_CACHE_PRESSURE_PCT / 100.0)
+
+
+def _normalize_cache_path(path):
+    # type: (Path) -> Path
+    """Return a stable absolute path for overlap checks."""
+    return path.expanduser().resolve(strict=False)
+
+
+def _cache_paths_overlap(a, b):
+    # type: (Path, Path) -> bool
+    """Return True when two cache roots overlap on disk."""
+    a_norm = _normalize_cache_path(a)
+    b_norm = _normalize_cache_path(b)
+    return a_norm == b_norm or a_norm in b_norm.parents or b_norm in a_norm.parents
+
+
+def validate_cache_layout():
+    # type: () -> None
+    """Fail fast on overlapping host cache roots.
+
+    Overlaps cause the same bytes to count against multiple cache budgets,
+    which makes LRU eviction misleading and can leave the node vulnerable to
+    disk pressure before any single cache appears over limit.
+    """
+    roots = []  # type: list[tuple[str, Path]]
+    for cache in CACHES:
+        roots.append((cache["env_var"], _get_cache_host_dir(cache)))
+
+    conflicts = []  # type: list[str]
+    for idx, (env_a, path_a) in enumerate(roots):
+        for env_b, path_b in roots[idx + 1 :]:
+            if _cache_paths_overlap(path_a, path_b):
+                conflicts.append(f"{env_a}={path_a} overlaps {env_b}={path_b}")
+
+    if conflicts:
+        joined = "; ".join(conflicts)
+        raise RuntimeError(
+            "Invalid cache layout: overlapping L1 cache roots detected. "
+            "Use separate sibling paths for each cache family so budget "
+            f"accounting remains accurate. Conflicts: {joined}"
+        )
+
+
+def log_cache_budget_guardrails(cache_bytes):
+    # type: (dict[str, int]) -> None
+    """Warn when grouped L1 cache budgets leave too little filesystem headroom."""
+    section("Cache budget guardrails")
+
+    groups = {}  # type: dict[int, dict[str, object]]
+    for cache in CACHES:
+        max_gb = _get_cache_max_gb(cache)
+        if max_gb <= 0:
+            continue
+
+        host_dir = _get_cache_host_dir(cache)
+        probe = host_dir if host_dir.exists() else host_dir.parent
+        try:
+            st = probe.stat()
+            usage = shutil.disk_usage(str(probe))
+        except OSError:
+            continue
+
+        group = groups.setdefault(
+            st.st_dev,
+            {
+                "path": str(probe),
+                "total_gb": usage.total / (1024**3),
+                "free_gb": usage.free / (1024**3),
+                "budget_gb": 0.0,
+                "current_gb": 0.0,
+                "members": [],
+            },
+        )
+        group["budget_gb"] += float(max_gb)
+        group["current_gb"] += cache_bytes.get(cache["env_var"], 0) / (1024**3)
+        group["members"].append(cache["env_var"])
+
+    if not groups:
+        info("  Filesystem budget checks unavailable")
+        return
+
+    for group in groups.values():
+        budget_gb = float(group["budget_gb"])
+        current_gb = float(group["current_gb"])
+        total_gb = float(group["total_gb"])
+        free_gb = float(group["free_gb"])
+        projected_growth_gb = max(0.0, budget_gb - current_gb)
+        projected_free_gb = free_gb - projected_growth_gb
+        util_pct = (budget_gb / total_gb * 100.0) if total_gb > 0 else 0.0
+        members = ", ".join(group["members"])
+
+        info(
+            "  "
+            f"{group['path']}: budget={budget_gb:.0f}GB "
+            f"current={current_gb:.1f}GB free={free_gb:.0f}GB "
+            f"projected_free_at_limit={projected_free_gb:.0f}GB "
+            f"(caches: {members})"
+        )
+
+        required_headroom_gb = min(L1_FS_MIN_HEADROOM_GB, total_gb * 0.1)
+        if util_pct > L1_FS_MAX_UTIL_PCT or projected_free_gb < required_headroom_gb:
+            warn(
+                f"  Cache budgets on {group['path']} are close to filesystem "
+                f"limits ({util_pct:.0f}% of total, projected free "
+                f"{projected_free_gb:.0f}GB). Reduce VLLM_CACHE_MAX_* or move "
+                "cache roots to a different mount to avoid disk-pressure evictions."
+            )
+
+
 def _overlay_supported():
     # type: () -> bool
     """Return True if OverlayFS mounts are possible.
@@ -2679,7 +3015,7 @@ def _overlay_supported():
 
 
 def mount_overlay_caches():
-    # type: () -> bool
+    # type: () -> set[str]
     """Mount OverlayFS for each cache, merging L1 (local) and L2 (NFS).
 
     Creates a merged view at CACHE_OVERLAY_ROOT/<subdir> for each cache
@@ -2692,15 +3028,18 @@ def mount_overlay_caches():
     When a file is written:
       - Always goes to L1 (upper). L2 is read-only from overlay's view.
 
-    Returns True if overlay was mounted for at least one cache.
-    Returns False if overlay is not supported or no caches have backing.
+    Returns the set of cache subdirs whose overlay mount succeeded.
+    Callers can use this to skip redundant seed-based L2->L1 copies for caches
+    already covered by a live overlay mount.
     """
+    global OVERLAY_ACTIVE_SUBDIRS
+    OVERLAY_ACTIVE_SUBDIRS = set()
     if CACHE_BACKING_ROOT is None:
-        return False
+        return set()
 
     if not _overlay_supported():
         info("OverlayFS not available -- using seed-based fallback")
-        return False
+        return set()
 
     section("Mounting OverlayFS cache layers (L1 + L2)")
     CACHE_OVERLAY_ROOT.mkdir(parents=True, exist_ok=True)
@@ -2736,12 +3075,13 @@ def mount_overlay_caches():
         if r.returncode == 0:
             info(f"  {env}: overlay mounted (L1={local}, L2={backing})")
             mounted += 1
+            OVERLAY_ACTIVE_SUBDIRS.add(cache["host_subdir"])
         else:
             warn(f"  {env}: overlay mount failed: {r.stdout.strip()}")
 
     if mounted > 0:
         info(f"Mounted {mounted} overlay cache(s)")
-    return mounted > 0
+    return set(OVERLAY_ACTIVE_SUBDIRS)
 
 
 def unmount_overlay_caches():
@@ -2755,6 +3095,7 @@ def unmount_overlay_caches():
             env = cache["env_var"]
             sh(f"umount '{merged}' 2>/dev/null || true")
             info(f"  {env}: overlay unmounted")
+    OVERLAY_ACTIVE_SUBDIRS.clear()
 
 
 # ---- Access frequency tracking ----
@@ -2809,6 +3150,7 @@ def _save_access_counts(counts):
     def _atomic_write(target):
         # type: (Path) -> None
         """Write via temp file + rename for crash-safe concurrent access."""
+        tmp = None
         try:
             fd, tmp = tempfile.mkstemp(
                 dir=str(target.parent),
@@ -2821,8 +3163,9 @@ def _save_access_counts(counts):
                 os.close(fd)
             os.replace(tmp, str(target))
         except OSError:
-            with suppress(OSError):
-                os.unlink(tmp)
+            if tmp is not None:
+                with suppress(OSError):
+                    os.unlink(tmp)
 
     # Write to local.
     with suppress(OSError):
@@ -2925,8 +3268,8 @@ def update_access_counts_from_atime(cache, counts=None):
     return counts
 
 
-def sync_caches_from_backing():
-    # type: () -> None
+def sync_caches_from_backing(skip_subdirs=None):
+    # type: (set[str] | None) -> None
     """Seed L1 (hot) from L2 (backing) using frequency-aware selection.
 
     Called at pod startup (Phase 5) ONLY when OverlayFS is not available.
@@ -2953,10 +3296,15 @@ def sync_caches_from_backing():
     If max_gb is 0 (unlimited), we cap the seed at the ephemeral
     volume's available space minus a 10% safety margin.
 
+    ``skip_subdirs`` lets callers exclude caches that already have a working
+    overlay mount, so partial overlay success does not suppress fallback seeding
+    for unrelated caches.
+
     Skipped if CACHE_BACKING_ROOT is not set (single-tier mode).
     """
     if CACHE_BACKING_ROOT is None:
         return
+    skip_subdirs = skip_subdirs or set()
 
     section("Cache seed: frequency-aware L2 -> L1 copy")
     info(f"Backing root: {CACHE_BACKING_ROOT}")
@@ -2979,6 +3327,8 @@ def sync_caches_from_backing():
         return
 
     for cache in CACHES:
+        if cache["host_subdir"] in skip_subdirs:
+            continue
         backing = _get_cache_backing_dir(cache)
         if backing is None:
             continue
@@ -2990,21 +3340,10 @@ def sync_caches_from_backing():
             info(f"  {env}: no backing dir yet -- skip")
             continue
 
-        max_gb = _get_cache_max_gb(cache)
-        max_bytes = max_gb * 1024 * 1024 * 1024 if max_gb > 0 else None
-
-        # If no limit, estimate from available disk space (90%).
-        if max_bytes is None:
-            r = sh(
-                f"df -B1 '{local}' 2>/dev/null | tail -1 | awk '{{print $4}}'",
-                capture=True,
-            )
-            try:
-                avail = int(r.stdout.strip())
-                max_bytes = int(avail * 0.9)
-            except (ValueError, AttributeError):
-                info(f"  {env}: cannot determine available space -- skip seed")
-                continue
+        max_bytes = get_cache_seed_budget_bytes(cache)
+        if max_bytes <= 0:
+            info(f"  {env}: no seed budget available -- skip")
+            continue
 
         # List all files in backing with mtime and size.
         r = sh(
@@ -3733,20 +4072,32 @@ def check_infra_health():
 
     # -- 3. Available memory --
     try:
-        r = sh("cat /proc/meminfo 2>/dev/null", capture=True)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                if line.startswith("MemAvailable:"):
-                    avail_kb = int(line.split()[1])
-                    avail_gb = avail_kb / (1024 * 1024)
-                    info(f"Available memory: {avail_gb:.1f} GB")
-                    if avail_gb < 8:
-                        warn(
-                            f"{_DIAG_PREFIX} Low available memory: {avail_gb:.1f} GB. "
-                            f"Tests may OOM or the kubelet may evict this pod. "
-                            f"Check node memory pressure: kubectl top node"
-                        )
-                    break
+        used_bytes, limit_bytes = get_cgroup_memory_usage()
+        if used_bytes is not None and limit_bytes is not None and limit_bytes > 0:
+            used_gb = used_bytes / (1024**3)
+            limit_gb = limit_bytes / (1024**3)
+            pct = int(100 * used_bytes / limit_bytes)
+            info(f"Pod memory usage: {used_gb:.1f} GB / {limit_gb:.1f} GB ({pct}%)")
+            if pct >= POD_MEMORY_WARN_PCT:
+                warn(
+                    f"{_DIAG_PREFIX} Pod memory usage is {pct}% of limit. "
+                    "Tests may OOM or be evicted."
+                )
+        else:
+            r = sh("cat /proc/meminfo 2>/dev/null", capture=True)
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    if line.startswith("MemAvailable:"):
+                        avail_kb = int(line.split()[1])
+                        avail_gb = avail_kb / (1024 * 1024)
+                        info(f"Available host memory: {avail_gb:.1f} GB")
+                        if avail_gb < 8:
+                            warn(
+                                f"{_DIAG_PREFIX} Low available host memory: "
+                                f"{avail_gb:.1f} GB. Tests may OOM or the kubelet "
+                                "may evict this pod. Check node memory pressure."
+                            )
+                        break
     except Exception as exc:
         warn(f"Memory check failed: {exc}")
 
@@ -3775,17 +4126,15 @@ def check_infra_health():
     # -- 5. Pod uptime (K8s only) --
     try:
         if is_k8s():
-            r = sh("cat /proc/uptime 2>/dev/null", capture=True)
-            if r.returncode == 0:
-                uptime_s = float(r.stdout.split()[0])
+            uptime_s = get_container_uptime_s()
+            if uptime_s is not None:
                 if uptime_s < 120:
                     warn(
-                        f"{_DIAG_PREFIX} Pod uptime is only "
-                        f"{uptime_s:.0f}s. This pod was "
-                        f"recently (re)started."
+                        f"{_DIAG_PREFIX} Pod/container uptime is only "
+                        f"{uptime_s:.0f}s. This pod was recently started."
                     )
                 else:
-                    info(f"Pod uptime: {uptime_s:.0f}s")
+                    info(f"Pod/container uptime: {uptime_s:.0f}s")
     except Exception as exc:
         warn(f"Pod uptime check failed: {exc}")
 
@@ -3875,53 +4224,89 @@ def _load_commit_tar(image, cache_dir):
     return False
 
 
-def _assemble_from_wheel(image, cache_dir):
-    # type: (str, str) -> bool
-    """Tier 1: Assemble a test image locally from ci_base + wheel artifact.
+def _try_download_wheel_artifact(wheel_tmp, artifact_dir):
+    # type: (str, str) -> list[str]
+    """Try to download wheel artifacts from a specific artifact directory.
 
-    The build step uploads the vLLM wheel as a Buildkite artifact
-    (artifacts/vllm-wheel/*.whl.zst). If ci_base is already loaded
-    (by the hooks from NVMe tar) and the wheel is available, we build
-    a lightweight image locally -- zero Docker Hub traffic.
-
-    Returns True if the image was assembled successfully.
+    Returns a list of .whl.zst file paths if found, empty list otherwise.
     """
-    # Check ci_base is available in Docker (hooks should have loaded it)
-    r = sh(["docker", "image", "inspect", CI_BASE_IMAGE], capture=True)
-    if r.returncode != 0:
-        info("Tier 1: ci_base not available, skipping local assembly")
-        return False
+    import glob as _glob
 
-    # Check buildkite-agent is available
-    if not shutil.which("buildkite-agent"):
-        info("Tier 1: buildkite-agent not found, skipping")
-        return False
-
-    info("Tier 1: Attempting local assembly from ci_base + wheel")
-
-    # Download wheel artifact
-    wheel_tmp = tempfile.mkdtemp(prefix="vllm-wheel-")
     try:
         r = sh(
             [
                 "buildkite-agent",
                 "artifact",
                 "download",
-                "artifacts/vllm-wheel/*",
+                f"{artifact_dir}/*",
                 wheel_tmp + "/",
             ],
             capture=True,
+            timeout=60,
         )
-        if r.returncode != 0:
-            info("Tier 1: No wheel artifact available (build may not have uploaded it)")
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if r.returncode != 0:
+        return []
+
+    zst_files = _glob.glob(os.path.join(wheel_tmp, artifact_dir, "*.whl.zst"))
+    return zst_files
+
+
+def _assemble_from_wheel(image):
+    # type: (str) -> bool
+    """Tier 1: Assemble a test image locally from ci_base + wheel artifact.
+
+    The build step uploads the vLLM wheel as a Buildkite artifact.
+    Wheels are namespaced by architecture:
+
+      artifacts/vllm-wheel-{arch}/*.whl.zst   (per-arch, e.g. gfx942)
+      artifacts/vllm-wheel-fat/*.whl.zst      (fat multi-arch build)
+      artifacts/vllm-wheel/*.whl.zst          (legacy path)
+
+    This function tries arch-specific first, then fat, then legacy.
+    If ci_base is already loaded (by the hooks from NVMe tar) and the
+    wheel is available, we build a lightweight image locally -- zero
+    Docker Hub traffic.
+
+    Returns True if the image was assembled successfully.
+    """
+    # Check buildkite-agent first (cheapest check).
+    if not shutil.which("buildkite-agent"):
+        info("Tier 1: buildkite-agent not found, skipping")
+        return False
+
+    # Check if wheel artifact exists BEFORE pulling ci_base.
+    # Downloading the artifact is cheap (small file, local API call).
+    # Pulling ci_base is expensive on a cold agent. Don't waste time
+    # pulling ci_base if there's no wheel to install into it.
+    info("Tier 1: Checking for wheel artifact...")
+    wheel_tmp = tempfile.mkdtemp(prefix="vllm-wheel-")
+    try:
+        import glob as _glob  # noqa: F811 -- also imported in helper
+
+        # Build ordered list of artifact paths to try:
+        # 1. Arch-specific (e.g. artifacts/vllm-wheel-gfx942)
+        # 2. Fat multi-arch (artifacts/vllm-wheel-fat)
+        # 3. Legacy (artifacts/vllm-wheel)
+        arch = _extract_arch_from_image(image)
+        artifact_dirs = []
+        if arch:
+            artifact_dirs.append(f"artifacts/vllm-wheel-{arch}")
+        artifact_dirs.append("artifacts/vllm-wheel-fat")
+        artifact_dirs.append("artifacts/vllm-wheel")
+
+        zst_files = []  # type: list[str]
+        for artifact_dir in artifact_dirs:
+            info(f"Tier 1: Trying {artifact_dir}/ ...")
+            zst_files = _try_download_wheel_artifact(wheel_tmp, artifact_dir)
+            if zst_files:
+                info(f"Tier 1: Found wheel artifact via {artifact_dir}/")
+                break
+        else:
+            info("Tier 1: No wheel artifact available from any path")
             return False
 
-        # Decompress .whl.zst files
-        import glob as _glob
-
-        zst_files = _glob.glob(
-            os.path.join(wheel_tmp, "artifacts/vllm-wheel/*.whl.zst")
-        )
         if not zst_files:
             info("Tier 1: No .whl.zst files in artifact")
             return False
@@ -3933,9 +4318,15 @@ def _assemble_from_wheel(image, cache_dir):
                 capture=True,
             )
 
-        # Decompress tests archive if present
-        tests_archive = os.path.join(wheel_tmp, "artifacts/vllm-wheel/tests.tar.zst")
-        if os.path.isfile(tests_archive):
+        # Decompress tests archive if present (search in the artifact_dir
+        # that matched, falling back to any dir that contains the archive).
+        tests_archive = ""
+        for adir in [artifact_dir] + artifact_dirs:
+            candidate = os.path.join(wheel_tmp, adir, "tests.tar.zst")
+            if os.path.isfile(candidate):
+                tests_archive = candidate
+                break
+        if tests_archive:
             sh(
                 f"zstd -d '{tests_archive}' --stdout | tar xf - -C '{wheel_tmp}/'",
                 capture=True,
@@ -3947,6 +4338,23 @@ def _assemble_from_wheel(image, cache_dir):
         if not whl_files or not os.path.isdir(workspace):
             info("Tier 1: Wheel or workspace not found, skipping")
             return False
+
+        # Wheel confirmed available. NOW pull ci_base (not before,
+        # to avoid wasting time if the wheel doesn't exist).
+        r = sh(
+            ["docker", "image", "inspect", CI_BASE_IMAGE],
+            capture=True,
+        )
+        if r.returncode != 0:
+            info("Tier 1: Pulling ci_base...")
+            r = sh(
+                ["docker", "pull", CI_BASE_IMAGE],
+                capture=True,
+                timeout=300,
+            )
+            if r.returncode != 0:
+                info("Tier 1: Could not pull ci_base, skipping local assembly")
+                return False
 
         # Copy wheels into workspace for Docker build context
         dist_dir = os.path.join(workspace, "dist")
@@ -4405,7 +4813,7 @@ class _HealthWatchdog:
     """
 
     def __init__(self, log_path, container_name):
-        # type: (Path, str) -> None
+        # type: (Path, str | None) -> None
         self._log_path = log_path
         self._container = container_name
         self._stop = threading.Event()
@@ -4416,6 +4824,7 @@ class _HealthWatchdog:
     def start(self):
         # type: () -> None
         """Start the watchdog daemon thread."""
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="health-watchdog"
         )
@@ -4436,10 +4845,10 @@ class _HealthWatchdog:
     def _run(self):
         # type: () -> None
         """Main loop: sample, write, sleep, repeat."""
-        with open(self._log_path, "w") as f:
+        with open(self._log_path, "w", encoding="utf-8") as f:
             f.write(
                 f"# Health watchdog log -- "
-                f"container {self._container}\n"
+                f"container {self._container or 'multi-node'}\n"
                 f"# Sampling every {WATCHDOG_INTERVAL_S}s\n"
                 f"# Format: timestamp | metric | value\n\n"
             )
@@ -4463,6 +4872,22 @@ class _HealthWatchdog:
                     gb = kb / (1024 * 1024)
                     f.write(f"{ts} | mem_avail_gb | {gb:.1f}\n")
                     break
+        except (OSError, ValueError, IndexError):
+            pass
+
+        # -- Pod/container memory --
+        try:
+            used_bytes, limit_bytes = get_cgroup_memory_usage()
+            if used_bytes is not None:
+                used_gb = used_bytes / (1024**3)
+                if limit_bytes is not None and limit_bytes > 0:
+                    limit_gb = limit_bytes / (1024**3)
+                    pct = int(100 * used_bytes / limit_bytes)
+                    f.write(
+                        f"{ts} | pod_mem_gb | {used_gb:.1f}/{limit_gb:.1f} ({pct}%)\n"
+                    )
+                else:
+                    f.write(f"{ts} | pod_mem_gb | {used_gb:.1f}/unbounded\n")
         except (OSError, ValueError, IndexError):
             pass
 
@@ -4513,22 +4938,23 @@ class _HealthWatchdog:
             pass
 
         # -- Container status --
-        try:
-            r = sh(
-                [
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{.State.Status}} {{.State.OOMKilled}} {{.State.ExitCode}}",
-                    self._container,
-                ],
-                capture=True,
-                timeout=10,
-            )
-            if r.returncode == 0:
-                f.write(f"{ts} | container | {r.stdout.strip()}\n")
-        except (OSError, subprocess.SubprocessError):
-            pass
+        if self._container:
+            try:
+                r = sh(
+                    [
+                        "docker",
+                        "inspect",
+                        "--format",
+                        "{{.State.Status}} {{.State.OOMKilled}} {{.State.ExitCode}}",
+                        self._container,
+                    ],
+                    capture=True,
+                    timeout=10,
+                )
+                if r.returncode == 0:
+                    f.write(f"{ts} | container | {r.stdout.strip()}\n")
+            except (OSError, subprocess.SubprocessError):
+                pass
 
         # -- Incremental cache sync (L1 -> L2) --
         if CACHE_BACKING_ROOT is not None and not self._sync_in_progress:
@@ -4557,16 +4983,8 @@ class _HealthWatchdog:
         # Check if any L1 cache is under disk pressure
         under_pressure = False
         for cache in CACHES:
-            max_gb = _get_cache_max_gb(cache)
-            if max_gb <= 0:
-                continue
-            host_dir = _get_cache_host_dir(cache)
-            if not host_dir.exists():
-                continue
             try:
-                usage = shutil.disk_usage(str(host_dir))
-                used_gb = usage.used / (1024 * 1024 * 1024)
-                if used_gb > max_gb * (WATCHDOG_CACHE_PRESSURE_PCT / 100.0):
+                if cache_under_pressure(cache):
                     under_pressure = True
                     break
             except OSError:
@@ -4856,17 +5274,28 @@ def run_container(
     # -- Step 2: Stream logs to stdout (Buildkite) AND a file (artifact) --
     log_file = results_dir / "container.log"
     info(f"Container log will be saved to: {log_file}")
-    log_proc = subprocess.Popen(
-        ["docker", "logs", "-f", name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    tee_proc = subprocess.Popen(
-        ["tee", str(log_file)],
-        stdin=log_proc.stdout,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-    )
+    log_proc = None  # type: subprocess.Popen | None
+    try:
+        log_proc = subprocess.Popen(
+            ["docker", "logs", "-f", name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        tee_proc = subprocess.Popen(
+            ["tee", str(log_file)],
+            stdin=log_proc.stdout,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    except OSError as exc:
+        warn(f"Failed to start container log streaming: {exc}")
+        if log_proc is not None:
+            with suppress(OSError):
+                log_proc.kill()
+            with suppress(OSError):
+                log_proc.wait(timeout=5)
+        sh(["docker", "rm", "-f", name], capture=True)
+        return 1
     # Close our copy of the pipe so log_proc gets SIGPIPE if tee dies.
     log_proc.stdout.close()
 
@@ -5777,6 +6206,9 @@ def run_multi_node(commands, image, results_dir):
 
     # Execute with timeout.
     timed_out = False
+    watchdog_log = results_dir / "health_watchdog.log"
+    watchdog = _HealthWatchdog(watchdog_log, None)
+    watchdog.start()
     exec_start = time.monotonic()
     try:
         r = subprocess.run(
@@ -5794,6 +6226,8 @@ def run_multi_node(commands, image, results_dir):
             style="error",
             context="timeout",
         )
+    finally:
+        watchdog.stop()
     exec_elapsed = time.monotonic() - exec_start
 
     info(f"Multi-node composite exit code: {exit_code} (ran for {exec_elapsed:.1f}s)")
@@ -5876,7 +6310,7 @@ def run_multi_node(commands, image, results_dir):
     snapshot_gpu_vram("multi-node-post-test")
 
     # Upload multi-node artifacts.
-    upload_artifacts(f"{results_dir}/*.xml")
+    upload_artifacts(f"{results_dir}/*.xml", f"{results_dir}/*.log")
 
     # Set metadata.
     set_buildkite_meta("test_exit_code", str(exit_code))
@@ -5923,129 +6357,153 @@ class _Cleanup:
         self.commit = os.environ.get("BUILDKITE_COMMIT", "")  # type: str
         self.is_multi_node = False  # type: bool
         self._done = False  # type: bool
+        self._running = False  # type: bool
         self._signal_triggered = False  # type: bool
 
     def run(self):
         # type: () -> None
         """Execute all cleanup steps. Idempotent (safe to call multiple times)."""
-        if self._done:
+        if self._done or self._running:
             return
-        self._done = True
+        self._running = True
 
-        section("Cleanup: tearing down test environment")
+        try:
+            section("Cleanup: tearing down test environment")
 
-        # When triggered by a signal (SIGTERM/SIGINT), Buildkite will send
-        # SIGKILL shortly after (~10s). Skip slow operations (rsync to NFS,
-        # access count updates) that can't complete in time and would just
-        # get killed mid-write, potentially corrupting the backing store.
-        if self._signal_triggered:
-            info("Signal-triggered cleanup: skipping cache sync (time-limited)")
-        else:
-            # 0a. Update access frequency counts from this job's file atimes.
-            info("  [0/8] Updating cache access counts...")
-            counts = _load_access_counts()
-            for cache in CACHES:
-                counts = update_access_counts_from_atime(cache, counts)
-            _save_access_counts(counts)
-            log_top_k_access_counts()
+            # When triggered by a signal (SIGTERM/SIGINT), Buildkite will send
+            # SIGKILL shortly after (~10s). Skip slow operations (rsync to NFS,
+            # access count updates) that can't complete in time and would just
+            # get killed mid-write, potentially corrupting the backing store.
+            if self._signal_triggered:
+                info("Signal-triggered cleanup: skipping cache sync (time-limited)")
+            else:
+                # 0a. Update access frequency counts from this job's file atimes.
+                with best_effort("cleanup access count update"):
+                    info("  [0/8] Updating cache access counts...")
+                    counts = _load_access_counts()
+                    for cache in CACHES:
+                        counts = update_access_counts_from_atime(cache, counts)
+                    _save_access_counts(counts)
+                    log_top_k_access_counts()
 
-        # 0b. Unmount overlay caches (must happen before rsync to backing,
-        # because the upper layer files are only visible after unmount
-        # when overlay is active).
-        unmount_overlay_caches()
+            # 0b. Unmount overlay caches (must happen before rsync to backing,
+            # because the upper layer files are only visible after unmount
+            # when overlay is active).
+            with best_effort("cleanup overlay unmount"):
+                unmount_overlay_caches()
 
-        if not self._signal_triggered:
-            # 0c. Persist caches to backing store before tearing anything
-            # down. Do this first so cache data survives even if later
-            # cleanup steps fail or the pod is killed mid-cleanup.
-            sync_caches_to_backing()
+            if not self._signal_triggered:
+                # 0c. Persist caches to backing store before tearing anything
+                # down. Do this first so cache data survives even if later
+                # cleanup steps fail or the pod is killed mid-cleanup.
+                with best_effort("cleanup cache sync"):
+                    sync_caches_to_backing()
 
-        # 1. Remove test container(s).
-        if self.container:
-            info(f"  [1/8] Removing test container: {self.container}")
-            sh(["docker", "rm", "-f", self.container], capture=True)
-        else:
-            info("  [1/8] No container to remove (not started)")
-        if self.is_multi_node:
-            info("  [1/8] Cleaning up multi-node containers and network")
-            _cleanup_multi_node()
+            # 1. Remove test container(s).
+            if self.container:
+                with best_effort("cleanup container removal"):
+                    info(f"  [1/8] Removing test container: {self.container}")
+                    sh(["docker", "rm", "-f", self.container], capture=True)
+            else:
+                info("  [1/8] No container to remove (not started)")
+            if self.is_multi_node:
+                with best_effort("cleanup multi-node containers"):
+                    info("  [1/8] Cleaning up multi-node containers and network")
+                    _cleanup_multi_node()
 
-        # 2. Kill GPU zombies (fuser -- same PID namespace).
-        info("  [2/8] Checking for GPU zombies (fuser)")
-        kfd_pids = _device_pids("/dev/kfd")
-        if kfd_pids:
-            info(f"         Found {len(kfd_pids)} process(es) on /dev/kfd")
-        for pid in kfd_pids:
-            _kill_pid(pid)
-        dri = Path("/dev/dri")
-        if dri.is_dir():
-            for dev in sorted(dri.glob("renderD*")):
-                for pid in _device_pids(str(dev)):
+            # 2. Kill GPU zombies (fuser -- same PID namespace).
+            with best_effort("cleanup GPU zombies (fuser)"):
+                info("  [2/8] Checking for GPU zombies (fuser)")
+                kfd_pids = _device_pids("/dev/kfd")
+                if kfd_pids:
+                    info(f"         Found {len(kfd_pids)} process(es) on /dev/kfd")
+                for pid in kfd_pids:
+                    _kill_pid(pid)
+                dri = Path("/dev/dri")
+                if dri.is_dir():
+                    for dev in sorted(dri.glob("renderD*")):
+                        for pid in _device_pids(str(dev)):
+                            _kill_pid(pid)
+
+            # 3. Kill GPU zombies (amd-smi/rocm-smi -- cross PID namespace).
+            with best_effort("cleanup GPU zombies (driver)"):
+                info(
+                    "  [3/8] Checking for GPU zombies "
+                    "(amd-smi/rocm-smi, cross-namespace)"
+                )
+                smi_pids = gpu_pids()
+                if smi_pids:
+                    info(f"         Found {len(smi_pids)} process(es) via {_SMI_TOOL}")
+                for pid in smi_pids:
                     _kill_pid(pid)
 
-        # 3. Kill GPU zombies (amd-smi/rocm-smi -- cross PID namespace).
-        info("  [3/8] Checking for GPU zombies (amd-smi/rocm-smi, cross-namespace)")
-        smi_pids = gpu_pids()
-        if smi_pids:
-            info(f"         Found {len(smi_pids)} process(es) via {_SMI_TOOL}")
-        for pid in smi_pids:
-            _kill_pid(pid)
+            # 4. Reset GPU state (locked, non-blocking).
+            with best_effort("cleanup GPU state reset"):
+                if _gpu_state_file_available() and os.access(
+                    str(GPU_STATE_FILE), os.W_OK
+                ):
+                    info("  [4/8] Resetting GPU state file")
+                    try:
+                        with _gpu_state_lock(blocking=False):
+                            GPU_STATE_FILE.write_text("reset\n")
+                            info("         GPU state reset requested")
+                    except OSError as exc:
+                        warn(f"         Could not reset GPU state: {exc}")
+                else:
+                    info("  [4/8] GPU state file not available -- skipping")
 
-        # 4. Reset GPU state (locked, non-blocking).
-        if _gpu_state_file_available() and os.access(str(GPU_STATE_FILE), os.W_OK):
-            info("  [4/8] Resetting GPU state file")
-            try:
-                with _gpu_state_lock(blocking=False):
-                    GPU_STATE_FILE.write_text("reset\n")
-                    info("         GPU state reset requested")
-            except OSError as exc:
-                warn(f"         Could not reset GPU state: {exc}")
-        else:
-            info("  [4/8] GPU state file not available -- skipping")
+            # 5. Remove stale containers from this commit.
+            with best_effort("cleanup stale containers"):
+                if self.commit:
+                    info(
+                        f"  [5/8] Removing stale containers for commit "
+                        f"{self.commit[:12]}"
+                    )
+                    r = sh(
+                        f"docker ps -a --filter name=rocm_{self.commit} -q",
+                        capture=True,
+                    )
+                    stale = (
+                        r.stdout.strip().splitlines()
+                        if r.returncode == 0 and r.stdout.strip()
+                        else []
+                    )
+                    if stale:
+                        info(f"         Found {len(stale)} container(s) to remove")
+                        for cid in stale:
+                            sh(f"docker rm -f {cid} 2>/dev/null || true")
+                    else:
+                        info("         None found")
+                else:
+                    info("  [5/8] No commit hash -- skipping stale container cleanup")
 
-        # 5. Remove stale containers from this commit.
-        if self.commit:
-            info(f"  [5/8] Removing stale containers for commit {self.commit[:12]}")
-            r = sh(
-                f"docker ps -a --filter name=rocm_{self.commit} -q",
-                capture=True,
-            )
-            stale = (
-                r.stdout.strip().splitlines()
-                if r.returncode == 0 and r.stdout.strip()
-                else []
-            )
-            if stale:
-                info(f"         Found {len(stale)} container(s) to remove")
-                for cid in stale:
-                    sh(f"docker rm -f {cid} 2>/dev/null || true")
+            # 6. Docker image: keep for same-commit retries.
+            # Removing the image after every run defeats the Docker layer
+            # cache and forces a full pull on retries of the same commit.
+            # The LRU/LFU eviction in cleanup_docker_disk() handles disk
+            # pressure -- no need to eagerly remove here.
+            if self.image:
+                info(f"  [6/8] Keeping Docker image: {self.image} (for retry cache)")
             else:
-                info("         None found")
-        else:
-            info("  [5/8] No commit hash -- skipping stale container cleanup")
+                info("  [6/8] No image tracked")
 
-        # 6. Docker image: keep for same-commit retries.
-        # Removing the image after every run defeats the Docker layer
-        # cache and forces a full pull on retries of the same commit.
-        # The LRU/LFU eviction in cleanup_docker_disk() handles disk
-        # pressure -- no need to eagerly remove here.
-        if self.image:
-            info(f"  [6/8] Keeping Docker image: {self.image} (for retry cache)")
-        else:
-            info("  [6/8] No image tracked")
+            # 7. Remove results directory (artifacts already uploaded).
+            with best_effort("cleanup results directory"):
+                if self.results_dir and self.results_dir.exists():
+                    info(f"  [7/8] Removing results directory: {self.results_dir}")
+                    shutil.rmtree(self.results_dir, ignore_errors=True)
+                else:
+                    info("  [7/8] No results directory to remove")
 
-        # 7. Remove results directory (artifacts already uploaded).
-        if self.results_dir and self.results_dir.exists():
-            info(f"  [7/8] Removing results directory: {self.results_dir}")
-            shutil.rmtree(self.results_dir, ignore_errors=True)
-        else:
-            info("  [7/8] No results directory to remove")
+            # 8. Record completion in Buildkite metadata.
+            with best_effort("cleanup metadata"):
+                info("  [8/8] Recording cleanup_completed in Buildkite metadata")
+                set_buildkite_meta("cleanup_completed", "true")
 
-        # 8. Record completion in Buildkite metadata.
-        info("  [8/8] Recording cleanup_completed in Buildkite metadata")
-        set_buildkite_meta("cleanup_completed", "true")
-
-        info("Cleanup complete")
+            info("Cleanup complete")
+        finally:
+            self._running = False
+            self._done = True
 
 
 _cleanup = _Cleanup()
@@ -6087,6 +6545,7 @@ def main():
     Phase  9: Execute         -- Run container (single-node or multi-node).
     Phase 10: Exit            -- Normalize pytest exit code and exit.
     """
+    global CACHE_RUNTIME_FAILED
     # -- Register cleanup for any exit path --
     atexit.register(_cleanup.run)
     signal.signal(signal.SIGTERM, _on_signal)
@@ -6263,14 +6722,43 @@ def main():
         with timed("Tier 0: NVMe commit tar"):
             image_ready = _load_commit_tar(image, LOCAL_IMAGE_CACHE)
 
-    # Tier 1: local assembly from ci_base + wheel artifact
-    if not image_ready and LOCAL_IMAGE_CACHE:
-        with timed("Tier 1: local assembly"):
-            image_ready = _assemble_from_wheel(image, LOCAL_IMAGE_CACHE)
-
-    # Tier 2/3: docker pull (with pre-loaded base layers from hooks)
+    # Tier 1: local assembly from ci_base + wheel artifact.
+    # Does NOT require LOCAL_IMAGE_CACHE -- only needs ci_base in Docker
+    # and a wheel artifact in Buildkite. Works on any agent.
     if not image_ready:
-        with timed(f"docker pull {image}"):
+        with best_effort("Tier 1: local assembly"):
+            image_ready = _assemble_from_wheel(image)
+
+    # Tier 2/3: docker pull (with per-arch -> fat fallback)
+    if not image_ready:
+        try:
+            with timed(f"docker pull {image}"):
+                r = sh(["docker", "pull", image], capture=True, timeout=600)
+                if r.returncode == 0:
+                    info(f"Tier 2: Pulled image {image}")
+                    image_ready = True
+        except subprocess.TimeoutExpired:
+            warn(f"Tier 2: docker pull {image} timed out after 600s")
+
+    # Tier 2b: per-arch pull failed, try the fat (all-archs) image as fallback.
+    # Only applies in per-arch mode; in legacy mode the fat image IS the primary.
+    if not image_ready and not ENABLE_LEGACY_DOCKER_TAG:
+        fat_image = f"rocm/vllm-ci:{commit}"
+        if fat_image != image:
+            info(f"Tier 2b: Per-arch pull failed, trying fat image {fat_image}")
+            try:
+                with timed(f"docker pull {fat_image} (fat fallback)"):
+                    r = sh(["docker", "pull", fat_image], capture=True, timeout=600)
+                if r.returncode == 0:
+                    sh(["docker", "tag", fat_image, image])
+                    info(f"Tier 2b: Re-tagged {fat_image} as {image}")
+                    image_ready = True
+            except subprocess.TimeoutExpired:
+                warn(f"Tier 2b: docker pull {fat_image} timed out after 600s")
+
+    # Final fallback: retry with full retry logic (may exit on failure)
+    if not image_ready:
+        with timed(f"docker pull {image} (final attempt)"):
             docker_pull_with_retry(image)
 
     # Save to NVMe for same-node reuse by subsequent jobs
@@ -6313,9 +6801,11 @@ def main():
     # Cache setup failure should not block the test -- caches are a
     # performance optimization, not a correctness requirement.
     if ENABLE_CACHE:
+        CACHE_RUNTIME_FAILED = False
         try:
             setup_caches()
         except Exception as exc:
+            CACHE_RUNTIME_FAILED = True
             warn(f"Cache setup crashed: {exc}. Tests will run without cache.")
     else:
         info("Persistent caches DISABLED (VLLM_ROCM_CI_CACHE_ENABLED=0)")
