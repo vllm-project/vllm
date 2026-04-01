@@ -33,7 +33,7 @@ from torch import nn
 from transformers import ApertusConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import XIELU
 from vllm.model_executor.layers.attention import (
@@ -131,6 +131,7 @@ class ApertusAttention(nn.Module):
         bias: bool = False,
         bias_o_proj: bool = False,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -200,6 +201,7 @@ class ApertusAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
@@ -246,6 +248,7 @@ class ApertusDecoderLayer(nn.Module):
         config: ApertusConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -282,6 +285,7 @@ class ApertusDecoderLayer(nn.Module):
             bias=attention_bias,
             bias_o_proj=bias_o_proj,
             cache_config=cache_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
@@ -332,6 +336,7 @@ class ApertusModel(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.config = config
         self.quant_config = quant_config
@@ -354,6 +359,7 @@ class ApertusModel(nn.Module, EagleModelMixin):
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

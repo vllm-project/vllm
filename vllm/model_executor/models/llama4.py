@@ -25,7 +25,7 @@ from torch import nn
 from transformers import Llama4TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_tensor_model_parallel_world_size,
@@ -180,6 +180,7 @@ class Llama4Attention(nn.Module):
         bias: bool = False,
         bias_o_proj: bool = False,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -263,6 +264,7 @@ class Llama4Attention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             **(
@@ -325,6 +327,7 @@ class Llama4DecoderLayer(nn.Module):
 
         config = config or vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
         quant_config = vllm_config.quant_config
 
         self.layer_idx = extract_layer_index(prefix)
@@ -342,6 +345,7 @@ class Llama4DecoderLayer(nn.Module):
             bias=False,
             bias_o_proj=False,
             cache_config=cache_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
         )
         is_moe_layer = (

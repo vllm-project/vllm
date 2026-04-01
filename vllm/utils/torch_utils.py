@@ -345,7 +345,7 @@ def resolve_kv_cache_dtype_string(
 
 
 def kv_cache_dtype_str_to_dtype(
-    kv_cache_dtype: str, model_config: ModelConfig
+    kv_cache_dtype: str, model_config: ModelConfig | None
 ) -> torch.dtype:
     if kv_cache_dtype == "auto":
         # Model config may not be specified for unit tests, default to float16

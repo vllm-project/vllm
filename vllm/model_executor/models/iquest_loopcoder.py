@@ -160,6 +160,7 @@ class LoopCoderAttention(nn.Module):
                     self.scaling,
                     num_kv_heads=self.num_kv_heads,
                     cache_config=loop_cache_config,
+                    model_config=model_config,
                     quant_config=quant_config,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",
