@@ -296,6 +296,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
         tool_choice: ChatToolChoice::None,
         decode_options: Default::default(),
         intermediate: true,
+        priority: 0,
     }
 }
 

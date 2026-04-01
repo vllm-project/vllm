@@ -12,6 +12,7 @@ use vllm_chat::{
 use super::types::ChatCompletionRequest;
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::utils::convert_logit_bias;
 
 /// Lowered chat request plus the public response metadata carried by every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +29,8 @@ pub struct PreparedRequest {
     pub include_prompt_logprobs: bool,
     /// Lowered text-only chat request for `vllm-chat`.
     pub chat_request: ChatRequest,
+    /// Last assistant-role message content to echo back when `echo=true`.
+    pub echo: Option<String>,
 }
 
 /// Validate and lower one OpenAI chat completion request into the internal chat format.
@@ -49,7 +52,17 @@ pub fn prepare_chat_request(
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
     let requested_logprobs = request.logprobs;
-    let include_prompt_logprobs = request.prompt_logprobs.is_some();
+    let echo = request
+        .echo
+        .then(|| extract_last_assistant_content(&request.messages))
+        .flatten();
+
+    // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's behavior.
+    let top_logprobs = request.top_logprobs.unwrap_or(0);
+    let prompt_logprobs = request
+        .prompt_logprobs
+        .or((request.echo && !request.stream).then_some(top_logprobs));
+    let include_prompt_logprobs = prompt_logprobs.is_some();
 
     let chat_request = ChatRequest {
         request_id: response_id.clone(),
@@ -61,16 +74,18 @@ pub fn prepare_chat_request(
             seed: request.seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
-            logprobs: request
-                .logprobs
-                .then_some(request.top_logprobs.unwrap_or(0) as i32),
-            prompt_logprobs: request.prompt_logprobs,
+            logprobs: request.logprobs.then_some(top_logprobs),
+            prompt_logprobs,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
             stop_token_ids: request.stop_token_ids.clone(),
             ignore_eos: request.ignore_eos,
+            logit_bias: convert_logit_bias(request.logit_bias.clone())?,
+            allowed_token_ids: request.allowed_token_ids.clone(),
+            bad_words: request.bad_words.clone(),
+            vllm_xargs: request.vllm_xargs.clone(),
         },
         chat_options: ChatOptions {
             add_generation_prompt: request.add_generation_prompt && !request.continue_final_message,
@@ -81,7 +96,7 @@ pub fn prepare_chat_request(
         tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
         decode_options: vllm_text::output::TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
-            include_stop_str_in_output: false,
+            include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.as_ref().map(|stop| match stop {
                 StringOrArray::String(string) => vec![string.clone()],
                 StringOrArray::Array(arr) => arr.clone(),
@@ -89,6 +104,7 @@ pub fn prepare_chat_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
+        priority: request.priority.unwrap_or(0),
     };
 
     Ok(PreparedRequest {
@@ -98,7 +114,27 @@ pub fn prepare_chat_request(
         requested_logprobs,
         include_prompt_logprobs,
         chat_request,
+        echo,
     })
+}
+
+/// Extract the text content of the last message if it has the assistant role.
+fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
+    let ChatMessage::Assistant { content, .. } = messages.last()? else {
+        return None;
+    };
+    let text = match content.as_ref()? {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 /// Lower one OpenAI chat message into the `vllm-chat` message shape.
@@ -307,6 +343,10 @@ mod tests {
                     repetition_penalty: None,
                     stop_token_ids: None,
                     ignore_eos: false,
+                    logit_bias: None,
+                    allowed_token_ids: None,
+                    bad_words: None,
+                    vllm_xargs: None,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: false,
@@ -324,6 +364,7 @@ mod tests {
                     min_tokens: 0,
                 },
                 intermediate: true,
+                priority: 0,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -361,6 +402,10 @@ mod tests {
                     repetition_penalty: None,
                     stop_token_ids: None,
                     ignore_eos: false,
+                    logit_bias: None,
+                    allowed_token_ids: None,
+                    bad_words: None,
+                    vllm_xargs: None,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -376,6 +421,7 @@ mod tests {
                     min_tokens: 0,
                 },
                 intermediate: true,
+                priority: 0,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -430,6 +476,10 @@ mod tests {
                     ),
                     stop_token_ids: None,
                     ignore_eos: false,
+                    logit_bias: None,
+                    allowed_token_ids: None,
+                    bad_words: None,
+                    vllm_xargs: None,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -445,6 +495,7 @@ mod tests {
                     min_tokens: 0,
                 },
                 intermediate: true,
+                priority: 0,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -527,6 +578,10 @@ mod tests {
                     repetition_penalty: None,
                     stop_token_ids: None,
                     ignore_eos: false,
+                    logit_bias: None,
+                    allowed_token_ids: None,
+                    bad_words: None,
+                    vllm_xargs: None,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -542,6 +597,7 @@ mod tests {
                     min_tokens: 0,
                 },
                 intermediate: true,
+                priority: 0,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -627,6 +683,10 @@ mod tests {
                     repetition_penalty: None,
                     stop_token_ids: None,
                     ignore_eos: false,
+                    logit_bias: None,
+                    allowed_token_ids: None,
+                    bad_words: None,
+                    vllm_xargs: None,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -658,6 +718,7 @@ mod tests {
                     min_tokens: 0,
                 },
                 intermediate: true,
+                priority: 0,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);

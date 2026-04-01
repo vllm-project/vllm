@@ -86,11 +86,6 @@ pub(super) fn validate_request_compat(
     }
 
     reject_non_default(
-        request.logit_bias.as_ref(),
-        "logit_bias",
-        "logit_bias is not supported.",
-    )?;
-    reject_non_default(
         request.reasoning_effort.as_ref(),
         "reasoning_effort",
         "reasoning controls are not supported.",

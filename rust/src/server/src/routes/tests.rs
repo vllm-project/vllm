@@ -2099,6 +2099,7 @@ async fn chat_harness_streams_text_events() {
             tool_choice: ChatToolChoice::None,
             decode_options: Default::default(),
             intermediate: true,
+            priority: 0,
         })
         .await
         .expect("submit chat request");

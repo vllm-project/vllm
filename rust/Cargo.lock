@@ -4555,6 +4555,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_default",
+ "serde_json",
  "serde_repr",
  "serde_tuple",
  "tempfile",

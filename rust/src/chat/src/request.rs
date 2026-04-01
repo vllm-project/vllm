@@ -276,6 +276,8 @@ pub struct ChatRequest {
     /// If `false`, callers only observe the terminal accumulated assistant output. If `true`,
     /// callers may receive zero or more incremental content events before the final terminal one.
     pub intermediate: bool,
+    /// Request scheduling priority (lower means earlier handling; default 0).
+    pub priority: i32,
 }
 
 impl ChatRequest {

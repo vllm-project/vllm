@@ -1,5 +1,5 @@
 use std::any::type_name;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
 
 use bytes::Bytes;
@@ -156,7 +156,7 @@ pub struct EngineCoreSamplingParams {
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: f32,
     /// Maximum number of top tokens to consider. `0` means all tokens.
-    pub top_k: i32,
+    pub top_k: u32,
     /// Random seed used by the sampler when present.
     pub seed: Option<i64>,
     /// Maximum number of tokens to generate per output sequence.
@@ -194,6 +194,23 @@ pub struct EngineCoreSamplingParams {
     /// contain explicit `stop_token_ids` plus any frontend-derived EOS token IDs.
     #[serde(rename = "_all_stop_token_ids")]
     pub all_stop_token_ids: BTreeSet<u32>,
+    /// Logit biases to apply during sampling.
+    /// Keys are token IDs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logit_bias: Option<HashMap<u32, f32>>,
+    /// Restrict output to these token IDs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_token_ids: Option<Vec<u32>>,
+    /// Tokenized bad words to avoid during generation.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "_bad_words_token_ids"
+    )]
+    pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
+    /// Additional request parameters for custom extensions (from `vllm_xargs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl EngineCoreSamplingParams {
@@ -215,6 +232,10 @@ impl EngineCoreSamplingParams {
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),
+            logit_bias: None,
+            allowed_token_ids: None,
+            bad_words_token_ids: None,
+            extra_args: None,
         }
     }
 }

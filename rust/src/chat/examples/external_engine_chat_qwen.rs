@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
         tool_choice: ChatToolChoice::None,
         decode_options: Default::default(),
         intermediate: true,
+        priority: 0,
     };
 
     println!("request_id={request_id}");

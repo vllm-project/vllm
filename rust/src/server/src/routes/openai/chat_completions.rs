@@ -75,6 +75,7 @@ pub async fn chat_completions(
             created,
             prepared.include_usage,
             prepared.requested_logprobs,
+            prepared.echo,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream);
 
@@ -89,6 +90,7 @@ pub async fn chat_completions(
             created,
             prepared.requested_logprobs,
             prepared.include_prompt_logprobs,
+            prepared.echo,
         )
         .await
         {
@@ -107,6 +109,7 @@ async fn collect_chat_completion(
     created: u64,
     requested_logprobs: bool,
     include_prompt_logprobs: bool,
+    echo: Option<String>,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
@@ -167,7 +170,10 @@ async fn collect_chat_completion(
             index: 0,
             message: ChatCompletionMessage {
                 role: "assistant".to_string(),
-                content: Some(message.text()).filter(|text| !text.is_empty()),
+                content: match &echo {
+                    Some(prefix) => Some(format!("{prefix}{}", message.text())),
+                    None => Some(message.text()).filter(|t| !t.is_empty()),
+                },
                 tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
                 reasoning: message.reasoning(),
             },
@@ -190,6 +196,7 @@ async fn chat_completion_chunk_stream(
     created: u64,
     include_usage: bool,
     requested_logprobs: bool,
+    echo: Option<String>,
 ) {
     let mut tool_call_indices = BTreeMap::<String, u32>::new();
 
@@ -201,7 +208,17 @@ async fn chat_completion_chunk_stream(
     while let Some(next) = stream.next().await {
         match next {
             Ok(ChatEvent::Start { .. }) => {
-                yield start_chunk(&response_id, &response_model, created)
+                yield start_chunk(&response_id, &response_model, created);
+                // When echo=true, emit the last assistant message content as a delta chunk.
+                if let Some(echo_text) = &echo {
+                    yield block_delta_chunk(
+                        &response_id,
+                        &response_model,
+                        created,
+                        AssistantBlockKind::Text,
+                        echo_text.clone(),
+                    );
+                }
             }
             Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
@@ -785,6 +802,7 @@ mod tests {
             1,
             false,
             true,
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -841,6 +859,7 @@ mod tests {
             1,
             false,
             true,
+            None,
         )
         .collect::<Vec<_>>()
         .await

@@ -92,7 +92,7 @@ impl TextLlm {
         if let Some(max_model_len) = self.max_model_len {
             sampling_hints.max_model_len = Some(max_model_len);
         }
-        let prepared = lower_text_request(request, prompt_token_ids, sampling_hints)?;
+        let prepared = lower_text_request(request, prompt_token_ids, sampling_hints, &*tokenizer)?;
         let raw_stream = self.llm.generate(prepared.generate_request).await?;
         let decoded_stream = output::decoded_text_event_stream(
             prepared.text_request.request_id,

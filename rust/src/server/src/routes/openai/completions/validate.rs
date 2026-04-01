@@ -65,10 +65,6 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    if request.logit_bias.is_some() {
-        bail_invalid_request!(param = "logit_bias", "logit_bias is not supported.");
-    }
-
     if request.use_beam_search {
         bail_invalid_request!(
             param = "use_beam_search",

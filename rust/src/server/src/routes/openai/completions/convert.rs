@@ -5,6 +5,7 @@ use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 use super::types::CompletionRequest;
 use crate::error::ApiError;
 use crate::routes::openai::completions::validate;
+use crate::utils::convert_logit_bias;
 
 /// Lowered completion request plus the public response metadata carried by every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +73,10 @@ pub fn prepare_completion_request(
             repetition_penalty: request.repetition_penalty,
             stop_token_ids: request.stop_token_ids.clone(),
             ignore_eos: request.ignore_eos,
+            logit_bias: convert_logit_bias(request.logit_bias.clone())?,
+            allowed_token_ids: request.allowed_token_ids.clone(),
+            bad_words: None,
+            vllm_xargs: request.vllm_xargs.clone(),
         },
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
@@ -83,6 +88,7 @@ pub fn prepare_completion_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
+        priority: request.priority.unwrap_or(0),
     };
 
     Ok(PreparedRequest {

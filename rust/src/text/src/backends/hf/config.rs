@@ -74,7 +74,7 @@ pub(super) struct GenerationConfig {
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default)]
-    pub top_k: Option<i32>,
+    pub top_k: Option<u32>,
     #[serde(default)]
     pub min_p: Option<f32>,
     #[serde(default)]

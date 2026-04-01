@@ -5,7 +5,7 @@ use openai_protocol::common::{
     ResponseFormat, StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue,
     ToolReference, default_true, validate_stop,
 };
-use openai_protocol::sampling_params::{validate_top_k_value, validate_top_p_value};
+use openai_protocol::sampling_params::validate_top_p_value;
 use openai_protocol::validated::Normalizable;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,9 +43,10 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub logprobs: bool,
 
-    /// An integer between 0 and 20 specifying the number of most likely tokens to return
-    #[validate(range(min = 0, max = 20))]
-    pub top_logprobs: Option<u32>,
+    /// An integer specifying the number of most likely tokens to return
+    /// -1 means return all
+    #[validate(range(min = -1))]
+    pub top_logprobs: Option<i32>,
 
     /// Deprecated: Replaced by max_completion_tokens
     #[deprecated(note = "Use max_completion_tokens instead")]
@@ -110,9 +111,8 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub use_beam_search: bool,
 
-    /// Top-k sampling parameter (-1 to disable)
-    #[validate(custom(function = "validate_top_k_value"))]
-    pub top_k: Option<i32>,
+    /// Top-k sampling parameter
+    pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
     #[validate(range(min = 0.0, max = 1.0))]
@@ -148,7 +148,7 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
 
-    /// Truncate prompt tokens to this length (-1 to disable)
+    /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
     /// Number of prompt logprobs to return
@@ -162,7 +162,7 @@ pub struct ChatCompletionRequest {
 
     // -------- Extra vLLM Parameters --------
     /// Token budget for reasoning/thinking
-    pub thinking_token_budget: Option<i64>,
+    pub thinking_token_budget: Option<u32>,
 
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
@@ -204,7 +204,7 @@ pub struct ChatCompletionRequest {
     pub structured_outputs: Option<Value>,
 
     /// Request scheduling priority (lower means earlier; default 0)
-    pub priority: Option<i64>,
+    pub priority: Option<i32>,
 
     /// Tokens represented as strings of the form 'token_id:{token_id}' in logprobs
     pub return_tokens_as_token_ids: Option<bool>,

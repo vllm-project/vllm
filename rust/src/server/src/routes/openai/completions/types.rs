@@ -81,8 +81,8 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub use_beam_search: bool,
 
-    /// Top-k sampling parameter (-1 to disable)
-    pub top_k: Option<i32>,
+    /// Top-k sampling parameter
+    pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
     pub min_p: Option<f32>,
@@ -115,7 +115,7 @@ pub struct CompletionRequest {
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
 
-    /// Truncate prompt tokens to this length (-1 to disable)
+    /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
     /// Restrict output to these token IDs only
@@ -136,7 +136,7 @@ pub struct CompletionRequest {
     pub structured_outputs: Option<Value>,
 
     /// Request scheduling priority (lower means earlier; default 0)
-    pub priority: Option<i64>,
+    pub priority: Option<i32>,
 
     /// Tokens represented as strings of the form 'token_id:{token_id}' in logprobs
     pub return_tokens_as_token_ids: Option<bool>,
