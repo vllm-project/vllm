@@ -201,10 +201,13 @@ class KVOutputAggregator:
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
             set_name: str = "",
+            req_id_to_cp_size: dict[str, int] = None,
         ) -> None:
             for req_id in req_ids or ():
+                assert req_id in req_id_to_cp_size
+                cp_size = req_id_to_cp_size[req_id]
                 remaining_count = remaining_count_dict.get(
-                    req_id, self._expected_finished_count
+                    req_id, self._expected_finished_count * cp_size
                 )
                 remaining_count_dict[req_id] = remaining_count - 1
 
@@ -250,11 +253,11 @@ class KVOutputAggregator:
 
             update_finished_set(
                 kv_output.finished_sending, self._send_remaining_count, finished_sending,
-                set_name="finished_sending"
+                set_name="finished_sending", req_id_to_cp_size=model_runner_output.req_id_to_cp_size,
             )
             update_finished_set(
                 kv_output.finished_recving, self._recv_remaining_count, finished_recving,
-                set_name="finished_recving"
+                set_name="finished_recving", req_id_to_cp_size=model_runner_output.req_id_to_cp_size,
             )
 
             # Aggregate kv_connector_stats from all workers.

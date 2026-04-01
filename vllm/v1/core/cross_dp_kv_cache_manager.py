@@ -95,17 +95,17 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
         cp_kv_cache_interleave_size: int = 1,
     ) -> list[list[int]]:
         """Calculate local seq_lens for all DCP ranks given a list of sequence lengths.
-        
+
         While using dcp, kv_cache size stored on each rank may be different.
         This function calculates the split decode seq_lens for all dcp ranks.
-        
+
         Args:
             seq_len: sequence lengths of the request
             dcp_size: Number of DCP ranks
             cp_kv_cache_interleave_size: Interleave size for KV cache
-            
+
         Returns:
-            List of lists, where each inner list contains the local seq_len for 
+            List of lists, where each inner list contains the local seq_len for
             all requests on that rank.
             Format: [[rank0_req0, rank0_req1, ...], [rank1_req0, rank1_req1, ...], ...]
         """
@@ -147,16 +147,16 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
     ) -> list[list[int]]:
         """
         Map hash block IDs to CP ranks in a round-robin fashion.
-        
+
         Example with 10 blocks, 3 ranks:
         - rank 0: blocks [0, 3, 6, 9]
         - rank 1: blocks [1, 4, 7]
         - rank 2: blocks [2, 5, 8]
-        
+
         Args:
             world_size: Number of CP ranks.
             num_tokens: Total number of tokens.
-        
+
         Returns:
             A list of lists, where each inner list contains the block IDs
             assigned to that rank. Format: [[rank0_blocks], [rank1_blocks], ...]
@@ -240,17 +240,17 @@ class CrossDPKVCacheCoordinatorNoPrefixCache:
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         raise NotImplementedError
 
-    def free(self, request_id: str) -> None:
+    def free(self, request: Request) -> None:
         """
         Free the blocks for the request across all CP ranks.
         Args:
             request_id: The request ID.
         """
         # Free blocks on all CP ranks (the request might have blocks on any rank)
-        for rank in range(len(self.corss_dp_single_type_managers)):
-            rank_managers = self.corss_dp_single_type_managers[rank]
-
-            for manager in rank_managers:
+        request_id = request.request_id
+        request_ranks = request.cp_ranks
+        for request_rank in request_ranks:
+            for manager in self.corss_dp_single_type_managers[request_rank]:
                 manager.free(request_id)
 
     def remove_skipped_blocks(self, cp_ranks: list[int], request_id: str, total_computed_tokens: int) -> None:
@@ -364,7 +364,7 @@ class CrossDPKVCacheManager:
         raise NotImplementedError
 
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int]:
-        """ 
+        """
         The decode instance can ignore this?
         Args:
             request: The request to get the computed blocks.
@@ -427,7 +427,7 @@ class CrossDPKVCacheManager:
             self.max_model_len,
         )
 
-        # Now the get_num_blocks_to_allocate return a int, it seems wrong, 
+        # Now the get_num_blocks_to_allocate return a int, it seems wrong,
         # it should return a list[int], len(list[int]) = len(cp_rank)
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             cp_ranks=cp_ranks,
@@ -487,7 +487,7 @@ class CrossDPKVCacheManager:
 
 
     def free(self, request: Request) -> None:
-        self.coordinator.free(request.request_id)
+        self.coordinator.free(request)
 
     def get_blocks(self, request: Request) -> list[KVCacheBlocks]:
         """Get the blocks of a request."""
@@ -531,7 +531,7 @@ class CrossDPKVCacheManager:
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled."""
         return None
-    
+
     def remove_skipped_blocks(
         self, cp_ranks: list[int], request_id: str, total_computed_tokens: int
     ) -> None:

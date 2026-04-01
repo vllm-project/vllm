@@ -220,6 +220,8 @@ class ModelRunnerOutput:
     req_ids: list[str]
     # req_id -> index
     req_id_to_index: dict[str, int]
+    # req_id -> cp_size
+    req_id_to_cp_size: dict[str, int] = None
 
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
