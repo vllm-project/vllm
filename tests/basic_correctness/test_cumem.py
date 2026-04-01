@@ -212,7 +212,7 @@ def test_deep_sleep():
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
-# @create_new_process_for_each_test()
+@create_new_process_for_each_test()
 def test_deep_sleep_async():
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"
