@@ -603,7 +603,6 @@ def make_shared_experts(
 def modular_triton_fused_moe(
     moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
-    shared_experts: torch.nn.Module | None = None,
 ) -> FusedMoEKernel:
     return FusedMoEKernel(
         maybe_make_prepare_finalize(
@@ -613,6 +612,5 @@ def modular_triton_fused_moe(
             use_monolithic=False,
         ),
         TritonExperts(moe_config, quant_config),
-        shared_experts,
         inplace=False,
     )

@@ -859,7 +859,6 @@ def make_mxfp4_moe_kernel(
             if moe_config.moe_parallel_config.use_deepep_ll_kernels
             else None
         ),
-        moe_parallel_config=moe_config.moe_parallel_config,
         inplace=(
             not moe_config.disable_inplace and mxfp4_backend not in TRTLLM_BACKENDS
         ),
