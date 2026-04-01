@@ -103,8 +103,8 @@ class LogitsProcsRequestParams:
 class MockReasoningConfig:
     """Mock reasoning config for testing ThinkingTokenBudgetLogitsProcessor."""
 
-    think_start_token_ids = [THINK_START_TOKEN_ID]
-    think_end_token_ids = [THINK_END_TOKEN_ID]
+    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
+    reasoning_end_token_ids = [THINK_END_TOKEN_ID]
 
 
 def _generate_fake_sampling_metadata(
@@ -491,7 +491,7 @@ def _thinking_budget_validate(
 
         # Find if thinking has started in output tokens
         thinking_started = False
-        start_tokens = tb_processor.think_start_token_ids
+        start_tokens = tb_processor.reasoning_start_token_ids
 
         if len(start_tokens) > 0:
             for i in range(len(output_tokens) - len(start_tokens) + 1):
@@ -518,7 +518,7 @@ def _thinking_budget_validate(
                     )
 
                 # Validate that only end tokens are allowed
-                end_tokens = tb_processor.think_end_token_ids
+                end_tokens = tb_processor.reasoning_end_token_ids
                 if len(end_tokens) > 0:
                     expected_end_token_id = end_tokens[
                         min(state["end_count"], len(end_tokens) - 1)
