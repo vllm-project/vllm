@@ -264,9 +264,8 @@ def _get_numactl_executable() -> tuple[str, str]:
 
     if which("numactl") is None:
         raise RuntimeError(
-            "numactl is required for NUMA binding but is not installed. "
-            "Install it with apt-get install numactl (Debian/Ubuntu) or "
-            "yum install numactl (RHEL/CentOS)."
+            "numactl is required for NUMA binding but is not installed or "
+            "not available on PATH."
         )
 
     script_path = Path(__file__).with_name("numa_wrapper.sh")
