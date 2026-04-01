@@ -22,6 +22,7 @@ from vllm import SamplingParams
 from vllm.engine.protocol import StreamingInput
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -65,6 +66,11 @@ def get_sampling_params(max_tokens: int = 20) -> SamplingParams:
     )
 
 
+def get_engine_input(engine: AsyncLLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
+
+
 async def collect_outputs(
     output_gen: AsyncGenerator[RequestOutput, None],
 ) -> tuple[list[RequestOutput], str]:
@@ -91,9 +97,9 @@ async def test_streaming_input_bunched(engine: AsyncLLM):
     # Create an input generator that yields all inputs quickly
     async def bunched_input_generator() -> AsyncGenerator[StreamingInput, None]:
         # Send multiple inputs rapidly - they should be queued
-        yield StreamingInput(prompt="Hello, my name is")
-        yield StreamingInput(prompt=" Alice and I like")
-        yield StreamingInput(prompt=" to code in Python")
+        yield StreamingInput(get_engine_input(engine, "Hello, my name is"))
+        yield StreamingInput(get_engine_input(engine, " Alice and I like"))
+        yield StreamingInput(get_engine_input(engine, " to code in Python"))
 
     outputs, full_text = await collect_outputs(
         engine.generate(
@@ -140,7 +146,7 @@ async def test_streaming_input_spaced(engine: AsyncLLM):
 
         # First input
         input_times.append(time.time())
-        yield StreamingInput(prompt="Hello, my name is")
+        yield StreamingInput(get_engine_input(engine, "Hello, my name is"))
         current_chunk = 0
 
         # Wait for some outputs to be generated
@@ -149,7 +155,7 @@ async def test_streaming_input_spaced(engine: AsyncLLM):
         # Second input
         input_times.append(time.time())
         current_chunk = 1
-        yield StreamingInput(prompt=" Alice and I like")
+        yield StreamingInput(get_engine_input(engine, " Alice and I like"))
 
         # Wait for some outputs
         await asyncio.sleep(0.5)
@@ -157,7 +163,7 @@ async def test_streaming_input_spaced(engine: AsyncLLM):
         # Third input
         input_times.append(time.time())
         current_chunk = 2
-        yield StreamingInput(prompt=" to code in Python")
+        yield StreamingInput(get_engine_input(engine, " to code in Python"))
 
     outputs: list[RequestOutput] = []
     full_text = ""
@@ -201,7 +207,7 @@ async def test_streaming_input_output_equivalence(engine: AsyncLLM):
     # Test bunched inputs
     async def bunched_gen() -> AsyncGenerator[StreamingInput, None]:
         for prompt in prompts:
-            yield StreamingInput(prompt=prompt)
+            yield StreamingInput(get_engine_input(engine, prompt))
 
     _, bunched_text = await collect_outputs(
         engine.generate(bunched_gen(), sampling_params, "equiv_bunched")
@@ -210,7 +216,7 @@ async def test_streaming_input_output_equivalence(engine: AsyncLLM):
     # Test spaced inputs (same prompts, but with delays)
     async def spaced_gen() -> AsyncGenerator[StreamingInput, None]:
         for prompt in prompts:
-            yield StreamingInput(prompt=prompt)
+            yield StreamingInput(get_engine_input(engine, prompt))
             await asyncio.sleep(0.3)
 
     _, spaced_text = await collect_outputs(
@@ -243,12 +249,14 @@ async def test_streaming_input_cancel_output_stream(engine: AsyncLLM):
     async def slow_input_generator() -> AsyncGenerator[StreamingInput, None]:
         nonlocal input_task_cancelled
         try:
-            yield StreamingInput(prompt="Tell me a very long story about")
-            yield StreamingInput(prompt=" a dragon and a knight")
+            yield StreamingInput(
+                get_engine_input(engine, "Tell me a very long story about")
+            )
+            yield StreamingInput(get_engine_input(engine, " a dragon and a knight"))
 
             # This should be cancelled before we get here
             await asyncio.sleep(10)
-            yield StreamingInput(prompt=" who become friends")
+            yield StreamingInput(get_engine_input(engine, " who become friends"))
             input_completed.set()
         except asyncio.CancelledError:
             input_task_cancelled = True
@@ -299,7 +307,7 @@ async def test_streaming_input_close_signals_completion(engine: AsyncLLM):
 
     async def limited_input_generator() -> AsyncGenerator[StreamingInput, None]:
         nonlocal input_generator_finished
-        yield StreamingInput(prompt="What is 2 + 2? The answer is")
+        yield StreamingInput(get_engine_input(engine, "What is 2 + 2? The answer is"))
         # Generator finishes naturally here
         input_generator_finished = True
 
@@ -341,7 +349,11 @@ async def test_streaming_input_abort_queued_inputs(engine: AsyncLLM):
         try:
             # Send several inputs to fill the queue
             for i in range(10):
-                yield StreamingInput(prompt=f" Part {i}: Tell me about the number {i}.")
+                yield StreamingInput(
+                    get_engine_input(
+                        engine, f" Part {i}: Tell me about the number {i}."
+                    )
+                )
                 inputs_sent += 1
                 # Small delay to interleave with output processing
                 await asyncio.sleep(0.05)
@@ -395,7 +407,7 @@ async def test_streaming_input_error_propagation(engine: AsyncLLM):
         pass
 
     async def error_input_generator() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="Start with this")
+        yield StreamingInput(get_engine_input(engine, "Start with this"))
         await asyncio.sleep(0.1)
         raise InputError("Simulated input error")
 
@@ -434,7 +446,7 @@ async def test_streaming_input_multiple_concurrent_sessions(engine: AsyncLLM):
 
         async def input_gen() -> AsyncGenerator[StreamingInput, None]:
             for prompt in prompts:
-                yield StreamingInput(prompt=prompt)
+                yield StreamingInput(get_engine_input(engine, prompt))
                 await asyncio.sleep(0.1)
 
         _, text = await collect_outputs(
@@ -468,12 +480,16 @@ async def test_streaming_input_per_chunk_sampling_params(engine: AsyncLLM):
 
     async def variable_params_generator() -> AsyncGenerator[StreamingInput, None]:
         # First chunk with base params
-        yield StreamingInput(prompt="Count to five:", sampling_params=base_params)
+        yield StreamingInput(
+            get_engine_input(engine, "Count to five:"),
+            sampling_params=base_params,
+        )
 
         # Second chunk with different max_tokens
         chunk_params = get_sampling_params(max_tokens=5)
         yield StreamingInput(
-            prompt=" Now count backwards:", sampling_params=chunk_params
+            get_engine_input(engine, " Now count backwards:"),
+            sampling_params=chunk_params,
         )
 
     outputs, full_text = await collect_outputs(
@@ -521,7 +537,9 @@ async def test_streaming_input_single_chunk(engine: AsyncLLM):
     sampling_params = get_sampling_params(max_tokens=15)
 
     async def single_chunk_generator() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="What color is the sky? The sky is")
+        yield StreamingInput(
+            get_engine_input(engine, "What color is the sky? The sky is")
+        )
 
     outputs, full_text = await collect_outputs(
         engine.generate(single_chunk_generator(), sampling_params, request_id)
@@ -542,7 +560,7 @@ async def test_streaming_input_reuse_request_id(engine: AsyncLLM):
 
     # First session
     async def gen1() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="First session")
+        yield StreamingInput(get_engine_input(engine, "First session"))
 
     _, text1 = await collect_outputs(
         engine.generate(gen1(), sampling_params, request_id)
@@ -550,7 +568,7 @@ async def test_streaming_input_reuse_request_id(engine: AsyncLLM):
 
     # Second session with same ID
     async def gen2() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="Second session")
+        yield StreamingInput(get_engine_input(engine, "Second session"))
 
     _, text2 = await collect_outputs(
         engine.generate(gen2(), sampling_params, request_id)
@@ -568,7 +586,7 @@ async def test_streaming_input_validation_errors(engine: AsyncLLM):
     """Test that invalid configurations raise appropriate errors."""
 
     async def dummy_generator() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="test")
+        yield StreamingInput(get_engine_input(engine, "test"))
 
     # Test n > 1 is rejected
     with pytest.raises(ValueError, match="Input streaming not currently supported"):
@@ -611,8 +629,8 @@ async def test_streaming_input_delayed_generator_exit(engine: AsyncLLM):
     async def delayed_exit_input_generator() -> AsyncGenerator[StreamingInput, None]:
         nonlocal input_generator_exited
         # Send all inputs immediately
-        yield StreamingInput(prompt="Hello, my name is")
-        yield StreamingInput(prompt=" Alice")
+        yield StreamingInput(get_engine_input(engine, "Hello, my name is"))
+        yield StreamingInput(get_engine_input(engine, " Alice"))
 
         # Wait until the engine has finished generating before exiting
         await engine_finished_event.wait()

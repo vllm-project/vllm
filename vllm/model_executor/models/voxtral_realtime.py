@@ -18,7 +18,6 @@ from mistral_common.tokens.tokenizers.audio import AudioConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.engine.protocol import StreamingInput
 from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
@@ -172,7 +171,7 @@ class VoxtralRealtimeBuffer:
         for token in tokens:
             await self._token_queue.put(token)
 
-    async def get_input_stream(self) -> AsyncGenerator[StreamingInput]:
+    async def get_input_stream(self) -> AsyncGenerator[TokensPrompt]:
         for frame_size, num_tokens in self._generate_frame_size_and_num_tokens():
             next_tokens = [await self._token_queue.get() for _ in range(num_tokens)]
 
@@ -198,11 +197,9 @@ class VoxtralRealtimeBuffer:
 
             self._leftover = audio_array[stride:]
 
-            yield StreamingInput(
-                TokensPrompt(
-                    prompt_token_ids=next_tokens,
-                    multi_modal_data={"audio": (frame, None)},
-                )
+            yield TokensPrompt(
+                prompt_token_ids=next_tokens,
+                multi_modal_data={"audio": (frame, None)},
             )
 
 
@@ -280,8 +277,8 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         token_task = asyncio.create_task(feed_tokens())
 
         try:
-            async for streaming_input in buffer.get_input_stream():
-                yield streaming_input.prompt
+            async for prompt in buffer.get_input_stream():
+                yield prompt
         finally:
             audio_task.cancel()
             token_task.cancel()

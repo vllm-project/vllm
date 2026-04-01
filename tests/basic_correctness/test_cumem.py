@@ -9,9 +9,15 @@ import torch
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.utils.mem_constants import GiB_bytes
 
 from ..utils import create_new_process_for_each_test, requires_fp8
+
+
+def get_engine_input(engine: AsyncLLMEngine, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
@@ -206,7 +212,7 @@ def test_deep_sleep():
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
-@create_new_process_for_each_test()
+# @create_new_process_for_each_test()
 def test_deep_sleep_async():
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"
@@ -217,25 +223,36 @@ def test_deep_sleep_async():
             enable_sleep_mode=True,
         )
 
-        llm = AsyncLLMEngine.from_engine_args(engine_args)
+        async_llm = AsyncLLMEngine.from_engine_args(engine_args)
         prompt = "How are you?"
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
-        outputs = llm.generate(prompt, sampling_params, request_id="test_request_id1")
+
+        engine_input = get_engine_input(async_llm, prompt)
+        outputs = async_llm.generate(
+            engine_input,
+            sampling_params,
+            request_id="test_request_id1",
+        )
+
         async for output in outputs:
             pass
 
         # Put the engine to deep sleep
-        await llm.sleep(level=2)
+        await async_llm.sleep(level=2)
 
-        await llm.wake_up(tags=["weights"])
-        await llm.collective_rpc("reload_weights")
+        await async_llm.wake_up(tags=["weights"])
+        await async_llm.collective_rpc("reload_weights")
         free_gpu_bytes_wake_up_w, total = torch.cuda.mem_get_info()
         used_bytes = total - free_gpu_bytes_wake_up_w - used_bytes_baseline
         assert used_bytes < 4 * GiB_bytes
 
         # now allocate kv cache and cuda graph memory
-        await llm.wake_up(tags=["kv_cache"])
-        outputs2 = llm.generate(prompt, sampling_params, request_id="test_request_id2")
+        await async_llm.wake_up(tags=["kv_cache"])
+        outputs2 = async_llm.generate(
+            engine_input,
+            sampling_params,
+            request_id="test_request_id2",
+        )
         async for output2 in outputs2:
             pass
 

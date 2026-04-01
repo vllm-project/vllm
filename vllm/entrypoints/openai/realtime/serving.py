@@ -85,4 +85,4 @@ class OpenAIServingRealtime(OpenAIServing):
             parsed_prompt = parse_model_prompt(model_config, prompt)
             (engine_input,) = await renderer.render_cmpl_async([parsed_prompt])
 
-            yield StreamingInput(prompt=engine_input)
+            yield StreamingInput(engine_input)

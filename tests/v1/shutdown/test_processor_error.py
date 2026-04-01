@@ -6,13 +6,14 @@ import asyncio
 
 import pytest
 
-from tests.v1.shutdown.utils import SHUTDOWN_TEST_TIMEOUT_SEC
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.inputs import TokensPrompt
+from vllm.inputs import tokens_input
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineGenerateError
+
+from .utils import SHUTDOWN_TEST_TIMEOUT_SEC, get_engine_input
 
 MODELS = ["meta-llama/Llama-3.2-1B"]
 
@@ -31,7 +32,9 @@ async def test_async_llm_processor_error(model: str) -> None:
     async def generate(request_id: str):
         # [] is not allowed and will raise a ValueError in Processor.
         generator = async_llm.generate(
-            TokensPrompt([]), request_id=request_id, sampling_params=SamplingParams()
+            tokens_input([]),
+            request_id=request_id,
+            sampling_params=SamplingParams(),
         )
         try:
             async for _ in generator:
@@ -55,10 +58,11 @@ async def test_async_llm_processor_error(model: str) -> None:
     EXPECTED_TOKENS = 5
     outputs = []
     async for out in async_llm.generate(
-        "Hello my name is",
+        get_engine_input(async_llm, "Hello my name is"),
         request_id="abc",
         sampling_params=SamplingParams(
-            max_tokens=EXPECTED_TOKENS, output_kind=RequestOutputKind.DELTA
+            max_tokens=EXPECTED_TOKENS,
+            output_kind=RequestOutputKind.DELTA,
         ),
     ):
         outputs.append(out)
