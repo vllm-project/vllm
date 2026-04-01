@@ -278,7 +278,7 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
-    use_gpu_for_late_interaction_scoring: bool = True
+    enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
 

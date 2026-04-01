@@ -119,11 +119,11 @@ def init_pooling_state(
         ServingScores(
             engine_client,
             state.openai_serving_models,
-            use_gpu_for_late_interaction_scoring=args.use_gpu_for_late_interaction_scoring,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
+            enable_flash_late_interaction=args.enable_flash_late_interaction,
         )
         if enable_scoring_api(supported_tasks, model_config)
         else None

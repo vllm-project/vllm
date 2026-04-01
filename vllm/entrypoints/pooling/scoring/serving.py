@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.config import ModelConfig
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
@@ -39,15 +39,18 @@ class ServingScores(PoolingServing):
     request_id_prefix = "score"
 
     def __init__(
-        self, *args, use_gpu_for_late_interaction_scoring: bool = True, **kwargs
+        self,
+        engine_client: EngineClient,
+        *args,
+        enable_flash_late_interaction: bool = True,
+        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
-
-        self.score_type = self.model_config.score_type
-        self.use_gpu_for_late_interaction_scoring = (
-            self.score_type == "late-interaction"
-            and use_gpu_for_late_interaction_scoring
+        self.score_type = engine_client.model_config.score_type
+        self.enable_flash_late_interaction = (
+            self.score_type == "late-interaction" and enable_flash_late_interaction
         )
+
+        super().__init__(engine_client, *args, **kwargs)
 
     def init_io_processor(
         self,
@@ -56,6 +59,9 @@ class ServingScores(PoolingServing):
         chat_template_config: ChatTemplateConfig,
     ) -> PoolingIOProcessor:
         score_type = model_config.score_type
+        if self.enable_flash_late_interaction:
+            score_type = "late-interaction-flash"
+
         assert score_type in ScoringIOProcessors
         processor_cls = ScoringIOProcessors[score_type]
         return processor_cls(
@@ -69,10 +75,10 @@ class ServingScores(PoolingServing):
         request: ScoringRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        if not self.use_gpu_for_late_interaction_scoring:
+        if not self.enable_flash_late_interaction:
             return await super().__call__(request, raw_request)
 
-        return await self.gpu_for_late_interaction_scoring(request, raw_request)
+        return await self.flash_late_interaction(request, raw_request)
 
     async def _build_response(
         self,
@@ -187,16 +193,15 @@ class ServingScores(PoolingServing):
 
         return JSONResponse(content=response.model_dump())
 
-    async def gpu_for_late_interaction_scoring(
+    ###################################################################################
+    ### Run pooling score MaxSim on worker side (GPU) in the API server process
+    ### Can significantly improve late-interaction scoring performance.
+
+    async def flash_late_interaction(
         self,
         request: ScoringRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        """
-        Run pooling score MaxSim on GPU in the API server process.
-        Can significantly improve late-interaction scoring performance.
-        """
-
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
 
@@ -207,35 +212,35 @@ class ServingScores(PoolingServing):
             raw_request=raw_request,
             model_name=model_name,
             request_id=request_id,
+            pooling_params=request.to_pooling_params("token_embed"),
         )
 
         self._validate_request(ctx)
         self._maybe_get_adapters(ctx)
+
         await self.io_processor.pre_process_online_async(ctx)
 
         # stage 1: encode queries and cache token embeddings on workers.
-        await self._late_interaction_encode_queries(ctx)
+        await self._flash_late_interaction_encode_queries(ctx)
         # stage 2: encode docs and return scalar scores from workers.
-        doc_ctx = await self._late_interaction_encode_docs(ctx)
+        await self._flash_late_interaction_encode_docs(ctx)
 
-        ctx.final_res_batch = doc_ctx.final_res_batch
+        await self.io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)
 
-        # await self.io_processor.post_process_online_async(ctx)
-        return await self._build_response(doc_ctx)
+    async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
+        assert isinstance(ctx.n_queries, int)
 
-    async def _late_interaction_encode_queries(
-        self, ctx: ScoringServeContext
-    ) -> ScoringServeContext:
-        offset = cast(int, ctx.intermediates)
-        query_engine_inputs = ctx.engine_inputs[:offset]
-        default_pooling_params = ctx.request.to_pooling_params("token_embed")
+        n_queries = ctx.n_queries
+        n_docs = len(ctx.engine_inputs) - n_queries
+        query_engine_inputs = ctx.engine_inputs[:n_queries]
 
-        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(offset)]
-        query_uses = [len(ctx.engine_inputs) - offset if offset == 1 else 1] * offset
+        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        query_uses = [n_docs if n_queries == 1 else 1] * n_queries
 
         query_pooling_params_list = []
-        for i in range(len(query_engine_inputs)):
-            pooling_params = default_pooling_params.clone()
+        for i in range(n_queries):
+            pooling_params = ctx.pooling_params.clone()
             pooling_params.late_interaction_params = (
                 build_late_interaction_query_params(
                     query_key=query_keys[i],
@@ -254,25 +259,30 @@ class ServingScores(PoolingServing):
             engine_inputs=query_engine_inputs,
         )
 
+        assert (
+            len(query_ctx.pooling_params)
+            == len(query_ctx.engine_inputs)
+            == len(query_ctx.prompt_request_ids)
+            == n_queries
+        )
+
         await self._prepare_generators(query_ctx)
         await self._collect_batch(query_ctx)
 
-        return query_ctx
+    async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
+        assert isinstance(ctx.n_queries, int)
 
-    async def _late_interaction_encode_docs(
-        self, ctx: ScoringServeContext
-    ) -> ScoringServeContext:
-        offset = cast(int, ctx.intermediates)
-        doc_engine_inputs = ctx.engine_inputs[offset:]
-        default_pooling_params = ctx.request.to_pooling_params("token_embed")
+        n_queries = ctx.n_queries
+        n_docs = len(ctx.engine_inputs) - n_queries
+        doc_engine_inputs = ctx.engine_inputs[n_queries:]
 
-        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(offset)]
-        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(offset)]
+        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
 
         doc_pooling_params_list = []
-        for i in range(len(doc_engine_inputs)):
-            query_idx = 0 if offset == 1 else i
-            pooling_params = default_pooling_params.clone()
+        for i in range(n_docs):
+            query_idx = 0 if n_queries == 1 else i
+            pooling_params = ctx.pooling_params.clone()
             pooling_params.late_interaction_params = build_late_interaction_doc_params(
                 query_key=query_keys[query_idx]
             )
@@ -288,7 +298,14 @@ class ServingScores(PoolingServing):
             engine_inputs=doc_engine_inputs,
         )
 
+        assert (
+            len(doc_ctx.pooling_params)
+            == len(doc_ctx.engine_inputs)
+            == len(doc_ctx.prompt_request_ids)
+            == n_docs
+        )
+
         await self._prepare_generators(doc_ctx)
         await self._collect_batch(doc_ctx)
 
-        return doc_ctx
+        ctx.final_res_batch = doc_ctx.final_res_batch
