@@ -67,7 +67,7 @@ class BlockStored(KVCacheEvent):
     KV cache consumers to reconstruct block hashes.
     """
 
-    stored_groups: int | None = None
+    group_idx: int | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -79,7 +79,7 @@ class BlockStored(KVCacheEvent):
                 self.lora_id,
                 self.medium,
                 tuple(self.extra_keys) if self.extra_keys else None,
-                self.stored_groups if self.stored_groups else None,
+                self.group_idx if self.group_idx else None,
             )
         )
 
@@ -87,14 +87,14 @@ class BlockStored(KVCacheEvent):
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
-    evicted_groups: int | None = None
+    group_idx: int | None = None
 
     def __hash__(self) -> int:
         return hash(
             (
                 tuple(self.block_hashes),
                 self.medium,
-                self.evicted_groups if self.evicted_groups else None,
+                self.group_idx if self.group_idx else None,
             )
         )
 
