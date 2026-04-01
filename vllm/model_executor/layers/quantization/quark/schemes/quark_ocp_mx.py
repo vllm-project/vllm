@@ -269,9 +269,15 @@ class QuarkOCP_MX(QuarkScheme):
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         if self.emulate:
-            layer.weight_scale = torch.nn.Parameter(
-                layer.weight_scale.data, requires_grad=False
-            )
+            if self.dynamic_mxfp4_quant:
+                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+                layer.weight_scale = torch.nn.Parameter(
+                    w_s.T.contiguous(), requires_grad=False
+                )
+            else:
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data, requires_grad=False
+                )
         else:
             if self.dynamic_mxfp4_quant:
                 w_q, w_s = dynamic_mxfp4_quant(layer.weight)
@@ -312,36 +318,51 @@ class QuarkOCP_MX(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
-        output_size_per_partition = sum(output_partition_sizes)
-        layer.logical_widths = output_partition_sizes
 
-        # WEIGHT
-        weight = PackedvLLMParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                self.get_packed_dim(input_size_per_partition, self.weight_dtype),
-                dtype=torch.uint8,
-            ),
-            input_dim=1,
-            output_dim=0,
-            packed_dim=1,
-            packed_factor=self.packed_factor,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
+        if self.dynamic_mxfp4_quant:
+            weight = ModelWeightParameter(
+                data=torch.empty(
+                    sum(output_partition_sizes),
+                    input_size_per_partition,
+                    dtype=params_dtype,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
 
-        # WEIGHT SCALE
-        weight_scale = GroupQuantScaleParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // OCP_MX_BLOCK_SIZE,
-                dtype=torch.uint8,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_scale", weight_scale)
+            layer.register_parameter("weight", weight)
+            set_weight_attrs(weight, kwargs)
+        else:
+            output_size_per_partition = sum(output_partition_sizes)
+            layer.logical_widths = output_partition_sizes
+            # WEIGHT
+            weight = PackedvLLMParameter(
+                data=torch.empty(
+                    output_size_per_partition,
+                    self.get_packed_dim(input_size_per_partition, self.weight_dtype),
+                    dtype=torch.uint8,
+                ),
+                input_dim=1,
+                output_dim=0,
+                packed_dim=1,
+                packed_factor=self.packed_factor,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("weight", weight)
+
+            # WEIGHT SCALE
+            weight_scale = GroupQuantScaleParameter(
+                data=torch.empty(
+                    output_size_per_partition,
+                    input_size_per_partition // OCP_MX_BLOCK_SIZE,
+                    dtype=torch.uint8,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("weight_scale", weight_scale)
 
     def apply_weights(
         self,
