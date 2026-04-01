@@ -323,6 +323,7 @@ class RopeMLAKVCachePattern:
         if self.q_lora_rank is None:
             return
 
+        q_lora_rank = self.q_lora_rank
         kv_total_dim = self.kv_lora_rank + self.qk_rope_head_dim
 
         def pattern(
@@ -350,10 +351,10 @@ class RopeMLAKVCachePattern:
             qkv_lora = qkv_lora.slice_scatter(
                 k_c_and_k_pe,
                 dim=1,
-                start=self.q_lora_rank,
-                end=self.q_lora_rank + kv_total_dim,
+                start=q_lora_rank,
+                end=q_lora_rank + kv_total_dim,
             )
-            _, k_c_and_k_pe = qkv_lora.split([self.q_lora_rank, kv_total_dim], dim=-1)
+            _, k_c_and_k_pe = qkv_lora.split([q_lora_rank, kv_total_dim], dim=-1)
             _, k_pe_2d_final = k_c_and_k_pe.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
@@ -415,10 +416,10 @@ class RopeMLAKVCachePattern:
             qkv_lora = qkv_lora.slice_scatter(
                 k_c_and_k_pe,
                 dim=1,
-                start=self.q_lora_rank,
-                end=self.q_lora_rank + kv_total_dim,
+                start=q_lora_rank,
+                end=q_lora_rank + kv_total_dim,
             )
-            _, k_c_and_k_pe = qkv_lora.split([self.q_lora_rank, kv_total_dim], dim=-1)
+            _, k_c_and_k_pe = qkv_lora.split([q_lora_rank, kv_total_dim], dim=-1)
             _, k_pe_2d_final = k_c_and_k_pe.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
