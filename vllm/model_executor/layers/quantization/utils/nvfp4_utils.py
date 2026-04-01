@@ -52,7 +52,11 @@ def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]
         # quantization and GEMM) were compiled for the current SM version.
         # FlashInfer backends still rely on the vLLM quantization kernels,
         # so we gate them on the same check.
-        supported = cutlass_fp4_supported() and current_platform.has_device_capability(100) and has_flashinfer()
+        supported = (
+            cutlass_fp4_supported()
+            and current_platform.has_device_capability(100)
+            and has_flashinfer()
+        )
 
         if not supported:
             reason = "FlashInfer is required, >=sm_100 is required"
