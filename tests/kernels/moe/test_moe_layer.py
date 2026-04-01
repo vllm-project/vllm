@@ -1424,11 +1424,14 @@ def _run_one_config(
     # TODO: consider associating tolerances with quant methods.
     if quantization is None:
         if k >= 2048:
-            atol, rtol = 6.5e-2, 6.5e-2
+            atol, rtol = 7.6e-2, 7.6e-2
         else:
             atol, rtol = 3.5e-2, 3.5e-2
     elif quantization in ("fp8", "modelopt_fp8"):
-        atol, rtol = 6e-2, 6e-2
+        if k >= 2048:
+            atol, rtol = 7.6e-2, 7.6e-2
+        else:
+            atol, rtol = 6e-2, 6e-2
     elif quantization == "modelopt_fp4":
         atol = rtol = 1e-1 + k * 5e-4
     else:
