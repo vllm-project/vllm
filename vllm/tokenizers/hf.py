@@ -106,7 +106,7 @@ class CachedHfTokenizer(TokenizerLike):
                     "the `--trust-remote-code` flag in the CLI. If the "
                     "model was created with a newer version of "
                     "transformers, consider upgrading: "
-                    "`pip install --upgrade transformers`"
+                    "`uv pip install --upgrade transformers`"
                 )
                 raise RuntimeError(err_msg) from e
             else:
