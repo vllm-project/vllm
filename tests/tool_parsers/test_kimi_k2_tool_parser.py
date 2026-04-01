@@ -180,9 +180,7 @@ class TestExtractToolCalls:
         model_output = "Checking weather. " + _wrap(
             _tool("functions.get_weather:0", '{"city": "Tokyo"}')
         )
-        content, tool_calls = run_tool_extraction(
-            parser, model_output, streaming=False
-        )
+        content, tool_calls = run_tool_extraction(parser, model_output, streaming=False)
         assert len(tool_calls) == 1
         assert tool_calls[0].id == "functions.get_weather:0"
         assert tool_calls[0].function.name == "get_weather"
