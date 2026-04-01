@@ -1032,8 +1032,63 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             logger.debug("ROCmAiterAllReduceRMSNormFusionPass disabled")
             return
 
+        self._bypass_noop_views_after_allreduce(graph)
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+
+    def _bypass_noop_views_after_allreduce(self, graph: fx.Graph) -> None:
+        """Remove no-op view/reshape nodes sitting between all_reduce and
+        rmsnorm so the pattern matcher can fuse them.
+
+        Some models (e.g. DeepSeek MoE) insert
+        ``final_hidden_states.view(num_tokens, hidden_dim)`` after
+        all_reduce. The view is identity-shaped but creates an intermediate
+        node that prevents the ``all_reduce -> rmsnorm`` pattern from
+        matching.
+        """
+        from torch.fx.experimental.symbolic_shapes import statically_known_true
+
+        count = 0
+        for node in list(graph.nodes):
+            if node.op != "call_function" or node.target not in (
+                torch.ops.aten.view.default,
+                torch.ops.aten.reshape.default,
+            ):
+                continue
+
+            input_node = node.args[0]
+            if not isinstance(input_node, fx.Node):
+                continue
+
+            if (
+                input_node.op != "call_function"
+                or input_node.target != torch.ops.vllm.all_reduce.default
+            ):
+                continue
+
+            input_val = input_node.meta.get("val")
+            output_val = node.meta.get("val")
+            if input_val is None or output_val is None:
+                continue
+
+            in_shape = input_val.shape
+            out_shape = output_val.shape
+            if len(in_shape) != len(out_shape):
+                continue
+            if not all(
+                statically_known_true(s == o)
+                for s, o in zip(in_shape, out_shape)
+            ):
+                continue
+
+            node.replace_all_uses_with(input_node)
+            graph.erase_node(node)
+            count += 1
+
+        if count:
+            logger.debug(
+                "Bypassed %s no-op view(s) after all_reduce", count
+            )
 
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
