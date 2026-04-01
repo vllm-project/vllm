@@ -94,7 +94,7 @@ class BlockRemoved(KVCacheEvent):
             (
                 tuple(self.block_hashes),
                 self.medium,
-                self.group_idx if self.group_idx is not None else None,
+                self.group_idx,
             )
         )
 
