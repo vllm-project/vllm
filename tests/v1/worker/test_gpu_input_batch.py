@@ -23,9 +23,7 @@ VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
 DEVICE_TYPE = current_platform.device_type
-DEVICES = [
-    f"{DEVICE_TYPE}:{i}" for i in range(min(current_platform.device_count(), 2))
-]
+DEVICES = [f"{DEVICE_TYPE}:{i}" for i in range(min(current_platform.device_count(), 2))]
 MAX_NUM_PROMPT_TOKENS = 64
 
 
@@ -400,7 +398,7 @@ def _construct_pooling_request(req_id_suffix: int, pooling_params=None):
     )
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_pooling_prompt_lens_not_aliased(device: str):
     """Verify that prompt_lens in PoolingMetadata does not share memory
     with the internal num_prompt_tokens pinned buffer. Guards against possible
