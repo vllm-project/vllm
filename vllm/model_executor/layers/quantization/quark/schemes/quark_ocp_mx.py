@@ -279,14 +279,14 @@ class QuarkOCP_MX(QuarkScheme):
 
         if self.emulate:
             if self.dynamic_mxfp4_quant:
-                process_dynamic_mxfp4_weights_after_loading(layer)
+                self.process_dynamic_mxfp4_weights_after_loading(layer)
             else:
                 layer.weight_scale = torch.nn.Parameter(
                     layer.weight_scale.data, requires_grad=False
                 )
         else:
             if self.dynamic_mxfp4_quant:
-                process_dynamic_mxfp4_weights_after_loading(layer)
+                self.process_dynamic_mxfp4_weights_after_loading(layer)
             elif self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
