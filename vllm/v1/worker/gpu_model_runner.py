@@ -4495,8 +4495,7 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
-        num_spec_tokens_to_schedule = (
-            scheduler_output.num_spec_tokens_to_schedule)
+        num_spec_tokens_to_schedule = scheduler_output.num_spec_tokens_to_schedule
         if spec_config.method == "ngram":
             from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 

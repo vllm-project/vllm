@@ -22,8 +22,23 @@ class DynamicSpeculativeDecodingManager:
         self.dynamic_config = dynamic_config
         self.vllm_max_batch_size = vllm_max_batch_size
         self.vllm_num_speculative_tokens = vllm_num_speculative_tokens
-        self.batch_stats = self.dynamic_config.batch_stats
-        self.available_batch_sizes = sorted(self.dynamic_config.batch_stats.keys())
+
+        assert dynamic_config.batch_stats is not None, (
+            "batch_stats is required for dynamic speculative decoding"
+        )
+        assert dynamic_config.max_num_speculative_tokens is not None, (
+            "max_num_speculative_tokens is required for dynamic speculative decoding"
+        )
+        assert dynamic_config.acceptance_rate_per_pos is not None, (
+            "acceptance_rate_per_pos is required for dynamic speculative decoding"
+        )
+
+        self.batch_stats: dict[int, dict[int, float]] = dynamic_config.batch_stats
+        self.max_num_speculative_tokens: int = dynamic_config.max_num_speculative_tokens
+        self.acceptance_rate_per_pos: list[float] = (
+            dynamic_config.acceptance_rate_per_pos
+        )
+        self.available_batch_sizes = sorted(dynamic_config.batch_stats.keys())
         self.steps = 0
         self.warmup_steps = warmup_steps
 
@@ -32,36 +47,35 @@ class DynamicSpeculativeDecodingManager:
 
         # Sanity check
         assert (
-            vllm_num_speculative_tokens
-            <= self.dynamic_config.max_num_speculative_tokens
+            vllm_num_speculative_tokens <= dynamic_config.max_num_speculative_tokens
         ), "vllm_num_speculative_tokens must be <= max_num_speculative_tokens"
 
-        assert self.dynamic_config.max_num_speculative_tokens == len(
-            self.dynamic_config.acceptance_rate_per_pos
+        assert dynamic_config.max_num_speculative_tokens == len(
+            dynamic_config.acceptance_rate_per_pos
         ), "max_num_speculative_tokens != len(acceptance_rate_per_pos)"
-        assert self.dynamic_config.max_num_speculative_tokens > 0, (
+        assert dynamic_config.max_num_speculative_tokens > 0, (
             "max_num_speculative_tokens must be > 0"
         )
-        assert all(
-            0.0 <= a <= 1.0 for a in self.dynamic_config.acceptance_rate_per_pos
-        ), "all acceptance_rate_per_pos values must be in [0.0, 1.0]"
-        assert 1 in self.dynamic_config.batch_stats, (
-            f"BS 1 not found in {self.dynamic_config.batch_stats.keys()}"
+        assert all(0.0 <= a <= 1.0 for a in dynamic_config.acceptance_rate_per_pos), (
+            "all acceptance_rate_per_pos values must be in [0.0, 1.0]"
         )
-        assert vllm_max_batch_size in self.dynamic_config.batch_stats, (
-            f"max BS not found in {self.dynamic_config.batch_stats.keys()}"
+        assert 1 in dynamic_config.batch_stats, (
+            f"BS 1 not found in {dynamic_config.batch_stats.keys()}"
+        )
+        assert vllm_max_batch_size in dynamic_config.batch_stats, (
+            f"max BS not found in {dynamic_config.batch_stats.keys()}"
         )
 
         for bs in self.available_batch_sizes:
             assert bs > 0
-            assert 0 in self.dynamic_config.batch_stats[bs], (
+            assert 0 in dynamic_config.batch_stats[bs], (
                 f"batch size {bs} must have draft 0 stats"
             )
-            assert 1 in self.dynamic_config.batch_stats[bs], (
+            assert 1 in dynamic_config.batch_stats[bs], (
                 f"batch size {bs} must have draft 1 stats"
             )
-            assert sorted(self.dynamic_config.batch_stats[bs].keys()) == list(
-                self.dynamic_config.batch_stats[bs].keys()
+            assert sorted(dynamic_config.batch_stats[bs].keys()) == list(
+                dynamic_config.batch_stats[bs].keys()
             ), f"batch size {bs} draft keys must be sorted"
 
         self.update_optimal_num_speculative_tokens()
@@ -111,6 +125,7 @@ class DynamicSpeculativeDecodingManager:
         }
 
     def update_acceptance_rate_per_pos(self, acceptance_rate_per_pos: list[float]):
+        self.acceptance_rate_per_pos = acceptance_rate_per_pos
         self.dynamic_config.acceptance_rate_per_pos = acceptance_rate_per_pos
         self.update_optimal_num_speculative_tokens()
 
@@ -170,8 +185,8 @@ class DynamicSpeculativeDecodingManager:
         batch_stats = self._get_batch_stats(batch_size)
 
         max_goodput = -1.0
-        for num_drafts in range(self.dynamic_config.max_num_speculative_tokens + 1):
-            curr_al = 1 + sum(self.dynamic_config.acceptance_rate_per_pos[:num_drafts])
+        for num_drafts in range(self.max_num_speculative_tokens + 1):
+            curr_al = 1 + sum(self.acceptance_rate_per_pos[:num_drafts])
             curr_itl = self._get_itl(batch_stats, num_drafts)
             curr_goodput = curr_al / curr_itl
             if curr_goodput > max_goodput:
