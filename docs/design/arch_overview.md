@@ -145,6 +145,66 @@ A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
 For CPU resource sizing recommendations, see
 [CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
 
+## Scheduler
+
+The scheduler runs inside the **Engine Core Process** and is responsible for
+deciding which requests execute each step. Its source is in
+[vllm/v1/core/sched/scheduler.py](../../vllm/v1/core/sched/scheduler.py).
+
+The V1 scheduler is **token-budget-based**: at each step it holds a fixed
+`max_num_scheduled_tokens` budget and fills it greedily across both running and
+waiting requests. There is no separate "prefill phase" or "decode phase" —
+each request has a `num_computed_tokens` counter that advances toward
+`num_tokens_with_spec`. This unified view handles chunked prefills, prefix
+caching, and speculative decoding within a single scheduling loop.
+
+### Scheduling Policies
+
+Two policies are supported via `--scheduling-policy`:
+
+-   **FCFS** (default): requests are scheduled first-come, first-served. When
+    the KV cache is exhausted, the last-admitted running request is preempted.
+-   **Priority**: requests carry an integer `priority` field. When the KV cache
+    is exhausted, the running request with the lowest priority (highest
+    `priority` value, then latest arrival time) is preempted.
+
+### Preemption
+
+When the KV cache is exhausted and a request cannot be allocated new blocks,
+the scheduler **preempts** a lower-priority running request:
+
+1.  Its KV cache blocks are freed immediately.
+2.  `num_computed_tokens` is reset to `0` — the request must recompute from
+    scratch when re-admitted.
+3.  The request is prepended to the front of the waiting queue with
+    `PREEMPTED` status, so it is re-admitted before any new requests.
+
+!!! note
+    vLLM V1 does not swap KV cache to CPU memory. Preempted requests always
+    recompute. Prefix caching makes this inexpensive for requests that share
+    a common prompt prefix.
+
+### Async Scheduling
+
+`AsyncScheduler`
+([vllm/v1/core/sched/async_scheduler.py](../../vllm/v1/core/sched/async_scheduler.py))
+is a thin subclass of `Scheduler` that overlaps CPU scheduling with GPU
+execution: while the GPU executes step *N*, the CPU speculatively schedules
+step *N+1*.
+
+Each scheduled decode step adds an **output placeholder**
+(`num_output_placeholders`) to the request — a token slot for a result the
+GPU is producing but has not yet returned. If `update_from_output` receives
+output for a request that has `discard_latest_async_tokens = True`, the
+speculative output is silently dropped rather than appended to the token
+sequence, preventing a spurious duplicate output token.
+
+This flag is currently set during a forced prefix-cache reset
+(`reset_prefix_cache` with `reset_running_requests=True`), which preempts all
+running requests and additionally resets `num_output_placeholders` to `0`
+and sets `discard_latest_async_tokens = True` before returning them to the
+waiting queue.
+
 ## LLM Engine
 
 The `LLMEngine` and `AsyncLLMEngine` classes are central to the functioning of
