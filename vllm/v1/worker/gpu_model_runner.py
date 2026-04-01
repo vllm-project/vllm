@@ -109,6 +109,7 @@ from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
 from vllm.utils.torch_utils import (
     get_dtype_size,
+    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -122,6 +123,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
+    NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
@@ -209,7 +211,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -450,7 +452,6 @@ class GPUModelRunner(
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.inputs_embeds_size = model_config.get_inputs_embeds_size()
-        self.attention_chunk_size = model_config.attention_chunk_size
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = model_config.uses_alibi
 
@@ -593,7 +594,6 @@ class GPUModelRunner(
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
-        self.comm_stream = torch.cuda.Stream()
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -718,16 +718,6 @@ class GPUModelRunner(
         self.num_accepted_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
-
-        # Only relevant for multimodal models
-        if self.supports_mm_inputs:
-            # Double buffer to avoid race condition: previous iteration's async
-            # copy may still be reading from CPU while current iteration writes.
-            self.is_mm_embed_buffers = [
-                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
-                self._make_buffer(self.max_num_tokens, dtype=torch.bool),
-            ]
-            self.is_mm_embed_idx = 0
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -897,7 +887,7 @@ class GPUModelRunner(
           If these are left at 0.0 (default after wake_up), all KV cache values
           become effectively zero, causing gibberish output.
         """
-        if not self.cache_config.cache_dtype.startswith("fp8"):
+        if not is_quantized_kv_cache(self.cache_config.cache_dtype):
             return
 
         kv_caches = getattr(self, "kv_caches", [])
@@ -1938,9 +1928,24 @@ class GPUModelRunner(
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            self.num_accepted_tokens.np[:num_reqs] = (
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            )
+            # Async mode: condense() reordered indices, use prev_positions mapping
+            if self.use_async_scheduling and prev_req_id_to_index:
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[
+                        np.where(new_mask, 0, prev_idx)
+                    ]
+                )
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                    self.num_accepted_tokens.np[:num_reqs]
+                )
+            else:
+                # Non-async mode: use values directly
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -2135,9 +2140,9 @@ class GPUModelRunner(
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
 
-            # Fill unused with -1. Needed for reshape_and_cache in full cuda
-            # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-            blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
+            # Fill unused block table entries with NULL_BLOCK_ID (null block)
+            # for CUDAGraph padding. Block 0 is reserved for padding.
+            blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
             return blk_table_tensor
 
         assert slot_mappings is not None
@@ -2895,14 +2900,10 @@ class GPUModelRunner(
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
-        # Swap to the other buffer to avoid race condition with previous
-        # iteration's async copy that may still be reading from CPU.
-        self.is_mm_embed_idx = 1 - self.is_mm_embed_idx
-        is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
-
         mm_embeds = list[torch.Tensor]()
-        is_mm_embed = is_mm_embed_buf.cpu
-        is_mm_embed[:total_num_scheduled_tokens] = False
+        is_mm_embed = torch.zeros(
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+        )
 
         req_start_idx = 0
         should_sync_mrope_positions = False
@@ -2984,8 +2985,6 @@ class GPUModelRunner(
 
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
-
-        is_mm_embed = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
 
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
@@ -4219,7 +4218,6 @@ class GPUModelRunner(
                     assert spec_decode_common_attn_metadata is not None
                     next_token_ids, valid_sampled_tokens_count = (
                         self.drafter.prepare_next_token_ids_padded(
-                            self.optimistic_seq_lens_cpu,
                             sampled_token_ids,
                             self.requests,
                             self.input_batch,
@@ -4586,7 +4584,6 @@ class GPUModelRunner(
             )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
-                    self.optimistic_seq_lens_cpu,
                     sampled_token_ids,
                     self.requests,
                     self.input_batch,
@@ -4631,7 +4628,6 @@ class GPUModelRunner(
                 )
                 next_token_ids, valid_sampled_tokens_count = (
                     self.drafter.prepare_next_token_ids_padded(
-                        self.optimistic_seq_lens_cpu,
                         sampled_token_ids,
                         self.requests,
                         self.input_batch,
@@ -5589,6 +5585,7 @@ class GPUModelRunner(
             top_k=dummy_tensors(logits.size(1) - 1),
             generators={},
             max_num_logprobs=None,
+            logprob_token_ids=None,
             no_penalties=True,
             prompt_token_ids=None,
             frequency_penalties=dummy_tensors(0.1),
@@ -5989,7 +5986,9 @@ class GPUModelRunner(
                 SupportsEncoderCudaGraph,
                 supports_encoder_cudagraph,
             )
-            from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+            from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
+                EncoderCudaGraphManager,
+            )
 
             raw_model = self.get_model()
             if supports_encoder_cudagraph(raw_model):
