@@ -872,6 +872,59 @@ def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
     assert "I'll check the weather." in full_content or len(all_content) > 0
 
 
+def test_native_id_extracted_and_placed_on_tool_call(kimi_k2_tool_parser):
+    """Regression: parser extracts native ID onto ToolCall (PR #32768)."""
+    model_output = (
+        "Checking weather. "
+        "<|tool_calls_section_begin|>"
+        "<|tool_call_begin|>functions.get_weather:0"
+        '<|tool_call_argument_begin|>{"city": "Tokyo"}'
+        "<|tool_call_end|>"
+        "<|tool_calls_section_end|>"
+    )
+
+    result = kimi_k2_tool_parser.extract_tool_calls(model_output, request=None)
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+
+    tc = result.tool_calls[0]
+    # Native ID from model output must be used as the tool call ID
+    assert tc.id == "functions.get_weather:0"
+    assert tc.function.name == "get_weather"
+    assert json.loads(tc.function.arguments) == {"city": "Tokyo"}
+
+
+def test_multi_turn_native_id_continuity(kimi_k2_tool_parser, kimi_k2_tokenizer):
+    """Regression: native IDs from turn 1 preserved across turns (PR #32768)."""
+    turn1_output = (
+        "Let me check. "
+        "<|tool_calls_section_begin|>"
+        "<|tool_call_begin|>functions.get_weather:0"
+        '<|tool_call_argument_begin|>{"city": "Beijing"}'
+        "<|tool_call_end|>"
+        "<|tool_calls_section_end|>"
+    )
+
+    turn1_result = kimi_k2_tool_parser.extract_tool_calls(turn1_output, request=None)
+    assert turn1_result.tools_called
+    assert turn1_result.tool_calls[0].id == "functions.get_weather:0"
+
+    # Fresh parser for turn 2
+    turn2_parser = KimiK2ToolParser(kimi_k2_tokenizer)
+    turn2_output = (
+        "Now let me get news. "
+        "<|tool_calls_section_begin|>"
+        "<|tool_call_begin|>functions.get_news:0"
+        '<|tool_call_argument_begin|>{"topic": "weather in Beijing"}'
+        "<|tool_call_end|>"
+        "<|tool_calls_section_end|>"
+    )
+
+    turn2_result = turn2_parser.extract_tool_calls(turn2_output, request=None)
+    assert turn2_result.tools_called
+    assert turn2_result.tool_calls[0].id == "functions.get_news:0"
+
+
 def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
     """
     Test that MULTIPLE tool calls in streaming mode do not leak into content.
