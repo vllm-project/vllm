@@ -1196,6 +1196,12 @@ class NixlConnectorWorker:
         # ---- Mamba-HMA per-engine state (only used when self._has_mamba) ----
         # Per-engine transfer config (source of truth for FA/mamba sizing).
         self._transfer_configs: dict[str, HeteroTPTransferConfig] = {}
+        # NOTE (ZhanqiuHu): _mamba_phys_ratio MUST be per-engine.
+        # compute_mamba_phys_ratio = ceil((conv_bytes + ssm_bytes) / block_len)
+        # where conv/ssm bytes are per-TP-rank (dimension-sharded).  With
+        # heterogeneous TP the per-rank sizes differ, so the ratio differs:
+        #   e.g. Nemotron 30B: P(TP=4) → 131, D(TP=1) → 261.
+        self._mamba_phys_ratio: dict[EngineId, int] = {}
         # 4 regions per mamba layer: x, B, C (conv sub-projections) + ssm.
         self._mamba_num_regions: int = 0
 
@@ -1744,6 +1750,9 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         if self._has_mamba:
+            self._mamba_phys_ratio[self.engine_id] = (
+                self._physical_blocks_per_logical_kv_block
+            )
             logger.info(
                 "Hybrid SSM registration: num_blocks=%s, "
                 "logical_num_blocks=%s, ratio=%s, num_regions=%s, "
@@ -1792,6 +1801,9 @@ class NixlConnectorWorker:
     ):
         """Register 4 desc regions (x, B, C, ssm) per layer for local mamba
         blocks, enabling the 3-read transfer with DS conv layout."""
+        assert block_size_ratio == 1, (
+            f"HMA does not support block_size_ratio != 1; got {block_size_ratio}"
+        )
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
@@ -1897,7 +1909,7 @@ class NixlConnectorWorker:
             conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
-        remote_ratio = self._physical_blocks_per_logical_kv_block
+        remote_ratio = self._mamba_phys_ratio[nixl_agent_meta.engine_id]
         num_blocks = nixl_agent_meta.num_blocks // remote_ratio
         device_id = nixl_agent_meta.device_id
 
@@ -2090,13 +2102,8 @@ class NixlConnectorWorker:
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
         if self._has_mamba:
-            remote_phys_ratio = compute_mamba_phys_ratio(
+            self._mamba_phys_ratio[engine_id] = compute_mamba_phys_ratio(
                 nixl_agent_meta.ssm_sizes, nixl_agent_meta.block_lens[0]
-            )
-            assert remote_phys_ratio == self._physical_blocks_per_logical_kv_block, (
-                f"remote phys_ratio {remote_phys_ratio} != local "
-                f"{self._physical_blocks_per_logical_kv_block}; block_size "
-                f"must match across engines"
             )
 
         # Keep track of remote agent kv caches base addresses.
@@ -2774,7 +2781,7 @@ class NixlConnectorWorker:
             # Expand remote logical → kernel block IDs.
             meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
                 meta.remote.block_ids,
-                self._physical_blocks_per_logical_kv_block,
+                self._mamba_phys_ratio[meta.remote.engine_id],
             )
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
@@ -3050,7 +3057,7 @@ class NixlConnectorWorker:
             # This is like having two "low-level views" of the same storage.
             # `num_fa_descs` offset must be computed per-engine since P and D can
             # have different num_blocks (and thus different FA descs counts).
-            ratio = self._physical_blocks_per_logical_kv_block
+            ratio = self._mamba_phys_ratio[engine_id]
             logical_blocks = num_blocks // ratio
             num_fa_descs = self.num_regions * num_blocks
             # 3-read mamba: 4 regions per layer (x, B, C, ssm).
