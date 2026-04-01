@@ -79,7 +79,7 @@ class BlockStored(KVCacheEvent):
                 self.lora_id,
                 self.medium,
                 tuple(self.extra_keys) if self.extra_keys else None,
-                self.group_idx if self.group_idx else None,
+                self.group_idx if self.group_idx is not None else None,
             )
         )
 
@@ -94,7 +94,7 @@ class BlockRemoved(KVCacheEvent):
             (
                 tuple(self.block_hashes),
                 self.medium,
-                self.group_idx if self.group_idx else None,
+                self.group_idx if self.group_idx is not None else None,
             )
         )
 
