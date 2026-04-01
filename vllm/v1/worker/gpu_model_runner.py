@@ -1080,6 +1080,15 @@ class GPUModelRunner(
                         if h != 0:
                             self._steering_manager.release_config(h, phase)
 
+            # Also remove any deferred decode registrations for finished
+            # requests to prevent registering rows for dead requests.
+            if self._pending_decode_registrations:
+                finished = set(scheduler_output.finished_req_ids)
+                self._pending_decode_registrations = [
+                    entry for entry in self._pending_decode_registrations
+                    if entry[0] not in finished
+                ]
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -3094,7 +3103,7 @@ class GPUModelRunner(
 
                 self._steering_manager = SteeringManager(max_configs)
                 self._pending_decode_registrations: list[
-                    tuple[int, dict[str, dict[int, list[float]]]]
+                    tuple[str, int, dict[str, dict[int, list[float]]]]
                 ] = []
                 self._req_steering_phase: dict[str, str] = {}
 
@@ -3183,14 +3192,16 @@ class GPUModelRunner(
 
         # Process deferred decode registrations (priority over new requests).
         if self._pending_decode_registrations:
-            still_pending: list[tuple[int, dict[str, dict[int, list[float]]]]] = []
-            for d_hash, d_vecs in self._pending_decode_registrations:
+            still_pending: list[
+                tuple[str, int, dict[str, dict[int, list[float]]]]
+            ] = []
+            for r_id, d_hash, d_vecs in self._pending_decode_registrations:
                 try:
                     self._steering_manager.register_config(
                         d_hash, d_vecs, phase="decode"
                     )
                 except RuntimeError:
-                    still_pending.append((d_hash, d_vecs))
+                    still_pending.append((r_id, d_hash, d_vecs))
             self._pending_decode_registrations = still_pending
 
         # 1. Populate steering tables
@@ -3290,7 +3301,7 @@ class GPUModelRunner(
                         )
                     except RuntimeError:
                         self._pending_decode_registrations.append(
-                            (decode_hash, sp.effective_decode_steering)
+                            (req_id, decode_hash, sp.effective_decode_steering)
                         )
                         logger.warning(
                             "Deferred decode steering config (hash=%d) "
