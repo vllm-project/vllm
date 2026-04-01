@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+educe.workspace = true
 futures.workspace = true
 libc.workspace = true
 time.workspace = true

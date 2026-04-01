@@ -6,13 +6,72 @@ use clap::error::{ContextKind, ContextValue, ErrorKind};
 
 use crate::cli::{Cli, Command};
 
-/// Python `argparse` accepts these multi-character single-dash aliases for overlapping
-/// data-parallel flags, but `clap` cannot model them as Rust-side aliases directly.
-const EXTRA_PASSTHROUGH_ALIASES: &[(&str, &str)] = &[
+/// Python `argparse` accepts these multi-character single-dash aliases, but `clap` cannot model
+/// them directly.
+const PYTHON_MULTI_CHAR_ALIASES: &[(&str, &str)] = &[
+    ("-asc", "--api-server-count"),
+    ("-pp", "--pipeline-parallel-size"),
+    ("-tp", "--tensor-parallel-size"),
+    ("-dcp", "--decode-context-parallel-size"),
+    ("-pcp", "--prefill-context-parallel-size"),
     ("-dp", "--data-parallel-size"),
+    ("-dpn", "--data-parallel-rank"),
+    ("-dpr", "--data-parallel-start-rank"),
+    ("-dpl", "--data-parallel-size-local"),
     ("-dpa", "--data-parallel-address"),
     ("-dpp", "--data-parallel-rpc-port"),
+    ("-dpb", "--data-parallel-backend"),
+    ("-dph", "--data-parallel-hybrid-lb"),
+    ("-dpe", "--data-parallel-external-lb"),
+    ("-ep", "--enable-expert-parallel"),
+    ("-cc", "--compilation-config"),
+    ("-ac", "--attention-config"),
 ];
+
+/// Normalize Python-only multi-character single-dash aliases before they reach `clap`.
+///
+/// This only rewrites arguments before `--`. Passthrough arguments after `--` must stay byte-for-
+/// byte unchanged so they can be forwarded directly to Python.
+pub(super) fn normalize_python_arg_aliases(args: &[OsString]) -> Vec<OsString> {
+    let mut normalized = Vec::with_capacity(args.len());
+    let mut seen_serve = false;
+    let mut in_passthrough = false;
+
+    for (index, arg) in args.iter().enumerate() {
+        if index == 0 {
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        let text = arg.to_string_lossy();
+        if !seen_serve {
+            if text == "serve" {
+                seen_serve = true;
+            }
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        if in_passthrough {
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        if text == "--" {
+            in_passthrough = true;
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        if let Some(canonical) = normalize_python_multi_char_alias(&text) {
+            normalized.push(canonical.into());
+        } else {
+            normalized.push(arg.clone());
+        }
+    }
+
+    normalized
+}
 
 /// Rewrite clap errors about unknown arguments in the `serve` subcommand to clarify the `--`
 /// separator for Python engine flags.
@@ -63,15 +122,21 @@ pub(super) fn validate_passthrough_args(cli: Cli) -> Result<Cli, clap::Error> {
 fn find_misplaced_passthrough_arg(python_args: &[String]) -> Option<(String, String)> {
     let (long_flags, short_flags) = collect_option_names();
     for arg in python_args {
-        if let Some((alias, canonical)) = find_extra_passthrough_alias(arg) {
-            return Some((alias.to_string(), canonical.to_string()));
-        }
-
         if let Some(rest) = arg.strip_prefix("--") {
             let name = rest.split_once('=').map_or(rest, |(name, _)| name);
             if long_flags.contains(name) {
                 let canonical = format!("--{name}");
                 return Some((canonical.clone(), canonical));
+            }
+            continue;
+        }
+
+        if let Some(canonical) = find_python_multi_char_alias(arg) {
+            let name = canonical
+                .strip_prefix("--")
+                .expect("canonical alias should be a long option");
+            if long_flags.contains(name) {
+                return Some((arg.to_string(), canonical.to_string()));
             }
             continue;
         }
@@ -95,12 +160,19 @@ fn find_misplaced_passthrough_arg(python_args: &[String]) -> Option<(String, Str
     None
 }
 
-/// Match Python-only multi-character single-dash aliases for Rust-side `serve` options.
-fn find_extra_passthrough_alias(arg: &str) -> Option<(&'static str, &'static str)> {
-    EXTRA_PASSTHROUGH_ALIASES
+fn normalize_python_multi_char_alias(arg: &str) -> Option<String> {
+    find_python_multi_char_alias(arg).map(|canonical| match arg.split_once('=') {
+        Some((_, value)) => format!("{canonical}={value}"),
+        None => canonical.to_string(),
+    })
+}
+
+/// Match Python-only multi-character single-dash aliases.
+fn find_python_multi_char_alias(arg: &str) -> Option<&'static str> {
+    PYTHON_MULTI_CHAR_ALIASES
         .iter()
         .find_map(|&(alias, canonical)| {
-            (arg == alias || arg.starts_with(&format!("{alias}="))).then_some((alias, canonical))
+            (arg == alias || arg.starts_with(&format!("{alias}="))).then_some(canonical)
         })
 }
 
