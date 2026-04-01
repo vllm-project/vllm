@@ -553,6 +553,9 @@ class TritonAttentionImpl(AttentionImpl):
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
+            if key_cache.dtype == torch.uint8:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             k_descale = None
             v_descale = None
             k_scale_cache = self._k_scale_cache
@@ -686,6 +689,9 @@ class TritonAttentionImpl(AttentionImpl):
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
+            if key_cache.dtype == torch.uint8:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             triton_reshape_and_cache_flash_per_token_head_quant(
                 key,
                 value,

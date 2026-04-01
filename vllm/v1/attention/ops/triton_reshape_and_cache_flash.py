@@ -150,8 +150,10 @@ def _reshape_cache_per_token_head(
     stride_vc_head: tl.int64,
     stride_ks_blk: tl.int64,  # k_scale_cache stride[0] (blocks)
     stride_ks_slot: tl.int64,  # k_scale_cache stride[1] (slots)
+    stride_ks_head: tl.int64,  # k_scale_cache stride[2] (heads)
     stride_vs_blk: tl.int64,  # v_scale_cache stride[0] (blocks)
     stride_vs_slot: tl.int64,  # v_scale_cache stride[1] (slots)
+    stride_vs_head: tl.int64,  # v_scale_cache stride[2] (heads)
     block_size: tl.constexpr,
     head_size: tl.constexpr,
     head_size_v: tl.constexpr,
@@ -181,7 +183,10 @@ def _reshape_cache_per_token_head(
 
     k_scale = tl.maximum(tl.max(tl.abs(k_h)) / QUANT_MAX, 1e-6)
     tl.store(
-        k_scale_cache_ptr + blk * stride_ks_blk + slot_in_blk * stride_ks_slot + head,
+        k_scale_cache_ptr
+        + blk * stride_ks_blk
+        + slot_in_blk * stride_ks_slot
+        + head * stride_ks_head,
         k_scale,
     )
 
@@ -206,7 +211,10 @@ def _reshape_cache_per_token_head(
 
     v_scale = tl.maximum(tl.max(tl.abs(v_h)) / QUANT_MAX, 1e-6)
     tl.store(
-        v_scale_cache_ptr + blk * stride_vs_blk + slot_in_blk * stride_vs_slot + head,
+        v_scale_cache_ptr
+        + blk * stride_vs_blk
+        + slot_in_blk * stride_vs_slot
+        + head * stride_vs_head,
         v_scale,
     )
 
@@ -288,8 +296,10 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
         stride_vc_head=value_cache.stride(2),
         stride_ks_blk=k_scale_cache.stride(0),
         stride_ks_slot=k_scale_cache.stride(1),
+        stride_ks_head=k_scale_cache.stride(2),
         stride_vs_blk=v_scale_cache.stride(0),
         stride_vs_slot=v_scale_cache.stride(1),
+        stride_vs_head=v_scale_cache.stride(2),
         block_size=block_size,
         head_size=head_size,
         head_size_v=head_size_v,

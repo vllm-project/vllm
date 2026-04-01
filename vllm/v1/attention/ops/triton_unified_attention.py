@@ -44,6 +44,7 @@ def _prepare_kv_tile(
     kv_head_idx,
     stride_s_blk,
     stride_s_slot,
+    stride_s_head,
     tile_mask,
     BLOCK_SIZE: tl.constexpr,
     KV_QUANT_MODE: tl.constexpr,
@@ -78,7 +79,7 @@ def _prepare_kv_tile(
         scale_idx = (
             physical_block_idx * stride_s_blk
             + (seq_offset % BLOCK_SIZE) * stride_s_slot
-            + kv_head_idx
+            + kv_head_idx * stride_s_head
         )
         token_head_scales = tl.load(
             scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
@@ -172,8 +173,10 @@ def kernel_unified_attention_2d(
     v_scale_cache_ptr=None,
     stride_ks_blk=0,
     stride_ks_slot=0,
+    stride_ks_head=0,
     stride_vs_blk=0,
     stride_vs_slot=0,
+    stride_vs_head=0,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -335,6 +338,7 @@ def kernel_unified_attention_2d(
             kv_head_idx,
             stride_ks_blk,
             stride_ks_slot,
+            stride_ks_head,
             tile_mask,
             BLOCK_SIZE,
             KV_QUANT_MODE,
@@ -356,6 +360,7 @@ def kernel_unified_attention_2d(
             kv_head_idx,
             stride_vs_blk,
             stride_vs_slot,
+            stride_vs_head,
             tile_mask,
             BLOCK_SIZE,
             KV_QUANT_MODE,
@@ -550,8 +555,10 @@ def kernel_unified_attention_3d(
     v_scale_cache_ptr=None,
     stride_ks_blk=0,
     stride_ks_slot=0,
+    stride_ks_head=0,
     stride_vs_blk=0,
     stride_vs_slot=0,
+    stride_vs_head=0,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -722,6 +729,7 @@ def kernel_unified_attention_3d(
             kv_head_idx,
             stride_ks_blk,
             stride_ks_slot,
+            stride_ks_head,
             tile_mask,
             BLOCK_SIZE,
             KV_QUANT_MODE,
@@ -743,6 +751,7 @@ def kernel_unified_attention_3d(
             kv_head_idx,
             stride_vs_blk,
             stride_vs_slot,
+            stride_vs_head,
             tile_mask,
             BLOCK_SIZE,
             KV_QUANT_MODE,
@@ -1171,8 +1180,10 @@ def unified_attention(
             v_scale_cache_ptr=v_scale_cache,
             stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
             stride_ks_slot=k_scale_cache.stride(1) if k_scale_cache is not None else 0,
+            stride_ks_head=k_scale_cache.stride(2) if k_scale_cache is not None else 0,
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
+            stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
         )
     else:
         kernel_unified_attention_3d[
@@ -1230,8 +1241,10 @@ def unified_attention(
             v_scale_cache_ptr=v_scale_cache,
             stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
             stride_ks_slot=k_scale_cache.stride(1) if k_scale_cache is not None else 0,
+            stride_ks_head=k_scale_cache.stride(2) if k_scale_cache is not None else 0,
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
+            stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,

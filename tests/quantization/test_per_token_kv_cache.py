@@ -101,7 +101,7 @@ def _quantize_per_token_head_ref(
     """
     absmax = data.float().abs().amax(dim=2)  # [num_tokens, num_heads]
     scales = (absmax / cfg.quant_max).clamp(min=1e-6)
-    scaled = data.float() / scales[:, :, None]
+    scaled = data.float() * (1.0 / scales[:, :, None])
     if cfg.uses_trunc:
         q = scaled.round().clamp(cfg.quant_min, cfg.quant_max).to(cfg.cache_dtype)
     else:
@@ -297,7 +297,7 @@ def test_per_token_head_round_trip_accuracy(
                 ref_scale = (absmax / qcfg.quant_max).clamp(min=1e-6)
 
                 # Build reference matching kernel semantics
-                scaled = orig / ref_scale
+                scaled = orig * (1.0 / ref_scale)
                 if qcfg.uses_trunc:
                     ref_q = (
                         scaled.clamp(qcfg.quant_min, qcfg.quant_max)
