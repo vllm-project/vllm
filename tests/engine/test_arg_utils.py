@@ -523,3 +523,20 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+def test_ir_op_priority():
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    cfg1 = EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    cfg2 = EngineArgs(
+        kernel_config=KernelConfig(ir_op_priority=ir_op_priority)
+    ).create_engine_config()
+    assert cfg1.kernel_config.ir_op_priority == cfg2.kernel_config.ir_op_priority
+
+    with pytest.raises(ValueError, match="rms_norm"):
+        _ = EngineArgs(
+            ir_op_priority=ir_op_priority,
+            kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
+        ).create_engine_config()
