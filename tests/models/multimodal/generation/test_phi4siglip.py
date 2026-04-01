@@ -155,21 +155,9 @@ def _run_and_compare(
         )
 
 
-def print_meminfo():
-    import torch
-
-    # Returns (free_memory, total_memory) in bytes for device 0
-    free_mem, total_mem = torch.cuda.mem_get_info(0)
-    print(
-        f"Memory Information : {free_mem / 1024**3:.2f} GB / "
-        f" {total_mem / 1024**3:.2f} GB is Free"
-    )
-
-
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [MODEL_ID])
 def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
-    print_meminfo()
     all_inputs = _build_single_image_inputs(image_assets)
     _run_and_compare(
         hf_runner,
@@ -186,7 +174,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [MODEL_ID])
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model) -> None:
-    print_meminfo()
     all_inputs = _build_multi_image_inputs(image_assets)
     _run_and_compare(
         hf_runner,
