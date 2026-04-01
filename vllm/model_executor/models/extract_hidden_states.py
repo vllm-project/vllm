@@ -23,14 +23,13 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import is_quantized_kv_cache, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,

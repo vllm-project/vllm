@@ -109,6 +109,7 @@ from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
 from vllm.utils.torch_utils import (
     get_dtype_size,
+    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -896,7 +897,7 @@ class GPUModelRunner(
           If these are left at 0.0 (default after wake_up), all KV cache values
           become effectively zero, causing gibberish output.
         """
-        if not self.cache_config.cache_dtype.startswith("fp8"):
+        if not is_quantized_kv_cache(self.cache_config.cache_dtype):
             return
 
         kv_caches = getattr(self, "kv_caches", [])

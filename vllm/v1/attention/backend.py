@@ -954,10 +954,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         )
 
 
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8")
-
-
 def subclass_attention_backend(
     name_prefix: str,
     attention_backend_cls: type[AttentionBackend],
