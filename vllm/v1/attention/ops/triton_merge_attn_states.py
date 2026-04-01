@@ -15,6 +15,7 @@ def merge_attn_states(
     suffix_output: torch.Tensor,
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
+    prefill_tokens_with_context: int | None = None,
 ) -> None:
     num_tokens = output.shape[0]
     num_query_heads = output.shape[1]
@@ -25,6 +26,11 @@ def merge_attn_states(
     # backend.
     prefix_head_stride = prefix_output.stride(1)
     output_head_stride = output.stride(1)
+
+    # If prefill_tokens_with_context is None, all tokens should use prefix context
+    if prefill_tokens_with_context is None:
+        prefill_tokens_with_context = num_tokens
+
     # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
     merge_attn_states_kernel[(num_tokens, num_query_heads)](
         output,
@@ -38,6 +44,7 @@ def merge_attn_states(
         head_size,
         padded_head_size,
         output_lse is not None,
+        prefill_tokens_with_context,
     )
 
 
@@ -54,12 +61,44 @@ def merge_attn_states_kernel(
     HEAD_SIZE: tl.constexpr,
     PADDED_HEAD_SIZE: tl.constexpr,
     OUTPUT_LSE: tl.constexpr,
+    prefill_tokens_with_context: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     num_tokens = tl.num_programs(0)
     head_idx = tl.program_id(1)
     num_heads = tl.num_programs(1)
 
+    prefix_mask = token_idx < prefill_tokens_with_context
+
+    head_arange = tl.arange(0, PADDED_HEAD_SIZE)
+    head_mask = head_arange < HEAD_SIZE
+
+    # For tokens without context (token_idx >= prefill_tokens_with_context),
+    # directly copy from suffix_output
+    if not prefix_mask:
+        s_lse = tl.load(suffix_lse + head_idx * num_tokens + token_idx)
+        if OUTPUT_LSE:
+            tl.store(output_lse + head_idx * num_tokens + token_idx, s_lse)
+
+        s_out = tl.load(
+            suffix_output
+            + token_idx * num_heads * prefix_head_stride
+            + head_idx * prefix_head_stride
+            + head_arange,
+            mask=head_mask,
+        )
+        tl.store(
+            output
+            + token_idx * num_heads * output_head_stride
+            + head_idx * output_head_stride
+            + head_arange,
+            s_out,
+            mask=head_mask,
+        )
+        return
+
+    # For tokens with context (token_idx < prefill_tokens_with_context),
+    # perform normal merge operation
     p_lse = tl.load(prefix_lse + head_idx * num_tokens + token_idx)
     s_lse = tl.load(suffix_lse + head_idx * num_tokens + token_idx)
 
@@ -83,8 +122,6 @@ def merge_attn_states_kernel(
         out_lse = tl.log(out_se) + max_lse
         tl.store(output_lse + head_idx * num_tokens + token_idx, out_lse)
 
-    head_arange = tl.arange(0, PADDED_HEAD_SIZE)
-    head_mask = head_arange < HEAD_SIZE
     p_out = tl.load(
         prefix_output
         + token_idx * num_heads * prefix_head_stride
