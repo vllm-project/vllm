@@ -303,6 +303,24 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         max_frames_per_video = max_tubelets_per_video * T
         return max(max_frames_per_video, 1)
 
+    def get_mm_max_tokens_per_item(
+        self, seq_len: int, mm_counts: Mapping[str, int]
+    ) -> Mapping[str, int]:
+        mm_max_tokens: dict[str, int] = {}
+
+        if mm_counts.get("image", 0) > 0:
+            mm_max_tokens["image"] = seq_len
+
+        if mm_counts.get("video", 0) > 0:
+            assert self.supports_video
+            mm_max_tokens["video"] = seq_len
+
+        if mm_counts.get("audio", 0) > 0:
+            assert self.audio_extractor is not None
+            mm_max_tokens["audio"] = seq_len
+
+        return mm_max_tokens
+
 
 class NanoNemotronVLMultiModalProcessor(
     BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]
