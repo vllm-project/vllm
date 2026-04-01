@@ -428,8 +428,14 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             and self.compilation_config.splitting_ops
         ):
             tp_size = get_tensor_model_parallel_world_size()
-            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
-                return False
+            assert compile_range.is_single_size(), (
+                "SequenceParallelismPass requires single-size compile ranges "
+                "when graph splitting is enabled."
+            )
+            assert compile_range.end % tp_size == 0, (
+                "SequenceParallelismPass requires compile sizes divisible by "
+                "the tensor parallel size when graph splitting is enabled."
+            )
 
         # min_token_num is None when SP is disabled for this device/config
         # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)

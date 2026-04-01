@@ -15,9 +15,9 @@ from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (
     CompilationConfig,
-    CUDAGraphMode,
     DeviceConfig,
     ModelConfig,
+    ParallelConfig,
     PassConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -178,6 +178,13 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_norm_quant", [True, False])
 @pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize(
+    ("splitting_ops", "use_inductor_graph_partition", "expect_sp_enabled"),
+    [
+        ([], False, True),
+        (["dummy_split"], False, False),
+    ],
+)
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_pass(
     test_model_cls: type[torch.nn.Module],
@@ -188,6 +195,9 @@ def test_sequence_parallelism_pass(
     dtype: torch.dtype,
     fuse_norm_quant: bool,
     dynamic: bool,
+    splitting_ops: list[str],
+    use_inductor_graph_partition: bool,
+    expect_sp_enabled: bool,
 ):
     num_processes = 2
 
@@ -206,6 +216,9 @@ def test_sequence_parallelism_pass(
                 dtype,
                 fuse_norm_quant,
                 dynamic,
+                splitting_ops,
+                use_inductor_graph_partition,
+                expect_sp_enabled,
             ),
             nprocs=nprocs,
         )
@@ -224,6 +237,9 @@ def sequence_parallelism_pass_on_test_model(
     dtype: torch.dtype,
     fuse_norm_quant: bool,
     dynamic: bool,
+    splitting_ops: list[str],
+    use_inductor_graph_partition: bool,
+    expect_sp_enabled: bool,
 ):
     set_random_seed(0)
 
@@ -248,16 +264,18 @@ def sequence_parallelism_pass_on_test_model(
     # configure vllm config for SequenceParallelismPass
     custom_ops_list = custom_ops.split(",") if custom_ops else []
     compilation_config = CompilationConfig(
-        splitting_ops=[],  # avoid automatic rms_norm enablement
-        cudagraph_mode=CUDAGraphMode.NONE,  # avoid piecewise warnings
+        splitting_ops=splitting_ops,
+        use_inductor_graph_partition=use_inductor_graph_partition,
         custom_ops=custom_ops_list,
         pass_config=PassConfig(
             enable_sp=True,
+            sp_min_token_num=1,
             fuse_norm_quant=fuse_norm_quant,
             eliminate_noops=True,
         ),
     )  # NoOp needed for fusion
     device_config = DeviceConfig(device=torch.device("cuda"))
+    parallel_config = ParallelConfig(tensor_parallel_size=world_size)
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
@@ -269,11 +287,16 @@ def sequence_parallelism_pass_on_test_model(
     vllm_config = VllmConfig(
         model_config=model_config,
         device_config=device_config,
+        parallel_config=parallel_config,
         compilation_config=compilation_config,
     )
 
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
+        assert vllm_config.compilation_config.pass_config.enable_sp == expect_sp_enabled
+        if not expect_sp_enabled:
+            return
+
         noop_pass = NoOpEliminationPass(vllm_config)
         sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)

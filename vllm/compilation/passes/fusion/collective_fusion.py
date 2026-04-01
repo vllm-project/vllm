@@ -415,7 +415,15 @@ class AsyncTPPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return bool(compile_range.is_single_size() and compile_range.end % tp_size == 0)
+        assert compile_range.is_single_size(), (
+            "AsyncTPPass requires single-size compile ranges when graph "
+            "splitting is enabled."
+        )
+        assert compile_range.end % tp_size == 0, (
+            "AsyncTPPass requires compile sizes divisible by the tensor "
+            "parallel size when graph splitting is enabled."
+        )
+        return True
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
