@@ -41,12 +41,8 @@ class DPCoordinator:
       DPEngineCoreProc._has_global_unfinished_reqs method.
 
     * Broadcasts the START_DP_WAVE message to engines to move them from paused
-      to running state when one engine receives a new request. This can happen
-      in two cases:
-      1) A front-end sending a new request while the engines are paused will
-         concurrently notify the coordinator.
-      2) An engine receiving a request for a stale request wave while in paused
-         state will notify the coordinator.
+      to running state when one engine receives a new request while idle and
+      unpaused. The receiving engine notifies the coordinator.
 
     Engines will move into running state when receiving a new request or
     START_DP_WAVE message.
