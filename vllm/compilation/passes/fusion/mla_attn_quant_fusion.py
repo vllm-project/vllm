@@ -10,9 +10,8 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
+    kFp8StaticTensorSym,
     kNvfp4Dynamic,
-    kStaticTensorScale,
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
@@ -27,8 +26,6 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 MLA_ATTN_OP = torch.ops.vllm.unified_mla_attention_with_output.default
-
-_FP8_QUANT_KEY = QuantKey(dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=True)
 
 
 class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
@@ -48,7 +45,7 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         self._qk_head_dim = layer.qk_nope_head_dim + layer.qk_rope_head_dim
         self._output_dim = layer.num_heads * layer.v_head_dim
         self._dtype = dtype
-        self._quant_matcher = MatcherQuantFP8(_FP8_QUANT_KEY)
+        self._quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     @property
     def pattern(self) -> Callable[..., torch.Tensor]:
@@ -252,7 +249,7 @@ class MLAAttnQuantFusionPass(VllmFusionPatternMatcherPass):
             )
 
         for layer in layers:
-            if layer.impl.fused_output_quant_supported(_FP8_QUANT_KEY):
+            if layer.impl.fused_output_quant_supported(kFp8StaticTensorSym):
                 self.register(MLAAttnFp8StaticQuantPattern(layer, dtype))
 
         if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
