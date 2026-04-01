@@ -508,11 +508,6 @@ class MoERunnerBase(MoERunner):
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
 
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.EXTERNAL,
-        )
-
         with self._sequence_parallel_context():
             return self._forward_impl(
                 layer,
