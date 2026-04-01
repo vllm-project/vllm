@@ -868,15 +868,14 @@ def fused_norm_rope(
 @triton.jit
 def _fused_q_kernel(
     pos_ptr,
-    # Q RoPE
-    q_ptr,
-    q_stride0,
-    q_stride1,
+    # MQA query PE: RoPE + FP8 pack into output tail
+    q_pe_ptr,
+    q_pe_stride0,
+    q_pe_stride1,
     NUM_Q_HEADS: tl.constexpr,
-    q_cos_sin_ptr,
-    q_cos_sin_stride,
-    Q_HALF_ROT_DIM: tl.constexpr,
-    Q_START_OFFSET: tl.constexpr,
+    q_pe_cos_sin_ptr,
+    q_pe_cos_sin_stride,
+    Q_PE_HALF_ROT_DIM: tl.constexpr,
     # Index Q RoPE
     index_q_ptr,
     index_q_stride0,
@@ -887,7 +886,19 @@ def _fused_q_kernel(
     INDEX_Q_HALF_ROT_DIM: tl.constexpr,
     # Index Q Quantize
     index_q_fp8_ptr,
+    index_q_fp8_stride0,
+    index_q_fp8_stride1,
     INDEX_Q_HEAD_DIM: tl.constexpr,
+    # MQA query pack: quantize ql_nope and RoPE+quantize q_pe into mqa_q_fp8
+    ql_nope_ptr,
+    ql_nope_stride0,
+    ql_nope_stride1,
+    mqa_q_fp8_ptr,
+    mqa_q_fp8_stride0,
+    mqa_q_fp8_stride1,
+    q_scale_ptr,
+    QL_NOPE_DIM: tl.constexpr,
+    QL_NOPE_BLOCK: tl.constexpr,
     # Index weights
     index_weights_ptr,
     index_weights_stride,
@@ -896,38 +907,94 @@ def _fused_q_kernel(
     index_weights_out_ptr,
     index_weights_out_stride,
 ):
+    pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
     head_idx = tl.program_id(2)
 
-    if tl.program_id(0) == 0:
-        # Each program processes two Q heads.
-        # Since grid[2] == NUM_INDEX_Q_HEADS == 2 * TOTAL_NUM_Q_HEADS, this ensures
-        # that all local Q heads are handled, even TP=1.
+    if pid == 2:
+        # ql_nope quantize + pack into the front of mqa_q_fp8.
         if 2 * head_idx >= NUM_Q_HEADS:
             return
 
-        # Q RoPE
+        scale = tl.load(q_scale_ptr)
+        for local_head in range(2):
+            q_head_idx = head_idx * 2 + local_head
+            if q_head_idx < NUM_Q_HEADS:
+                ql_nope_off = tl.arange(0, QL_NOPE_BLOCK)
+                ql_nope_mask = ql_nope_off < QL_NOPE_DIM
+                ql_nope = tl.load(
+                    ql_nope_ptr
+                    + tok_idx * ql_nope_stride0
+                    + q_head_idx * ql_nope_stride1
+                    + ql_nope_off,
+                    mask=ql_nope_mask,
+                ).to(tl.float32)
+                ql_nope_fp8 = (ql_nope / scale).to(tl.float8e4nv)
+                tl.store(
+                    mqa_q_fp8_ptr
+                    + tok_idx * mqa_q_fp8_stride0
+                    + q_head_idx * mqa_q_fp8_stride1
+                    + ql_nope_off,
+                    ql_nope_fp8,
+                    mask=ql_nope_mask,
+                )
+        return
+    elif pid == 0:
+        # q_pe RoPE + quantize + pack into the tail of mqa_q_fp8.
+        if 2 * head_idx >= NUM_Q_HEADS:
+            return
+
         pos = tl.load(pos_ptr + tok_idx)
         cos, sin = _cos_sin_cache_kernel(
-            q_cos_sin_ptr,
-            q_cos_sin_stride,
+            q_pe_cos_sin_ptr,
+            q_pe_cos_sin_stride,
             pos,
-            Q_HALF_ROT_DIM,
+            Q_PE_HALF_ROT_DIM,
         )
 
-        _rope_kernel(
-            q_ptr + tok_idx * q_stride0 + head_idx * 2 * q_stride1,
-            q_stride1,
-            cos,
-            sin,
-            2,
-            Q_HALF_ROT_DIM,
-            Q_START_OFFSET,
-            True,
-        )
+        scale = tl.load(q_scale_ptr)
+        for local_head in range(2):
+            q_head_idx = head_idx * 2 + local_head
+            if q_head_idx < NUM_Q_HEADS:
+                rot_off = tl.arange(0, Q_PE_HALF_ROT_DIM)
+                x1 = tl.load(
+                    q_pe_ptr
+                    + tok_idx * q_pe_stride0
+                    + q_head_idx * q_pe_stride1
+                    + rot_off * 2,
+                ).to(tl.float32)
+                x2 = tl.load(
+                    q_pe_ptr
+                    + tok_idx * q_pe_stride0
+                    + q_head_idx * q_pe_stride1
+                    + rot_off * 2
+                    + 1
+                ).to(tl.float32)
+                r1 = x1 * cos - x2 * sin
+                r2 = x2 * cos + x1 * sin
+                tl.store(
+                    mqa_q_fp8_ptr
+                    + tok_idx * mqa_q_fp8_stride0
+                    + q_head_idx * mqa_q_fp8_stride1
+                    + QL_NOPE_DIM
+                    + rot_off * 2,
+                    (r1 / scale).to(tl.float8e4nv),
+                )
+                tl.store(
+                    mqa_q_fp8_ptr
+                    + tok_idx * mqa_q_fp8_stride0
+                    + q_head_idx * mqa_q_fp8_stride1
+                    + QL_NOPE_DIM
+                    + rot_off * 2
+                    + 1,
+                    (r2 / scale).to(tl.float8e4nv),
+                )
         return
-    elif tl.program_id(0) == 1:
+    elif pid == 1:
         # Index Q RoPE
+        if head_idx >= NUM_INDEX_Q_HEADS:
+            return
+
         pos = tl.load(pos_ptr + tok_idx)
         cos, sin = _cos_sin_cache_kernel(
             index_q_cos_sin_ptr,
@@ -958,8 +1025,8 @@ def _fused_q_kernel(
         index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(index_q)
         tl.store(
             index_q_fp8_ptr
-            + tok_idx * index_q_stride0
-            + head_idx * index_q_stride1
+            + tok_idx * index_q_fp8_stride0
+            + head_idx * index_q_fp8_stride1
             + index_q_block,
             index_q_fp8,
         )
@@ -980,39 +1047,48 @@ def _fused_q_kernel(
 
 def fused_q(
     positions: torch.Tensor,
-    q: torch.Tensor,
-    q_cos_sin_cache: torch.Tensor,
-    q_start_offset: int,
+    q_pe: torch.Tensor,
+    q_pe_cos_sin_cache: torch.Tensor,
     index_q: torch.Tensor,
     index_q_cos_sin_cache: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_scale: torch.Tensor,
     # Index weights
     index_weights: torch.Tensor,
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert positions.ndim == 1
-    assert q.ndim == 3
-    assert q_cos_sin_cache.ndim == 2
+    assert q_pe.ndim == 3
+    assert q_pe_cos_sin_cache.ndim == 2
     assert index_q.ndim == 3
     assert index_q_cos_sin_cache.ndim == 2
 
     num_tokens = positions.shape[0]
-    num_q_heads = q.shape[1]
+    num_q_heads = q_pe.shape[1]
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
+    assert ql_nope.ndim == 3
+    assert ql_nope.shape[:2] == q_pe.shape[:2]
+    mqa_q_fp8 = torch.empty(
+        q_pe.shape[0],
+        q_pe.shape[1],
+        ql_nope.shape[2] + q_pe.shape[2],
+        dtype=torch.float8_e4m3fn,
+        device=q_pe.device,
+    )
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
-    _fused_q_kernel[(2, num_tokens, num_index_q_heads)](
+    _fused_q_kernel[(3, num_tokens, num_index_q_heads)](
         positions,
-        q,
-        q.stride(0),
-        q.stride(1),
+        q_pe,
+        q_pe.stride(0),
+        q_pe.stride(1),
         num_q_heads,
-        q_cos_sin_cache,
-        q_cos_sin_cache.stride(0),
-        q_cos_sin_cache.shape[-1] // 2,
-        q_start_offset,
+        q_pe_cos_sin_cache,
+        q_pe_cos_sin_cache.stride(0),
+        q_pe_cos_sin_cache.shape[-1] // 2,
         index_q,
         index_q.stride(0),
         index_q.stride(1),
@@ -1021,7 +1097,18 @@ def fused_q(
         index_q_cos_sin_cache.stride(0),
         index_q_cos_sin_cache.shape[-1] // 2,
         index_q_fp8,
+        index_q_fp8.stride(0),
+        index_q_fp8.stride(1),
         index_q_head_dim,
+        ql_nope,
+        ql_nope.stride(0),
+        ql_nope.stride(1),
+        mqa_q_fp8,
+        mqa_q_fp8.stride(0),
+        mqa_q_fp8.stride(1),
+        q_scale,
+        ql_nope.shape[2],
+        triton.next_power_of_2(ql_nope.shape[2]),
         index_weights,
         index_weights.stride(0),
         index_weights_softmax_scale,
@@ -1030,4 +1117,4 @@ def fused_q(
         index_weights_out.stride(0),
         num_warps=1,  # TODO: Tune this
     )
-    return index_q_fp8, index_weights_out
+    return index_q_fp8, index_weights_out, mqa_q_fp8
