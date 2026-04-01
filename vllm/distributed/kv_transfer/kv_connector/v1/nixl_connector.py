@@ -2857,12 +2857,6 @@ class NixlConnectorWorker:
         # just notify P worker that we have the blocks we need.
         has_any_local_blocks = any(len(group) > 0 for group in local_block_ids)
         if not has_any_local_blocks:
-            # Check if this is a real prefix cache hit or an empty intersection.
-            # Empty intersection: remote_block_ids is also empty (DCP don't overlap).
-            # In this case we still send a no-op notification so sender-side
-            # completion can match the expected consumer count.
-            is_empty_intersection = all(len(group) == 0 for group in remote_block_ids)
-
             # Real prefix cache hit or empty intersection: local does not need
             # to issue a READ, but producer still needs this notification.
             agent_name = self._remote_agents[dst_engine_id][remote_worker_key]
