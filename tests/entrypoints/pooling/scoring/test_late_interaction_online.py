@@ -36,7 +36,7 @@ def server(request):
     # Test run pooling score MaxSim on worker side (GPU)
     # aka flash-late-interaction
     if not request.param:
-        args+= ["--no-enable-flash-late-interaction"]
+        args += ["--no-enable-flash-late-interaction"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.config import ModelConfig
@@ -28,7 +27,6 @@ from .protocol import (
     ScoreRequest,
     ScoreResponse,
     ScoreResponseData,
-    ScoringRequest,
 )
 from .typing import ScoreInput
 
@@ -70,15 +68,11 @@ class ServingScores(PoolingServing):
             chat_template_config=chat_template_config,
         )
 
-    async def __call__(
-        self,
-        request: ScoringRequest,
-        raw_request: Request | None = None,
-    ) -> Response:
+    async def __call__(self, *args, **kwargs) -> Response:
         if not self.enable_flash_late_interaction:
-            return await super().__call__(request, raw_request)
+            return await super().__call__(*args, **kwargs)
 
-        return await self.flash_late_interaction(request, raw_request)
+        return await self.flash_late_interaction(*args, **kwargs)
 
     async def _build_response(
         self,
@@ -197,27 +191,9 @@ class ServingScores(PoolingServing):
     ### Run pooling score MaxSim on worker side (GPU) in the API server process
     ### Can significantly improve late-interaction scoring performance.
 
-    async def flash_late_interaction(
-        self,
-        request: ScoringRequest,
-        raw_request: Request | None = None,
-    ) -> Response:
-        model_name = self.models.model_name()
-        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
-
-        await self._check_model(request)
-
-        ctx = ScoringServeContext(
-            request=request,
-            raw_request=raw_request,
-            model_name=model_name,
-            request_id=request_id,
-            pooling_params=request.to_pooling_params("token_embed"),
-        )
-
-        self._validate_request(ctx)
-        self._maybe_get_adapters(ctx)
-
+    async def flash_late_interaction(self, *args, **kwargs) -> Response:
+        ctx = await self._init_ctx(*args, **kwargs)
+        ctx.pooling_params = self.io_processor.create_pooling_params()
         await self.io_processor.pre_process_online_async(ctx)
 
         # stage 1: encode queries and cache token embeddings on workers.
