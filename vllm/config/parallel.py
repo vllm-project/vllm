@@ -16,7 +16,6 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
@@ -35,6 +34,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -82,6 +82,15 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+
+    communicator: EPLBCommunicatorBackend | None = None
+    """
+    Backend for EPLB expert weight communication:
+    - "torch_nccl": Use torch.distributed on the device process group
+    - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "pynccl": Use PyNccl send/recv
+    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -716,9 +725,9 @@ class ParallelConfig:
                 backend = "mp"
             elif (
                 current_platform.is_cuda()
-                and cuda_device_count_stateless() < self.world_size
+                and current_platform.device_count() < self.world_size
             ):
-                gpu_count = cuda_device_count_stateless()
+                gpu_count = current_platform.device_count()
                 raise ValueError(
                     f"World size ({self.world_size}) is larger than the number of "
                     f"available GPUs ({gpu_count}) in this node. If this is "
@@ -764,16 +773,18 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if (
-            self.all2all_backend in ("allgather_reducescatter")
-            and self.eplb_config.use_async
-        ):
-            logger.warning(
-                "Async EPLB causes hangs with the '%s' all2all backend. "
-                "Forcing synchronous EPLB.",
-                self.all2all_backend,
-            )
-            self.eplb_config.use_async = False
+        if self.enable_eplb and self.eplb_config.communicator is None:
+            if self.enable_elastic_ep:
+                # Elastic EP requires stateless mode
+                # (torch.distributed.batch_isend_irecv doesn't
+                # support stateless mode), so we use PyNCCL backend
+                self.eplb_config.communicator = "pynccl"
+            elif self.eplb_config.use_async:
+                # Torch Gloo is a backend that allows avoiding hangs
+                # due to NCCL multi-thread conflicts in async EPLB
+                self.eplb_config.communicator = "torch_gloo"
+            else:
+                self.eplb_config.communicator = "torch_nccl"
 
     @property
     def use_ray(self) -> bool:
