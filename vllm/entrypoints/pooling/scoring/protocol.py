@@ -95,6 +95,16 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
     top_n: int = Field(default_factory=lambda: 0)
+    max_tokens_per_doc: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of tokens per document. Documents longer than "
+            "this will be truncated to this length. If not specified, no "
+            "document-level truncation is applied (only truncate_prompt_tokens "
+            "applies to the combined query+document). This parameter is useful "
+            "for limiting document length independently of the query."
+        ),
+    )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}

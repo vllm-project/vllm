@@ -247,6 +247,18 @@ class PoolingServing:
                 "greater than max_model_len."
                 " Please request a smaller truncation size."
             )
+
+        max_tokens_per_doc = getattr(ctx.request, "max_tokens_per_doc", None)
+        if max_tokens_per_doc is not None:
+            if max_tokens_per_doc <= 0:
+                raise ValueError(
+                    "max_tokens_per_doc must be a positive integer"
+                )
+            if max_tokens_per_doc >= self.max_model_len:
+                raise ValueError(
+                    f"max_tokens_per_doc ({max_tokens_per_doc}) must be less "
+                    f"than max_model_len ({self.max_model_len})."
+                )
         return None
 
     async def _get_trace_headers(

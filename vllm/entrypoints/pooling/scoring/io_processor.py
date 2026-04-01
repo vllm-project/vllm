@@ -25,8 +25,10 @@ from .typing import ScoreData, ScoreInput, ScoringData
 from .utils import (
     compress_token_type_ids,
     compute_maxsim_score,
+    get_num_special_tokens_for_pair,
     parse_score_data,
     score_data_to_prompts,
+    truncate_text_to_tokens,
     validate_score_input,
 )
 
@@ -47,6 +49,26 @@ class ScoringIOProcessor(PoolingIOProcessor):
 
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
+
+    def _validate_max_tokens_per_doc(self, max_tokens_per_doc: int) -> None:
+        if max_tokens_per_doc <= 0:
+            raise ValueError("max_tokens_per_doc must be a positive integer")
+        if max_tokens_per_doc >= self.model_config.max_model_len:
+            raise ValueError(
+                f"max_tokens_per_doc ({max_tokens_per_doc}) must be less "
+                f"than max_model_len ({self.model_config.max_model_len})."
+            )
+
+    def _truncate_data_2(
+        self, scoring_data: ScoringData, max_tokens_per_doc: int
+    ) -> ScoringData:
+        """Truncate document texts in data_2 to max_tokens_per_doc."""
+        truncated = []
+        for d in scoring_data.data_2:
+            if isinstance(d, str):
+                d = truncate_text_to_tokens(d, self.tokenizer, max_tokens_per_doc)
+            truncated.append(d)
+        return ScoringData(data_1=scoring_data.data_1, data_2=truncated)
 
     def valid_inputs(
         self,
@@ -81,7 +103,13 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
+        max_tokens_per_doc = getattr(request, "max_tokens_per_doc", None)
         scoring_data = self.valid_inputs(data_1, data_2)
+
+        if max_tokens_per_doc is not None:
+            self._validate_max_tokens_per_doc(max_tokens_per_doc)
+            scoring_data = self._truncate_data_2(scoring_data, max_tokens_per_doc)
+
         tok_params = request.build_tok_params(self.model_config)
         engine_inputs = self._pre_process(
             scoring_data,
@@ -115,7 +143,21 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
-        return self._pre_process(ctx.prompts, tok_params)
+
+        max_tokens_per_doc = None
+        if ctx.pooling_params is not None and not isinstance(
+            ctx.pooling_params, list
+        ):
+            max_tokens_per_doc = ctx.pooling_params.extra_kwargs.get(
+                "max_tokens_per_doc"
+            ) if ctx.pooling_params.extra_kwargs else None
+
+        scoring_data = ctx.prompts
+        if max_tokens_per_doc is not None:
+            self._validate_max_tokens_per_doc(max_tokens_per_doc)
+            scoring_data = self._truncate_data_2(scoring_data, max_tokens_per_doc)
+
+        return self._pre_process(scoring_data, tok_params)
 
     def post_process_offline(
         self,
@@ -254,7 +296,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
+        max_tokens_per_doc = getattr(request, "max_tokens_per_doc", None)
         scoring_data = self.valid_inputs(data_1, data_2)
+
+        if max_tokens_per_doc is not None:
+            self._validate_max_tokens_per_doc(max_tokens_per_doc)
+
         tok_params = request.build_tok_params(self.model_config)
         pooling_params = self.create_pooling_params(request)
 
@@ -263,6 +310,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             tok_params,
             pooling_params,
             chat_template=self.chat_template,
+            max_tokens_per_doc=max_tokens_per_doc,
             prompt_extras={
                 k: v
                 for k in ("mm_processor_kwargs", "cache_salt")
@@ -283,8 +331,20 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
+
+        max_tokens_per_doc = None
+        if ctx.pooling_params is not None:
+            max_tokens_per_doc = ctx.pooling_params.extra_kwargs.get(
+                "max_tokens_per_doc"
+            ) if ctx.pooling_params.extra_kwargs else None
+
+        scoring_data = ctx.prompts
+        if max_tokens_per_doc is not None:
+            self._validate_max_tokens_per_doc(max_tokens_per_doc)
+
         engine_inputs, pooling_params_list = self._pre_process(
-            ctx.prompts, tok_params, ctx.pooling_params, ctx.chat_template
+            scoring_data, tok_params, ctx.pooling_params, ctx.chat_template,
+            max_tokens_per_doc=max_tokens_per_doc,
         )
         ctx.pooling_params = pooling_params_list
         return engine_inputs
@@ -298,6 +358,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tok_params: TokenizeParams,
         pooling_params: PoolingParams | None,
         chat_template: str | None = None,
+        max_tokens_per_doc: int | None = None,
         prompt_extras: dict[str, Any] | None = None,
     ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
         # todo: support prompt_extras
@@ -320,6 +381,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 data_2=d,
                 encode_kwargs=tok_params.get_encode_kwargs(),
                 chat_template=chat_template,
+                max_tokens_per_doc=max_tokens_per_doc,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
@@ -342,6 +404,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         data_2: ScoreData,
         encode_kwargs: dict[str, Any],
         chat_template: str | None = None,
+        max_tokens_per_doc: int | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -353,24 +416,70 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         def default_tokenizer_encode():
+            nonlocal prompt_2
+            local_kwargs = encode_kwargs.copy()
+
             if self.supports_score_template:
                 assert self.model is not None
+                # Template case — truncate text before applying template
+                if max_tokens_per_doc is not None and isinstance(prompt_2, str):
+                    prompt_2 = truncate_text_to_tokens(
+                        prompt_2, tokenizer, max_tokens_per_doc
+                    )
                 full_prompt = self.model.get_score_template(prompt_1, prompt_2)
                 if full_prompt is None:
                     raise ValueError("Get empty score template from model")
 
-                prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
+                prompt_inputs = tokenizer(full_prompt, **local_kwargs)
             else:
                 if self.use_sep_token:
-                    # cross_encoder models defaults to using separating token.
+                    # Cross-encoder — use tokenizer's built-in truncation
+                    if max_tokens_per_doc is not None and isinstance(
+                        prompt_2, str
+                    ):
+                        query_tokens = tokenizer.encode(
+                            prompt_1, add_special_tokens=False
+                        )
+                        num_special = get_num_special_tokens_for_pair(tokenizer)
+                        doc_limit_max_length = (
+                            len(query_tokens)
+                            + max_tokens_per_doc
+                            + num_special
+                        )
+                        existing_max_length = local_kwargs.get("max_length")
+                        if existing_max_length is not None:
+                            effective_max_length = min(
+                                doc_limit_max_length, existing_max_length
+                            )
+                        else:
+                            effective_max_length = doc_limit_max_length
+                        local_kwargs["truncation"] = "only_second"
+                        local_kwargs["max_length"] = effective_max_length
+
                     prompt_inputs = tokenizer(
-                        text=prompt_1, text_pair=prompt_2, **encode_kwargs
+                        text=prompt_1, text_pair=prompt_2, **local_kwargs
                     )
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
-                    # `llm as reranker` defaults to not using separating token.
-                    full_prompt = prompt_1 + prompt_2
-                    prompt_inputs = tokenizer(text=full_prompt, **encode_kwargs)
+                    # `llm as reranker` — direct token slicing
+                    if max_tokens_per_doc is not None and isinstance(
+                        prompt_2, str
+                    ):
+                        query_ids = tokenizer.encode(
+                            prompt_1, add_special_tokens=False
+                        )
+                        doc_ids = tokenizer.encode(
+                            prompt_2, add_special_tokens=False
+                        )
+                        doc_ids = doc_ids[:max_tokens_per_doc]
+                        input_ids = query_ids + doc_ids
+                        full_prompt = tokenizer.decode(input_ids)
+                        prompt_inputs = {"input_ids": input_ids}
+                    else:
+                        full_prompt = prompt_1 + prompt_2
+                        prompt_inputs = tokenizer(
+                            text=full_prompt, **local_kwargs
+                        )
             return full_prompt, prompt_inputs
 
         # FIXME: For now, we only apply a template when one is explicitly provided.
@@ -385,12 +494,20 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             # If that fails because there is no such template,
             # fall back to the default implementation.
             try:
+                # Template case — truncate text first if needed
+                doc_content = prompt_2
+                if max_tokens_per_doc is not None and isinstance(
+                    prompt_2, str
+                ):
+                    doc_content = truncate_text_to_tokens(
+                        prompt_2, tokenizer, max_tokens_per_doc
+                    )
                 full_prompt = safe_apply_chat_template(
                     model_config,
                     tokenizer,
                     [
                         {"role": "query", "content": prompt_1},
-                        {"role": "document", "content": prompt_2},
+                        {"role": "document", "content": doc_content},
                     ],
                     chat_template=chat_template,
                     tools=None,
