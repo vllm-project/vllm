@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import re
 import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, overload
 
+import regex as re
 import torch
 from pydantic import Field, field_validator, model_validator
 from torch.distributed import ProcessGroup, ReduceOp, Store
