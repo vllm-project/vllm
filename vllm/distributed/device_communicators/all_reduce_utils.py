@@ -146,7 +146,7 @@ def _should_nccl_symm_mem_collective(
         is_symmetric_memory_enabled,
     )
 
-    if envs.VLLM_BATCH_INVARIANT:
+    if getattr(envs, "VLLM_BATCH_INVARIANT", False):
         return False
     if not is_symmetric_memory_enabled():
         return False
