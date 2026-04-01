@@ -61,12 +61,25 @@ vllm-rs serve Qwen/Qwen3-0.6B \
   --python xxx/vllm/.venv/bin/python \
   --data-parallel-size 2 \
   --max-model-len 4096 \
+  --tensor-parallel-size 2 \
+  --more-engine-args ...
+```
+
+`vllm-rs serve` automatically keeps Rust frontend-owned args on the Rust side and forwards
+everything else to the managed Python engine. If you want to force raw passthrough without any
+Rust-side interpretation, you can still use an explicit `--`:
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --python xxx/vllm/.venv/bin/python \
+  --max-model-len 4096 \
   -- \
   --tensor-parallel-size 2 \
   --more-engine-args ...
 ```
 
-Note that not all original `vllm serve` args are supported yet. For additional args that are only recognized by the Python engine, you have to place them after `--` to bypass Rust-side parsing and directly forward them to the managed Python engine.
+Note that not all original `vllm serve` frontend args are supported yet. Unsupported frontend args
+are recognized by `vllm-rs` and reported explicitly instead of being forwarded.
 
 ### External Engine
 

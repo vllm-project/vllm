@@ -4527,6 +4527,7 @@ dependencies = [
  "educe",
  "expect-test",
  "futures",
+ "itertools 0.14.0",
  "libc",
  "time",
  "tokio",

@@ -12,6 +12,7 @@ anyhow.workspace = true
 clap.workspace = true
 educe.workspace = true
 futures.workspace = true
+itertools.workspace = true
 libc.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["process", "signal"] }

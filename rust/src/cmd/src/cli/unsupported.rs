@@ -13,7 +13,13 @@ impl FromStr for Unsupported {
     type Err = String;
 
     fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        Err("argument is not implemented in Rust frontend yet".to_string())
+        Err("argument is not implemented in Rust frontend yet
+
+Remove this unsupported argument to continue.
+
+Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
+This may lead to unexpected behavior as the Rust frontend will completely ignore that argument."
+            .to_string())
     }
 }
 

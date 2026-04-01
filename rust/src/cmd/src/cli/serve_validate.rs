@@ -2,9 +2,9 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 
 use clap::CommandFactory as _;
-use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::error::ErrorKind;
 
-use crate::cli::{Cli, Command};
+use crate::cli::Cli;
 
 /// Python `argparse` accepts these multi-character single-dash aliases, but `clap` cannot model
 /// them directly.
@@ -28,136 +28,84 @@ const PYTHON_MULTI_CHAR_ALIASES: &[(&str, &str)] = &[
     ("-ac", "--attention-config"),
 ];
 
-/// Normalize Python-only multi-character single-dash aliases before they reach `clap`.
-///
-/// This only rewrites arguments before `--`. Passthrough arguments after `--` must stay byte-for-
-/// byte unchanged so they can be forwarded directly to Python.
-pub(super) fn normalize_python_arg_aliases(args: &[OsString]) -> Vec<OsString> {
-    let mut normalized = Vec::with_capacity(args.len());
-    let mut seen_serve = false;
-    let mut in_passthrough = false;
+/// Repartition `serve` argv so Rust frontend-owned flags stay before `--`, while everything else
+/// is forwarded to Python.
+pub(super) fn repartition_serve_args(args: &[OsString]) -> Result<Vec<OsString>, clap::Error> {
+    if args.get(1).map(|arg| arg.as_os_str()) != Some("serve".as_ref()) {
+        return Ok(args.to_vec());
+    }
 
-    for (index, arg) in args.iter().enumerate() {
-        if index == 0 {
-            normalized.push(arg.clone());
-            continue;
-        }
+    if args.get(2).is_none() {
+        return Ok(args.to_vec());
+    }
 
+    let model = args[2].to_string_lossy();
+    if is_help_flag(&model) {
+        return Ok(args.to_vec());
+    }
+    if model == "--" || is_option_like(&model) {
+        return Err(build_missing_model_error());
+    }
+
+    let (front_args, explicit_passthrough, had_separator) = split_serve_args(&args[3..]);
+    let normalized_front_args = normalize_python_arg_aliases(front_args);
+    let (long_flags, short_flags) = collect_frontend_option_names();
+
+    let mut frontend_chunks = Vec::new();
+    let mut python_chunks = Vec::new();
+    let mut current_chunk = Vec::new();
+
+    for arg in normalized_front_args {
         let text = arg.to_string_lossy();
-        if !seen_serve {
-            if text == "serve" {
-                seen_serve = true;
-            }
-            normalized.push(arg.clone());
-            continue;
+        if is_option_like(&text) && !current_chunk.is_empty() {
+            push_chunk(
+                &mut frontend_chunks,
+                &mut python_chunks,
+                std::mem::take(&mut current_chunk),
+                &long_flags,
+                &short_flags,
+            );
         }
-
-        if in_passthrough {
-            normalized.push(arg.clone());
-            continue;
-        }
-
-        if text == "--" {
-            in_passthrough = true;
-            normalized.push(arg.clone());
-            continue;
-        }
-
-        if let Some(canonical) = normalize_python_multi_char_alias(&text) {
-            normalized.push(canonical.into());
-        } else {
-            normalized.push(arg.clone());
-        }
+        current_chunk.push(arg);
+    }
+    if !current_chunk.is_empty() {
+        push_chunk(
+            &mut frontend_chunks,
+            &mut python_chunks,
+            current_chunk,
+            &long_flags,
+            &short_flags,
+        );
     }
 
-    normalized
+    let mut repartitioned = vec![args[0].clone(), args[1].clone(), args[2].clone()];
+    repartitioned.extend(frontend_chunks);
+    if had_separator || !python_chunks.is_empty() || !explicit_passthrough.is_empty() {
+        repartitioned.push("--".into());
+        repartitioned.extend(python_chunks);
+        repartitioned.extend(explicit_passthrough.iter().cloned());
+    }
+
+    Ok(repartitioned)
 }
 
-/// Rewrite clap errors about unknown arguments in the `serve` subcommand to clarify the `--`
-/// separator for Python engine flags.
-pub(super) fn rewrite_unknown_arg_error(args: &[OsString], error: clap::Error) -> clap::Error {
-    if error.kind() != ErrorKind::UnknownArgument {
-        return error;
+fn split_serve_args(args: &[OsString]) -> (&[OsString], &[OsString], bool) {
+    if let Some(index) = args.iter().position(|arg| arg == "--") {
+        (&args[..index], &args[index + 1..], true)
+    } else {
+        (args, &[], false)
     }
-    let subcommand = args
-        .iter()
-        .skip(1)
-        .find(|s| !s.to_string_lossy().starts_with('-'));
-    if subcommand.map(|s| s.as_os_str()) != Some("serve".as_ref()) {
-        return error;
-    }
-    let Some(ContextValue::String(unrecognized_arg)) = error.get(ContextKind::InvalidArg) else {
-        return error;
-    };
-
-    let mut command = Cli::command();
-    let serve_command = command
-        .find_subcommand_mut("serve")
-        .expect("serve subcommand should exist");
-    serve_command.error(
-        ErrorKind::UnknownArgument,
-        format!(
-            "unrecognized serve argument {unrecognized_arg:?}\n\n\
-             This may be a flag the Rust frontend does not support yet, or a Python vLLM engine \
-             flag.\nIf it is a Python engine flag, pass it after `--`, for example:\n    \
-             vllm-rs serve <model> -- {unrecognized_arg}"
-        ),
-    )
 }
 
-/// Reject Rust-side `serve` flags when users accidentally place them after `--`.
-pub(super) fn validate_passthrough_args(cli: Cli) -> Result<Cli, clap::Error> {
-    let Command::Serve(args) = &cli.command else {
-        return Ok(cli);
-    };
-
-    let Some((arg, canonical)) = find_misplaced_passthrough_arg(&args.python_args) else {
-        return Ok(cli);
-    };
-
-    Err(build_misplaced_passthrough_arg_error(arg, canonical))
-}
-
-/// Find the first passthrough token that is actually a Rust-side `serve` option.
-fn find_misplaced_passthrough_arg(python_args: &[String]) -> Option<(String, String)> {
-    let (long_flags, short_flags) = collect_option_names();
-    for arg in python_args {
-        if let Some(rest) = arg.strip_prefix("--") {
-            let name = rest.split_once('=').map_or(rest, |(name, _)| name);
-            if long_flags.contains(name) {
-                let canonical = format!("--{name}");
-                return Some((canonical.clone(), canonical));
-            }
-            continue;
-        }
-
-        if let Some(canonical) = find_python_multi_char_alias(arg) {
-            let name = canonical
-                .strip_prefix("--")
-                .expect("canonical alias should be a long option");
-            if long_flags.contains(name) {
-                return Some((arg.to_string(), canonical.to_string()));
-            }
-            continue;
-        }
-
-        let Some(rest) = arg.strip_prefix('-') else {
-            continue;
-        };
-        if rest.is_empty() {
-            continue;
-        }
-
-        let Some(short) = rest.chars().next() else {
-            continue;
-        };
-        if short_flags.contains(&short) {
-            let canonical = format!("-{short}");
-            return Some((canonical.clone(), canonical));
-        }
-    }
-
-    None
+fn normalize_python_arg_aliases(args: &[OsString]) -> Vec<OsString> {
+    args.iter()
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            normalize_python_multi_char_alias(&text)
+                .map(Into::into)
+                .unwrap_or_else(|| arg.clone())
+        })
+        .collect()
 }
 
 fn normalize_python_multi_char_alias(arg: &str) -> Option<String> {
@@ -167,7 +115,6 @@ fn normalize_python_multi_char_alias(arg: &str) -> Option<String> {
     })
 }
 
-/// Match Python-only multi-character single-dash aliases.
 fn find_python_multi_char_alias(arg: &str) -> Option<&'static str> {
     PYTHON_MULTI_CHAR_ALIASES
         .iter()
@@ -176,8 +123,45 @@ fn find_python_multi_char_alias(arg: &str) -> Option<&'static str> {
         })
 }
 
-/// Collect all long/short option names recognized by the Rust `serve` subcommand.
-fn collect_option_names() -> (HashSet<String>, HashSet<char>) {
+fn push_chunk(
+    frontend_chunks: &mut Vec<OsString>,
+    python_chunks: &mut Vec<OsString>,
+    chunk: Vec<OsString>,
+    long_flags: &HashSet<String>,
+    short_flags: &HashSet<char>,
+) {
+    if chunk_head_is_frontend_owned(&chunk, long_flags, short_flags) {
+        frontend_chunks.extend(chunk);
+    } else {
+        python_chunks.extend(chunk);
+    }
+}
+
+fn chunk_head_is_frontend_owned(
+    chunk: &[OsString],
+    long_flags: &HashSet<String>,
+    short_flags: &HashSet<char>,
+) -> bool {
+    let Some(head) = chunk.first() else {
+        return false;
+    };
+    let head = head.to_string_lossy();
+
+    if let Some(rest) = head.strip_prefix("--") {
+        let name = rest.split_once('=').map_or(rest, |(name, _)| name);
+        return long_flags.contains(name);
+    }
+
+    let Some(rest) = head.strip_prefix('-') else {
+        return false;
+    };
+    let Some(short) = rest.chars().next() else {
+        return false;
+    };
+    short_flags.contains(&short)
+}
+
+fn collect_frontend_option_names() -> (HashSet<String>, HashSet<char>) {
     let mut command = Cli::command();
     let serve_command = command
         .find_subcommand_mut("serve")
@@ -197,25 +181,39 @@ fn collect_option_names() -> (HashSet<String>, HashSet<char>) {
         }
     }
 
-    // Clap injects built-in help flags separately from user-defined arguments.
     long_flags.insert("help".to_string());
     short_flags.insert('h');
 
     (long_flags, short_flags)
 }
 
-/// Build one targeted error for a Rust-side `serve` argument that was placed after `--`.
-fn build_misplaced_passthrough_arg_error(arg: String, canonical: String) -> clap::Error {
+fn is_option_like(arg: &str) -> bool {
+    if arg == "--" {
+        return false;
+    }
+
+    if let Some(rest) = arg.strip_prefix("--") {
+        return rest.chars().next().is_some_and(char::is_alphabetic);
+    }
+
+    if let Some(rest) = arg.strip_prefix('-') {
+        return rest.chars().next().is_some_and(char::is_alphabetic);
+    }
+
+    false
+}
+
+fn is_help_flag(arg: &str) -> bool {
+    arg == "-h" || arg == "--help"
+}
+
+fn build_missing_model_error() -> clap::Error {
     let mut command = Cli::command();
     let serve_command = command
         .find_subcommand_mut("serve")
         .expect("serve subcommand should exist");
     serve_command.error(
-        ErrorKind::UnknownArgument,
-        format!(
-            "misplaced serve argument {arg:?} after `--`\n\n\
-             Arguments after `--` are forwarded directly to the managed Python `vllm serve \
-             --headless` process.\nUse {canonical:?} before `--` to configure `vllm-rs serve`."
-        ),
+        ErrorKind::MissingRequiredArgument,
+        "serve requires the model to appear immediately after the subcommand",
     )
 }
