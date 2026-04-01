@@ -71,8 +71,15 @@ else:
     _layer_name_type = ModuleName if HAS_OPAQUE_TYPE else str
 
 
+@torch.compiler.assume_constant_result
 def _resolve_layer_name(layer_name: str | ModuleName) -> str:
-    return layer_name.value if isinstance(layer_name, ModuleName) else layer_name
+    from torch._library.fake_class_registry import FakeScriptObject
+
+    if isinstance(layer_name, ModuleName):
+        return layer_name.value
+    elif isinstance(layer_name, FakeScriptObject):
+        return layer_name.real_obj.value
+    return layer_name
 
 
 # Note: _moe_forward and _moe_forward_shared should not contain any
