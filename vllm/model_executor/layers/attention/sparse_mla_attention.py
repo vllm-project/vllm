@@ -68,7 +68,7 @@ def _scatter_topk_kernel(
     topk_ptr,
     cu_q_lens_ptr,
     num_words: tl.constexpr,
-    topk: tl.constexpr,
+    num_topk: tl.constexpr,
     topk_stride: tl.constexpr,
     max_q_len: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
@@ -91,7 +91,7 @@ def _scatter_topk_kernel(
 
     topk_row_ptr = topk_ptr + row_idx * topk_stride
     offsets = tl.arange(0, BLOCK_TOPK)
-    in_range = offsets < topk
+    in_range = offsets < num_topk
     indices = tl.load(topk_row_ptr + offsets, mask=in_range, other=-1)
 
     valid = in_range & (indices >= 0)
@@ -120,19 +120,19 @@ def _build_topk_mask(
         return mask
 
     topk_packed = torch.cat(topk_indices_per_req, dim=0)
-    topk_k = topk_packed.shape[1]
+    num_topk = topk_packed.shape[1]
 
     q_lens_t = torch.tensor(q_lens, dtype=torch.int32, device=device)
     cu_q_lens = torch.zeros(B + 1, dtype=torch.int32, device=device)
     torch.cumsum(q_lens_t, dim=0, out=cu_q_lens[1:])
 
-    BLOCK_TOPK = triton.next_power_of_2(topk_k)
+    BLOCK_TOPK = triton.next_power_of_2(num_topk)
     _scatter_topk_kernel[(total_q,)](
         mask,
         topk_packed,
         cu_q_lens,
         num_words=num_words,
-        topk=topk_k,
+        num_topk=num_topk,
         topk_stride=topk_packed.stride(0),
         max_q_len=max_q_len,
         BLOCK_TOPK=BLOCK_TOPK,
