@@ -261,8 +261,8 @@ class RopeReshapeKVCachePattern:
 
 class RopeMLAKVCachePattern:
     """
-    This pass fuses the rotary embedding and KV cache update operations for MLA.
-    Note: this only works when FlashInfer RoPE is enabled.
+    Match the DeepSeek-V3 flashinfer rope and cache update chain,
+    replace with fused_rope_and_unified_mla_kv_cache_update.
     """
 
     FUSED_OP = torch.ops.vllm.fused_rope_and_unified_mla_kv_cache_update.default
@@ -274,7 +274,9 @@ class RopeMLAKVCachePattern:
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
+        self.q_lora_rank = layer.q_lora_rank
         self.kv_lora_rank = layer.kv_lora_rank
+        self.qk_nope_head_dim = layer.qk_nope_head_dim
         self.qk_rope_head_dim = layer.qk_rope_head_dim
         self.kv_cache_dtype = layer.kv_cache_dtype
         self.is_neox = is_neox
@@ -290,55 +292,107 @@ class RopeMLAKVCachePattern:
     def get_inputs(self) -> list[torch.Tensor]:
         T = 5
         L = 4096
-        q_pe = empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
+        assert self.q_lora_rank is not None
+        kv_total_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        q_rope = empty_bf16(
+            T, self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim
+        )
+        q_scatter = empty_bf16(
+            T, self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim
+        )
+        k_c_and_k_pe = empty_bf16(T, kv_total_dim)
         k_pe_2d = empty_bf16(T, self.qk_rope_head_dim)
-        k_c_and_k_pe = empty_bf16(T, self.kv_lora_rank + self.qk_rope_head_dim)
+        qkv_lora = empty_bf16(T, self.q_lora_rank + kv_total_dim)
         kv_c = empty_bf16(T, self.kv_lora_rank)
         positions = empty_i64(T)
         cos_sin_cache = empty_bf16(L, self.qk_rope_head_dim)
-        k_scale = torch.empty(1, dtype=torch.float32, device=q_pe.device)
-        return [q_pe, k_pe_2d, k_c_and_k_pe, kv_c, positions, cos_sin_cache, k_scale]
+        k_scale = torch.empty(1, dtype=torch.float32, device=q_rope.device)
+        return [
+            q_rope,
+            q_scatter,
+            k_c_and_k_pe,
+            k_pe_2d,
+            qkv_lora,
+            kv_c,
+            positions,
+            cos_sin_cache,
+            k_scale,
+        ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
+        if self.q_lora_rank is None:
+            return
+
+        kv_total_dim = self.kv_lora_rank + self.qk_rope_head_dim
+
         def pattern(
-            q_pe: torch.Tensor,
-            k_pe_2d: torch.Tensor,
+            q_rope: torch.Tensor,
+            q_scatter: torch.Tensor,
             k_c_and_k_pe: torch.Tensor,
+            k_pe_2d: torch.Tensor,
+            qkv_lora: torch.Tensor,
             kv_c: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe = k_pe_2d.unsqueeze(1)
+            q_pe = q_rope[..., self.qk_nope_head_dim :]
             q_pe, k_pe = self.rope_matcher(positions, q_pe, k_pe, cos_sin_cache)
             assert k_pe is not None
-            k_pe_2d = k_pe.squeeze(1)
+            k_pe_2d_new = k_pe.squeeze(1)
             k_c_and_k_pe = k_c_and_k_pe.slice_scatter(
-                k_pe_2d,
+                k_pe_2d_new,
                 dim=1,
                 start=self.kv_lora_rank,
                 end=self.kv_lora_rank + self.qk_rope_head_dim,
             )
-            _, k_pe_2d = k_c_and_k_pe.split(
+            qkv_lora = qkv_lora.slice_scatter(
+                k_c_and_k_pe,
+                dim=1,
+                start=self.q_lora_rank,
+                end=self.q_lora_rank + kv_total_dim,
+            )
+            _, k_c_and_k_pe = qkv_lora.split([self.q_lora_rank, kv_total_dim], dim=-1)
+            _, k_pe_2d_final = k_c_and_k_pe.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
-            k_pe = k_pe_2d.unsqueeze(1)
+            k_pe = k_pe_2d_final.unsqueeze(1)
+            # Keep explicit "slice to end" sentinel to match traced FX graph
+            # exactly; omitting end makes pattern miss in DeepSeek-V3 e2e.
+            q = q_scatter.slice_scatter(
+                q_pe,
+                dim=2,
+                start=self.qk_nope_head_dim,
+                end=9223372036854775807,
+            )
+            # Keep an explicit extra slice user to match the traced graph.
+            q_unused = q[..., self.qk_nope_head_dim :]
+            q_slice = q[..., self.qk_nope_head_dim :]
+            q = q.slice_scatter(
+                q_slice,
+                dim=2,
+                start=self.qk_nope_head_dim,
+                end=9223372036854775807,
+            )
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c, k_pe, self.layer_name, self.kv_cache_dtype, k_scale
             )
-            return dummy, q_pe, k_pe
+            return dummy, q, k_pe, q_unused
 
         def replacement(
-            q_pe: torch.Tensor,
-            k_pe_2d: torch.Tensor,
+            q_rope: torch.Tensor,
+            q_scatter: torch.Tensor,
             k_c_and_k_pe: torch.Tensor,
+            k_pe_2d: torch.Tensor,
+            qkv_lora: torch.Tensor,
             kv_c: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            del k_c_and_k_pe
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe = k_pe_2d.unsqueeze(1)
+            q_pe = q_rope[..., self.qk_nope_head_dim :]
             results = auto_functionalized(
                 self.FUSED_OP,
                 positions=positions,
@@ -351,7 +405,42 @@ class RopeMLAKVCachePattern:
                 kv_cache_dtype=self.kv_cache_dtype,
                 k_scale=k_scale,
             )
-            return results[0], results[1], results[2]
+            k_pe_2d_new = results[2].squeeze(1)
+            k_c_and_k_pe = k_c_and_k_pe.slice_scatter(
+                k_pe_2d_new,
+                dim=1,
+                start=self.kv_lora_rank,
+                end=self.kv_lora_rank + self.qk_rope_head_dim,
+            )
+            qkv_lora = qkv_lora.slice_scatter(
+                k_c_and_k_pe,
+                dim=1,
+                start=self.q_lora_rank,
+                end=self.q_lora_rank + kv_total_dim,
+            )
+            _, k_c_and_k_pe = qkv_lora.split([self.q_lora_rank, kv_total_dim], dim=-1)
+            _, k_pe_2d_final = k_c_and_k_pe.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            k_pe = k_pe_2d_final.unsqueeze(1)
+            # Keep explicit "slice to end" sentinel to match traced FX graph
+            # exactly; omitting end makes pattern miss in DeepSeek-V3 e2e.
+            q = q_scatter.slice_scatter(
+                results[1],
+                dim=2,
+                start=self.qk_nope_head_dim,
+                end=9223372036854775807,
+            )
+            # Keep parity with pattern graph users.
+            q_unused = q[..., self.qk_nope_head_dim :]
+            q_slice = q[..., self.qk_nope_head_dim :]
+            q = q.slice_scatter(
+                q_slice,
+                dim=2,
+                start=self.qk_nope_head_dim,
+                end=9223372036854775807,
+            )
+            return results[0], q, k_pe, q_unused
 
         def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
             gm = pm.fwd_only(*args, **kwargs)
