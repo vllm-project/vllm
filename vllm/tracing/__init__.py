@@ -9,6 +9,7 @@ from typing import Any, TypeAlias
 from .otel import (
     SpanKind,
     extract_trace_context,
+    get_trace_headers_from_context,
     init_otel_tracer,
     init_otel_worker_tracer,
     instrument_otel,
@@ -33,6 +34,7 @@ __all__ = [
     "SpanKind",
     "extract_trace_context",
     "extract_trace_headers",
+    "get_trace_headers_from_context",
     "log_tracing_disabled_warning",
     "contains_trace_headers",
     "otel_import_error_traceback",
@@ -125,6 +127,7 @@ def instrument_manual(
     attributes: dict[str, Any] | None = None,
     context: Any = None,
     kind: Any = None,
+    use_environment_context: bool = True,
 ):
     """Manually create a span with explicit timestamps.
 
@@ -135,11 +138,20 @@ def instrument_manual(
         attributes: Optional dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        use_environment_context: Whether to fall back to trace headers stored
+            in process environment variables when no explicit context is
+            provided.
     """
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():
         return manual_instrument_fn(
-            span_name, start_time, end_time, attributes, context, kind
+            span_name,
+            start_time,
+            end_time,
+            attributes,
+            context,
+            kind,
+            use_environment_context,
         )
     else:
         return None

@@ -27,6 +27,7 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
+    get_trace_headers_from_context,
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
@@ -249,7 +250,11 @@ class PoolingServing:
         is_tracing_enabled = await self.engine_client.is_tracing_enabled()
 
         if is_tracing_enabled:
-            return extract_trace_headers(headers)
+            trace_headers = extract_trace_headers(headers)
+            if trace_headers:
+                return trace_headers
+
+            return get_trace_headers_from_context()
 
         if contains_trace_headers(headers):
             log_tracing_disabled_warning()
