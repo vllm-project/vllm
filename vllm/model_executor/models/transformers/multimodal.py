@@ -302,8 +302,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             self.check_version("5.0.0", "multimodal encoder compilation support")
             self._decorate_cls_for_torch_compile(
                 cls=self._get_encoder_cls(**kwargs),
-                # TODO: properly infer dynamic_arg_dims based
-                # on the encoder's forward method signature
+                # TODO: properly infer dynamic_arg_dims based on the encoder's forward
+                # method signature. Currently we assume dim 0 for all tensor inputs.
                 dynamic_arg_dims=None,
                 enable_if=should_torch_compile_mm_encoder,
                 is_encoder=True,
