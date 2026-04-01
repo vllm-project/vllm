@@ -16,7 +16,7 @@ from ....conftest import (
     PromptImageInput,
     VllmRunner,
 )
-from ....utils import multi_gpu_test
+from ....utils import large_gpu_test, multi_gpu_test
 from ...utils import check_logprobs_close
 
 MODEL_ID = "microsoft/Phi-4-reasoning-vision-15B"
@@ -155,6 +155,7 @@ def _run_and_compare(
         )
 
 
+@large_gpu_test(min_gb=48)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [MODEL_ID])
 def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
@@ -171,6 +172,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
     )
 
 
+@large_gpu_test(min_gb=48)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [MODEL_ID])
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model) -> None:
