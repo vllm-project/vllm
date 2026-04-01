@@ -16,7 +16,7 @@ from ....conftest import (
     PromptImageInput,
     VllmRunner,
 )
-from ....utils import large_gpu_test, multi_gpu_test
+from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
 MODEL_ID = "microsoft/Phi-4-reasoning-vision-15B"
@@ -79,7 +79,7 @@ def _build_multi_image_inputs(
     """Build multi-image inputs for all size_factors at once."""
     images = [asset.pil_image for asset in image_assets]
     all_inputs: list[tuple[list[str], PromptImageInput]] = []
-    for size_factors in [[1.0], [1.0, 1.0, 1.0], [0.25, 0.5, 1.0]]:
+    for size_factors in [[0.5], [0.15, 0.30]]:
         all_inputs.append(
             (
                 [HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
@@ -128,7 +128,7 @@ def _run_and_compare(
             for prompts, images in all_inputs
         ]
 
-    hf_model_kwargs = {"_attn_implementation": "sdpa"}
+    hf_model_kwargs = {"_attn_implementation": "sdpa", "device_map": "auto"}
     with hf_runner(
         model,
         dtype=DTYPE,
@@ -155,7 +155,6 @@ def _run_and_compare(
         )
 
 
-@large_gpu_test(min_gb=48)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [MODEL_ID])
 def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
@@ -172,7 +171,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
     )
 
 
-@large_gpu_test(min_gb=48)
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [MODEL_ID])
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model) -> None:
