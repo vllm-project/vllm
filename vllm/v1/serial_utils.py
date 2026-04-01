@@ -203,6 +203,9 @@ class MsgpackEncoder:
                 for v in (obj.start, obj.stop, obj.step)
             )
 
+        if isinstance(obj, np.generic):
+            return obj.item()
+
         if isinstance(obj, MultiModalKwargsItem):
             return self._encode_mm_item(obj)
 

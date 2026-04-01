@@ -423,3 +423,22 @@ def test_multiple_senders_single_receiver_ipc():
         assert torch.allclose(decoded.prompt_embeds, original_tensor), (
             f"Value mismatch for sender {sender_idx} msg {msg_idx}"
         )
+
+
+def test_numpy_scalar_serialization():
+    """Test encoding and decoding of numpy scalar types (np.generic)."""
+    encoder = MsgpackEncoder()
+    decoder = MsgpackDecoder(dict)
+
+    obj = {
+        "int64": np.int64(42),
+        "float32": np.float32(3.14),
+        "bool_": np.bool_(True),
+    }
+
+    encoded = encoder.encode(obj)
+    decoded = decoder.decode(encoded)
+
+    assert decoded["int64"] == 42
+    assert abs(decoded["float32"] - 3.14) < 1e-5
+    assert decoded["bool_"] is True
