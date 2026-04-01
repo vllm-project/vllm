@@ -250,8 +250,31 @@ class FixFunctionalizationPass(VllmInductorPass):
                 continue
             arg = mutated_args[idx]
             arg = node.kwargs[arg] if isinstance(arg, str) else arg
+            self.remove_redundant_copy_back(user, arg)
             user.replace_all_uses_with(arg)
             self._remove(user)
+
+    def remove_redundant_copy_back(
+        self, getitem: torch.fx.Node, mutated_arg: torch.fx.Node
+    ) -> None:
+        """
+        Defunctionalized mutating ops already update view-like residual tensors
+        in place. If functionalization later emitted a copy-back into the base
+        tensor, that copy becomes redundant and can also be shape-invalid
+        (e.g. copying a shard slice back into the full gathered tensor).
+        """
+        if not is_func(mutated_arg, torch.ops.aten.slice.Tensor):
+            return
+
+        base = mutated_arg.args[0]
+        for user in list(getitem.users):
+            if (
+                is_func(user, torch.ops.aten.copy_.default)
+                and user.args[0] == base
+                and user.args[1] == getitem
+            ):
+                user.replace_all_uses_with(base)
+                self._remove(user)
 
     def getitem_users(self, node: torch.fx.Node) -> dict[int, torch.fx.Node]:
         """

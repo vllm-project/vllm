@@ -261,6 +261,34 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
+    def reduce_scatter_into(
+        self,
+        output_tensor: torch.Tensor,
+        input_: torch.Tensor,
+        dim: int = -1,
+    ) -> torch.Tensor:
+        if self.world_size == 1:
+            output_tensor.copy_(input_)
+            return output_tensor
+        if dim < 0:
+            dim += input_.dim()
+        if dim != 0 or not input_.is_contiguous() or not output_tensor.is_contiguous():
+            return super().reduce_scatter_into(output_tensor, input_, dim)
+
+        expected_shape = (
+            input_.shape[0] // self.world_size,
+            *input_.shape[1:],
+        )
+        assert tuple(output_tensor.shape) == expected_shape, (
+            "Invalid output shape for reduce_scatter_into. "
+            f"Expected {expected_shape}, got {tuple(output_tensor.shape)}."
+        )
+
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        pynccl_comm.reduce_scatter(output_tensor, input_)
+        return output_tensor
+
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ):
@@ -396,6 +424,38 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm.group_end()
 
         return output_list
+
+    def all_gather_into(
+        self,
+        output_tensor: torch.Tensor,
+        input_: torch.Tensor,
+        dim: int = -1,
+    ) -> torch.Tensor:
+        if self.world_size == 1:
+            output_tensor.copy_(input_)
+            return output_tensor
+        if dim < 0:
+            dim += input_.dim()
+        if dim != 0 or not input_.is_contiguous() or not output_tensor.is_contiguous():
+            return super().all_gather_into(output_tensor, input_, dim)
+
+        expected_shape = (
+            input_.shape[0] * self.world_size,
+            *input_.shape[1:],
+        )
+        assert tuple(output_tensor.shape) == expected_shape, (
+            "Invalid output shape for all_gather_into. "
+            f"Expected {expected_shape}, got {tuple(output_tensor.shape)}."
+        )
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            torch.distributed.all_gather_into_tensor(
+                output_tensor, input_, group=self.device_group
+            )
+        else:
+            pynccl_comm.all_gather(output_tensor, input_)
+        return output_tensor
 
     def dispatch_router_logits(
         self,
