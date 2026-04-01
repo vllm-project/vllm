@@ -294,7 +294,7 @@ def supports_trtllm_attention() -> bool:
     # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
     # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
     return (
-        current_platform.is_device_capability(10, 0) and has_nvidia_artifactory()
+        current_platform.is_device_capability(100) and has_nvidia_artifactory()
     )
 
 
