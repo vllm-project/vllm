@@ -33,36 +33,58 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 class DiskBlockIndex:
-    """Maps block hashes to disk block IDs.
+    """Maps block hashes to disk block IDs with LRU eviction.
 
-    Simple bump allocator with a free list. All blocks are the same size,
-    so there is no fragmentation. Supports pickle persistence for
-    cross-restart cache.
+    When disk is full, evicts the least recently used block to make
+    room for new entries. Uses an OrderedDict for O(1) LRU tracking.
+    Supports pickle persistence for cross-restart cache.
     """
 
     def __init__(self, num_blocks: int):
+        from collections import OrderedDict
         self._num_blocks = num_blocks
         self._num_allocated = 0
         self._free_list: list[int] = []
-        self._index: dict[BlockHash, int] = {}
+        # OrderedDict for LRU: most recently used at the end
+        self._index: OrderedDict[BlockHash, int] = OrderedDict()
 
     def contains(self, bh: BlockHash) -> bool:
         return bh in self._index
 
     def get_block_id(self, bh: BlockHash) -> int | None:
-        return self._index.get(bh)
+        bid = self._index.get(bh)
+        if bid is not None:
+            # Move to end (most recently used)
+            self._index.move_to_end(bh)
+        return bid
+
+    def touch(self, bh: BlockHash) -> None:
+        """Mark a block as recently used (move to MRU end)."""
+        if bh in self._index:
+            self._index.move_to_end(bh)
 
     def allocate(self, bh: BlockHash) -> int | None:
-        """Allocate a disk block for the given hash. Returns None if full."""
+        """Allocate a disk block for the given hash.
+
+        If disk is full, evicts the least recently used block
+        to make room. Always succeeds unless num_blocks == 0.
+        """
         if bh in self._index:
+            self._index.move_to_end(bh)
             return self._index[bh]
+
         if self._free_list:
             bid = self._free_list.pop()
         elif self._num_allocated < self._num_blocks:
             bid = self._num_allocated
             self._num_allocated += 1
         else:
-            return None
+            # Disk full — evict LRU (oldest entry at front)
+            if not self._index:
+                return None
+            _, evicted_bid = self._index.popitem(last=False)
+            bid = evicted_bid
+
         self._index[bh] = bid
         return bid
 
