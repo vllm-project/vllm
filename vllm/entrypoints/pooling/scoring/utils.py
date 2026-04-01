@@ -151,6 +151,7 @@ def _parse_score_content(
         mm_tracker=mm_tracker,
         wrap_dicts=False,
         interleave_strings=False,
+        multimodal_content_part_separator="",
     )
 
     if parse_res:
