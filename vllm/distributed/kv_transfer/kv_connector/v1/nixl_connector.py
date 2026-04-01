@@ -1196,10 +1196,6 @@ class NixlConnectorWorker:
         # ---- Mamba-HMA per-engine state (only used when self._has_mamba) ----
         # Per-engine transfer config (source of truth for FA/mamba sizing).
         self._transfer_configs: dict[str, HeteroTPTransferConfig] = {}
-        # Per-engine _physical_blocks_per_logical_kv_block.  For the local
-        # engine this is assigned directly; for remote engines it is derived
-        # from handshake metadata via compute_mamba_phys_ratio.
-        self._mamba_phys_ratio: dict[EngineId, int] = {}
         # 4 regions per mamba layer: x, B, C (conv sub-projections) + ssm.
         self._mamba_num_regions: int = 0
 
@@ -1749,9 +1745,6 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         if self._has_mamba:
-            self._mamba_phys_ratio[self.engine_id] = (
-                self._physical_blocks_per_logical_kv_block
-            )
             logger.info(
                 "Hybrid SSM registration: num_blocks=%s, "
                 "logical_num_blocks=%s, ratio=%s, num_regions=%s, "
@@ -1906,10 +1899,7 @@ class NixlConnectorWorker:
             conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
-        remote_ratio = self._mamba_phys_ratio.get(
-            nixl_agent_meta.engine_id,
-            self._physical_blocks_per_logical_kv_block,
-        )
+        remote_ratio = self._physical_blocks_per_logical_kv_block
         num_blocks = nixl_agent_meta.num_blocks // remote_ratio
         device_id = nixl_agent_meta.device_id
 
@@ -2101,10 +2091,14 @@ class NixlConnectorWorker:
 
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
-        if self._has_mamba and engine_id not in self._mamba_phys_ratio:
-            remote_block_len = nixl_agent_meta.block_lens[0]
-            self._mamba_phys_ratio[engine_id] = compute_mamba_phys_ratio(
-                nixl_agent_meta.ssm_sizes, remote_block_len
+        if self._has_mamba:
+            remote_phys_ratio = compute_mamba_phys_ratio(
+                nixl_agent_meta.ssm_sizes, nixl_agent_meta.block_lens[0]
+            )
+            assert remote_phys_ratio == self._physical_blocks_per_logical_kv_block, (
+                f"remote phys_ratio {remote_phys_ratio} != local "
+                f"{self._physical_blocks_per_logical_kv_block}; block_size "
+                f"must match across engines"
             )
 
         # Keep track of remote agent kv caches base addresses.
@@ -2780,13 +2774,10 @@ class NixlConnectorWorker:
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
 
         if self._has_mamba:
-            # Expand remote logical → kernel block IDs using REMOTE phys ratio.
-            remote_ratio = self._mamba_phys_ratio.get(
-                meta.remote.engine_id,
-                self._physical_blocks_per_logical_kv_block,
-            )
+            # Expand remote logical → kernel block IDs.
             meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
-                meta.remote.block_ids, remote_ratio
+                meta.remote.block_ids,
+                self._physical_blocks_per_logical_kv_block,
             )
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
@@ -3062,9 +3053,7 @@ class NixlConnectorWorker:
             # This is like having two "low-level views" of the same storage.
             # `num_fa_descs` offset must be computed per-engine since P and D can
             # have different num_blocks (and thus different FA descs counts).
-            ratio = self._mamba_phys_ratio.get(
-                engine_id, self._physical_blocks_per_logical_kv_block
-            )
+            ratio = self._physical_blocks_per_logical_kv_block
             logical_blocks = num_blocks // ratio
             num_fa_descs = self.num_regions * num_blocks
             # 3-read mamba: 4 regions per layer (x, B, C, ssm).
