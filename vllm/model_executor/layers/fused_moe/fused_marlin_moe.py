@@ -40,6 +40,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Static,
+    kMxfp8Static,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
@@ -574,12 +576,14 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TODO(rob): add int4, mxfp4, int8 as integrations
+        # TODO(rob): add int4, int8 as integrations
         # are migrated to use the oracle one-by-one.
         SUPPORTED_W = [
             kFp8Static128BlockSym,
             kFp8StaticChannelSym,
             kFp8StaticTensorSym,
+            kMxfp4Static,
+            kMxfp8Static,
             kNvfp4Static,
         ]
         return weight_key in SUPPORTED_W
@@ -607,7 +611,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @property
     def quant_type_id(self) -> int:
-        # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
         if self.quant_config.use_int4_w4a16:
             return scalar_types.uint4b8.id
         elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
