@@ -2118,17 +2118,28 @@ class NixlConnectorWorker:
                     "setting 'enable_permute_local_kv'=True in --kv-transfer-config."
                 )
 
-        # Block len can only vary across layers when using MLA.
+        # Block len can vary across layers when using MLA or HMA (which unifies
+        # page sizes by adjusting block_size per-layer for varying head_dim).
         remote_block_len = nixl_agent_meta.block_lens[0]
-        if self.use_mla or self.kv_topo.is_kv_replicated(remote_engine_id):
-            # With replicated KV cache, only the number of blocks can differ.
+        allows_per_layer_block_len = (
+            self.use_mla
+            or self._is_hma_required
+            or self.kv_topo.is_kv_replicated(remote_engine_id)
+        )
+        if allows_per_layer_block_len:
+            # With MLA, HMA, or replicated KV cache, block_lens can differ
+            # per-layer. Validate that each layer's block_len matches.
             for i in range(len(self.block_len_per_layer)):
                 assert (
                     self.block_len_per_layer[i] // block_size_ratio
                     == nixl_agent_meta.block_lens[i]
-                ), "KV cache sizes must match between P and D when replicated"
+                ), (
+                    f"KV cache size mismatch at layer {i}: "
+                    f"local={self.block_len_per_layer[i] // block_size_ratio}, "
+                    f"remote={nixl_agent_meta.block_lens[i]}"
+                )
         else:
-            # When MLA is not used, this is a list of the same block length
+            # When MLA/HMA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:
                 assert block_len == remote_block_len, (
                     "All remote layers must have the same block size"

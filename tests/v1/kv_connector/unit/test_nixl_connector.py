@@ -2383,6 +2383,115 @@ def test_compatibility_hash_validation(
             assert len(result) == 1
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_hma_allows_per_layer_block_len(default_vllm_config, dist_init):
+    """
+    Test that HMA-enabled non-MLA models allow per-layer block_len differences.
+
+    When HMA (Hybrid Memory Allocator) is enabled, layers may have different
+    head_dim values (e.g., SWA layers). HMA unifies page sizes by adjusting
+    block_size per-layer, which results in different block_lens across layers.
+    The handshake validation should accept this configuration.
+    """
+    vllm_config = create_vllm_config()
+
+    # Create kv_cache_config with SWA enabled (triggers HMA)
+    kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
+
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=kv_cache_config,
+    )
+    worker = connector.connector_worker
+
+    # Simulate different block_lens per layer (as HMA would produce)
+    # FA layers: 4096 * 16 = 65536
+    # SWA layers: different head_dim would result in different block_len
+    fa_block_len = 4096 * worker.block_size
+    swa_block_len = 2048 * worker.block_size  # Different head_dim
+
+    worker.block_len_per_layer = [fa_block_len, swa_block_len]
+    worker.num_blocks = 1
+    worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+    # Remote metadata with matching per-layer block_lens
+    meta = NixlAgentMetadata(
+        engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+        agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+        kv_caches_base_addr=[0, 0],  # Two layers
+        device_id=0,
+        num_blocks=1,
+        block_lens=[fa_block_len, swa_block_len],  # Per-layer block_lens
+        kv_cache_layout="HND",
+        block_size=worker.block_size,
+        ssm_sizes=(0, 0),
+    )
+
+    # This should NOT raise - HMA allows per-layer block_len
+    worker.add_remote_agent(meta, remote_tp_size=1)
+
+    # Verify the remote agent was registered
+    assert FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker._remote_agents
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_hma_rejects_mismatched_per_layer_block_len(default_vllm_config, dist_init):
+    """
+    Test that HMA-enabled models reject mismatched per-layer block_lens.
+
+    Even with HMA enabled, the per-layer block_lens must match between
+    local and remote. This test verifies that mismatches are detected.
+    """
+    vllm_config = create_vllm_config()
+
+    # Create kv_cache_config with SWA enabled (triggers HMA)
+    kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
+
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=kv_cache_config,
+    )
+    worker = connector.connector_worker
+
+    # Local block_lens
+    fa_block_len = 4096 * worker.block_size
+    swa_block_len = 2048 * worker.block_size
+
+    worker.block_len_per_layer = [fa_block_len, swa_block_len]
+    worker.num_blocks = 1
+    worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+    # Remote metadata with MISMATCHED per-layer block_lens
+    meta = NixlAgentMetadata(
+        engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+        agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+        kv_caches_base_addr=[0, 0],
+        device_id=0,
+        num_blocks=1,
+        # Mismatch: second layer has wrong block_len
+        block_lens=[fa_block_len, swa_block_len + 1024],
+        kv_cache_layout="HND",
+        block_size=worker.block_size,
+        ssm_sizes=(0, 0),
+    )
+
+    # This should raise due to block_len mismatch
+    with pytest.raises(AssertionError, match="KV cache size mismatch at layer"):
+        worker.add_remote_agent(meta, remote_tp_size=1)
+
+
 @pytest.mark.parametrize(
     "error_scenario",
     [
