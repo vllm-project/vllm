@@ -77,7 +77,7 @@ class EngineHandshakeMetadata:
     """
 
     addresses: EngineZmqAddresses
-    parallel_config: dict[str, bool | int | str | list[int] | list[str] | None]
+    parallel_config: dict[str, int | str | list[int]]
 
 
 class CoreEngineProcManager:
