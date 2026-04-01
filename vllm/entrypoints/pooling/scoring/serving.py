@@ -228,6 +228,13 @@ class ServingScores(PoolingServing):
             )
             query_pooling_params_list.append(pooling_params)
 
+        assert (
+            n_queries
+            == len(query_pooling_params_list)
+            == len(query_engine_inputs)
+            == len(query_keys)
+        )
+
         query_ctx = ScoringServeContext(
             request=ctx.request,
             raw_request=ctx.raw_request,
@@ -236,13 +243,6 @@ class ServingScores(PoolingServing):
             pooling_params=query_pooling_params_list,
             prompt_request_ids=query_keys,
             engine_inputs=query_engine_inputs,
-        )
-
-        assert (
-            n_queries
-            == len(query_ctx.pooling_params)
-            == len(query_ctx.engine_inputs)
-            == len(query_ctx.prompt_request_ids)
         )
 
         await self._prepare_generators(query_ctx)
@@ -269,6 +269,13 @@ class ServingScores(PoolingServing):
             )
             doc_pooling_params_list.append(pooling_params)
 
+        assert (
+            n_queries
+            == len(doc_pooling_params_list)
+            == len(doc_engine_inputs)
+            == len(doc_keys)
+        )
+
         doc_ctx = ScoringServeContext(
             request=ctx.request,
             raw_request=ctx.raw_request,
@@ -277,13 +284,6 @@ class ServingScores(PoolingServing):
             pooling_params=doc_pooling_params_list,
             prompt_request_ids=doc_keys,
             engine_inputs=doc_engine_inputs,
-        )
-
-        assert (
-            n_docs
-            == len(doc_ctx.pooling_params)
-            == len(doc_ctx.engine_inputs)
-            == len(doc_ctx.prompt_request_ids)
         )
 
         await self._prepare_generators(doc_ctx)
