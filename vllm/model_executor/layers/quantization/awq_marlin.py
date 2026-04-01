@@ -8,6 +8,8 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Parameter
 from transformers import PretrainedConfig
 
+from vllm import envs
+
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -235,7 +237,6 @@ class AWQMarlinConfig(QuantizationConfig):
     ) -> "QuantizationMethods | None":
         # NOTE: this needs to be cleaned up the idea here is to skip the override to awq_marlin kernels
         # as they are not batch invariant
-        from vllm import envs
         if envs.VLLM_BATCH_INVARIANT:
             return None
 
