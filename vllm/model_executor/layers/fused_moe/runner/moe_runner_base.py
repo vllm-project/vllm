@@ -189,9 +189,9 @@ class MoERunnerBase(MoERunner):
         self._reduce_results = reduce_results
         self.enable_dbo = enable_dbo
 
-        self.shared_experts: SharedExperts | None = None
+        self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
-            self.shared_experts = SharedExperts(
+            self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
                 # Note: For now we must pass quant_method along to SharedExperts so it
@@ -221,6 +221,10 @@ class MoERunnerBase(MoERunner):
             if self.shared_experts is None
             else torch.ops.vllm.moe_forward_shared
         )
+
+    @property
+    def shared_experts(self) -> SharedExperts | None:
+        return self._shared_experts
 
     # TODO(bnell): temporary hack, do not call this method.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
