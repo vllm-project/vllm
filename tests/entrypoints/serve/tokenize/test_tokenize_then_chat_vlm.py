@@ -4,11 +4,10 @@
 Regression test: calling ``/tokenize`` with multimodal data followed by
 ``/v1/chat/completions`` with the same data must not cause an error.
 
-The bug: after multimodal tokenization support was added, ``/tokenize`` fully
-processes multimodal inputs (images) through the renderer but discards the
-mm features.  When a subsequent ``/v1/chat/completions`` request with the same
-image arrives, the engine may fail because it expects multimodal features that
-were consumed/cached incorrectly by the tokenization call.
+Ensures that the ``/tokenize`` endpoint does not pollute internal caches
+(e.g. multimodal feature caches) and that a subsequent
+``/v1/chat/completions`` request with the same multimodal payload
+completes successfully.
 """
 
 import json
