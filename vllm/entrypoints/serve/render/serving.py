@@ -483,16 +483,14 @@ class OpenAIServingRender:
         ]
         tok_params = request.build_tok_params(model_config)
 
-        prompt_extras: dict[str, Any] = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-
         return await renderer.render_cmpl_async(
             parsed_prompts,
             tok_params,
-            prompt_extras=prompt_extras,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
             skip_mm_cache=skip_mm_cache,
         )
 
@@ -529,17 +527,15 @@ class OpenAIServingRender:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        prompt_extras: dict[str, Any] = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-
         (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],
             chat_params,
             tok_params,
-            prompt_extras=prompt_extras,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
             skip_mm_cache=skip_mm_cache,
         )
 
