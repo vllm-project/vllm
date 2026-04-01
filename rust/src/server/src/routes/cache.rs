@@ -5,8 +5,8 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use crate::error::ApiError;
-use crate::routes::utils::utility_call_error;
 use crate::state::AppState;
+use crate::utils::utility_call_error;
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ResetPrefixCacheParams {

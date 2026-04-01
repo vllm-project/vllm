@@ -1,4 +1,4 @@
-# OpenAI Server Smoke Test
+# Server Smoke Test
 
 Start a fresh headless `vllm` engine:
 
@@ -18,10 +18,10 @@ python3 -m vllm.entrypoints.cli.main serve Qwen/Qwen3-0.6B \
   --dtype float16
 ```
 
-Run the Rust OpenAI smoke test:
+Run the Rust server smoke test:
 
 ```bash
-cargo run -p vllm-openai-server --example external_engine_openai_qwen -- \
+cargo run -p vllm-server --example external_engine_openai_qwen -- \
   --handshake-address tcp://127.0.0.1:62100
 ```
 
@@ -32,7 +32,7 @@ content chunks, and a terminal finish chunk. This example intentionally uses
 `async-openai`'s standard typed `create_stream` API instead of BYOT, so it does
 not inspect the nonstandard `reasoning_content` field even though the Rust
 server may emit it for reasoning-capable models such as Qwen3. For reasoning
-behavior itself, use the `vllm-chat` smoke test or the `vllm-openai-server`
+behavior itself, use the `vllm-chat` smoke test or the `vllm-server`
 route tests.
 
 IMPORTANT: Restart `vllm` each time you run the smoke test. The current headless

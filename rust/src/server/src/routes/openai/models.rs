@@ -7,7 +7,7 @@ use openai_protocol::models::{ListModelsResponse, ModelObject};
 use crate::state::AppState;
 
 /// Return the single configured model in OpenAI `list models` format.
-pub(super) async fn list_models(State(state): State<Arc<AppState>>) -> Json<ListModelsResponse> {
+pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<ListModelsResponse> {
     Json(ListModelsResponse {
         object: "list".to_string(),
         data: vec![ModelObject {

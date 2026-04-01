@@ -8,6 +8,7 @@ mod error;
 mod middleware;
 mod routes;
 mod state;
+mod utils;
 
 use std::future::Future;
 use std::sync::Arc;

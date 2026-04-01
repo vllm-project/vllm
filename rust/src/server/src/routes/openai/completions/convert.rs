@@ -4,7 +4,7 @@ use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
 use crate::error::ApiError;
-use crate::routes::completions::validate;
+use crate::routes::openai::completions::validate;
 
 /// Lowered completion request plus the public response metadata carried by every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,7 +100,7 @@ mod tests {
     use vllm_text::Prompt;
 
     use super::prepare_completion_request;
-    use crate::routes::completions::types::CompletionRequest;
+    use crate::routes::openai::completions::types::CompletionRequest;
 
     fn base_request_json() -> serde_json::Value {
         json!({

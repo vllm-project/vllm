@@ -1,12 +1,9 @@
 mod cache;
-mod chat_completions;
-mod completions;
 mod health;
 mod load;
 mod metrics;
-mod models;
+mod openai;
 mod sleep;
-mod utils;
 
 use std::sync::Arc;
 
@@ -37,12 +34,9 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         // OpenAI-compatible endpoints
-        .route("/v1/models", get(models::list_models))
-        .route("/v1/completions", post(completions::completions))
-        .route(
-            "/v1/chat/completions",
-            post(chat_completions::chat_completions),
-        );
+        .route("/v1/models", get(openai::list_models))
+        .route("/v1/completions", post(openai::completions))
+        .route("/v1/chat/completions", post(openai::chat_completions));
 
     if dev_mode_enabled {
         // Development-only

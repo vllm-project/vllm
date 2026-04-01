@@ -245,7 +245,7 @@ mod tests {
     use serde_json::json;
 
     use super::prepare_chat_request;
-    use crate::routes::chat_completions::types::ChatCompletionRequest;
+    use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {

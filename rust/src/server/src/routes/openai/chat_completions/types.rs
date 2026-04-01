@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
-use crate::routes::utils::types::{ChatLogProbs, StreamOptions, Usage};
+use crate::routes::openai::utils::types::{ChatLogProbs, StreamOptions, Usage};
 
 /// vLLM-compatible request type for the Chat Completions API.
 ///

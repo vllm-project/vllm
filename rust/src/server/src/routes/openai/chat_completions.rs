@@ -24,20 +24,20 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::StopReason;
 
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::chat_completions::convert::prepare_chat_request;
-use crate::routes::chat_completions::types::{
+use crate::routes::openai::chat_completions::convert::prepare_chat_request;
+use crate::routes::openai::chat_completions::types::{
     ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
 };
-use crate::routes::utils::logprobs::{
+use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, decoded_prompt_logprobs_to_maps,
 };
-use crate::routes::utils::types::{ChatLogProbs, Usage};
-use crate::routes::utils::unix_timestamp;
+use crate::routes::openai::utils::types::{ChatLogProbs, Usage};
 use crate::state::AppState;
+use crate::utils::unix_timestamp;
 
 /// Validate one chat completion request and proxy it into the shared `vllm-chat` stack.
-pub(super) async fn chat_completions(
+pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {

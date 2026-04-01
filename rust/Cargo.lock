@@ -4533,7 +4533,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vllm-openai-server",
+ "vllm-server",
 ]
 
 [[package]]
@@ -4600,7 +4600,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vllm-openai-server"
+name = "vllm-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",

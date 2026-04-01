@@ -12,7 +12,7 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio::sync::oneshot;
 use tracing_subscriber::EnvFilter;
-use vllm_openai_server::{Config, serve};
+use vllm_server::{Config, serve};
 
 #[derive(Debug, Parser)]
 #[command(

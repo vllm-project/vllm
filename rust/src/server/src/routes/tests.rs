@@ -39,7 +39,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{build_router, build_router_with_dev_mode};
-use crate::routes::chat_completions::convert::prepare_chat_request;
+use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
 
 fn request_output(

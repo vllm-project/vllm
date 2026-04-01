@@ -6,8 +6,8 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
-use crate::routes::utils::utility_call_error;
 use crate::state::AppState;
+use crate::utils::utility_call_error;
 
 #[derive(Serialize)]
 pub(crate) struct IsSleepingResponse {

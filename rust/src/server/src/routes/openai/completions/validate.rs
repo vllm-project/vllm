@@ -98,7 +98,7 @@ mod tests {
     use serde_json::json;
 
     use super::validate_request_compat;
-    use crate::routes::completions::types::CompletionRequest;
+    use crate::routes::openai::completions::types::CompletionRequest;
 
     fn base_request() -> CompletionRequest {
         serde_json::from_value(json!({

@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Frontend(args) => vllm_openai_server::serve(args.into_config(), ctrl_c()).await,
+        Command::Frontend(args) => vllm_server::serve(args.into_config(), ctrl_c()).await,
         Command::Serve(args) => {
             let handshake_port = match args.handshake_port {
                 Some(port) => port,
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
                 Ok(())
             } else {
                 let config = args.to_frontend_config(handshake_address);
-                vllm_openai_server::serve(config, shutdown_signal_rx.map(|_| ()))
+                vllm_server::serve(config, shutdown_signal_rx.map(|_| ()))
                     .await
                     .inspect(|_| info!("OpenAI server shut down gracefully"))
             };

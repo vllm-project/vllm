@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_text::Prompt;
 
-use crate::routes::utils::types::{StreamOptions, Usage};
+use crate::routes::openai::utils::types::{StreamOptions, Usage};
 
 /// vLLM-compatible request type for the Completions API.
 ///

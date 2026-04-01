@@ -14,7 +14,7 @@ The project is organized as a Cargo workspace with several crates, layered botto
 │                                 │  frontend mode + managed-engine
 │                                 │  serve mode
 ├─────────────────────────────────┤
-│  vllm-openai-server             │  OpenAI-compatible HTTP API (axum)
+│  vllm-server                    │  OpenAI-compatible HTTP API (axum)
 ├─────────────────────────────────┤
 │  vllm-chat                      │  Chat completions: template rendering,
 │                                 │  structured assistant events,

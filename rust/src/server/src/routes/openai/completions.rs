@@ -22,17 +22,17 @@ use super::utils::logprobs::{
     text_len,
 };
 use super::utils::types::Usage;
-use super::utils::unix_timestamp;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::completions::convert::prepare_completion_request;
-use crate::routes::completions::types::{
+use crate::routes::openai::completions::convert::prepare_completion_request;
+use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
 };
 use crate::state::AppState;
+use crate::utils::unix_timestamp;
 
 /// Validate one completions request and proxy it into the shared `vllm-text` stack.
-pub(super) async fn completions(
+pub async fn completions(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
