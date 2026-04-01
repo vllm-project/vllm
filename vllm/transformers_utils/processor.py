@@ -11,12 +11,16 @@ from transformers import (
     AutoImageProcessor,
     AutoProcessor,
     AutoVideoProcessor,
+    BatchFeature,
     processing_utils,
 )
+from transformers.audio_utils import AudioInput
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
+from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
+from transformers.video_utils import VideoInput
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
@@ -241,12 +245,13 @@ def get_processor_kwargs_type(
         call_kwargs_annotations = call_kwargs.annotation if call_kwargs else None
 
         # if the processor has explicit kwargs annotation, use it
-        if call_kwargs_annotations not in (None, inspect._empty):
+        if call_kwargs_annotations not in (None, inspect._empty):  # noqa: SIM102
             # get_type_hints will parse all type annotations at runtime,
             # and if an annotation refers to a type or
             # name that hasn’t been imported or defined, it will raise an error.
             # So we use __annotations__ to get the raw annotations directly.
-            return get_args(call_kwargs_annotations)[0]
+            if anno_args := get_args(call_kwargs_annotations):
+                return anno_args[0]
 
         # otherwise, try to get from ProcessorKwargs
         module_name = type(processor).__module__
@@ -266,7 +271,12 @@ def get_processor_kwargs_keys(
     kwargs_cls: type[processing_utils.ProcessingKwargs],
 ) -> set[str]:
     dynamic_kwargs: set[str] = set()
-    modality_kwargs = {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
+    modality_kwargs = {
+        "text_kwargs",
+        "images_kwargs",
+        "videos_kwargs",
+        "audio_kwargs",
+    }
 
     try:
         # get kwargs annotations in processor
@@ -515,4 +525,44 @@ def cached_video_processor_from_config(
         trust_remote_code=model_config.trust_remote_code,
         processor_cls_overrides=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, AutoVideoProcessor, **kwargs),
+    )
+
+
+def call_hf_processor_mm_only(
+    processor: ProcessorMixin,
+    images: ImageInput | None = None,
+    videos: VideoInput | None = None,
+    audio: AudioInput | None = None,
+    **kwargs,
+) -> BatchFeature:
+    output_kwargs = processor._merge_kwargs(
+        get_processor_kwargs_type(processor),
+        **kwargs,
+    )
+
+    if audio is not None and (
+        feature_extractor := getattr(processor, "feature_extractor", None)
+    ):
+        audio_inputs = feature_extractor(audio, **output_kwargs["audio_kwargs"])
+        audio_inputs["feature_attention_mask"] = audio_inputs.pop("attention_mask")
+    else:
+        audio_inputs = {}
+
+    if images is not None and (
+        image_processor := getattr(processor, "image_processor", None)
+    ):
+        images_inputs = image_processor(images=images, **output_kwargs["images_kwargs"])
+    else:
+        images_inputs = {}
+
+    if videos is not None and (
+        video_processor := getattr(processor, "video_processor", None)
+    ):
+        videos_inputs = video_processor(videos=videos, **output_kwargs["videos_kwargs"])
+    else:
+        videos_inputs = {}
+
+    return BatchFeature(
+        data={**audio_inputs, **images_inputs, **videos_inputs},
+        tensor_type=kwargs.get("return_tensors"),
     )

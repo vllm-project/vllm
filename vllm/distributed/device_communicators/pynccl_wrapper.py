@@ -23,6 +23,7 @@
 # variable in the code.
 
 import ctypes
+import functools
 import platform
 from dataclasses import dataclass
 from typing import Any
@@ -76,6 +77,7 @@ class ncclDataTypeEnum:
     ncclNumTypes = 11
 
     @classmethod
+    @functools.lru_cache(maxsize=1)
     def _torch_to_nccl_map(cls) -> dict[torch.dtype, int]:
         return {
             torch.int8: cls.ncclInt8,

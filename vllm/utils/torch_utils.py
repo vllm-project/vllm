@@ -6,7 +6,6 @@ import os
 import random
 import threading
 from collections.abc import Callable, Collection
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -16,7 +15,6 @@ from packaging import version
 from packaging.version import Version
 from torch.library import Library, infer_schema
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -61,6 +59,10 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype.startswith("fp8")
 
 
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
@@ -590,49 +592,6 @@ def aux_stream() -> torch.cuda.Stream | None:
     return _aux_stream
 
 
-@lru_cache(maxsize=8)
-def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
-    # Note: cuda_visible_devices is not used, but we keep it as an argument for
-    # LRU Cache purposes.
-
-    # Code below is based on
-    # https://github.com/pytorch/pytorch/blob/
-    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
-    # torch/cuda/__init__.py#L831C1-L831C17
-    import torch.cuda
-    import torch.version
-
-    from vllm.platforms import current_platform
-
-    if not torch.cuda._is_compiled():
-        return 0
-    if current_platform.is_rocm():
-        # ROCm uses amdsmi instead of nvml for stateless device count
-        # This requires a sufficiently modern version of Torch 2.4.0
-        raw_count = (
-            torch.cuda._device_count_amdsmi()
-            if (hasattr(torch.cuda, "_device_count_amdsmi"))
-            else -1
-        )
-    else:
-        raw_count = torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
-    return r
-
-
-def cuda_device_count_stateless() -> int:
-    """Get number of CUDA devices, caching based on the value of
-    CUDA_VISIBLE_DEVICES at the time of call.
-
-    This should be used instead of torch.cuda.device_count()
-    unless CUDA_VISIBLE_DEVICES has already been set to the desired
-    value."""
-
-    # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -683,7 +642,7 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     if current_platform.is_xpu():
         assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
-    elif current_platform.is_cuda() or current_platform.is_rocm():
+    elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
     else:
         raise ValueError(

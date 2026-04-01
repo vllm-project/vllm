@@ -148,7 +148,7 @@ def move_to_buffer(
     expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: torch.cuda.Stream | None,
-    ep_group: ProcessGroup,
+    ep_rank: int,
     communicator: EplbCommunicator,
 ) -> MoveToBufferResult:
     """
@@ -163,7 +163,7 @@ def move_to_buffer(
         expert_weights: Original expert weights for the layer.
         expert_weights_buffers: Intermediate buffers (one per tensor).
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
-        ep_group: Distributed process group for expert parallel comms.
+        ep_rank: Rank of this process in expert parallel group.
         communicator: EplbCommunicator instance for P2P communication.
 
     Returns:
@@ -174,8 +174,6 @@ def move_to_buffer(
         RecvMetadata: Metadata needed for completing remote weight transfers.
     """
     assert old_indices.shape == new_indices.shape
-    ep_rank = ep_group.rank()
-
     recv_primary_mask = np.zeros((num_local_experts,), dtype=np.bool_)
     send_expert_ids = np.full((num_local_experts,), -1, dtype=np.int64)
     send_src_rows = np.full((num_local_experts,), -1, dtype=np.int32)
@@ -479,7 +477,7 @@ async def transfer_layer(
         expert_weights=expert_weights,
         expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
-        ep_group=ep_group,
+        ep_rank=ep_group.rank(),
         communicator=communicator,
     )
     return is_unchanged, is_received_locally, recv_metadata
@@ -539,6 +537,7 @@ def rearrange_expert_weights_inplace(
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
 
     ep_size = ep_group.size()
+    ep_rank = ep_group.rank()
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     first_layer_weights = list(expert_weights[0])
@@ -575,7 +574,7 @@ def rearrange_expert_weights_inplace(
             expert_weights=expert_weights[layer_idx],
             expert_weights_buffers=weights_buffer,
             cuda_stream=None,
-            ep_group=ep_group,
+            ep_rank=ep_rank,
             communicator=communicator,
         )
 
@@ -586,7 +585,7 @@ def rearrange_expert_weights_inplace(
             is_received_locally=is_received_locally,
             recv_metadata=recv_metadata,
             new_indices=new_global_expert_indices_cpu[layer_idx],
-            ep_rank=ep_group.rank(),
+            ep_rank=ep_rank,
         )
 
 

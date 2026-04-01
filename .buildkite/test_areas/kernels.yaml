@@ -2,14 +2,25 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
+- label: vLLM IR Tests
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+    - vllm/ir
+    - vllm/kernels
+  commands:
+    - pytest -v -s tests/ir
+    - pytest -v -s tests/kernels/ir
+
 - label: Kernels Core Operation Test
   timeout_in_minutes: 75
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
@@ -34,7 +45,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test %N
-  timeout_in_minutes: 60
+  timeout_in_minutes: 25
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -46,7 +57,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 5
 
 - label: Kernels Mamba Test
   timeout_in_minutes: 45
@@ -96,7 +107,7 @@ steps:
   - vllm/platforms/cuda.py
   commands:
     - nvidia-smi
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_attention_selector.py

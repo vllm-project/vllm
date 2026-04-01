@@ -63,11 +63,10 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return
 
-        if scheduler_output.preempted_req_ids:
-            self.kv_connector.handle_preemptions(scheduler_output.preempted_req_ids)
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+        self.kv_connector.handle_preemptions(kv_connector_metadata)
 
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
@@ -97,11 +96,6 @@ class ActiveKVConnector(KVConnector):
         if clear_metadata:
             self.kv_connector.clear_connector_metadata()
         return output
-
-    def clear_metadata(self) -> None:
-        """Clear the connector metadata. Call this after draft model runs."""
-        if not self._disabled:
-            self.kv_connector.clear_connector_metadata()
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:

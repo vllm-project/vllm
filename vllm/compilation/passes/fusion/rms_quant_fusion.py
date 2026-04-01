@@ -9,6 +9,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
+import vllm.ir.ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -30,7 +31,6 @@ from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
-    MatcherRMSNorm,
 )
 
 logger = init_logger(__name__)
@@ -54,7 +54,6 @@ def empty_i64(*args: Any, **kwargs: Any) -> torch.Tensor:
     return torch.empty(*args, **kwargs, dtype=torch.int64, device="cuda")
 
 
-RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
@@ -63,7 +62,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default
+    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
@@ -131,11 +130,9 @@ class RMSNormQuantPattern:
         assert key in FUSED_OPS, f"unsupported fused rmsnorm+quant op for {key}"
         self.FUSED_OP = FUSED_OPS[key]
 
-        self.rmsnorm_matcher = (
-            MatcherRMSNorm(epsilon)
-            if not key.fused_add
-            else MatcherFusedAddRMSNorm(epsilon)
-        )
+        if key.fused_add:
+            self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
+
         self.quant_matcher = MatcherQuantFP8(
             key.quant,
             has_col_major_scales=has_col_major_scales,
@@ -161,16 +158,12 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
         def pattern(
             input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> torch.Tensor:
-            result_rms = self.rmsnorm_matcher(input, weight)
+            result_rms = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
             return self.quant_matcher(result_rms, scale)[0]
 
         def replacement(
             input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> torch.Tensor:
-            # In case we're matching native rms-norm, conversions might be
-            # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
-
             result = torch.empty(
                 input.shape, device=input.device, dtype=self.quant_dtype
             )
@@ -187,8 +180,8 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
             return at[1]
 
         inputs = [
-            # input, weight
-            *self.rmsnorm_matcher.inputs(),
+            empty_bf16(5, 16),  # input
+            empty_bf16(16),  # weight
             self.quant_matcher.inputs()[1],  # scale
         ]
         pattern(*inputs)
@@ -391,7 +384,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         def pattern(
             input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            result_rms = self.rmsnorm_matcher(input, weight)
+            result_rms = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
             result = torch.empty(
                 result_rms.shape,
                 device=result_rms.device,
@@ -442,12 +435,14 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             # result, scale
             return at[1], at[2]
 
-        scale = self.quant_matcher.empty_f32(1, 1)
-
         pm.register_replacement(
             pattern,
             replacement,
-            self.rmsnorm_matcher.inputs() + [scale],
+            [
+                empty_bf16(5, 16),  # input
+                empty_bf16(16),  # weight
+                self.quant_matcher.empty_f32(1, 1),  # scale
+            ],
             pm.fwd_only,
             pm_pass,
         )
@@ -472,7 +467,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
         def pattern(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            result_rms = self.rmsnorm_matcher(input, weight)
+            result_rms = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
             # result, scale
             return self.quant_matcher(result_rms)  # type: ignore[no-any-return]
 
@@ -502,7 +497,10 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
         pm.register_replacement(
             pattern,
             replacement,
-            self.rmsnorm_matcher.inputs(),
+            [
+                empty_bf16(5, 16),  # input
+                empty_bf16(16),  # weight
+            ],
             pm.fwd_only,
             pm_pass,
         )
