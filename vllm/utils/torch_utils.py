@@ -699,7 +699,7 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
-HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.12.0.dev")
 
 if HAS_OPAQUE_TYPE:
     from torch._opaque_base import OpaqueBase
