@@ -104,6 +104,7 @@ def kernel_unified_attention_2d(
     BLOCK_Q: tl.constexpr,  # int
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
+    block_q_seq_boundaries_ptr,  # [num_seqs+1]
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -112,10 +113,10 @@ def kernel_unified_attention_2d(
     kv_head_idx = tl.program_id(1)
 
     seq_idx = find_seq_idx(
-        query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
+        block_q_seq_boundaries_ptr, q_block_global_idx, num_seqs, BLOCK_Q, False
     )
 
-    q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
+    q_block_start_idx = tl.load(block_q_seq_boundaries_ptr + seq_idx)
 
     q_block_local_idx = q_block_global_idx - q_block_start_idx
 
@@ -898,11 +899,15 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
-    seq_threshold_3D=None,
-    num_par_softmax_segments=None,
-    softmax_segm_output=None,
-    softmax_segm_max=None,
-    softmax_segm_expsum=None,
+    seq_threshold_3D,
+    num_par_softmax_segments,
+    softmax_segm_output,
+    softmax_segm_max,
+    softmax_segm_expsum,
+    BLOCK_M,
+    BLOCK_Q,
+    num_q_blocks,
+    block_q_seq_boundaries_tensor,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -939,22 +944,6 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
-    )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
-
-    # Ideally we would launch with kernel with:
-    # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
-    # However, it is slow to realize the query_lens on cpu.
-    # Instead we use upper-bound:
-    # \sum_i[ceil(query_len[i] / BLOCK_Q)]
-    #   <= \sum_i[floor(query_len[i] / BLOCK_Q) + 1]
-    #    = \sum_i[floor(query_len[i] / BLOCK_Q)] + num_seqs
-    #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
-    #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
-    total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
-
     # Tile sizes for prefill and decode. Gemma3 models use optimized values.
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
@@ -971,24 +960,14 @@ def unified_attention(
         is_prefill=False,
     )
 
-    # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold, or
-    # 4. Batch invariance is enabled
-    if (
-        seq_threshold_3D is None
-        or num_par_softmax_segments is None
-        or softmax_segm_output is None
-        or softmax_segm_max is None
-        or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
-        or is_batch_invariant
-    ):
+    # Launch the 2D kernel if:
+    # 1. Batch contains a prefill (max_seqlen_q > 1)
+    # 2. The number of sequences exceeds the configured threshold
+    # 3. Batch invariance is enabled
+    if max_seqlen_q > 1 or num_seqs > seq_threshold_3D or is_batch_invariant:
         kernel_unified_attention_2d[
             (
-                total_num_q_blocks,
+                num_q_blocks,
                 num_kv_heads,
             )
         ](
@@ -1039,9 +1018,12 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
+            block_q_seq_boundaries_ptr=block_q_seq_boundaries_tensor,
             USE_FP8=output_scale is not None,
         )
     else:
+        # Launch 3D kernel for small decode-only batches
+        total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
         kernel_unified_attention_3d[
             (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         ](
