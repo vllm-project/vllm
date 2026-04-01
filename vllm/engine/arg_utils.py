@@ -8,7 +8,7 @@ import functools
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
 from typing import (
@@ -53,6 +53,7 @@ from vllm.config import (
     PoolerConfig,
     PrefetchOffloadConfig,
     ProfilerConfig,
+    ReasoningConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
@@ -69,7 +70,7 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
@@ -387,7 +388,7 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
-    safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
+    safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -400,6 +401,7 @@ class EngineArgs:
     max_cudagraph_capture_size: int | None = get_field(
         CompilationConfig, "max_cudagraph_capture_size"
     )
+    ir_op_priority: IrOpPriorityConfig = get_field(KernelConfig, "ir_op_priority")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -507,6 +509,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_attn_backend
     )
     io_processor_plugin: str | None = None
+    renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
@@ -530,6 +533,8 @@ class EngineArgs:
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+
+    scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
 
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
@@ -582,6 +587,7 @@ class EngineArgs:
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
+    reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -593,10 +599,17 @@ class EngineArgs:
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+    kv_cache_dtype_skip_layers: list[str] = get_field(
+        CacheConfig, "kv_cache_dtype_skip_layers"
+    )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    enable_mamba_cache_stochastic_rounding: bool = (
+        CacheConfig.enable_mamba_cache_stochastic_rounding
+    )
+    mamba_cache_philox_rounds: int = CacheConfig.mamba_cache_philox_rounds
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -646,6 +659,9 @@ class EngineArgs:
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
             )
+        if isinstance(self.ir_op_priority, dict):
+            self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
+
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -763,6 +779,10 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
+        )
+        model_group.add_argument(
+            "--renderer-num-workers",
+            **model_kwargs["renderer_num_workers"],
         )
 
         # Model loading arguments
@@ -996,6 +1016,9 @@ class EngineArgs:
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
         cache_group.add_argument(
+            "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
+        )
+        cache_group.add_argument(
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
         )
         cache_group.add_argument(
@@ -1009,6 +1032,13 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+        )
+        cache_group.add_argument(
+            "--enable-mamba-cache-stochastic-rounding",
+            **cache_kwargs["enable_mamba_cache_stochastic_rounding"],
+        )
+        cache_group.add_argument(
+            "--mamba-cache-philox-rounds", **cache_kwargs["mamba_cache_philox_rounds"]
         )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
@@ -1235,6 +1265,10 @@ class EngineArgs:
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
         scheduler_group.add_argument(
+            "--scheduler-reserve-full-isl",
+            **scheduler_kwargs["scheduler_reserve_full_isl"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -1265,6 +1299,7 @@ class EngineArgs:
             title="KernelConfig",
             description=KernelConfig.__doc__,
         )
+        kernel_group.add_argument("--ir-op-priority", **kernel_kwargs["ir_op_priority"])
         kernel_group.add_argument(
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
@@ -1284,7 +1319,7 @@ class EngineArgs:
         # delay the Pydantic validation that comes with SpeculativeConfig.
         vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
-            "--speculative-config", **vllm_kwargs["speculative_config"]
+            "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
@@ -1299,6 +1334,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--reasoning-config", **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
@@ -1431,6 +1467,7 @@ class EngineArgs:
             video_pruning_rate=self.video_pruning_rate,
             mm_tensor_ipc=self.mm_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
+            renderer_num_workers=self.renderer_num_workers,
         )
 
     def validate_tensorizer_args(self):
@@ -1523,6 +1560,7 @@ class EngineArgs:
                     revision=self.revision,
                     trust_remote_code=self.trust_remote_code,
                     vllm_speculative_config=self.speculative_config,
+                    hf_token=self.hf_token,
                 )
             )
 
@@ -1564,11 +1602,14 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
+            enable_mamba_cache_stochastic_rounding=self.enable_mamba_cache_stochastic_rounding,
+            mamba_cache_philox_rounds=self.mamba_cache_philox_rounds,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -1809,6 +1850,7 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
@@ -1882,6 +1924,22 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
+
+        # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
+        for op_name, op_priority in asdict(self.ir_op_priority).items():
+            # Empty means unset
+            if not op_priority:
+                continue
+
+            # Priority cannot be set 2x for the same op
+            if getattr(kernel_config.ir_op_priority, op_name):
+                raise ValueError(
+                    f"Op priority for {op_name} specified via both ir_op_priority "
+                    f"and KernelConfig.ir_op_priority, only one allowed at a time."
+                )
+
+            # Set the attribute
+            setattr(kernel_config.ir_op_priority, op_name, op_priority)
 
         load_config = self.create_load_config()
 
@@ -1961,6 +2019,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,

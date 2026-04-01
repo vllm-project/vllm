@@ -16,7 +16,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -183,7 +183,7 @@ class CpuPlatform(Platform):
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(cache_config.cache_dtype):
             logger.warning(
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )
@@ -284,8 +284,9 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # Intel OpenMP setting
         ld_preload_str = os.getenv("LD_PRELOAD", "")
+
+        # Intel OpenMP setting
         if "libiomp5.so" in ld_preload_str:
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
@@ -297,10 +298,35 @@ class CpuPlatform(Platform):
             os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
 
+        cpu_architecture = Platform.get_cpu_architecture()
+
+        # LD_PRELOAD libtcmalloc, bundled under vllm/libs to reduce
+        # memory allocation overhead
         if (
             platform.system() == "Linux"
-            and Platform.get_cpu_architecture()
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
+            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.X86)
+            and "libtcmalloc" not in ld_preload_str
+        ):
+            vllm_pkg = os.path.dirname(os.path.dirname(__file__))
+            tcmalloc_so = None
+            for pattern in ("libtcmalloc_minimal*.so*", "libtcmalloc.so*"):
+                tcmalloc_so_candidates = glob.glob(
+                    os.path.join(vllm_pkg, "libs", pattern)
+                )
+                if tcmalloc_so_candidates:
+                    tcmalloc_so = tcmalloc_so_candidates[0]
+                    break
+
+            if tcmalloc_so is not None:
+                if ld_preload_str:
+                    ld_preload_str = f"{tcmalloc_so}:{ld_preload_str}"
+                else:
+                    ld_preload_str = tcmalloc_so
+                os.environ["LD_PRELOAD"] = ld_preload_str
+
+        if (
+            platform.system() == "Linux"
+            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
             and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
         ):
             # We need to LD_PRELOAD PyTorch's libgomp, otherwise only

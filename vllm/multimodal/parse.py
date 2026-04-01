@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from typing_extensions import assert_never
 
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
@@ -29,11 +30,8 @@ from .inputs import (
     HfImageItem,
     HfVideoItem,
     ImageItem,
-    ModalityData,
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     VideoItem,
 )
 from .media import MediaWithBytes
@@ -407,8 +405,8 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     """
-    As [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict], but
-    normalized such that each entry corresponds to a list.
+    A normalized [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    such that each entry corresponds to a list.
     """
 
     def select(self, modalities: Set[str]):
@@ -477,7 +475,7 @@ ModalityDataParser: TypeAlias = Callable[
 
 class MultiModalDataParser:
     """
-    Parses [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+    Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
 
     Args:
@@ -695,8 +693,8 @@ class MultiModalDataParser:
 
 MultiModalUUIDItems: TypeAlias = dict[str, Sequence[str | None]]
 """
-As [`MultiModalUUIDDict`][vllm.multimodal.inputs.MultiModalUUIDDict], but
-normalized such that each entry corresponds to a list.
+A normalized [`MultiModalUUIDDict`][vllm.inputs.MultiModalUUIDDict]
+such that each entry corresponds to a list.
 """
 
 
