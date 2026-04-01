@@ -119,7 +119,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             tensor_sf=self.w1_scale_val,
             global_scale=w13_global_scale,
             dtype=hidden_states.dtype,
-            device=w1.device,
             block_size=16,
             swizzle=False,
         )
@@ -132,7 +131,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             tensor_sf=self.w2_scale_val,
             global_scale=w2_global_scale,
             dtype=hidden_states.dtype,
-            device=w2.device,
             block_size=16,
             swizzle=False,
         )
