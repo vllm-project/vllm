@@ -175,6 +175,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             routing_tables=layer._maybe_init_expert_routing_tables(),
             shared_experts=layer.shared_experts,
         )
+        preload_runtime_moe_config = getattr(
+            self.moe_kernel.fused_experts,
+            "preload_runtime_moe_config",
+            None,
+        )
+        if preload_runtime_moe_config is not None:
+            preload_runtime_moe_config(
+                tuple(layer.w13_weight.shape),
+                tuple(layer.w2_weight.shape),
+                layer.top_k,
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)

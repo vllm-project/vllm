@@ -10,6 +10,7 @@ import torch
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -279,6 +280,8 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
+        if isinstance(layer, FusedMoE):
+            layer.ensure_moe_quant_config_init()
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)

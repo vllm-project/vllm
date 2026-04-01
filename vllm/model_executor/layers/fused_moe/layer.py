@@ -1195,7 +1195,7 @@ class FusedMoE(CustomOp):
             if shard_id in {"w1", "w3"}:
                 final_shape[1] *= 2
             final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
+            param.materialize(tuple(final_shape), dtype=loaded_weight.dtype)
 
         expert_data = param.data if full_load else param.data[expert_id]
 
@@ -1538,6 +1538,7 @@ class FusedMoE(CustomOp):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.runner.forward(
+            self,
             hidden_states,
             router_logits,
         )
