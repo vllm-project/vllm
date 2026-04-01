@@ -11,6 +11,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
@@ -377,11 +378,57 @@ class MonolithicDecoderLayer(nn.Module):
         # When fused_allreduce_rms is enabled, the MLP/MoE AllReduce is
         # deferred — it will be fused with the next layer's input norm.
         if self.is_moe:
-            # MoE returns raw (shared_output, routed_output) without
-            # applying scale + add. torch.compile fuses the elementwise ops.
-            shared_output, routed_output = self.mlp(hidden_states)
+            moe = self.mlp
+            experts = moe.experts
+            runner = experts.runner
+            quant_method = experts.quant_method
+
+            # Specialize to the current DeepSeek V3.2-NVFP4 path:
+            # no EP/PCP, no routed-input transform, monolithic TRTLLM MoE.
+            assert not moe.is_sequence_parallel
+            assert not experts.use_ep
+            assert experts.moe_config.pcp_size == 1
+            assert not runner.use_dp_chunking
+            assert runner.routed_input_transform is None
+            assert quant_method.is_monolithic
+            assert moe.shared_experts is not None
+            assert moe.gate is not None
+
+            hidden_states = hidden_states.view(-1, self.hidden_size)
+
+            use_shared_experts_stream = (
+                runner.has_separate_shared_experts
+                and runner.shared_experts_stream is not None
+                and hidden_states.shape[0]
+                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            )
+            runner.use_shared_experts_stream = use_shared_experts_stream
+
+            if use_shared_experts_stream:
+                runner._maybe_setup_shared_experts_stream(
+                    hidden_states,
+                    hidden_states,
+                )
+                shared_output = None
+            else:
+                shared_output = moe.shared_experts(hidden_states)
+
+            router_logits, _ = moe.gate(hidden_states)
+            routed_output = quant_method.apply_monolithic(
+                experts,
+                hidden_states,
+                router_logits,
+            )
+
+            if use_shared_experts_stream:
+                shared_output = runner._apply_shared_experts(hidden_states, True)
+
+            assert shared_output is not None
+
             hidden_states = scale_and_add(
-                routed_output, self.routed_scaling_factor, shared_output
+                routed_output,
+                self.routed_scaling_factor,
+                shared_output,
             )
         else:
             hidden_states = self.mlp(hidden_states)
