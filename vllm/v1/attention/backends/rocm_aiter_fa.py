@@ -1371,7 +1371,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
         
     def fused_qk_norm_rope_kvcache_supported(self):
-        # Fuion is supported in both shuffle and non-shuffle layout for KV cache update.
+        # Fusion is supported in both shuffle and non-shuffle KV cache layouts.
         return (
             rocm_aiter_ops.is_enabled()
         )
@@ -1403,6 +1403,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
         head_dim = layer.head_size
         use_shuffle_layout = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         x = 16 // key_cache.element_size()
+        block_size = key_cache.shape[1]
+
+        # Use CPU scalar tensors for scales so the C++ kernel's .item()
+        # call doesn't trigger a device-to-host sync during CUDA graph capture.
+        k_scale_cpu = torch.tensor(layer._k_scale_float,
+                                   dtype=torch.float32)
+        v_scale_cpu = torch.tensor(layer._v_scale_float,
+                                   dtype=torch.float32)
 
         rocm_aiter_ops.hip_qk_norm_rope_and_cache(
             qkv,
@@ -1420,13 +1428,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
             key_cache,
             value_cache,
             layer_slot_mapping,
-            layer._k_scale,
-            layer._v_scale,
+            k_scale_cpu,
+            v_scale_cpu,
             k_out,
             None,
             True,
             use_shuffle_layout,
-            self.block_size,
+            block_size,
             x,
         )
 

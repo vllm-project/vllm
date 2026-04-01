@@ -141,7 +141,7 @@ class PassConfig:
     """Fuse the custom RMSNorm + padding ops."""
     fuse_rope_kvcache: bool = Field(default=None)
     """Fuse the QK rope + KV cache ops."""
-    enable_fuse_qk_norm_rope_kvcache: bool = Field(default=None)
+    fuse_qk_norm_rope_kvcache: bool = Field(default=None)
     """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
     for layers that support it. Auto-enabled at O1+ on ROCm for models
@@ -875,6 +875,11 @@ class CompilationConfig:
         ):
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+        if (
+            self.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
             self.custom_ops.append("+rotary_embedding")
 
         if (

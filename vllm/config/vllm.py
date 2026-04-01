@@ -172,7 +172,8 @@ _QK_NORM_MODEL_TYPES = frozenset({
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     """Enable fused QK-norm + RoPE + KV cache update for models with
     QK-norm on ROCm with AITER. Requires rotary embedding custom op
-    and inductor graph partition to be active."""
+    and inductor graph partition (so unified_kv_cache_update is visible
+    to the compiled graph)."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms import current_platform
 
@@ -187,7 +188,10 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     model_type = getattr(hf_config, "model_type", "")
     if not has_qk_norm and model_type not in _QK_NORM_MODEL_TYPES:
         return False
-    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+    return (
+        cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        and cfg.compilation_config.use_inductor_graph_partition
+    )
 
 
 def enable_qk_norm_rope(cfg: "VllmConfig") -> bool:
@@ -228,7 +232,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_rope_kvcache": False,
-            "enable_fuse_qk_norm_rope_kvcache": False,
+            "fuse_qk_norm_rope_kvcache": False,
             "enable_qk_norm_rope_fusion": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
@@ -249,7 +253,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "enable_fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
             "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
@@ -270,7 +274,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "enable_fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
             "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -291,7 +295,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "enable_fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
             "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,

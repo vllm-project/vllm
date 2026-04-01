@@ -513,6 +513,13 @@ class RocmAttentionImpl(AttentionImpl):
         block_size = key_cache.shape[1]
         x = 16 // key_cache.element_size()
 
+        # Use CPU scalar tensors for scales so the C++ kernel's .item()
+        # call doesn't trigger a device-to-host sync during CUDA graph capture.
+        k_scale_cpu = torch.tensor(layer._k_scale_float,
+                                   dtype=torch.float32)
+        v_scale_cpu = torch.tensor(layer._v_scale_float,
+                                   dtype=torch.float32)
+
         rocm_aiter_ops.hip_qk_norm_rope_and_cache(
             qkv,
             q_weight,
@@ -529,8 +536,8 @@ class RocmAttentionImpl(AttentionImpl):
             key_cache,
             value_cache,
             layer_slot_mapping,
-            layer._k_scale,
-            layer._v_scale,
+            k_scale_cpu,
+            v_scale_cpu,
             k_out,
             None,
             True,
