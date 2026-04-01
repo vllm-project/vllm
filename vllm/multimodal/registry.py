@@ -92,11 +92,7 @@ class _ProcessorFactories(Generic[_I]):
     ):
         info = self.info(ctx)
         dummy_inputs_builder = self.dummy_inputs(info)
-        return self.processor(
-            info,
-            dummy_inputs_builder,
-            cache=cache,
-        )
+        return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
 class MultiModalRegistry:
@@ -215,10 +211,7 @@ class MultiModalRegistry:
 
         ctx = self._create_processing_ctx(model_config, tokenizer)
 
-        return factories.build_processor(
-            ctx,
-            cache=cache,
-        )
+        return factories.build_processor(ctx, cache=cache)
 
     def get_dummy_mm_inputs(
         self,
