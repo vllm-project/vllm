@@ -296,6 +296,17 @@ def select_fp8_moe_backend(
             requested_backend, config, weight_key, activation_key, activation_format
         )
 
+    # For MiniMaxM2 on Blackwell (SM100+), FlashInfer FP8 MoE backends are not
+    # preferred. Remove them unless the user has explicitly opted in.
+    if (
+        config.model_arch == "MiniMaxM2ForCausalLM"
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and not envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8")
+    ):
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_CUTLASS)
+
     # Handle explicit FlashInfer FP8 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
