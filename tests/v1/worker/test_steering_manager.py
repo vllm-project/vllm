@@ -1043,13 +1043,13 @@ class TestPhaseTrackingRelease:
 class TestLazyInitCapacityExhaustion:
     """Simulate the lazy-init registration path where more distinct
     configs arrive in the first batch than ``max_steering_configs``
-    allows.  The engine must degrade gracefully (fall back to global
-    steering for the overflow configs) rather than crash with a
-    ``RuntimeError``.
+    allows.  Failed registrations are deferred into
+    ``_pending_steering_registrations`` and retried with priority on the
+    next step, matching the ``_handle_steering_transition`` pattern.
 
-    This mirrors the guard already present in
-    ``_handle_steering_transition`` and validates that the lazy-init
-    block in ``_update_steering_buffers`` is equally resilient.
+    This tests the SteeringManager's underlying behaviour (RuntimeError
+    on capacity) and the global-row fallback used during the deferral
+    period.
     """
 
     def test_prefill_overflow_does_not_crash(self):
@@ -1188,3 +1188,146 @@ class TestLazyInitCapacityExhaustion:
         assert decode_row == 2, (
             "Unregistered decode hash should fall back to global decode row"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestPendingSteering Registrations
+# ---------------------------------------------------------------------------
+
+_PendingEntry = tuple[str, int, dict[str, dict[int, list[float]]], str]
+
+
+class TestPendingSteeringRegistrations:
+    """Validate the unified deferred-registration retry loop that runs
+    in ``_update_steering_buffers`` before table population.
+
+    The loop must:
+    - Drop entries for requests that have finished (prevents row leaks).
+    - Drop entries whose request changed phase (e.g. prefill deferred
+      but request already transitioned to decode).
+    - Register entries whose requests are still alive and in the
+      matching phase.
+    - Keep entries that still can't register (capacity still full).
+    """
+
+    @staticmethod
+    def _run_retry_loop(
+        mgr: "SteeringManager",
+        pending: list[_PendingEntry],
+        live_requests: set[str],
+        req_phases: dict[str, str],
+    ) -> list[_PendingEntry]:
+        """Simulate the retry loop from _update_steering_buffers."""
+        still_pending: list[_PendingEntry] = []
+        for d_req_id, d_hash, d_vecs, d_phase in pending:
+            if d_req_id not in live_requests:
+                continue
+            if req_phases.get(d_req_id) != d_phase:
+                continue
+            try:
+                mgr.register_config(d_hash, d_vecs, phase=d_phase)
+            except RuntimeError:
+                still_pending.append((d_req_id, d_hash, d_vecs, d_phase))
+        return still_pending
+
+    def test_finished_request_entry_dropped(self):
+        """Deferred entry for a finished request must be silently dropped."""
+        mgr = _make_manager(max_configs=2)
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+
+        pending: list[_PendingEntry] = [
+            ("req-gone", 42, vectors, "decode"),
+        ]
+        # req-gone is NOT in live_requests
+        result = self._run_retry_loop(mgr, pending, live_requests=set(), req_phases={})
+        assert result == []
+        # Must NOT have been registered
+        assert mgr.num_active_configs == 0
+
+    def test_phase_changed_entry_dropped(self):
+        """Deferred prefill entry dropped when request transitioned
+        to decode."""
+        mgr = _make_manager(max_configs=2)
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+
+        pending: list[_PendingEntry] = [
+            ("req-1", 42, vectors, "prefill"),
+        ]
+        # req-1 is alive but now in decode phase
+        result = self._run_retry_loop(
+            mgr,
+            pending,
+            live_requests={"req-1"},
+            req_phases={"req-1": "decode"},
+        )
+        assert result == []
+        assert mgr.num_active_configs == 0
+
+    def test_active_request_registered_on_retry(self):
+        """Deferred entry for an active, same-phase request registers
+        successfully when capacity is available."""
+        mgr = _make_manager(max_configs=2)
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+
+        pending: list[_PendingEntry] = [
+            ("req-1", 42, vectors, "decode"),
+        ]
+        result = self._run_retry_loop(
+            mgr,
+            pending,
+            live_requests={"req-1"},
+            req_phases={"req-1": "decode"},
+        )
+        assert result == []
+        assert mgr.num_active_configs == 1
+        assert (42, "decode") in mgr.config_to_row
+
+    def test_still_at_capacity_keeps_active_entries(self):
+        """Active entries that still can't register stay in the pending
+        list."""
+        mgr = _make_manager(max_configs=1)
+        blocker = {_HP: {0: [99.0] * HIDDEN_SIZE}}
+        mgr.register_config(config_hash=1, vectors=blocker, phase="prefill")
+
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        pending: list[_PendingEntry] = [
+            ("req-1", 42, vectors, "decode"),
+        ]
+        result = self._run_retry_loop(
+            mgr,
+            pending,
+            live_requests={"req-1"},
+            req_phases={"req-1": "decode"},
+        )
+        assert len(result) == 1
+        assert result[0] == ("req-1", 42, vectors, "decode")
+        assert mgr.num_active_configs == 1  # only the blocker
+
+    def test_mixed_active_and_stale_in_pending(self):
+        """Only active, matching-phase entries survive the retry loop."""
+        mgr = _make_manager(max_configs=2)
+        vecs_a = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        vecs_b = {_HP: {0: [2.0] * HIDDEN_SIZE}}
+        vecs_c = {_HP: {0: [3.0] * HIDDEN_SIZE}}
+
+        pending: list[_PendingEntry] = [
+            ("req-finished", 10, vecs_a, "decode"),  # request gone
+            ("req-transitioned", 20, vecs_b, "prefill"),  # now in decode
+            ("req-active", 30, vecs_c, "decode"),  # still alive
+        ]
+        result = self._run_retry_loop(
+            mgr,
+            pending,
+            live_requests={"req-transitioned", "req-active"},
+            req_phases={
+                "req-transitioned": "decode",
+                "req-active": "decode",
+            },
+        )
+        # Only req-active should have been processed
+        assert result == []
+        assert mgr.num_active_configs == 1
+        assert (30, "decode") in mgr.config_to_row
+        # The other two must NOT be registered
+        assert (10, "decode") not in mgr.config_to_row
+        assert (20, "prefill") not in mgr.config_to_row

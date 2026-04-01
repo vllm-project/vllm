@@ -1080,12 +1080,15 @@ class GPUModelRunner(
                         if h != 0:
                             self._steering_manager.release_config(h, phase)
 
-            # Also remove any deferred decode registrations for finished
-            # requests to prevent registering rows for dead requests.
-            if self._pending_decode_registrations:
+            # Also remove any deferred steering registrations for
+            # finished requests to prevent registering rows for dead
+            # requests.  (The retry loop also checks, but this eagerly
+            # drops entries before self.requests is pruned below.)
+            if self._pending_steering_registrations:
                 finished = set(scheduler_output.finished_req_ids)
-                self._pending_decode_registrations = [
-                    entry for entry in self._pending_decode_registrations
+                self._pending_steering_registrations = [
+                    entry
+                    for entry in self._pending_steering_registrations
                     if entry[0] not in finished
                 ]
 
@@ -3102,8 +3105,10 @@ class GPUModelRunner(
                 from vllm.v1.worker.steering_manager import SteeringManager
 
                 self._steering_manager = SteeringManager(max_configs)
-                self._pending_decode_registrations: list[
-                    tuple[str, int, dict[str, dict[int, list[float]]]]
+                # Each entry: (req_id, config_hash, vectors, phase).
+                # Retried with priority before new admissions.
+                self._pending_steering_registrations: list[
+                    tuple[str, int, dict[str, dict[int, list[float]]], str]
                 ] = []
                 self._req_steering_phase: dict[str, str] = {}
 
@@ -3169,11 +3174,13 @@ class GPUModelRunner(
                                         ph, eff, phase="prefill"
                                     )
                                 except RuntimeError:
+                                    self._pending_steering_registrations.append(
+                                        (rid, ph, eff, "prefill")
+                                    )
                                     logger.warning(
-                                        "Could not register prefill steering "
-                                        "config (hash=%d) during init -- "
-                                        "capacity full, falling back to "
-                                        "global prefill steering",
+                                        "Deferred prefill steering config "
+                                        "(hash=%d) during init -- capacity "
+                                        "full, will retry next step",
                                         ph,
                                     )
                         self._req_steering_phase[rid] = "prefill"
@@ -3193,11 +3200,13 @@ class GPUModelRunner(
                                         dh, eff, phase="decode"
                                     )
                                 except RuntimeError:
+                                    self._pending_steering_registrations.append(
+                                        (rid, dh, eff, "decode")
+                                    )
                                     logger.warning(
-                                        "Could not register decode steering "
-                                        "config (hash=%d) during init -- "
-                                        "capacity full, falling back to "
-                                        "global decode steering",
+                                        "Deferred decode steering config "
+                                        "(hash=%d) during init -- capacity "
+                                        "full, will retry next step",
                                         dh,
                                     )
                         self._req_steering_phase[rid] = "decode"
@@ -3208,19 +3217,33 @@ class GPUModelRunner(
         if self._steering_manager is None or not self._steerable_layers:
             return
 
-        # Process deferred decode registrations (priority over new requests).
-        if self._pending_decode_registrations:
+        # Process deferred steering registrations (priority over new
+        # admissions).  Entries are dropped when the originating request
+        # has finished or changed phase, preventing row leaks.
+        if self._pending_steering_registrations:
             still_pending: list[
-                tuple[str, int, dict[str, dict[int, list[float]]]]
+                tuple[str, int, dict[str, dict[int, list[float]]], str]
             ] = []
-            for r_id, d_hash, d_vecs in self._pending_decode_registrations:
+            for (
+                d_req_id,
+                d_hash,
+                d_vecs,
+                d_phase,
+            ) in self._pending_steering_registrations:
+                # Drop entries for finished requests.
+                if d_req_id not in self.requests:
+                    continue
+                # Drop entries whose request changed phase (e.g. prefill
+                # deferred but request already transitioned to decode).
+                if self._req_steering_phase.get(d_req_id) != d_phase:
+                    continue
                 try:
                     self._steering_manager.register_config(
-                        d_hash, d_vecs, phase="decode"
+                        d_hash, d_vecs, phase=d_phase
                     )
                 except RuntimeError:
-                    still_pending.append((r_id, d_hash, d_vecs))
-            self._pending_decode_registrations = still_pending
+                    still_pending.append((d_req_id, d_hash, d_vecs, d_phase))
+            self._pending_steering_registrations = still_pending
 
         # 1. Populate steering tables
         self._steering_manager.populate_steering_tables(self._steerable_layers)
@@ -3297,8 +3320,8 @@ class GPUModelRunner(
         so it is ready for the next step's table population.
 
         If the steering table is at capacity, the decode registration
-        is deferred to ``_pending_decode_registrations`` and retried on
-        the next scheduler step.  The existing ``get_row_for_config``
+        is deferred to ``_pending_steering_registrations`` and retried
+        on the next scheduler step.  The existing ``get_row_for_config``
         fallback (returns row 2 for unregistered decode hashes) provides
         graceful degradation during the deferral period.
         """
@@ -3318,8 +3341,13 @@ class GPUModelRunner(
                             phase="decode",
                         )
                     except RuntimeError:
-                        self._pending_decode_registrations.append(
-                            (req_id, decode_hash, sp.effective_decode_steering)
+                        self._pending_steering_registrations.append(
+                            (
+                                req_id,
+                                decode_hash,
+                                sp.effective_decode_steering,
+                                "decode",
+                            )
                         )
                         logger.warning(
                             "Deferred decode steering config (hash=%d) "
