@@ -68,7 +68,12 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
     Mxfp8LinearOp,
+<<<<<<< HEAD
     mxfp8_e4m3_quantize,
+=======
+    flashinfer_mxfp8_e4m3_quantize,
+    swizzle_mxfp8_scale,
+>>>>>>> fc8132710 (refine modelopt)
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     apply_nvfp4_linear,
@@ -1944,7 +1949,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         n_group = layer.num_expert_group or None
         topk_group = layer.topk_group or None
 
-        hidden_states_mxfp8, hidden_states_scale = mxfp8_e4m3_quantize(
+        hidden_states_mxfp8, hidden_states_scale = flashinfer_mxfp8_e4m3_quantize(
             x,
             is_sf_swizzled_layout=False,
         )
