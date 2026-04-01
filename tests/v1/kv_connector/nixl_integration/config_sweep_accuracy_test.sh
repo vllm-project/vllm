@@ -23,6 +23,10 @@ hybrid_ssm_configs=(
   # TODO: (NickLucche) Address async scheduling issue with TP>1 separately as this may impact other models.
   "ENABLE_HMA_FLAG=1 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code,--no-async-scheduling"
 )
+sw_attn_configs=(
+  "ENABLE_HMA_FLAG=1 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
+  "ENABLE_HMA_FLAG=1 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
+)
 
 # Select config array based on DP_EP env var
 if [[ -n "${DP_EP:-}" ]]; then
@@ -31,6 +35,9 @@ if [[ -n "${DP_EP:-}" ]]; then
 elif [[ -n "${HYBRID_SSM:-}" ]]; then
   configs=("${hybrid_ssm_configs[@]}")
   echo "HYBRID_SSM is set, using hybrid_ssm_configs."
+elif [[ -n "${SW_ATTN:-}" ]]; then
+  configs=("${sw_attn_configs[@]}")
+  echo "SW_ATTN is set, using sw_attn_configs."
 else
   configs=("${tp_configs[@]}")
 fi
