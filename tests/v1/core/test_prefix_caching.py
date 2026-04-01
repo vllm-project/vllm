@@ -247,6 +247,8 @@ def test_prefill(hash_fn):
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
+    manager.new_step_starts()
+
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
@@ -377,6 +379,8 @@ def test_prefill_hybrid_model():
     for block_id in (4, 8, 12):
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
+
+    manager.new_step_starts()
 
     # Cache hit in the common prefix
     # Incomplete 1 block (5 tokens)
@@ -548,6 +552,8 @@ def test_prefill_hybrid_model_eagle():
     for partial_block_id in (row[-1] for row in block_ids):
         assert manager.block_pool.blocks[partial_block_id].block_hash is None
         assert manager.block_pool.blocks[partial_block_id].ref_cnt == 1
+
+    manager.new_step_starts()
 
     # Cache hit in the common prefix
     # Incomplete 1 block (5 tokens)
@@ -942,6 +948,8 @@ def test_prefill_hybrid_model_combinations_eagle(
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
 
+    manager.new_step_starts()
+
     # Second request: should hit cached blocks for common prefix
     all_token_ids = common_token_ids + [6] * 5
     req1 = make_request("1", all_token_ids, block_size, hash_fn)
@@ -1060,6 +1068,8 @@ def test_prefill_plp():
     for block_id in (4,):
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
+
+    manager.new_step_starts()
 
     # Request #1 is a non-prompt-logprobs request:
     # Cache hit in the common prefix when the original block is still in use.
@@ -1228,6 +1238,8 @@ def test_evict():
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [10, 6, 5, 4, 3, 2, 1, 9, 8, 7]
 
+    manager.new_step_starts()
+
     # Touch the first 2 blocks.
     req2 = make_request("2", list(range(2 * 16 + 3)), block_size, sha256)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
@@ -1322,6 +1334,8 @@ def test_computed_blocks_not_evicted():
     # Free the blocks.
     manager.free(req0)
     manager.free(req1)
+
+    manager.new_step_starts()
 
     # Now if we have a cache hit on the first block, we should evict the second
     # cached block rather than the first one.
@@ -1614,6 +1628,8 @@ def test_mm_prefix_caching():
         )
     )
 
+    manager.new_step_starts()
+
     # Cache hit.
     unique_token_ids = [-1] * 7 + [200] * 5
     all_token_ids = common_token_ids + unique_token_ids
@@ -1685,6 +1701,8 @@ def test_cache_key_salting():
         (block_hashes[2], tuple(token_ids[3 * block_size :] + [8] * 5), None)
     )
 
+    manager.new_step_starts()
+
     # Test cache hit with a new request that has the same salt.
     token_ids = common_token_ids + [4] * 11
     req1 = make_request("1", token_ids, block_size, sha256, cache_salt="salt1")
@@ -1739,6 +1757,8 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     block_part0 = manager.coordinator.single_type_managers[0].req_to_blocks[
         req0.request_id
     ]
+
+    manager.new_step_starts()
 
     # | Common-0 | Common-1 | Common-2 | Req1-3 | Req1-4 | Req1-5 | ... |
     req1 = make_request("1", common_token_ids * 2, block_size, sha256)
@@ -1806,6 +1826,8 @@ def test_reset_prefix_cache():
     req0 = make_request("0", all_token_ids, block_size, sha256)
     blocks = manager.allocate_slots(req0, 55)
     assert blocks is not None and blocks.get_block_ids() == ([1, 2, 3, 4],)
+
+    manager.new_step_starts()
 
     unique_token_ids = [4] * 7
     all_token_ids = full_block_token_ids + unique_token_ids
@@ -2364,3 +2386,106 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_no_intra_step_prefix_reuse():
+    """Regression test for issue #38606: intra-step prefix cache race.
+
+    Blocks cached by allocate_slots() must not be reusable as prefix hits
+    by another request in the same scheduling step -- the GPU forward pass
+    that writes those KV values has not run yet.
+    """
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 10),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    hash_fn = sha256
+    # 3 full blocks as a shared prefix
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    unique_ids_0 = [99] * 7
+
+    req0 = make_request("0", common_token_ids + unique_ids_0, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks0 = manager.allocate_slots(
+        req0,
+        len(common_token_ids) + len(unique_ids_0),
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks0 is not None
+
+    # Same prefix, same scheduling step -- allocation must be deferred
+    unique_ids_1 = [88] * 5
+    req1 = make_request("1", common_token_ids + unique_ids_1, block_size, hash_fn)
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+
+    result = manager.allocate_slots(
+        req1, len(unique_ids_1), num_computed_tokens1, computed_blocks1
+    )
+    assert result is None, (
+        "allocate_slots should defer req1 when its prefix blocks "
+        "were registered this step (GPU hasn't run yet)"
+    )
+
+    # After a step boundary, req1 can proceed normally
+    manager.new_step_starts()
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+    result = manager.allocate_slots(
+        req1, len(unique_ids_1), num_computed_tokens1, computed_blocks1
+    )
+    assert result is not None
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_no_intra_step_prefix_reuse_with_lora():
+    """LoRA variant of test_no_intra_step_prefix_reuse (issue #38606).
+
+    Rapid LoRA adapter alternation is the primary trigger of the corruption
+    described in the issue, so verify the guard works with LoRA requests.
+    """
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 10),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    hash_fn = sha256
+    lora_a = LoRARequest(lora_name="adapter_a", lora_int_id=1, lora_path="/a")
+    token_ids = [i for i in range(3) for _ in range(block_size)]
+
+    req0 = make_request(
+        "0", token_ids + [0] * 7, block_size, hash_fn, lora_request=lora_a
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    blocks0 = manager.allocate_slots(
+        req0, len(token_ids) + 7, num_computed_tokens, computed_blocks
+    )
+    assert blocks0 is not None
+
+    # Second LoRA request with the same prefix, same step -- must be deferred
+    req1 = make_request(
+        "1", token_ids + [1] * 5, block_size, hash_fn, lora_request=lora_a
+    )
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+
+    result = manager.allocate_slots(req1, 5, num_computed_tokens1, computed_blocks1)
+    assert result is None, "Same-step LoRA prefix reuse must be deferred"
+
+    manager.new_step_starts()
+    computed_blocks1, num_computed_tokens1 = manager.get_computed_blocks(req1)
+    assert num_computed_tokens1 == 3 * block_size
+    result = manager.allocate_slots(req1, 5, num_computed_tokens1, computed_blocks1)
+    assert result is not None
+
+    manager.free(req0)
+    manager.free(req1)
