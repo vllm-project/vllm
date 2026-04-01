@@ -296,6 +296,15 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return encoder_cls
 
     def _decorate_for_torch_compile(self, **kwargs: dict):
+        """
+        Decorate the model's decoder and encoder classes to indicate to vLLM that they
+        support torch compile if `can_enable_torch_compile` and
+        `should_torch_compile_mm_encoder` are True respectively.
+
+        Args:
+            kwargs: The kwargs to create the model, which are needed to get the decoder
+                and encoder classes.
+        """
         super()._decorate_for_torch_compile(**kwargs)
         # Decorate the vision encoder model class to support torch compile if needed
         if self.compilation_config.compile_mm_encoder:
