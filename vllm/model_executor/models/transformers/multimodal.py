@@ -309,6 +309,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Decorate the vision encoder model class to support torch compile if needed
         if self.compilation_config.compile_mm_encoder:
             self.check_version("5.0.0", "multimodal encoder compilation support")
+            logger.warning_once(
+                "Multimodal encoder compilation with the Transformers modeling backend "
+                "is an experimental feature. It relies on:\n"
+                "- The vision encoder being torch compilable.\n"
+                "- All vision encoder tensor inputs must be type hinted as either "
+                "`torch.Tensor` or `torch.FloatTensor`.\n"
+                "- The 0-th dimension of all tensor inputs to the vision encoder being "
+                "the dynamic dimension (i.e., sequence length or number of patches).\n"
+                "Please report any issues you encounter to help us improve it."
+            )
             self._decorate_cls_for_torch_compile(
                 cls=self._get_encoder_cls(**kwargs),
                 # TODO: properly infer dynamic_arg_dims based on the encoder's forward
