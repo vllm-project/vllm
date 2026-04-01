@@ -6,6 +6,7 @@ from importlib.util import find_spec
 
 import torch
 
+import vllm.envs as envs
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -499,20 +500,37 @@ def rocm_aiter_sparse_attn_indexer(
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
-        # Reserve workspace during profiling run (real tensors, not
-        # FakeTensor mode). Must NOT be in the fake impl — torch.compile
-        # calls the fake impl under FakeTensor mode where workspace
-        # manager operations on the locked real workspace would corrupt
-        # PyTorch's dispatch state.
+        # Profiling early-exit: reserve memory to account for runtime
+        # allocations. Must be in the real impl, not the fake impl —
+        # torch.compile calls the fake impl under FakeTensor mode where
+        # workspace manager operations on the locked real workspace
+        # would corrupt PyTorch's dispatch state.
         workspace_manager = current_workspace_manager()
+
+        # Prefill k_fp8 and k_scale buffers, used by
+        # rocm_aiter_sparse_attn_indexer's prefill path
         workspace_manager.get_simultaneous(
             ((total_seq_lens, head_dim), fp8_dtype),
             ((total_seq_lens, 4), torch.uint8),
         )
+
+        # Decode out_qk buffer, used by rocm_fp8_paged_mqa_logits.
+        # actual_batch <= hidden_states.shape[0] == max_num_batched_tokens
         heads = q_fp8.shape[1]
         workspace_manager.get_simultaneous(
             ((heads, hidden_states.shape[0], max_model_len), torch.float32),
         )
+
+        # Transient logits tensor peak memory, produced by
+        # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
+        # (decode). Prefill logits are bounded by
+        # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
+        # split_indexer_prefill_chunks; decode logits are smaller.
+        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        _ = torch.empty(
+            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+        )
+
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
