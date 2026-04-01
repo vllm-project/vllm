@@ -98,7 +98,9 @@ def _run_and_compare(
     all_inputs: Sequence[tuple[list[str], PromptImageInput]],
     model: str,
     max_model_len: int,
+    max_num_seqs: int,
     mm_limit: int,
+    gpu_memory_utilization: float,
 ):
     """Load each runner once, run all inputs, then compare."""
     # NOTE: run vLLM first, then HF.  vLLM needs a fresh process without
@@ -108,11 +110,13 @@ def _run_and_compare(
         model,
         runner="generate",
         max_model_len=max_model_len,
-        max_num_seqs=2,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
         dtype=DTYPE,
         limit_mm_per_prompt={"image": mm_limit},
         tensor_parallel_size=2,
         trust_remote_code=True,
+        enforce_eager=True,
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
@@ -160,8 +164,10 @@ def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
         vllm_runner,
         all_inputs,
         model,
-        max_model_len=4096,
+        max_model_len=8192,
+        max_num_seqs=2,
         mm_limit=1,
+        gpu_memory_utilization=0.80,
     )
 
 
@@ -175,5 +181,7 @@ def test_multi_images_models(hf_runner, vllm_runner, image_assets, model) -> Non
         all_inputs,
         model,
         max_model_len=8192,
+        max_num_seqs=2,
         mm_limit=2,
+        gpu_memory_utilization=0.80,
     )
