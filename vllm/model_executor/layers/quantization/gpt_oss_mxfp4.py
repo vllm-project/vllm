@@ -16,9 +16,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+from vllm.model_executor.layers.fused_moe.oracle.gpt_oss_mxfp4 import (
     TRITON_BACKENDS,
-    Mxfp4MoeBackend,
+    GptOssMxfp4MoeBackend,
     convert_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -37,7 +37,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 logger = init_logger(__name__)
 
 
-class Mxfp4Config(QuantizationConfig):
+class GptOssMxfp4Config(QuantizationConfig):
     def __init__(self, ignored_layers: list[str] | None = None):
         super().__init__()
         self.ignored_layers = ignored_layers
@@ -52,7 +52,7 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
-        return "mxfp4"
+        return "gpt_oss_mxfp4"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
@@ -79,7 +79,7 @@ class Mxfp4Config(QuantizationConfig):
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
-            return Mxfp4MoEMethod(layer.moe_config)
+            return GptOssMxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             logger.debug_once(
                 "MXFP4 attention layer is not implemented. "
@@ -93,12 +93,12 @@ class Mxfp4Config(QuantizationConfig):
         return True
 
 
-class Mxfp4MoEMethod(FusedMoEMethodBase):
+class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.weight_dtype = "mxfp4"
+        self.weight_dtype = "gpt_oss_mxfp4"
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
         self.max_capture_size = (
@@ -116,7 +116,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def skip_forward_padding(self) -> bool:
         # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
         # so can skip the padding in the forward before applying the moe method
-        return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+        return self.mxfp4_backend == GptOssMxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
 
     def maybe_roundup_sizes(
         self,
@@ -333,7 +333,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
+        if self.mxfp4_backend == GptOssMxfp4MoeBackend.NONE:
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)

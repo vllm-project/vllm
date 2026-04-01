@@ -26,8 +26,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    Mxfp4MoeBackend,
+from vllm.model_executor.layers.fused_moe.oracle.gpt_oss_mxfp4 import (
+    GptOssMxfp4MoeBackend,
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
@@ -699,12 +699,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 f"Please check that the combination is supported in OCP_MX_Scheme."
             )
 
-        self.mxfp4_backend: Mxfp4MoeBackend | None = None
+        self.mxfp4_backend: GptOssMxfp4MoeBackend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
             self.mxfp4_backend, _ = select_mxfp4_moe_backend(moe)
         elif self.ocp_mx_scheme.startswith("w_mxfp4"):
             # TODO(bowenbao): refactor and introduce backends for other OCP MX schemes.
-            self.mxfp4_backend = Mxfp4MoeBackend.NONE
+            self.mxfp4_backend = GptOssMxfp4MoeBackend.NONE
 
         if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
@@ -739,7 +739,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             or not self.ocp_mx_scheme.startswith("w_mxfp4")
         ) and (
             self.mxfp4_backend is None
-            or self.mxfp4_backend is Mxfp4MoeBackend.NONE
+            or self.mxfp4_backend is GptOssMxfp4MoeBackend.NONE
             or not self.use_rocm_aiter_moe
         )
 
