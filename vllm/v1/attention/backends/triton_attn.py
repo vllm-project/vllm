@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -26,9 +27,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    KVQuantMode,
     MultipleOf,
-    get_kv_quant_mode,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -36,7 +35,12 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_per_token_quant,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
-from vllm.v1.kv_cache_interface import AttentionSpec, kv_cache_uses_per_token_scales
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVQuantMode,
+    get_kv_quant_mode,
+    kv_cache_uses_per_token_scales,
+)
 
 logger = init_logger(__name__)
 
@@ -580,7 +584,7 @@ class TritonAttentionImpl(AttentionImpl):
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            if self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 if key_cache.dtype != self.fp8_dtype:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
@@ -664,7 +668,7 @@ class TritonAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # Quantized KV cache is not supported for encoder attention.
-        if self._kv_quant_mode != KVQuantMode.NONE:
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantized KV cache is not supported for encoder attention"
             )
@@ -718,7 +722,7 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
-        if self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(
@@ -752,7 +756,7 @@ class TritonAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.unbind(1)
         flash_layout = True
 
-        is_fp8_kv_cache = self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

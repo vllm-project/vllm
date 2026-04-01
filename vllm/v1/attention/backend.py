@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+
+from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -959,15 +961,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-
-
-# Re-exported from kv_cache_interface for backward compatibility.
-from vllm.v1.kv_cache_interface import (  # noqa: E402, F401, F811
-    KVQuantMode,
-    get_kv_quant_mode,
-    is_quantized_kv_cache,
-    kv_cache_uses_per_token_scales,
-)
 
 
 def subclass_attention_backend(

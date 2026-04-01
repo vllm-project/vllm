@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import KVQuantMode, is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
 # Skip entire module if no CUDA/ROCm GPU available
 pytestmark = [

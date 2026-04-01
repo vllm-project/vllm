@@ -8,6 +8,7 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -245,7 +246,7 @@ class CacheConfig:
                 "Dynamic per-token scales will be computed at runtime.",
                 str(cache_dtype),
             )
-        elif cache_dtype.startswith("fp8"):
+        elif is_quantized_kv_cache(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "

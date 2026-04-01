@@ -9,10 +9,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import (
-    is_quantized_kv_cache,
-    kv_cache_uses_per_token_scales,
-)
+from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_scales
 
 logger = init_logger(__name__)
 
