@@ -43,7 +43,8 @@ class MambaBase(AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         if (
             vllm_config.speculative_config is not None
-            and vllm_config.model_config.hf_config.model_type not in ["qwen3_next"]
+            and vllm_config.model_config.hf_config.model_type
+            not in ["qwen3_next", "qwen3_5", "qwen3_5_moe"]
         ):
             raise NotImplementedError(
                 "Mamba with speculative decoding is not supported yet."
