@@ -67,14 +67,18 @@ def _scatter_topk_kernel(
     mask_ptr,
     topk_ptr,
     cu_q_lens_ptr,
-    max_seq_len: tl.constexpr,
+    num_words: tl.constexpr,
     topk: tl.constexpr,
     topk_stride: tl.constexpr,
     max_q_len: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
     NUM_REQS: tl.constexpr,
 ):
-    """Scatter 1s at topk positions. Grid: (sum(q_lens),)."""
+    """Scatter bits at topk positions into a bit-packed int32 mask.
+
+    Grid: (sum(q_lens),).
+    Output shape: (B, max_Q, ceil(max_S / 32)) int32.
+    """
     row_idx = tl.program_id(0)
 
     b: tl.int32 = 0
@@ -91,8 +95,12 @@ def _scatter_topk_kernel(
     indices = tl.load(topk_row_ptr + offsets, mask=in_range, other=-1)
 
     valid = in_range & (indices >= 0)
-    mask_row_ptr = mask_ptr + (b * max_q_len + q_local) * max_seq_len
-    tl.store(mask_row_ptr + indices, tl.where(valid, 1, 0), mask=valid)
+    word_indices = indices >> 5  # index // 32
+    bit_indices = indices & 31  # index % 32
+    bits = (1 << bit_indices).to(tl.int32)
+
+    mask_row_ptr = mask_ptr + (b * max_q_len + q_local) * num_words
+    tl.atomic_or(mask_row_ptr + word_indices, bits, mask=valid)
 
 
 def _build_topk_mask(
@@ -102,9 +110,10 @@ def _build_topk_mask(
     max_seq_len: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Build a dense (B, max_Q, max_S) int32 mask from topk indices."""
+    """Build a bit-packed (B, max_Q, ceil(max_S/32)) int32 mask from topk indices."""
     B = len(q_lens)
-    mask = torch.zeros(B, max_q_len, max_seq_len, dtype=torch.int32, device=device)
+    num_words = (max_seq_len + 31) // 32
+    mask = torch.zeros(B, max_q_len, num_words, dtype=torch.int32, device=device)
 
     total_q = sum(q_lens)
     if total_q == 0:
@@ -122,7 +131,7 @@ def _build_topk_mask(
         mask,
         topk_packed,
         cu_q_lens,
-        max_seq_len=max_seq_len,
+        num_words=num_words,
         topk=topk_k,
         topk_stride=topk_packed.stride(0),
         max_q_len=max_q_len,
