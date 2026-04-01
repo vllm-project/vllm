@@ -536,44 +536,7 @@ def one_sided_workspace_reinitialization_worker(rank: int, world_size: int):
     manager.cleanup()
 
 
-@pytest.mark.skip(
-    reason="One-sided FlashInfer backend requires matching DP and EP group sizes. "
-           "The FlashInfer MoeAlltoAll kernel strictly checks workspace.size(0) == epSize, "
-           "which fails when DP group size (1) != EP group size (2) in current test setup. "
-           "TODO: Implement proper MoE model config in test framework to create matching group sizes."
-)
-@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
-@pytest.mark.skipif(
-    not has_flashinfer_nvlink_one_sided(),
-    reason="FlashInfer NVLink one-sided not available",
-)
-@pytest.mark.skipif(
-    not has_sys_ptrace_capability(),
-    reason=(
-        "SYS_PTRACE capability required for MNNVL. "
-        "Run container with: docker run --cap-add=SYS_PTRACE"
-    ),
-)
-@pytest.mark.parametrize("world_size", [2])
-@pytest.mark.skip(
-    reason="One-sided FlashInfer backend requires matching DP and EP group sizes. "
-           "The FlashInfer MoeAlltoAll kernel strictly checks workspace.size(0) == epSize, "
-           "which fails when DP group size (1) != EP group size (2) in current test setup. "
-           "TODO: Implement proper MoE model config in test framework to create matching group sizes."
-)
-@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
-@pytest.mark.skipif(
-    not has_flashinfer_nvlink_one_sided(),
-    reason="FlashInfer NVLink one-sided not available",
-)
-@pytest.mark.skipif(
-    not has_sys_ptrace_capability(),
-    reason=(
-        "SYS_PTRACE capability required for MNNVL. "
-        "Run container with: docker run --cap-add=SYS_PTRACE"
-    ),
-)
-@pytest.mark.parametrize("world_size", [2])
+
 # =============================================================================
 # Data Communication Validation Tests
 # =============================================================================
