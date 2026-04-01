@@ -6,7 +6,13 @@ import torch
 from vllm.forward_context import (
     get_forward_context,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import MoERunnerBase
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -51,6 +57,18 @@ class ChunkingMoERunner(MoERunnerBase):
         # called when normal lookup (instance __dict__, class MRO) fails,
         # so ChunkingMoERunner's own attributes and methods take priority.
         return getattr(self._inner, name)
+
+    @property
+    def shared_experts(self) -> SharedExperts | None:
+        return self._inner.shared_experts
+
+    # TODO(bnell): temporary hack, do not call this method.
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        self._inner._replace_quant_method(quant_method)
+        self.quant_method = quant_method
+
+    def is_internal_router(self) -> bool:
+        return self._inner.gate is not None
 
     # Reducing results when chunking is handled by the MK finalize operations
     # when DP chunking is enabled..

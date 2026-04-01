@@ -214,11 +214,11 @@ class MoERunnerBase(MoERunner):
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped _forward_impl.
-            return _moe_forward if self.shared_experts is None else _moe_forward_shared
+            return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
         return (
             torch.ops.vllm.moe_forward
-            if self.shared_experts is None
+            if self._shared_experts is None
             else torch.ops.vllm.moe_forward_shared
         )
 
@@ -228,8 +228,8 @@ class MoERunnerBase(MoERunner):
 
     # TODO(bnell): temporary hack, do not call this method.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        if self.shared_experts is not None:
-            self.shared_experts._quant_method = quant_method
+        if self._shared_experts is not None:
+            self._shared_experts._quant_method = quant_method
         self.quant_method = quant_method
 
     def is_internal_router(self) -> bool:
@@ -293,7 +293,7 @@ class MoERunnerBase(MoERunner):
 
         return (
             hidden_states,
-            hidden_states if self.shared_experts is not None else None,
+            hidden_states if self._shared_experts is not None else None,
         )
 
     def _maybe_reduce_output(
@@ -355,7 +355,7 @@ class MoERunnerBase(MoERunner):
                 value=0.0,
             )
 
-        if self.shared_experts is not None:
+        if self._shared_experts is not None:
             orig_hidden_dims = [shared_experts_hidden_dim, transformed_hidden_dim]
         else:
             orig_hidden_dims = [transformed_hidden_dim]
@@ -367,9 +367,9 @@ class MoERunnerBase(MoERunner):
         shared_experts_input: torch.Tensor | None,
         order: SharedExpertsOrder,
     ):
-        if self.shared_experts is not None:
+        if self._shared_experts is not None:
             assert shared_experts_input is not None
-            self.shared_experts.apply(shared_experts_input, order)
+            self._shared_experts.apply(shared_experts_input, order)
 
     def _apply_quant_method(
         self,
@@ -413,7 +413,7 @@ class MoERunnerBase(MoERunner):
         )
 
         return (
-            self.shared_experts.output if self.shared_experts is not None else None,
+            self._shared_experts.output if self._shared_experts is not None else None,
             fused_out,
         )
 
@@ -433,8 +433,8 @@ class MoERunnerBase(MoERunner):
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
-        if self.shared_experts is not None:
-            self.shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
+        if self._shared_experts is not None:
+            self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def forward(
         self,
