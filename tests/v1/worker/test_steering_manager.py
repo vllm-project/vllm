@@ -886,3 +886,150 @@ class TestBackfillRegistration:
         # Refcount should still be 1 — backfill did not re-register
         assert mgr.config_refcounts[(42, "prefill")] == 1
         assert mgr.config_to_row[(42, "prefill")] == row_pre
+
+
+# ---------------------------------------------------------------------------
+# TestDeferredDecodeRegistration
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredDecodeRegistration:
+    """Verify that capacity exhaustion raises RuntimeError and that
+    registrations succeed after capacity is freed.
+
+    These tests validate the SteeringManager behaviour that underpins
+    the model runner's deferred-registration logic (Fix A).
+    """
+
+    def test_deferred_decode_registration_on_capacity(self):
+        """When max_configs slots are full, registering a new config
+        raises RuntimeError — the model runner catches this to defer."""
+        mgr = _make_manager(max_configs=2)
+        vectors_a = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        vectors_b = {_HP: {0: [2.0] * HIDDEN_SIZE}}
+        vectors_c = {_HP: {0: [3.0] * HIDDEN_SIZE}}
+
+        mgr.register_config(config_hash=1, vectors=vectors_a, phase="prefill")
+        mgr.register_config(config_hash=2, vectors=vectors_b, phase="decode")
+        assert mgr.num_active_configs == 2
+
+        # Simulates the transition scenario: prefill still held by
+        # another request sharing the same config, so refcount didn't
+        # drop to 0 and the row wasn't freed.
+        try:
+            mgr.register_config(config_hash=3, vectors=vectors_c, phase="decode")
+            raise AssertionError("Expected RuntimeError when capacity is exhausted")
+        except RuntimeError:
+            pass
+
+        # The failed registration should not have modified state.
+        assert mgr.num_active_configs == 2
+        assert (3, "decode") not in mgr.config_to_row
+
+    def test_pending_registration_processed_after_release(self):
+        """After releasing a config to free a slot, a previously-failed
+        registration should succeed on retry (row reused)."""
+        mgr = _make_manager(max_configs=2)
+        vectors_a = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        vectors_b = {_HP: {0: [2.0] * HIDDEN_SIZE}}
+        vectors_c = {_HP: {0: [3.0] * HIDDEN_SIZE}}
+
+        mgr.register_config(config_hash=1, vectors=vectors_a, phase="prefill")
+        row_b = mgr.register_config(config_hash=2, vectors=vectors_b, phase="decode")
+        assert mgr.num_active_configs == 2
+
+        # Release one config to free a slot.
+        mgr.release_config(config_hash=2, phase="decode")
+        assert mgr.num_active_configs == 1
+
+        # Now the deferred registration should succeed.
+        row_c = mgr.register_config(config_hash=3, vectors=vectors_c, phase="decode")
+        assert mgr.num_active_configs == 2
+        assert (3, "decode") in mgr.config_to_row
+        # The freed row should have been reused.
+        assert row_c == row_b
+
+
+# ---------------------------------------------------------------------------
+# TestPhaseTrackingRelease
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseTrackingRelease:
+    """Verify that partial release with shared refcounts works correctly.
+
+    These tests validate the refcount behaviour that underpins
+    the model runner's phase-tracking release logic (Fix B).
+    """
+
+    def test_phase_tracking_release_correctness(self):
+        """Two requests sharing the same (hash, phase='prefill') config.
+        Releasing one should decrement refcount to 1 and keep the row
+        active, not free it."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+
+        # Two requests register the same prefill config (refcount = 2).
+        row = mgr.register_config(config_hash=1, vectors=vectors, phase="prefill")
+        mgr.register_config(config_hash=1, vectors=vectors, phase="prefill")
+        assert mgr.config_refcounts[(1, "prefill")] == 2
+
+        # Release one (simulates one request finishing).
+        mgr.release_config(config_hash=1, phase="prefill")
+        assert mgr.config_refcounts[(1, "prefill")] == 1
+        assert (1, "prefill") in mgr.config_to_row
+
+        # The row is still active and resolvable.
+        assert mgr.get_row_for_config(config_hash=1, is_prefill=True) == row
+        assert mgr.num_active_configs == 1
+
+    def test_phase_tracking_prevents_cross_phase_release(self):
+        """Releasing (hash, 'decode') must NOT affect (hash, 'prefill')
+        even when both use the same hash value."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+
+        row_p = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+        row_d = mgr.register_config(config_hash=42, vectors=vectors, phase="decode")
+        assert row_p != row_d
+        assert mgr.num_active_configs == 2
+
+        # Release the decode config.
+        mgr.release_config(config_hash=42, phase="decode")
+        assert mgr.num_active_configs == 1
+
+        # Prefill config must remain untouched.
+        assert (42, "prefill") in mgr.config_to_row
+        assert mgr.config_refcounts[(42, "prefill")] == 1
+        assert mgr.get_row_for_config(config_hash=42, is_prefill=True) == row_p
+
+    def test_release_only_active_phase_on_finish(self):
+        """Simulate the model runner's finish-release logic:
+        a request that transitioned to decode should only release
+        its decode config, not both phases.
+
+        This validates that phase-tracking prevents the double-release bug.
+        """
+        mgr = _make_manager(max_configs=4)
+        vectors_p = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        vectors_d = {_HP: {0: [2.0] * HIDDEN_SIZE}}
+
+        # Two requests share the same prefill config.
+        mgr.register_config(config_hash=10, vectors=vectors_p, phase="prefill")
+        mgr.register_config(config_hash=10, vectors=vectors_p, phase="prefill")
+        assert mgr.config_refcounts[(10, "prefill")] == 2
+
+        # Request A transitions: release prefill, register decode.
+        mgr.release_config(config_hash=10, phase="prefill")
+        assert mgr.config_refcounts[(10, "prefill")] == 1
+        mgr.register_config(config_hash=20, vectors=vectors_d, phase="decode")
+
+        # Request A finishes — with correct phase tracking, we only
+        # release decode (hash=20), NOT prefill (hash=10).
+        # Simulate: phase_A = "decode"
+        mgr.release_config(config_hash=20, phase="decode")
+        assert (20, "decode") not in mgr.config_to_row
+
+        # The prefill config for request B must still be intact.
+        assert (10, "prefill") in mgr.config_to_row
+        assert mgr.config_refcounts[(10, "prefill")] == 1
