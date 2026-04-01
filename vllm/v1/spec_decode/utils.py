@@ -2,19 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.config import VllmConfig, replace
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
-from vllm.v1.spec_decode.spec_decode_pytorch_utils import (
-    PADDING_SLOT_ID,
-    eagle_step_update_slot_mapping_and_metadata_pytorch,
-)
 
-logger = init_logger(__name__)
+PADDING_SLOT_ID = -1
+
+
+def next_power_of_2(n: int) -> int:
+    """Return the smallest power of 2 >= n."""
+    if n <= 0:
+        return 1
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    n |= n >> 32
+    return n + 1
 
 
 @triton.jit
@@ -109,32 +117,20 @@ def eagle_step_update_slot_mapping_and_metadata(
     if input_batch_size is None:
         input_batch_size = batch_size
 
-    if HAS_TRITON:
-        n_blocks_per_req = block_table_tensor.shape[1]
-        eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
-            positions_1d,
-            block_table_tensor,
-            block_table_tensor.stride(0),
-            seq_lens,
-            out_clamped_positions,
-            out_slot_mapping,
-            block_size=block_size,
-            max_model_len=max_model_len,
-            n_blocks_per_req=n_blocks_per_req,
-            PAD_ID=PADDING_SLOT_ID,
-            batch_size=batch_size,
-        )
-    else:
-        eagle_step_update_slot_mapping_and_metadata_pytorch(
-            positions_1d,
-            block_table_tensor,
-            seq_lens,
-            block_size,
-            max_model_len,
-            out_clamped_positions,
-            out_slot_mapping,
-            input_batch_size,
-        )
+    n_blocks_per_req = block_table_tensor.shape[1]
+    eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
+        positions_1d,
+        block_table_tensor,
+        block_table_tensor.stride(0),
+        seq_lens,
+        out_clamped_positions,
+        out_slot_mapping,
+        block_size=block_size,
+        max_model_len=max_model_len,
+        n_blocks_per_req=n_blocks_per_req,
+        PAD_ID=PADDING_SLOT_ID,
+        batch_size=batch_size,
+    )
 
 
 @triton.jit

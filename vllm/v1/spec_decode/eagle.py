@@ -26,7 +26,6 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.triton_utils.importing import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -40,20 +39,15 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.spec_decode_pytorch_utils import (
-    PADDING_SLOT_ID,
-    copy_and_expand_eagle_inputs_pytorch,
-    eagle_prepare_inputs_padded_pytorch,
-    eagle_prepare_next_token_padded_pytorch,
-    next_power_of_2,
-)
 from vllm.v1.spec_decode.utils import (
+    PADDING_SLOT_ID,
     compute_new_slot_mapping,
     copy_and_expand_eagle_inputs_kernel,
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
+    next_power_of_2,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
@@ -722,50 +716,29 @@ class SpecDecodeBaseProposer:
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
-            if HAS_TRITON:
-                copy_and_expand_eagle_inputs_kernel[grid](
-                    # (Padded) Inputs from the target model
-                    target_token_ids_ptr=target_token_ids,
-                    target_positions_ptr=target_positions,
-                    next_token_ids_ptr=next_token_ids,
-                    # Outputs to the drafting buffers
-                    out_input_ids_ptr=self.input_ids,
-                    out_positions_ptr=self.positions,
-                    out_is_rejected_token_mask_ptr=self.is_rejected_token_mask,
-                    out_is_masked_token_mask_ptr=self.is_masked_token_mask,
-                    out_new_token_indices_ptr=token_indices_to_sample,
-                    out_hidden_state_mapping_ptr=out_hidden_state_mapping,
-                    # Input metadata
-                    query_start_loc_ptr=query_start_loc,
-                    query_end_loc_ptr=query_end_loc,
-                    padding_token_id=0,
-                    parallel_drafting_token_id=self.parallel_drafting_token_id,
-                    # Sizing info
-                    total_input_tokens=total_num_input_tokens,
-                    num_padding_slots_per_request=self.extra_slots_per_request,
-                    shift_input_ids=self.pass_hidden_states_to_model,
-                    BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
-                )
-            else:
-                # CPU fallback
-                copy_and_expand_eagle_inputs_pytorch(
-                    target_token_ids=target_token_ids,
-                    target_positions=target_positions,
-                    next_token_ids=next_token_ids,
-                    out_input_ids=self.input_ids,
-                    out_positions=self.positions,
-                    out_is_rejected_token_mask=self.is_rejected_token_mask,
-                    out_is_masked_token_mask=self.is_masked_token_mask,
-                    out_new_token_indices=token_indices_to_sample,
-                    out_hidden_state_mapping=out_hidden_state_mapping,
-                    query_start_loc=query_start_loc,
-                    query_end_loc=query_end_loc,
-                    padding_token_id=0,
-                    parallel_drafting_token_id=self.parallel_drafting_token_id,
-                    total_input_tokens=total_num_input_tokens,
-                    num_padding_slots_per_request=self.extra_slots_per_request,
-                    shift_input_ids=self.pass_hidden_states_to_model,
-                )
+            copy_and_expand_eagle_inputs_kernel[grid](
+                # (Padded) Inputs from the target model
+                target_token_ids_ptr=target_token_ids,
+                target_positions_ptr=target_positions,
+                next_token_ids_ptr=next_token_ids,
+                # Outputs to the drafting buffers
+                out_input_ids_ptr=self.input_ids,
+                out_positions_ptr=self.positions,
+                out_is_rejected_token_mask_ptr=self.is_rejected_token_mask,
+                out_is_masked_token_mask_ptr=self.is_masked_token_mask,
+                out_new_token_indices_ptr=token_indices_to_sample,
+                out_hidden_state_mapping_ptr=out_hidden_state_mapping,
+                # Input metadata
+                query_start_loc_ptr=query_start_loc,
+                query_end_loc_ptr=query_end_loc,
+                padding_token_id=0,
+                parallel_drafting_token_id=self.parallel_drafting_token_id,
+                # Sizing info
+                total_input_tokens=total_num_input_tokens,
+                num_padding_slots_per_request=self.extra_slots_per_request,
+                shift_input_ids=self.pass_hidden_states_to_model,
+                BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
+            )
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
@@ -923,32 +896,20 @@ class SpecDecodeBaseProposer:
         # Kernel grid: one program per request (row)
         grid = (batch_size,)
 
-        if HAS_TRITON:
-            # Find the next power of 2 for block sizes
-            BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
-            eagle_prepare_next_token_padded_kernel[grid](
-                sampled_token_ids,
-                discard_request_mask,
-                backup_tokens_gpu,
-                next_token_ids,
-                valid_sampled_tokens_count,
-                gpu_input_batch.vocab_size,
-                num_tokens,
-                batch_size,
-                sampled_token_ids.stride(0),
-                BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
-            )
-        else:
-            eagle_prepare_next_token_padded_pytorch(
-                sampled_token_ids,
-                discard_request_mask,
-                backup_tokens_gpu,
-                next_token_ids,
-                valid_sampled_tokens_count,
-                gpu_input_batch.vocab_size,
-                num_tokens,
-                batch_size,
-            )
+        # Find the next power of 2 for block sizes
+        BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
+        eagle_prepare_next_token_padded_kernel[grid](
+            sampled_token_ids,
+            discard_request_mask,
+            backup_tokens_gpu,
+            next_token_ids,
+            valid_sampled_tokens_count,
+            gpu_input_batch.vocab_size,
+            num_tokens,
+            batch_size,
+            sampled_token_ids.stride(0),
+            BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
+        )
 
         return next_token_ids, valid_sampled_tokens_count
 
@@ -977,24 +938,14 @@ class SpecDecodeBaseProposer:
         )
 
         grid = (num_reqs,)
-        if HAS_TRITON:
-            eagle_prepare_inputs_padded_kernel[grid](
-                spec_decode_metadata.cu_num_draft_tokens,
-                valid_sampled_tokens_count,
-                common_attn_metadata.query_start_loc,
-                token_indices_to_sample,
-                num_rejected_tokens_gpu,
-                num_reqs,
-            )
-        else:
-            eagle_prepare_inputs_padded_pytorch(
-                spec_decode_metadata.cu_num_draft_tokens,
-                valid_sampled_tokens_count,
-                common_attn_metadata.query_start_loc,
-                token_indices_to_sample,
-                num_rejected_tokens_gpu,
-                num_reqs,
-            )
+        eagle_prepare_inputs_padded_kernel[grid](
+            spec_decode_metadata.cu_num_draft_tokens,
+            valid_sampled_tokens_count,
+            common_attn_metadata.query_start_loc,
+            token_indices_to_sample,
+            num_rejected_tokens_gpu,
+            num_reqs,
+        )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
