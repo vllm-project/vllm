@@ -25,8 +25,10 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
+    ModelWeightParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 from .quark_scheme import QuarkScheme
@@ -265,26 +267,26 @@ class QuarkOCP_MX(QuarkScheme):
     def get_min_capability(cls) -> int:
         return 70
 
+    def process_dynamic_mxfp4_weights_after_loading(
+        self, layer: torch.nn.Module
+    ) -> None:
+        w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+        layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
+        layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         if self.emulate:
             if self.dynamic_mxfp4_quant:
-                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
-                layer.weight_scale = torch.nn.Parameter(
-                    w_s.T.contiguous(), requires_grad=False
-                )
+                process_dynamic_mxfp4_weights_after_loading(layer)
             else:
                 layer.weight_scale = torch.nn.Parameter(
                     layer.weight_scale.data, requires_grad=False
                 )
         else:
             if self.dynamic_mxfp4_quant:
-                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
-                layer.weight_scale = torch.nn.Parameter(
-                    w_s.T.contiguous(), requires_grad=False
-                )
-                layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+                process_dynamic_mxfp4_weights_after_loading(layer)
             elif self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
@@ -318,7 +320,6 @@ class QuarkOCP_MX(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
-
         if self.dynamic_mxfp4_quant:
             weight = ModelWeightParameter(
                 data=torch.empty(
@@ -336,6 +337,7 @@ class QuarkOCP_MX(QuarkScheme):
         else:
             output_size_per_partition = sum(output_partition_sizes)
             layer.logical_widths = output_partition_sizes
+
             # WEIGHT
             weight = PackedvLLMParameter(
                 data=torch.empty(
