@@ -290,16 +290,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        # Only use symmetric memory when all ranks have uniform output sizes.
-        # ncclCommWindowRegister is collective: asymmetric pool allocations
-        # from variable per-rank sizes cause deadlocks.
-        use_symm_mem = sizes is None and should_nccl_symm_mem_reduce_scatter(
-            world_size, input_tensor
-        )
-        if use_symm_mem:
-            output = self._reduce_scatter_symm_mem(
-                input_tensor, output_shape, sizes=sizes
-            )
+        if should_nccl_symm_mem_reduce_scatter(world_size, input_tensor):
+            output = self._reduce_scatter_symm_mem(input_tensor, output_shape, sizes)
         else:
             output = torch.empty(
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
@@ -318,6 +310,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output_shape: tuple,
         sizes: list[int] | None,
     ) -> torch.Tensor:
+        """ReduceScatter using NCCL symmetric memory (NVLS).
+
+        Supports both uniform and variable sizes.  To ensure symmetric NCCL
+        pool allocations across ranks (required by ncclCommWindowRegister),
+        all ranks allocate the same total buffer sizes: input uses
+        input_tensor.shape (sum of all chunk sizes, identical across ranks)
+        and output uses max(sizes) (padded to be identical across ranks).
+
+        NOTE: ncclMemAlloc allocates outside PyTorch's caching allocator, so
+        it competes with KV-cache memory.  Lower gpu_memory_utilization
+        (e.g. 0.8) to leave headroom for the NCCL pool.
+        """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             is_symmetric_memory_tensor,
             nccl_symm_mem_context,
@@ -326,24 +330,27 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
 
-        # NVLS kernels require buffers allocated via ncclMemAlloc. When the
-        # input is already in the symmetric memory pool (e.g. the output of a
-        # prior symm-mem AllGather), we reuse it directly and avoid the copy.
-        # Otherwise we must allocate + copy, which adds overhead proportional
-        # to the full input size (N × world_size).  For large tensors the copy
-        # cost can rival the NVLS benefit; a future improvement is to use
-        # ncclCommRegister to register arbitrary user buffers in-place.
-        #
-        # NOTE: ncclMemAlloc allocates outside PyTorch's caching allocator, so
-        # it competes with KV-cache memory.  Lower gpu_memory_utilization
-        # (e.g. 0.8) to leave headroom for the NCCL pool.
+        # input_tensor has shape (sum(sizes), *tail) — identical on all ranks.
+        # output_shape has shape (sizes[rank], *tail) — may differ per rank.
+        # To keep NCCL pool allocations symmetric, allocate output at
+        # max(sizes) on all ranks, then narrow to the local chunk.
+        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+            padded_out_dim0 = max(sizes)
+            padded_output_shape = (padded_out_dim0,) + output_shape[1:]
+            use_scatterv = True
+        else:
+            padded_output_shape = output_shape
+            use_scatterv = False
+
         input_already_symm = is_symmetric_memory_tensor(input_tensor)
 
         with nccl_symm_mem_context(pynccl_comm):
             if not input_already_symm:
                 symm_input = torch.empty_like(input_tensor)
             symm_output = torch.empty(
-                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+                padded_output_shape,
+                dtype=input_tensor.dtype,
+                device=input_tensor.device,
             )
 
         if input_already_symm:
@@ -351,12 +358,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         else:
             symm_input.copy_(input_tensor)
 
-        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+        if use_scatterv:
             pynccl_comm.reduce_scatterv(symm_output, symm_input, sizes=sizes)
         else:
             pynccl_comm.reduce_scatter(symm_output, symm_input)
 
-        return symm_output
+        return symm_output.narrow(0, 0, output_shape[0])
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
@@ -428,18 +435,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
-        # Only use symmetric memory when all ranks have uniform sizes.
-        # ncclCommWindowRegister is collective: asymmetric pool allocations
-        # from variable per-rank sizes cause deadlocks.
         use_symm_mem = False
-        if sizes is None:
-            if isinstance(input_, torch.Tensor):
-                use_symm_mem = should_nccl_symm_mem_allgather(world_size, input_)
-            elif len(input_) > 0:
-                use_symm_mem = should_nccl_symm_mem_allgather(world_size, input_[0])
+        if isinstance(input_, torch.Tensor):
+            use_symm_mem = should_nccl_symm_mem_allgather(world_size, input_)
+        elif len(input_) > 0:
+            use_symm_mem = should_nccl_symm_mem_allgather(world_size, input_[0])
 
         if use_symm_mem:
-            return self._all_gatherv_symm_mem(input_, sizes, world_size)
+            if isinstance(input_, torch.Tensor):
+                return self._all_gather_symm_mem(input_, sizes)
+            return self._all_gather_batched_symm_mem(input_, sizes)
 
         def _all_gather_single(input_: torch.Tensor, sizes: list[int] | None = None):
             input_size = input_.size()
@@ -472,12 +477,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         return output_list
 
-    def _all_gatherv_symm_mem(
-        self,
-        input_: torch.Tensor | list[torch.Tensor],
-        sizes: list[int] | None,
-        world_size: int,
-    ):
+    def _all_gather_symm_mem(
+        self, input_: torch.Tensor, sizes: list[int] | None
+    ) -> torch.Tensor:
+        """AllGather a single tensor using NCCL symmetric memory (NVLS).
+
+        Supports both uniform and variable sizes.  To keep NCCL pool
+        allocations symmetric across ranks, the input buffer is padded to
+        max(sizes) (identical on all ranks).
+        See _reduce_scatter_symm_mem for notes on copy-skip and memory.
+        """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             is_symmetric_memory_tensor,
             nccl_symm_mem_context,
@@ -485,10 +494,54 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
+        world_size = self.world_size
 
-        inputs = [input_] if isinstance(input_, torch.Tensor) else input_
+        input_already_symm = is_symmetric_memory_tensor(input_)
 
-        # See _reduce_scatter_symm_mem for rationale on the copy-skip.
+        if sizes is not None:
+            out_size = (sum(sizes),) + input_.size()[1:]
+            padded_in_size = (max(sizes),) + input_.size()[1:]
+        else:
+            out_size = (input_.size(0) * world_size,) + input_.size()[1:]
+            padded_in_size = input_.size()
+
+        with nccl_symm_mem_context(pynccl_comm):
+            if not input_already_symm:
+                symm_input = torch.empty(
+                    padded_in_size, dtype=input_.dtype, device=input_.device
+                )
+            symm_output = torch.empty(
+                out_size, dtype=input_.dtype, device=input_.device
+            )
+
+        if input_already_symm:
+            symm_input = input_
+        else:
+            symm_input.narrow(0, 0, input_.size(0)).copy_(input_)
+
+        if sizes is not None:
+            pynccl_comm.all_gatherv(symm_output, symm_input, sizes=sizes)
+        else:
+            pynccl_comm.all_gather(symm_output, symm_input)
+        return symm_output
+
+    def _all_gather_batched_symm_mem(
+        self, inputs: list[torch.Tensor], sizes: list[int] | None
+    ) -> list[torch.Tensor]:
+        """AllGather a list of tensors using NCCL symmetric memory (NVLS).
+
+        Uses group_start/group_end to batch the collectives.
+        Supports both uniform and variable sizes.
+        """
+        from vllm.distributed.device_communicators.pynccl_allocator import (
+            is_symmetric_memory_tensor,
+            nccl_symm_mem_context,
+        )
+
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        world_size = self.world_size
+
         symm_inputs = []
         symm_outputs = []
         needs_copy = []
@@ -496,38 +549,34 @@ class CudaCommunicator(DeviceCommunicatorBase):
             for inp in inputs:
                 already_symm = is_symmetric_memory_tensor(inp)
                 needs_copy.append(not already_symm)
-                if not already_symm:
-                    symm_inputs.append(torch.empty_like(inp))
-                else:
-                    symm_inputs.append(inp)
                 if sizes is not None:
+                    padded_in_size = (max(sizes),) + inp.size()[1:]
                     out_size = (sum(sizes),) + inp.size()[1:]
                 else:
+                    padded_in_size = inp.size()
                     out_size = (inp.size(0) * world_size,) + inp.size()[1:]
+                if not already_symm:
+                    symm_inputs.append(
+                        torch.empty(padded_in_size, dtype=inp.dtype, device=inp.device)
+                    )
+                else:
+                    symm_inputs.append(inp)
                 symm_outputs.append(
                     torch.empty(out_size, dtype=inp.dtype, device=inp.device)
                 )
 
         for do_copy, symm_in, inp in zip(needs_copy, symm_inputs, inputs):
             if do_copy:
-                symm_in.copy_(inp)
+                symm_in.narrow(0, 0, inp.size(0)).copy_(inp)
 
-        if len(inputs) == 1:
+        pynccl_comm.group_start()
+        for symm_out, symm_in in zip(symm_outputs, symm_inputs):
             if sizes is not None:
-                pynccl_comm.all_gatherv(symm_outputs[0], symm_inputs[0], sizes=sizes)
+                pynccl_comm.all_gatherv(symm_out, symm_in, sizes=sizes)
             else:
-                pynccl_comm.all_gather(symm_outputs[0], symm_inputs[0])
-        else:
-            pynccl_comm.group_start()
-            for symm_out, symm_in in zip(symm_outputs, symm_inputs):
-                if sizes is not None:
-                    pynccl_comm.all_gatherv(symm_out, symm_in, sizes=sizes)
-                else:
-                    pynccl_comm.all_gather(symm_out, symm_in)
-            pynccl_comm.group_end()
+                pynccl_comm.all_gather(symm_out, symm_in)
+        pynccl_comm.group_end()
 
-        if isinstance(input_, torch.Tensor):
-            return symm_outputs[0]
         return symm_outputs
 
     def dispatch_router_logits(
