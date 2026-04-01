@@ -6,10 +6,15 @@ import importlib
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+
+logger = init_logger(__name__)
+
+_AITER_MQA_SMALL_HEADS_WARNED = False
 
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
@@ -322,17 +327,29 @@ def rocm_fp8_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
+    global _AITER_MQA_SMALL_HEADS_WARNED
     from vllm._aiter_ops import rocm_aiter_ops
 
+    batch_size, next_n, heads, _ = q_fp8.shape
+
+    # AITER's deepgemm_fp8_paged_mqa_logits_stage1 computes TileQCount
+    # from num_heads; when heads < 16 (e.g. GLM-5 with TP=8 → 8 heads)
+    # TileQCount becomes 0, causing ZeroDivisionError.
+    # Tracked: https://github.com/ROCm/aiter/issues/2563
     aiter_paged_mqa_logits_module = None
-    if rocm_aiter_ops.is_enabled():
+    if rocm_aiter_ops.is_enabled() and heads >= 16:
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
+    elif rocm_aiter_ops.is_enabled() and not _AITER_MQA_SMALL_HEADS_WARNED:
+        logger.warning(
+            "AITER paged MQA logits kernel does not support %d heads "
+            "(requires >= 16). Falling back to PyTorch reference. "
+            "See https://github.com/ROCm/aiter/issues/2563", heads)
+        _AITER_MQA_SMALL_HEADS_WARNED = True
 
     if aiter_paged_mqa_logits_module is not None:
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
-        batch_size, next_n, heads, _ = q_fp8.shape
         out_qk = torch.full(
             (heads, batch_size * next_n, max_model_len),
             float("-inf"),
@@ -449,8 +466,9 @@ def rocm_fp8_mqa_logits(
     # path after aiter merge this kernel into main
     from vllm._aiter_ops import rocm_aiter_ops
 
+    heads = q.shape[1]
     aiter_mqa_logits_module = None
-    if rocm_aiter_ops.is_enabled():
+    if rocm_aiter_ops.is_enabled() and heads >= 16:
         aiter_mqa_logits_module = mqa_logits_module()
 
     if aiter_mqa_logits_module is not None:
