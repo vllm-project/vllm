@@ -290,9 +290,11 @@ def supports_trtllm_attention() -> bool:
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    # TRTLLM attention is currently only validated on SM100 (CC 10.0).
+    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
+    # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
     return (
-        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+        current_platform.is_device_capability(10, 0) and has_nvidia_artifactory()
     )
 
 
