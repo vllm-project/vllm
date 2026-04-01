@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
     DefaultMoERunner,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -275,8 +278,6 @@ class FusedMoE(CustomOp):
     ):
         super().__init__()
 
-        self._gate = gate
-        self._shared_experts = shared_experts
         self._routed_input_transform = routed_input_transform
 
         if params_dtype is None:
@@ -486,7 +487,7 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or self._shared_experts is not None,
+            disable_inplace=disable_inplace() or shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -564,34 +565,20 @@ class FusedMoE(CustomOp):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+        # TODO(bnell): this is un-needed and removed in a follow up PR.
         self.base_quant_method = self.quant_method
 
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        #   - we are using marlin kernels
-        backend = self.moe_parallel_config.all2all_backend
-        self.use_overlapped = (
-            not (
-                (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_nvl_two_sided_kernels
-            )
-            and self._shared_experts is not None
-        )
-
-        self.runner = self._init_runner()
-
-    def _init_runner(self):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        return DefaultMoERunner(
+        self.runner = DefaultMoERunner(
             layer=self,
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=self.gate,
-            shared_experts=self.shared_experts,
+            gate=gate,
+            shared_experts=shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
@@ -602,10 +589,7 @@ class FusedMoE(CustomOp):
     # intrusive way to do this.
     def _replace_quant_method(self, mk: FusedMoEMethodBase):
         self.quant_method = mk
-        # We need to force reconstruction of runner because we're swapping out
-        # the quant_method with a FusedMoEModularMethod. This logic can go
-        # away once the FusedMoEModularMethod is eliminated.
-        self.runner = self._init_runner()
+        self.runner._replace_quant_method(mk)
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -639,8 +623,8 @@ class FusedMoE(CustomOp):
             )
 
     @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return self._shared_experts if self.use_overlapped else None
+    def shared_experts(self) -> SharedExperts | None:
+        return self.runner.shared_experts
 
     @property
     def layer_id(self):
@@ -648,10 +632,6 @@ class FusedMoE(CustomOp):
         from vllm.model_executor.models.utils import extract_layer_index
 
         return extract_layer_index(self.layer_name)
-
-    @property
-    def gate(self) -> torch.nn.Module | None:
-        return self._gate if self.use_overlapped else None
 
     @property
     def tp_size(self):
@@ -676,7 +656,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self.gate is not None
+        return self.runner.is_internal_router()
 
     def _maybe_init_expert_routing_tables(
         self,
@@ -1467,7 +1447,12 @@ class FusedMoE(CustomOp):
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if not (name.startswith("_shared_experts.") or name.startswith("_gate."))
+            if not (
+                name.startswith("_shared_experts.")
+                or name.startswith("_gate.")
+                or name.startswith("_routed_input_transform.")
+                or name.startswith("_routed_output_transform.")
+            )
             and name not in NON_EXPERT_WEIGHTS
         )
 
@@ -1477,8 +1462,11 @@ class FusedMoE(CustomOp):
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
             and not name.startswith("_shared_experts.")
-            # exclude parameters from non-expert submodules (e.g. gate/shared)
+            # exclude parameters from non-expert submodules,
+            # e.g. gate/shared/transforms.
             and not name.startswith("_gate.")
+            and not name.startswith("_routed_input_transform.")
+            and not name.startswith("_routed_output_transform.")
         ]
 
     def set_eplb_state(
