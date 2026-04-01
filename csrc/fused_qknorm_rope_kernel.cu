@@ -22,6 +22,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include "async_util.cuh"
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 #include "type_convert.cuh"
@@ -88,64 +89,7 @@ inline __device__ __host__ T divUp(T m, T n) {
 
 namespace tensorrt_llm::kernels {
 
-// cp.async helpers: async copy from global to shared memory (SM80+).
-// On older architectures these fall back to synchronous loads.
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(USE_ROCM)
-__device__ __forceinline__ void rope_cp_async4(void* smem_ptr,
-                                               const void* glob_ptr) {
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
-               :
-               : "r"(smem), "l"(glob_ptr));
-}
-__device__ __forceinline__ void rope_cp_async_ca(void* smem_ptr,
-                                                 const void* glob_ptr,
-                                                 int size_bytes) {
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  if (size_bytes == 4) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                 :
-                 : "r"(smem), "l"(glob_ptr));
-  } else if (size_bytes == 8) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n"
-                 :
-                 : "r"(smem), "l"(glob_ptr));
-  } else {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n"
-                 :
-                 : "r"(smem), "l"(glob_ptr));
-  }
-}
-__device__ __forceinline__ void rope_cp_async_fence() {
-  asm volatile("cp.async.commit_group;\n" ::);
-}
-template <int n>
-__device__ __forceinline__ void rope_cp_async_wait() {
-  asm volatile("cp.async.wait_group %0;\n" : : "n"(n));
-}
-#else
-__device__ __forceinline__ void rope_cp_async4(void* smem_ptr,
-                                               const void* glob_ptr) {
-  *reinterpret_cast<int4*>(smem_ptr) = *reinterpret_cast<const int4*>(glob_ptr);
-}
-__device__ __forceinline__ void rope_cp_async_ca(void* smem_ptr,
-                                                 const void* glob_ptr,
-                                                 int size_bytes) {
-  if (size_bytes == 4) {
-    *reinterpret_cast<uint32_t*>(smem_ptr) =
-        *reinterpret_cast<const uint32_t*>(glob_ptr);
-  } else if (size_bytes == 8) {
-    *reinterpret_cast<uint64_t*>(smem_ptr) =
-        *reinterpret_cast<const uint64_t*>(glob_ptr);
-  } else {
-    *reinterpret_cast<int4*>(smem_ptr) =
-        *reinterpret_cast<const int4*>(glob_ptr);
-  }
-}
-__device__ __forceinline__ void rope_cp_async_fence() {}
-template <int n>
-__device__ __forceinline__ void rope_cp_async_wait() {}
-#endif
+using namespace vllm::cuda_async;
 
 // NOTE(zhuhaoran): This kernel is adapted from TensorRT-LLM implementation,
 // with added support for passing the cos_sin_cache as an input.
@@ -456,10 +400,10 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       int const offThread = offWarp + laneId * numElemsPerThread;
       char* smem_dst =
           this_warp_head_smem + k * qkv_tile_bytes + laneId * elemSizeBytes;
-      rope_cp_async_ca(smem_dst, reinterpret_cast<const char*>(&qkv[offThread]),
-                       elemSizeBytes);
+      cp_async_shared_global_ca(smem_dst, reinterpret_cast<const char*>(&qkv[offThread]),
+                                elemSizeBytes);
     }
-    rope_cp_async_fence();  // commit group 0 (QKV)
+    cp_async_commit_group();  // commit group 0 (QKV)
 
     // === Group 1: async load cos/sin into smem (issued second). ===
     int64_t const pos_id = position_ids[tokenIdx];
@@ -471,12 +415,12 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
           reinterpret_cast<char*>(&smem[warpId * rotary_dim]) + copyId * 16;
       const char* glob_ptr =
           reinterpret_cast<const char*>(cache_ptr) + copyId * 16;
-      rope_cp_async4(smem_ptr, glob_ptr);
+      cp_async_shared_global_16_cg(smem_ptr, glob_ptr);
     }
-    rope_cp_async_fence();  // commit group 1 (cos/sin)
+    cp_async_commit_group();  // commit group 1 (cos/sin)
 
     // wait<1>: allow at most 1 pending group (group 1) → group 0 (QKV) is done.
-    rope_cp_async_wait<1>();
+    cp_async_wait_group<1>();
 
     float elements[numElemsPerThread];
     float elements2[numElemsPerThread];
@@ -536,7 +480,7 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       }
 
       // On first head: wait for group 1 (cos/sin) before RoPE.
-      if (k == 0) rope_cp_async_wait<0>();
+      if (k == 0) cp_async_wait_group<0>();
 
       // === Part 2: RoPE using cos/sin from shared memory. ===
       if (laneId < rotary_lanes) {
@@ -802,7 +746,7 @@ void fused_qk_norm_rope(
   // Auto thresholds are calibrated on SM 9.0 (H100). On other architectures,
   // fall back to token_heads_per_warp=1 (base kernel) until profiled.
   int token_heads_per_warp;
-  if (forced_token_heads_per_warp > 0) {
+  if (forced_token_heads_per_warp > 0) { //only support SM80+
     token_heads_per_warp = static_cast<int>(forced_token_heads_per_warp);
   } else {
     token_heads_per_warp = 1;
