@@ -2467,6 +2467,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
 def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler = object.__new__(Scheduler)
     sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
     request = Request(
         request_id="0",
@@ -2474,7 +2475,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         mm_features=None,
         sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=EOS_TOKEN_ID,
     )
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock()
