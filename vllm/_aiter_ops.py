@@ -50,9 +50,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_gfx9
+        from vllm.platforms.rocm import on_mi3xx
 
-        return on_gfx9()
+        return on_mi3xx()
     return False
 
 
@@ -386,6 +386,12 @@ def _rocm_aiter_mla_decode_fwd_impl(
     logit_cap: float = 0.0,
     q_scale: torch.Tensor | None = None,
     kv_scale: torch.Tensor | None = None,
+    work_meta_data: torch.Tensor | None = None,
+    work_indptr: torch.Tensor | None = None,
+    work_info_set: torch.Tensor | None = None,
+    reduce_indptr: torch.Tensor | None = None,
+    reduce_final_map: torch.Tensor | None = None,
+    reduce_partial_map: torch.Tensor | None = None,
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
@@ -398,6 +404,29 @@ def _rocm_aiter_mla_decode_fwd_impl(
     if _check_aiter_mla_fp8_support():
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
+
+    if work_meta_data is not None:
+        assert work_indptr is not None, (
+            "work_indptr must be provided with work_meta_data"
+        )
+        assert work_info_set is not None, (
+            "work_info_set must be provided with work_meta_data"
+        )
+        assert reduce_indptr is not None, (
+            "reduce_indptr must be provided with work_meta_data"
+        )
+        assert reduce_final_map is not None, (
+            "reduce_final_map must be provided with work_meta_data"
+        )
+        assert reduce_partial_map is not None, (
+            "reduce_partial_map must be provided with work_meta_data"
+        )
+        kwargs["work_meta_data"] = work_meta_data
+        kwargs["work_indptr"] = work_indptr
+        kwargs["work_info_set"] = work_info_set
+        kwargs["reduce_indptr"] = reduce_indptr
+        kwargs["reduce_final_map"] = reduce_final_map
+        kwargs["reduce_partial_map"] = reduce_partial_map
 
     mla_decode_fwd(
         q,
@@ -425,6 +454,12 @@ def _rocm_aiter_mla_decode_fwd_fake(
     logit_cap: float = 0.0,
     q_scale: torch.Tensor | None = None,
     kv_scale: torch.Tensor | None = None,
+    work_meta_data: torch.Tensor | None = None,
+    work_indptr: torch.Tensor | None = None,
+    work_info_set: torch.Tensor | None = None,
+    reduce_indptr: torch.Tensor | None = None,
+    reduce_final_map: torch.Tensor | None = None,
+    reduce_partial_map: torch.Tensor | None = None,
 ) -> None:
     pass
 
@@ -1659,6 +1694,12 @@ class rocm_aiter_ops:
         logit_cap: float = 0.0,
         q_scale: torch.Tensor | None = None,
         kv_scale: torch.Tensor | None = None,
+        work_meta_data: torch.Tensor | None = None,
+        work_indptr: torch.Tensor | None = None,
+        work_info_set: torch.Tensor | None = None,
+        reduce_indptr: torch.Tensor | None = None,
+        reduce_final_map: torch.Tensor | None = None,
+        reduce_partial_map: torch.Tensor | None = None,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -1673,6 +1714,12 @@ class rocm_aiter_ops:
             logit_cap=logit_cap,
             q_scale=q_scale,
             kv_scale=kv_scale,
+            work_meta_data=work_meta_data,
+            work_indptr=work_indptr,
+            work_info_set=work_info_set,
+            reduce_indptr=reduce_indptr,
+            reduce_final_map=reduce_final_map,
+            reduce_partial_map=reduce_partial_map,
         )
 
     @staticmethod
@@ -2021,6 +2068,57 @@ class rocm_aiter_ops:
             K_QScale=K_QScale,
             V_QScale=V_QScale,
             out_=out_,
+        )
+
+    @staticmethod
+    def paged_attention_common(
+        Q: torch.Tensor,
+        K: torch.Tensor,
+        V: torch.Tensor,
+        tmp_out: torch.Tensor,
+        max_logits: torch.Tensor,
+        exp_sums: torch.Tensor,
+        max_seq_len: int,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables_stride0: int,
+        scale: float,
+        K_QScale_hip: torch.Tensor,
+        V_QScale_hip: torch.Tensor,
+        K_QScale_asm: torch.Tensor,
+        V_QScale_asm: torch.Tensor,
+        out_: torch.Tensor,
+        kv_cache_dtype: str,
+    ):
+        """
+        Paged attention common function.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.paged_attention_common
+        """
+        from aiter import paged_attention_common
+
+        return paged_attention_common(
+            Q=Q,
+            K=K,
+            V=V,
+            tmp_out=tmp_out,
+            max_logits=max_logits,
+            exp_sums=exp_sums,
+            max_seq_len=max_seq_len,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            block_tables_stride0=block_tables_stride0,
+            scale=scale,
+            K_QScale_hip=K_QScale_hip,
+            V_QScale_hip=V_QScale_hip,
+            K_QScale_asm=K_QScale_asm,
+            V_QScale_asm=V_QScale_asm,
+            out_=out_,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
 

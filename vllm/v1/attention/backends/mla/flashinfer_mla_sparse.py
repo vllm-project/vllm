@@ -30,6 +30,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     build_sparse_mla_prefill_fields,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -350,11 +351,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
         o = trtllm_batch_decode_with_kv_cache_mla(
