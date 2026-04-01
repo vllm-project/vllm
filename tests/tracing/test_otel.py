@@ -15,13 +15,20 @@ from vllm.tracing import SpanKind, extract_trace_context, extract_trace_headers
 from vllm.tracing.otel import (
     get_trace_headers_from_context,
     manual_instrument_otel,
-    shutdown_otel_tracer,
 )
+
+
+def _reset_tracer_provider() -> None:
+    provider = getattr(trace, "_TRACER_PROVIDER", None)
+    if provider is not None and hasattr(provider, "shutdown"):
+        provider.shutdown()
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE._done = False
 
 
 @pytest.fixture
 def span_exporter(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
-    shutdown_otel_tracer()
+    _reset_tracer_provider()
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -33,7 +40,7 @@ def span_exporter(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
 
     yield exporter
 
-    shutdown_otel_tracer()
+    _reset_tracer_provider()
 
 
 def test_extract_trace_headers_is_case_insensitive():
