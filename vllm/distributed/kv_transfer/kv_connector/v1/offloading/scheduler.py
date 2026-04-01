@@ -315,19 +315,14 @@ class OffloadingConnectorScheduler:
         """
         Called when a request has finished, before its blocks are freed.
 
-        Returns:
-            True if the request is being saved/sent asynchronously and blocks
-            should not be freed until the request_id is returned from
-            get_finished().
-            Optional KVTransferParams to be included in the request outputs
-            returned by the engine.
+        Returns True if stores are pending — GPU blocks must be held
+        until the deferred GPU→CPU copy completes (vLLM defers stores
+        to avoid delaying token generation). Freeing blocks before the
+        copy runs would cause data corruption.
         """
         req_id = request.request_id
         self._requests.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
-
-        # TODO(orozery): possibly kickoff offload for last block
-        # which may have been deferred due to async scheduling
         self._next_stored_block_idx.pop(req_id, None)
 
         request_being_stored = req_id in self._reqs_being_stored

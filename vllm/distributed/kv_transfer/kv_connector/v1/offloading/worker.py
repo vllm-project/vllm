@@ -54,8 +54,6 @@ class OffloadingConnectorWorker:
         self._load_job: dict[ReqId, int] = {}
         # req_id -> set(active job IDs)
         self._store_jobs = defaultdict[ReqId, set[int]](set)
-        # list of store jobs pending submission (job_id, transfer_spec)
-        self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
         self._completed_disk_prefetches: list = []
@@ -306,11 +304,6 @@ class OffloadingConnectorWorker:
         self._register_handlers(canonical_kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
-            assert success
-        self._unsubmitted_store_jobs.clear()
-
         for req_id in kv_connector_metadata.reqs_to_flush or ():
             job_ids = self._store_jobs.get(req_id)
             if job_ids:
@@ -330,11 +323,6 @@ class OffloadingConnectorWorker:
             if newly_completed:
                 self._completed_disk_prefetches.extend(newly_completed)
 
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
-            assert success
-        self._unsubmitted_store_jobs.clear()
-
         for req_id, transfer_spec in metadata.reqs_to_load.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, False)
@@ -348,10 +336,13 @@ class OffloadingConnectorWorker:
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)
             self._store_jobs[req_id].add(job_id)
-            # NOTE(orozery): defer the store to the beginning of the next engine step,
-            # so that offloading starts AFTER transfers related to token sampling,
-            # thereby avoiding delays to token generation due to offloading.
-            self._unsubmitted_store_jobs.append((job_id, transfer_spec))
+            # Submit immediately — post_forward runs AFTER the model
+            # forward pass, so wait_stream(current_stream) in
+            # transfer_async correctly orders the copy after all
+            # compute. This allows faster block freeing (1 step
+            # instead of 2-3) and avoids GPU OOM from held blocks.
+            success = self.worker.transfer_async(job_id, transfer_spec)
+            assert success
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
