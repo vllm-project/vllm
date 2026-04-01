@@ -335,6 +335,15 @@ scheduler adds its currently-active `(hash, phase)` pair:
 prefill (`num_computed_tokens < num_tokens`),
 `(decode_steering_config_hash, "decode")` for those in decode.
 
+**Transition-aware capacity counting:** When a running request will
+complete prefill during the current step
+(`num_computed_tokens + num_scheduled_tokens >= num_prompt_tokens`), the
+scheduler predicts the mid-step prefill-to-decode transition and reserves
+both the prefill row (still active at step start) and the decode row
+(registered mid-step by `_handle_steering_transition`).  This prevents
+over-admitting new WAITING requests when transition-time row usage is at
+its peak.
+
 **New request admission:** A request only occupies one steering row at
 a time.  The prefill row is released before the decode row is registered
 (in `_handle_steering_transition`).  Therefore the scheduler only counts
@@ -350,6 +359,61 @@ resolution).
    decode when starting directly in decode due to a full prefix-cache hit)
 5. Requests without steering (`prefill hash == 0`) are never blocked
 6. Requests whose starting `(hash, phase)` pair is already in the batch pass through (dedup)
+
+**Decode-start capacity check:** After prefix-cache resolution, a request
+that initially passed the prefill admission check may turn out to have a
+full prefix-cache hit, meaning it starts directly in the decode phase.  In
+this case, the scheduler performs a second capacity check for the decode
+`(hash, phase)` pair.  If the decode row cannot fit, the request is moved
+back to the waiting queue and retried on the next step.
+
+## Capacity Behavior During Transitions
+
+During the prefill-to-decode transition, both the prefill and decode
+steering configs may briefly coexist.  The system handles this in two
+layers:
+
+**Scheduler (prediction):** The scheduler predicts which running requests
+will complete prefill during the current step and reserves capacity for
+both their prefill and decode configs in `scheduled_steering_configs`.
+This ensures that new WAITING requests are not admitted when the
+transition would temporarily exhaust capacity.
+
+**Model runner (graceful deferral):** In `_handle_steering_transition`,
+the model runner releases the prefill config and attempts to register the
+decode config.  If the `SteeringManager` is at capacity (all per-request
+rows are occupied), the decode registration is deferred to
+`_pending_decode_registrations` and retried on the next scheduler step.
+During the deferral period, `get_row_for_config` returns row 2 (global
+decode effective) for the unregistered decode hash, so the request falls
+back to global-only decode steering instead of crashing.
+
+The `_req_steering_phase` dict tracks which single phase config is active
+per request.  This ensures that on request completion, only the correct
+phase config is released — preventing double-release bugs where a shared
+prefill config's refcount would be incorrectly decremented after the
+request had already transitioned to decode.
+
+## Status Endpoint
+
+`GET /v1/steering` returns per-layer, per-hook-point status via
+`get_steering_status()`.  Each layer/hook-point entry may contain:
+
+- `"norm"`: L2 norm of the base steering vector (from layer buffers).
+  Always present for layers with non-zero base steering.
+- `"prefill_norm"`: L2 norm of the prefill-specific global vector (from
+  `SteeringManager.global_prefill_vectors`).  Only present when set and
+  non-zero.
+- `"decode_norm"`: L2 norm of the decode-specific global vector (from
+  `SteeringManager.global_decode_vectors`).  Only present when set and
+  non-zero.
+
+Base norms reflect the shared layer buffers (written by
+`set_steering_vectors` for base vectors).  Phase-specific norms come from
+the `SteeringManager`'s internal dictionaries and are only present when
+those phase-specific global vectors have been set via the
+`prefill_vectors` or `decode_vectors` parameters of the `/v1/steering/set`
+endpoint.
 
 ## File Reference
 
@@ -401,7 +465,7 @@ Key design decisions:
 5. **The steering_index tensor is shared across all layers and all hook points.** One in-place update is visible to all decoder layers. Token-to-row mapping is independent of hook point.
 6. **All four hook point buffers are always allocated.** The memory cost is trivial. Zero rows make unused hook points a no-op.
 7. **The custom op is not a splitting op.** It prevents constant-folding but does not partition the compiled graph.
-8. **One-active-at-a-time registration.** Only one phase's config is registered per request at any time. The initial phase is detected at registration time: if `num_computed_tokens >= num_prompt_tokens` (full prefix-cache hit), the decode config is registered directly; otherwise, the prefill config is registered and the decode config is registered on the prefill-to-decode transition. On request completion, only the currently-active config is released.
+8. **One-active-at-a-time registration.** Only one phase's config is registered per request at any time. The initial phase is detected at registration time: if `num_computed_tokens >= num_prompt_tokens` (full prefix-cache hit), the decode config is registered directly; otherwise, the prefill config is registered and the decode config is registered on the prefill-to-decode transition. The `_req_steering_phase` dict tracks which phase is active per request so that on completion only the correct config is released. If decode registration is deferred due to capacity exhaustion, the phase is still tracked as "decode" and the request falls back to global-only decode steering until the next step retries the registration.
 9. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all three vector fields before any request processing begins.
 10. **Additive composition is pre-scaled.** `resolve_effective_vectors()` applies co-located scales before summing base and phase-specific vectors.
 11. **Phase detection is token-count based.** `num_computed_tokens < num_prompt_tokens` determines prefill vs decode, not the `n_tokens == 1` heuristic.
