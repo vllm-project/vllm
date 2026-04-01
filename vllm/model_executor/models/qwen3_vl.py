@@ -1977,7 +1977,6 @@ class Qwen3VLForConditionalGeneration(
         These embeddings will replace the placeholder embeddings to create
         input_embeds for the LLM.
         """
-        device = video_embeddings.device
 
         # Generate video replacement token IDs using get_video_repl
         # This tokenizes each frame separator independently, then uses pre-tokenized
@@ -1993,8 +1992,10 @@ class Qwen3VLForConditionalGeneration(
             select_token_id=self.is_multimodal_pruning_enabled,
         )
 
-        repl_token_ids = torch.tensor(video_repl.full, device=device)
-        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
+        repl_token_ids = torch.tensor(video_repl.full)
+        embed_token_id = _cached_tensor(
+            self.config.video_token_id, repl_token_ids.device
+        )
         is_video_embed = torch.isin(repl_token_ids, embed_token_id)
 
         # Get text embeddings for indicator tokens (has only `visual_dim``).
