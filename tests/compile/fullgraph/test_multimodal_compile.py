@@ -17,10 +17,7 @@ def test_compile():
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
-@pytest.mark.parametrize(
-    "model_impl,num_models_seen", [("vllm", 35), ("transformers", 2)]
-)
-def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch, model_impl, num_models_seen):
+def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are compiled.
 
     This test verifies that the 3 vision submodules (Qwen2_5_VisionPatchEmbed,
@@ -30,9 +27,6 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch, model_impl, num_models
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    if model_impl == "transformers":
-        pytest.importorskip("transformers", minversion="5.0.0")
-
     with (
         # NOTE: Qwen2.5-VL has 35 models in total - the LLM backend
         # Vision Patch Embed, Vision Patch Merger, and then 32 Vision Blocks
@@ -40,7 +34,7 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch, model_impl, num_models
         # logic to handle this case and only compile the Vision submodules once
         # and reuse the compiled code for all layers
         # See https://github.com/vllm-project/vllm/issues/27590
-        compilation_counter.expect(num_models_seen=num_models_seen),
+        compilation_counter.expect(num_models_seen=35),
         vllm_runner(
             "Qwen/Qwen2.5-VL-3B-Instruct",
             max_model_len=2048,
@@ -49,7 +43,6 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch, model_impl, num_models
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": True,
             },
-            model_impl=model_impl,
         ) as _,
     ):
         pass
@@ -58,16 +51,12 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch, model_impl, num_models
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
-@pytest.mark.parametrize("model_impl", ["vllm", "transformers"])
-def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch, model_impl):
+def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are not compiled when the
     config is passed off
     """
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
-    if model_impl == "transformers":
-        pytest.importorskip("transformers", minversion="5.0.0")
 
     with (
         compilation_counter.expect(num_models_seen=1),
@@ -79,7 +68,6 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch, model_impl):
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": False,
             },
-            model_impl=model_impl,
         ) as _,
     ):
         pass
