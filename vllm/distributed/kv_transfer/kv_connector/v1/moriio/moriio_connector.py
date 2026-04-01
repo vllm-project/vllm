@@ -1024,14 +1024,14 @@ class MoRIIOConnectorWorker:
             if len(self.local_kv_cache_metadata) > 0:
                 logger.warning(
                     "len(self.local_kv_cache_metadata) = %s,"
-                    "maybe you didnt clear this buffer correctly",
+                    "maybe you didn't clear this buffer correctly",
                     len(self.local_kv_cache_metadata),
                 )
                 self.local_kv_cache_metadata = []
             if len(self.remote_kv_cache_metadata) > 0:
                 logger.warning(
                     "len(self.remote_kv_cache_metadata) = %s,"
-                    "maybe you didnt clear this buffer correctly",
+                    "maybe you didn't clear this buffer correctly",
                     len(self.remote_kv_cache_metadata),
                 )
                 self.remote_kv_cache_metadata = []

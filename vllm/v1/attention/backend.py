@@ -584,7 +584,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     ) -> M:
         """
         Update the block table for the attention metadata.
-        Faster when theres multiple kv-cache groups that create virtually the
+        Faster when there's multiple kv-cache groups that create virtually the
         same metadata but just with different block tables.
 
         Only needs to be implemented if supports_update_block_table is True.
