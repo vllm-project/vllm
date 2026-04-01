@@ -66,14 +66,14 @@ __global__ void merge_attn_states_kernel(
       input_pack_t s_out_pack = reinterpret_cast<const input_pack_t*>(
           suffix_head_ptr)[pack_offset / pack_size];
 
-      if constexpr (FP8_OUTPUT) {
-        out_t o_out_pack[pack_size];
+      if constexpr (USE_FP8_OUTPUT) {
+        output_t o_out_pack[pack_size];
 #pragma unroll
         for (uint i = 0; i < pack_size; ++i) {
           const float val =
               vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
           o_out_pack[i] =
-              vllm::scaled_fp8_conversion<false, out_t>(val, fp8_scale);
+              vllm::scaled_fp8_conversion<true, output_t>(val, fp8_scale_inv);
         }
         reinterpret_cast<output_pack_t*>(
             output_head_ptr)[pack_offset / pack_size] =
@@ -209,19 +209,19 @@ __global__ void merge_attn_states_kernel(
     }                                                                   \
   }
 
-#define LAUNCH_MERGE_ATTN_STATES(scalar_t, output_t, NUM_THREADS,              \
-                                 USE_FP8_OUTPUT)                               \
-  {                                                                            \
-    vllm::merge_attn_states_kernel<scalar_t, output_t, NUM_THREADS,            \
-                                   USE_FP8_OUTPUT>                             \
-        <<<grid, block, 0, stream>>>(                                          \
-            reinterpret_cast<output_t*>(output.data_ptr()), output_lse_ptr,    \
-            reinterpret_cast<scalar_t*>(prefix_output.data_ptr()),             \
-            reinterpret_cast<float*>(prefix_lse.data_ptr()),                   \
-            reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),             \
-            reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,       \
-            num_heads, head_size, prefix_head_stride, output_head_stride,      \
-            prefix_num_tokens, output_scale_ptr);                              \
+#define LAUNCH_MERGE_ATTN_STATES(scalar_t, output_t, NUM_THREADS,           \
+                                 USE_FP8_OUTPUT)                            \
+  {                                                                         \
+    vllm::merge_attn_states_kernel<scalar_t, output_t, NUM_THREADS,         \
+                                   USE_FP8_OUTPUT>                          \
+        <<<grid, block, 0, stream>>>(                                       \
+            reinterpret_cast<output_t*>(output.data_ptr()), output_lse_ptr, \
+            reinterpret_cast<scalar_t*>(prefix_output.data_ptr()),          \
+            reinterpret_cast<float*>(prefix_lse.data_ptr()),                \
+            reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),          \
+            reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,    \
+            num_heads, head_size, prefix_head_stride, output_head_stride,   \
+            prefix_num_tokens, output_scale_ptr);                           \
   }
 
 /*@brief Merges the attention states from prefix and suffix
@@ -305,12 +305,14 @@ void merge_attn_states_launcher(
         suffix_lse, prefill_tokens_with_context, output_scale);       \
   }
 
-void merge_attn_states(
-    torch::Tensor& output, std::optional<torch::Tensor> output_lse,
-    const torch::Tensor& prefix_output, const torch::Tensor& prefix_lse,
-    const torch::Tensor& suffix_output, const torch::Tensor& suffix_lse,
-    std::optional<int64_t> prefill_tokens_with_context,
-    const std::optional<torch::Tensor>& output_scale) {
+void merge_attn_states(torch::Tensor& output,
+                       std::optional<torch::Tensor> output_lse,
+                       const torch::Tensor& prefix_output,
+                       const torch::Tensor& prefix_lse,
+                       const torch::Tensor& suffix_output,
+                       const torch::Tensor& suffix_lse,
+                       std::optional<int64_t> prefill_tokens_with_context,
+                       const std::optional<torch::Tensor>& output_scale) {
   if (output_scale.has_value()) {
     TORCH_CHECK(output.scalar_type() == at::ScalarType::Float8_e4m3fn ||
                     output.scalar_type() == at::ScalarType::Float8_e4m3fnuz,
