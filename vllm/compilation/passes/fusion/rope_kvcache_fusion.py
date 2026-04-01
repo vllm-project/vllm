@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import operator
-from collections import deque
-
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
@@ -347,6 +344,196 @@ class RopeMLAKVCachePattern:
         )
 
 
+class RopeMLAFlashinferKVCachePattern:
+    """
+    Fuse flashinfer rotary_embedding + unified_mla_kv_cache_update into one custom op.
+    """
+
+    FUSED_OP = torch.ops.vllm.fused_rope_and_unified_mla_kv_cache_update.default
+
+    def __init__(
+        self,
+        layer: MLAAttention,
+        is_neox: bool,
+    ) -> None:
+        self.layer_name = layer.layer_name
+        self.num_heads = layer.num_heads
+        self.kv_lora_rank = layer.kv_lora_rank
+        self.qk_rope_head_dim = layer.qk_rope_head_dim
+        self.kv_cache_dtype = layer.kv_cache_dtype
+        self.is_neox = is_neox
+
+        self.rope_matcher = MatcherRotaryEmbedding(
+            is_neox=self.is_neox,
+            head_size=self.qk_rope_head_dim,
+            num_heads=self.num_heads,
+            num_kv_heads=1,
+            use_flashinfer=True,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        T = 5
+        L = 4096
+        q_pe = empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
+        k_pe = empty_bf16(T, 1, self.qk_rope_head_dim)
+        kv_c = empty_bf16(T, self.kv_lora_rank)
+        positions = empty_i64(T)
+        cos_sin_cache = empty_bf16(L, self.qk_rope_head_dim)
+        k_scale = torch.empty(1, dtype=torch.float32, device=q_pe.device)
+        return [q_pe, k_pe, kv_c, positions, cos_sin_cache, k_scale]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            q_pe: torch.Tensor,
+            k_pe: torch.Tensor,
+            kv_c: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            k_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q_pe, k_pe = self.rope_matcher(positions, q_pe, k_pe, cos_sin_cache)
+            assert k_pe is not None
+            dummy = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c, k_pe, self.layer_name, self.kv_cache_dtype, k_scale
+            )
+            return dummy, q_pe, k_pe
+
+        def replacement(
+            q_pe: torch.Tensor,
+            k_pe: torch.Tensor,
+            kv_c: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            k_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            results = auto_functionalized(
+                self.FUSED_OP,
+                positions=positions,
+                q_pe=q_pe,
+                k_pe=k_pe,
+                kv_c=kv_c,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox,
+                layer_name=self.layer_name,
+                kv_cache_dtype=self.kv_cache_dtype,
+                k_scale=k_scale,
+            )
+            return results[0], results[1], results[2]
+
+        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
+            gm = pm.fwd_only(*args, **kwargs)
+            view_to_reshape(gm)
+            return gm
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
+        )
+
+
+class RopeMLAFlashinferUnsqueezeKVCachePattern:
+    """
+    Match e2e MLA chain:
+      k_pe_2d -> unsqueeze -> flashinfer_rotary_embedding -> unified_mla_kv_cache_update
+    and replace by fused_rope_and_unified_mla_kv_cache_update.
+    """
+
+    FUSED_OP = torch.ops.vllm.fused_rope_and_unified_mla_kv_cache_update.default
+
+    def __init__(
+        self,
+        layer: MLAAttention,
+        is_neox: bool,
+    ) -> None:
+        self.layer_name = layer.layer_name
+        self.num_heads = layer.num_heads
+        self.kv_lora_rank = layer.kv_lora_rank
+        self.qk_rope_head_dim = layer.qk_rope_head_dim
+        self.kv_cache_dtype = layer.kv_cache_dtype
+        self.is_neox = is_neox
+
+        self.rope_matcher = MatcherRotaryEmbedding(
+            is_neox=self.is_neox,
+            head_size=self.qk_rope_head_dim,
+            num_heads=self.num_heads,
+            num_kv_heads=1,
+            use_flashinfer=True,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        T = 5
+        L = 4096
+        q_pe = empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
+        k_pe_2d = empty_bf16(T, self.qk_rope_head_dim)
+        k_c_and_k_pe = empty_bf16(T, self.kv_lora_rank + self.qk_rope_head_dim)
+        kv_c = empty_bf16(T, self.kv_lora_rank)
+        positions = empty_i64(T)
+        cos_sin_cache = empty_bf16(L, self.qk_rope_head_dim)
+        k_scale = torch.empty(1, dtype=torch.float32, device=q_pe.device)
+        return [q_pe, k_pe_2d, k_c_and_k_pe, kv_c, positions, cos_sin_cache, k_scale]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            q_pe: torch.Tensor,
+            k_pe_2d: torch.Tensor,
+            k_c_and_k_pe: torch.Tensor,
+            kv_c: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            k_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            k_pe = k_pe_2d.unsqueeze(1)
+            q_pe, k_pe = self.rope_matcher(positions, q_pe, k_pe, cos_sin_cache)
+            assert k_pe is not None
+            k_pe_2d = k_pe.squeeze(1)
+            k_c_and_k_pe = k_c_and_k_pe.slice_scatter(
+                k_pe_2d,
+                dim=1,
+                start=self.kv_lora_rank,
+                end=self.kv_lora_rank + self.qk_rope_head_dim,
+            )
+            _, k_pe_2d = k_c_and_k_pe.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            k_pe = k_pe_2d.unsqueeze(1)
+            dummy = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c, k_pe, self.layer_name, self.kv_cache_dtype, k_scale
+            )
+            return dummy, q_pe, k_pe
+
+        def replacement(
+            q_pe: torch.Tensor,
+            k_pe_2d: torch.Tensor,
+            k_c_and_k_pe: torch.Tensor,
+            kv_c: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            k_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            k_pe = k_pe_2d.unsqueeze(1)
+            results = auto_functionalized(
+                self.FUSED_OP,
+                positions=positions,
+                q_pe=q_pe,
+                k_pe=k_pe,
+                kv_c=kv_c,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox,
+                layer_name=self.layer_name,
+                kv_cache_dtype=self.kv_cache_dtype,
+                k_scale=k_scale,
+            )
+            return results[0], results[1], results[2]
+
+        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
+            gm = pm.fwd_only(*args, **kwargs)
+            view_to_reshape(gm)
+            return gm
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
+        )
+
+
 class RopeKVCacheFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses the rotary embedding and KV cache update operations
@@ -387,115 +574,21 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
                     layer=layer,
                     is_neox=is_neox,
                 ).register(self.patterns)
+                RopeMLAFlashinferKVCachePattern(
+                    layer=layer,
+                    is_neox=is_neox,
+                ).register(self.patterns)
+                RopeMLAFlashinferUnsqueezeKVCachePattern(
+                    layer=layer,
+                    is_neox=is_neox,
+                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
-        self.matched_count += self._rewrite_flashinfer_mla_chain(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
-
-    @staticmethod
-    def _get_arg(
-        node: fx.Node,
-        idx: int,
-        kw_name: str,
-        default: torch.Tensor | str | bool | None = None,
-    ) -> torch.Tensor | str | bool | None:
-        if kw_name in node.kwargs:
-            return node.kwargs[kw_name]
-        if len(node.args) > idx:
-            return node.args[idx]
-        return default
-
-    @staticmethod
-    def _find_flashinfer_auto_node(node: fx.Node) -> fx.Node | None:
-        if (
-            node.op != "call_function"
-            or node.target != auto_functionalized
-            or len(node.args) == 0
-            or node.args[0] != torch.ops.vllm.flashinfer_rotary_embedding.default
-        ):
-            return None
-        return node
-
-    def _find_flashinfer_auto_node_for_mla_update(
-        self, mla_update: fx.Node
-    ) -> fx.Node | None:
-        """
-        Find the nearest upstream flashinfer node for the k_pe fed into this
-        specific unified_mla_kv_cache_update node.
-        """
-        k_pe_in = self._get_arg(mla_update, 1, "k_pe")
-        if not isinstance(k_pe_in, fx.Node):
-            return None
-
-        queue = deque([k_pe_in])
-        visited: set[fx.Node] = set()
-        while queue:
-            cur = queue.popleft()
-            if cur in visited:
-                continue
-            visited.add(cur)
-
-            flashinfer_auto = self._find_flashinfer_auto_node(cur)
-            if flashinfer_auto is not None:
-                return flashinfer_auto
-
-            queue.extend(cur.all_input_nodes)
-        return None
-
-    def _rewrite_flashinfer_mla_chain(self, graph: fx.Graph) -> int:
-        count = 0
-        fused_mla_op = torch.ops.vllm.fused_rope_and_unified_mla_kv_cache_update.default
-        mla_update_op = torch.ops.vllm.unified_mla_kv_cache_update.default
-
-        for node in list(graph.nodes):
-            if node.op != "call_function" or node.target != mla_update_op:
-                continue
-
-            flashinfer_auto = self._find_flashinfer_auto_node_for_mla_update(node)
-            if flashinfer_auto is None:
-                continue
-
-            with graph.inserting_before(node):
-                q_pe_for_fuse = graph.call_function(
-                    torch.ops.aten.clone.default,
-                    args=(self._get_arg(flashinfer_auto, 1, "query"),),
-                )
-                k_pe_for_fuse = graph.call_function(
-                    torch.ops.aten.clone.default,
-                    args=(self._get_arg(flashinfer_auto, 2, "key"),),
-                )
-                fused_auto = graph.call_function(
-                    auto_functionalized,
-                    args=(fused_mla_op,),
-                    kwargs={
-                        "positions": self._get_arg(flashinfer_auto, 0, "positions"),
-                        "q_pe": q_pe_for_fuse,
-                        "k_pe": k_pe_for_fuse,
-                        "kv_c": self._get_arg(node, 0, "kv_c_normed"),
-                        "cos_sin_cache": self._get_arg(
-                            flashinfer_auto, 4, "cos_sin_cache"
-                        ),
-                        "is_neox": self._get_arg(flashinfer_auto, 5, "is_neox"),
-                        "layer_name": self._get_arg(node, 2, "layer_name"),
-                        "kv_cache_dtype": self._get_arg(node, 3, "kv_cache_dtype"),
-                        "k_scale": self._get_arg(node, 4, "k_scale"),
-                    },
-                )
-                fused_dummy = graph.call_function(
-                    operator.getitem, args=(fused_auto, 0)
-                )
-            node.replace_all_uses_with(fused_dummy)
-
-            graph.erase_node(node)
-            count += 1
-
-        if count > 0:
-            graph.lint()
-        return count
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         # This pass works best for the small-batch decode setting.
@@ -508,4 +601,6 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
             self,
             RopeReshapeKVCachePattern,
             RopeMLAKVCachePattern,
+            RopeMLAFlashinferKVCachePattern,
+            RopeMLAFlashinferUnsqueezeKVCachePattern,
         )
