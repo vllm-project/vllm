@@ -641,6 +641,18 @@ class InputBatch:
             self.request_lora_mapping[i1],
         )
 
+        (
+            self.request_prefill_steering_hash[i1],
+            self.request_prefill_steering_hash[i2],
+        ) = (
+            self.request_prefill_steering_hash[i2],
+            self.request_prefill_steering_hash[i1],
+        )
+        self.request_decode_steering_hash[i1], self.request_decode_steering_hash[i2] = (
+            self.request_decode_steering_hash[i2],
+            self.request_decode_steering_hash[i1],
+        )
+
         if self.is_pooling_model:
             # Sampling and logits parameters don't apply to pooling models.
             return
