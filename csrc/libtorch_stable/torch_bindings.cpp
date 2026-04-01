@@ -285,6 +285,26 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
       "Tensor!? azp) -> ()");
+
+  // Compute FP8 quantized tensor for given scaling factor.
+  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
+  // scaling. Optional group_m/group_n specify the group shape explicitly;
+  // required for 1D scales to disambiguate per-channel vs per-token.
+  ops.def(
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "int[]? group_shape=None) -> ()");
+
+  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
+      "-> "
+      "()");
+
+  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! scale, Tensor? scale_ub) -> "
+      "()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -347,6 +367,12 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // INT8 quantization kernels
   ops.impl("static_scaled_int8_quant", TORCH_BOX(&static_scaled_int8_quant));
   ops.impl("dynamic_scaled_int8_quant", TORCH_BOX(&dynamic_scaled_int8_quant));
+
+  // FP8 quantization kernels
+  ops.impl("static_scaled_fp8_quant", TORCH_BOX(&static_scaled_fp8_quant));
+  ops.impl("dynamic_scaled_fp8_quant", TORCH_BOX(&dynamic_scaled_fp8_quant));
+  ops.impl("dynamic_per_token_scaled_fp8_quant",
+           TORCH_BOX(&dynamic_per_token_scaled_fp8_quant));
 }
 
 // These capability-check functions take only primitive args (no tensors), so

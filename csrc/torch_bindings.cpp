@@ -352,30 +352,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
-  // Compute FP8 quantized tensor for given scaling factor.
-  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
-  // scaling. Optional group_m/group_n specify the group shape explicitly;
-  // required for 1D scales to disambiguate per-channel vs per-token.
-  ops.def(
-      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
-      "(int, int)? group_shape=None) -> ()");
-  ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
-
-  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
-  ops.def(
-      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
-      "-> "
-      "()");
-  ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
-
-  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
-  ops.def(
-      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
-      "Tensor! scale, Tensor? scale_ub) -> "
-      "()");
-  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
-           &dynamic_per_token_scaled_fp8_quant);
-
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"
