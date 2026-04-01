@@ -9,7 +9,6 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.utils import flashinfer as vllm_flashinfer
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 

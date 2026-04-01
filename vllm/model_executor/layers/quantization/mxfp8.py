@@ -160,7 +160,9 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        weight_fp8, weight_scale = flashinfer_mxfp8_e4m3_quantize(layer.weight.contiguous())
+        weight_fp8, weight_scale = flashinfer_mxfp8_e4m3_quantize(
+            layer.weight.contiguous()
+        )
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)

@@ -124,15 +124,16 @@ def _xpu_mxfp8_quantize_impl(
     shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
     x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
     torch.ops._C.per_token_group_fp8_quant(
-            x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
-        )
+        x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
+    )
     x_s = x_s.to(torch.float8_e8m0fnu)
     return x_q, x_s
+
 
 def xpu_mxfp8_quantize_fake(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not dtype is None:
+    if dtype is not None:
         assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
             f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
             f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
@@ -141,10 +142,11 @@ def xpu_mxfp8_quantize_fake(
         dtype = current_platform.fp8_dtype()
 
     MXFP8_BLOCK_SIZE = 32
-    
+
     shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
 
     return x.to(dtype), torch.zeros(shape, device=x.device, dtype=torch.float32)
+
 
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
@@ -547,7 +549,7 @@ class xpu_ops:
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
-            
+
             direct_register_custom_op(
                 op_name="xpu_mxfp8_quantize",
                 op_func=_xpu_mxfp8_quantize_impl,
