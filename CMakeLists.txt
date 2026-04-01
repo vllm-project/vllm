@@ -340,7 +340,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/cutlass_extensions/common.cpp")
+    "csrc/cutlass_extensions/common.cpp"
+    "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
