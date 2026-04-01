@@ -90,14 +90,6 @@ class OffloadingConnectorScheduler:
         if hits is None:
             return None, False
         if hits == 0:
-            from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
-            if isinstance(self.manager, TieredOffloadingManager):
-                remaining_hashes = list(
-                    self._get_block_hashes(request, start_idx=start_block_idx)
-                )
-                self.manager.record_disk_miss(
-                    request.request_id, remaining_hashes
-                )
             return 0, False
 
         num_hit_tokens = (
@@ -258,19 +250,8 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        # Process disk prefetches: pick top candidate, allocate, dispatch.
-        # This runs ONCE per step (not per request), keeping overhead bounded.
+        # Disk prefetch disabled for testing
         disk_prefetches: list[DiskPrefetchSpec] = []
-        from vllm.v1.kv_offload.disk.manager import TieredOffloadingManager
-        if isinstance(self.manager, TieredOffloadingManager):
-            # Pick the best candidate and do the actual allocation
-            self.manager.process_top_disk_miss()
-            # Dispatch any newly allocated prefetches
-            for op in self.manager.take_pending_dispatches():
-                disk_prefetches.append(DiskPrefetchSpec(
-                    cpu_block_ids=op.cpu_block_ids,
-                    disk_block_ids=op.disk_block_ids,
-                ))
 
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,

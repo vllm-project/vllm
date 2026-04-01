@@ -331,11 +331,10 @@ class CpuGpuOffloadingHandlers:
                 disk_path=disk_path,
                 num_disk_blocks=num_disk_blocks,
             )
-            # Wire callback: after GPU→CPU transfer completes,
-            # write those CPU blocks to disk in background
-            self.gpu_to_cpu_handler._on_write_complete = (
-                self._disk_write_through
-            )
+            # TEMPORARILY DISABLED: disk write-through
+            # self.gpu_to_cpu_handler._on_write_complete = (
+            #     self._disk_write_through
+            # )
         # Inflight prefetch tracking: list of (DiskPrefetchSpec, [futures])
         self._inflight_prefetches: list[tuple] = []
 
