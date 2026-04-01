@@ -58,7 +58,6 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._disabled = False
-        self._step_has_pre_forward_work = False
 
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
         if self._disabled:
@@ -67,12 +66,6 @@ class ActiveKVConnector(KVConnector):
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
-        self._step_has_pre_forward_work = not self.kv_connector.should_skip_load_store(
-            kv_connector_metadata
-        )
-        if not self._step_has_pre_forward_work:
-            return
-
         self.kv_connector.handle_preemptions(kv_connector_metadata)
 
         # TODO: sort out KV Connectors' use of forward_context
@@ -92,7 +85,7 @@ class ActiveKVConnector(KVConnector):
             return None
 
         output = KVConnectorOutput()
-        if wait_for_save and self._step_has_pre_forward_work:
+        if wait_for_save:
             self.kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = (
             self.kv_connector.get_finished(scheduler_output.finished_req_ids)
@@ -102,7 +95,6 @@ class ActiveKVConnector(KVConnector):
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
         if clear_metadata:
             self.kv_connector.clear_connector_metadata()
-        self._step_has_pre_forward_work = False
         return output
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:

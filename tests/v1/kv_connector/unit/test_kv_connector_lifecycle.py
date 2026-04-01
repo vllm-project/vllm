@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
-
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
     ExampleConnectorMetadata,
 )
@@ -64,38 +62,26 @@ def test_kv_connector_mixin_clears_metadata():
         ensure_kv_transfer_shutdown()
 
 
-@pytest.mark.parametrize("has_step_work", [False, True])
-def test_active_kv_connector_pre_forward_work(monkeypatch, has_step_work: bool):
+def test_active_kv_connector_runs_lifecycle_hooks_for_empty_metadata():
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_connector = "TestExampleConnector"
     vllm_config.kv_transfer_config.kv_role = "kv_both"
-    vllm_config.kv_transfer_config.kv_connector_extra_config["name"] = (
-        "nonempty" if has_step_work else "empty"
-    )
+    vllm_config.kv_transfer_config.kv_connector_extra_config["name"] = "empty"
 
     ensure_kv_transfer_initialized(vllm_config)
 
     try:
         wrapped = get_kv_transfer_group()
-        monkeypatch.setattr(
-            wrapped._connector,
-            "should_skip_load_store",
-            lambda metadata: not has_step_work,
-            raising=False,
-        )
-
         connector = ActiveKVConnector(vllm_config, {})
         scheduler_output = _make_empty_scheduler_output()
 
         connector.pre_forward(scheduler_output)
         connector.post_forward(scheduler_output)
 
-        expected = 1 if has_step_work else 0
         assert wrapped.call_record.get("bind_connector_metadata", 0) == 1
-        assert wrapped.call_record.get("should_skip_load_store", 0) == 1
-        assert wrapped.call_record.get("handle_preemptions", 0) == expected
-        assert wrapped.call_record.get("start_load_kv", 0) == expected
-        assert wrapped.call_record.get("wait_for_save", 0) == expected
+        assert wrapped.call_record.get("handle_preemptions", 0) == 1
+        assert wrapped.call_record.get("start_load_kv", 0) == 1
+        assert wrapped.call_record.get("wait_for_save", 0) == 1
         assert wrapped.call_record.get("get_finished", 0) == 1
         assert wrapped.call_record.get("clear_connector_metadata", 0) == 1
     finally:
