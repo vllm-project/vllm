@@ -231,7 +231,9 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                 )
 
             elif match_name == "attn_quant_fusion":
-                actual_match = match_table.get(match_name, 0)
+                actual_match = match_table.get(
+                    "attn_quant_fusion", 0
+                ) + match_table.get("mla_attn_quant_fusion", 0)
                 assert actual_match == expected_matches * n_expected, (
                     f"Could not find {expected_matches * n_expected} "
                     f"{match_name} (found {actual_match})."

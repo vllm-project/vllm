@@ -12,7 +12,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.mla_attn_quant_fusion import (
     MLA_ATTN_OP,
-    MLAAttnFusionPass,
+    MLAAttnQuantFusionPass,
 )
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -421,7 +421,7 @@ def test_mla_attention_quant_pattern(
 
         # Create test backend with fusion passes
         noop_pass = NoOpEliminationPass(vllm_config)
-        attn_pass = LazyInitPass(MLAAttnFusionPass, vllm_config)
+        attn_pass = LazyInitPass(MLAAttnQuantFusionPass, vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
         test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
