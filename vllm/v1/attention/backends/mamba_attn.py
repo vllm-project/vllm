@@ -15,7 +15,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    PAD_SLOT_ID,
+    NULL_BLOCK_ID,
     compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
@@ -358,7 +358,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=decode_threshold
+                common_attn_metadata,
+                decode_threshold=decode_threshold,
+                treat_short_extends_as_decodes=False,
             )
         )
 
@@ -502,7 +504,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 state_indices_tensor_d, non_blocking=True
             )
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
-            state_indices_tensor_d[metadata.num_decodes :] = PAD_SLOT_ID
+            state_indices_tensor_d[metadata.num_decodes :] = NULL_BLOCK_ID
 
             if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None

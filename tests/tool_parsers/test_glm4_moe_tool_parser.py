@@ -27,14 +27,8 @@ def glm4_moe_tokenizer():
 
 
 @pytest.fixture
-def glm4_moe_tool_parser(glm4_moe_tokenizer):
-    return Glm4MoeModelToolParser(glm4_moe_tokenizer)
-
-
-@pytest.fixture
-def mock_request() -> ChatCompletionRequest:
-    request = Mock(spec=ChatCompletionRequest)
-    request.tools = [  # GLM45 parser needs this attribute to enable tool parsing.
+def sample_tools():
+    return [
         ChatCompletionToolsParam(
             function=FunctionDefinition(
                 name="get_weather",
@@ -42,6 +36,17 @@ def mock_request() -> ChatCompletionRequest:
             ),
         ),
     ]
+
+
+@pytest.fixture
+def glm4_moe_tool_parser(glm4_moe_tokenizer, sample_tools):
+    return Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=sample_tools)
+
+
+@pytest.fixture
+def mock_request(sample_tools) -> ChatCompletionRequest:
+    request = Mock(spec=ChatCompletionRequest)
+    request.tools = sample_tools
     return request
 
 
@@ -107,7 +112,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     )
                 )
             ],
-            "",
+            None,
         ),
         (
             """<tool_call>get_current_weather
@@ -152,7 +157,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     )
                 ),
             ],
-            "",
+            None,
         ),
         (
             """I'll help you check the weather. <tool_call>get_current_weather
@@ -202,7 +207,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     )
                 )
             ],
-            "",
+            None,
         ),
         (
             """I will help you get the weather.<tool_call>get_weather
@@ -671,14 +676,13 @@ def test_streaming_json_escape_in_string(glm4_moe_tool_parser, mock_request):
     assert '"' in parsed["message"] or "world" in parsed["message"]
 
 
-def test_streaming_long_content_incremental(glm4_moe_tool_parser):
+def test_streaming_long_content_incremental(glm4_moe_tokenizer):
     """Test incremental streaming of long content (Issue #32829).
 
     This is the core fix: for long string values like code (4000+ chars),
     the parser should stream incrementally rather than buffering until
     complete. This test verifies we get many fragments, not just 1-3.
     """
-    _reset_streaming_state(glm4_moe_tool_parser)
 
     # Bubble sort example from Issue #32829 - realistic long content
     bubble_sort_code = '''#!/usr/bin/env python3
@@ -705,27 +709,28 @@ if __name__ == "__main__":
     sorted_arr = bubble_sort(test_arr.copy())
     print(f"Sorted: {sorted_arr}")'''
 
-    # Create a request with tool schema to enable string type detection
+    # Create tools with schema to enable string type detection
     # This is required for incremental streaming of string values
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="write_to_file",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            ),
+        ),
+    ]
+    glm4_moe_tool_parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(
         model=MODEL,
         messages=[],
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_to_file",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
-                    },
-                },
-            }
-        ],
-    )  # type: ignore
+        tools=tools,
+    )
 
     # Simulate token-based streaming (special tags as single tokens)
     chunks = [
@@ -817,3 +822,108 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_r
     # Boolean should be deserialized as bool
     assert args["enabled"] is True
     assert isinstance(args["enabled"], bool)
+
+
+def test_zero_argument_tool_call(glm4_moe_tool_parser, mock_request):
+    """Regression: zero-argument tool call crash (PR #32321)."""
+    model_output = """<tool_call>get_time
+</tool_call>"""
+
+    extracted = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=mock_request
+    )  # type: ignore[arg-type]
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "get_time"
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args == {}
+
+
+def test_malformed_tool_call_no_regex_match(glm4_moe_tool_parser, mock_request):
+    """Regression: malformed tool_call with no regex match (PR #32321)."""
+    model_output = "<tool_call>   </tool_call>"
+
+    extracted = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=mock_request
+    )  # type: ignore[arg-type]
+
+    assert extracted.tools_called is False
+    assert extracted.tool_calls == []
+
+
+def test_delimiter_preserved_transformers_5x(glm4_moe_tool_parser):
+    """Regression: adjust_request sets skip_special_tokens=False (PR #31622)."""
+    # Tools enabled
+    request_with_tools = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    )  # type: ignore
+    adjusted = glm4_moe_tool_parser.adjust_request(request_with_tools)
+    assert adjusted.skip_special_tokens is False
+
+    # tool_choice="none"
+    request_no_choice = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        tool_choice="none",
+    )  # type: ignore
+    adjusted_none = glm4_moe_tool_parser.adjust_request(request_no_choice)
+    assert adjusted_none.skip_special_tokens is True
+
+    # No tools at all
+    request_no_tools = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+    )  # type: ignore
+    adjusted_empty = glm4_moe_tool_parser.adjust_request(request_no_tools)
+    assert adjusted_empty.skip_special_tokens is True
+
+
+def test_unicode_characters_preserved(glm4_moe_tool_parser, mock_request):
+    """Regression: Unicode chars must not be escaped to \\uXXXX (PR #30920)."""
+    model_output = """<tool_call>send_message
+<arg_key>greeting</arg_key>
+<arg_value>你好世界</arg_value>
+<arg_key>emoji</arg_key>
+<arg_value>🎉</arg_value>
+</tool_call>"""
+
+    extracted = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=mock_request
+    )  # type: ignore[arg-type]
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+
+    raw_args = extracted.tool_calls[0].function.arguments
+    assert "你好世界" in raw_args
+    assert "🎉" in raw_args
+    assert "\\u4f60" not in raw_args
+    parsed_args = json.loads(raw_args)
+    assert parsed_args["greeting"] == "你好世界"
+    assert parsed_args["emoji"] == "🎉"

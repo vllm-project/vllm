@@ -105,9 +105,6 @@ class BaseFrontendArgs:
     """When `--max-logprobs` is specified, represents single tokens as
     strings of the form 'token_id:{token_id}' so that tokens that are not
     JSON-encodable can be identified."""
-    disable_frontend_multiprocessing: bool = False
-    """If specified, will run the OpenAI frontend server in the same process as
-    the model serving engine."""
     enable_auto_tool_choice: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser`
     to specify which parser to use."""
@@ -347,6 +344,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="Read CLI options from a config file. "
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
+    )
+    parser.add_argument(
+        "--grpc",
+        action="store_true",
+        default=False,
+        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+        "server. Requires: pip install vllm[grpc].",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
