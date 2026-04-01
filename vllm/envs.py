@@ -1463,6 +1463,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
+    # - "fp8-compute": convert FP4 weights to FP8 at load time and use native
+    #   FP8 tensor cores (auto-selected on Hopper when native FP4 unavailable)
     # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
     # - "emulation":
     #     use BF16/FP16 GEMM, dequantizing weights and running QDQ on activations.
@@ -1477,6 +1479,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "flashinfer-trtllm",
             "flashinfer-cutlass",
             "cutlass",
+            "fp8-compute",
             "marlin",
             "emulation",
         ],
