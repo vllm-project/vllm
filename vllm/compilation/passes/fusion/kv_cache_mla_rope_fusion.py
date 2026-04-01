@@ -3,6 +3,7 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
@@ -71,7 +72,7 @@ def fused_concat_and_cache_mla_rope_fake(
     kv_cache_scale: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    return torch.empty(0, device=kv_c.device, dtype=kv_c.dtype)
+    return torch.empty(0, dtype=kv_c.dtype, device=kv_c.device)
 
 
 direct_register_custom_op(
@@ -163,7 +164,8 @@ class KVCacheMLARoPEFusionPattern:
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            dummy = self.FUSED_OP(
+            res = auto_functionalized(
+                self.FUSED_OP,
                 positions=positions,
                 q_pe=q,
                 k_pe=k_pe,
@@ -174,7 +176,7 @@ class KVCacheMLARoPEFusionPattern:
                 kv_cache_scale=k_scale,
                 layer_name=self.layer_name,
             )
-            return dummy, q, k_pe
+            return res[0], res[1], res[2]
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
@@ -216,7 +218,7 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
     def get_inputs(self) -> list[torch.Tensor]:
         T = 5
         L = 163840
-        k_pe = empty_bf16(T, 1, self.qk_rope_head_dim)
+        k_pe = empty_bf16(T, self.qk_rope_head_dim)
         kv_c_normed = empty_bf16(T, self.kv_lora_rank)
         mm = empty_bf16(
             T, self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
@@ -258,7 +260,11 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
                 v1, copy_out, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
             )
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed, key, self.layer_name, self.kv_cache_dtype, k_scale
+                kv_c_normed,
+                key,
+                self.layer_name,
+                self.kv_cache_dtype,
+                k_scale,
             )
             return dummy, q_full, key
 
@@ -272,9 +278,10 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             h = self.qk_nope_head_dim + self.qk_rope_head_dim
             v2 = mm.reshape(-1, self.num_heads, h)
-            dummy = self.FUSED_OP(
+            q_pe_slice = v2[:, :, self.qk_nope_head_dim :]
+            res = self.FUSED_OP(
                 positions=positions,
-                q_pe=v2[..., self.qk_nope_head_dim :],
+                q_pe=q_pe_slice,
                 k_pe=k_pe,
                 kv_c=kv_c_normed,
                 cos_sin_cache=cos_sin_cache.to(mm.dtype),
@@ -283,7 +290,7 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
                 kv_cache_scale=k_scale,
                 layer_name=self.layer_name,
             )
-            return dummy, v2, k_pe
+            return res, v2, k_pe
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
