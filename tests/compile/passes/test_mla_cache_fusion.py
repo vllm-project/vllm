@@ -14,9 +14,6 @@ FUSED_OP = "torch.ops.vllm.fused_rope_and_unified_mla_kv_cache_update.default"
 
 
 def _count_in_rope_fusion_after_dump(dump_dir: Path, needle: str) -> int:
-    # Only count occurrences in emitted compiled graph files.
-    # Pattern/template dumps can still contain unfused op text and lead to
-    # false negatives for e2e fusion assertions.
     graph_files = list(dump_dir.rglob("__compiled_fn_*.kernel_*.py"))
     if not graph_files:
         graph_files = list(dump_dir.rglob("__compiled_fn_*.py"))
