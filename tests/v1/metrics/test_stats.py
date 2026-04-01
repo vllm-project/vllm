@@ -116,7 +116,7 @@ def test_prompt_token_stats_all_computed():
     # Case 1: No caching (All tokens computed locally)
     stats.update_from_output(
         num_cached_tokens=0,
-        num_external_computed_tokens=0,
+        num_external_cached_tokens=0,
         prompt_len=1000,
     )
 
@@ -133,7 +133,7 @@ def test_prompt_token_stats_partial_local_cache():
     # Case 2: Partial local cache
     stats.update_from_output(
         num_cached_tokens=300,
-        num_external_computed_tokens=0,
+        num_external_cached_tokens=0,
         prompt_len=1000,
     )
 
@@ -149,7 +149,7 @@ def test_prompt_token_stats_partial_external_transfer():
     # Case 3: Partial external transfer
     stats.update_from_output(
         num_cached_tokens=500,
-        num_external_computed_tokens=500,
+        num_external_cached_tokens=500,
         prompt_len=1000,
     )
 
@@ -165,7 +165,7 @@ def test_prompt_token_stats_mixed_sources():
     # Case 4: Mixed sources
     stats.update_from_output(
         num_cached_tokens=600,
-        num_external_computed_tokens=200,
+        num_external_cached_tokens=200,
         prompt_len=1000,
     )
 
@@ -185,7 +185,7 @@ def test_prompt_token_stats_full_local_cache_recompute():
     # Case 5: Full local cache (999 cached after reduction, 1 recomputed)
     stats.update_from_output(
         num_cached_tokens=999,
-        num_external_computed_tokens=0,
+        num_external_cached_tokens=0,
         prompt_len=1000,
     )
 
@@ -201,7 +201,7 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     # Case 6: Full external transfer (999 cached after reduction, 1 recomputed)
     stats.update_from_output(
         num_cached_tokens=999,
-        num_external_computed_tokens=1000,
+        num_external_cached_tokens=1000,
         prompt_len=1000,
     )
 
