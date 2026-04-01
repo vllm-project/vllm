@@ -9,6 +9,7 @@ from typing import final
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -563,6 +564,8 @@ class FusedMoEExperts(ABC):
             )
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
+        elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
+            return False, _make_reason("batch invariance")
         return True, None
 
     @staticmethod
@@ -644,6 +647,15 @@ class FusedMoEExperts(ABC):
         has specific shape requirements.
         """
         return True
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        """
+        Whether the kernel supports batch invariance, i.e. the output does not
+        depend on the order of the tokens in the input batch. This is useful
+        for determining if the kernel can used with VLLM_BATCH_INVARIANT=1.
+        """
+        return False
 
     #
     # Various helpers for accessing quantization parameters from the
@@ -768,8 +780,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         require a specialized implementation, like MarlinExperts, they are free
         to override this function.
         """
-        assert w1.dim() == 3 and w2.dim() == 3
-        E, N, _ = w1.size()
+        assert len(w1.shape) == 3 and len(w2.shape) == 3
+        E, N, _ = w1.shape
         K = a1.size(-1)
 
         if a1.dim() == 2:
@@ -1349,7 +1361,7 @@ class FusedMoEKernelModularImpl:
         else:
             output = torch.empty_like(hidden_states)
 
-        local_num_experts = w1.size(0)
+        local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 

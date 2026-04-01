@@ -227,7 +227,6 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
@@ -372,7 +371,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if (
             cache_config is not None
             and cache_config.enable_prefix_caching
-            and vllm_is_batch_invariant()
+            and envs.VLLM_BATCH_INVARIANT
             and (
                 self.attn_backend.get_name() == "TRITON_MLA"
                 or self.attn_backend.get_name() == "FLASHINFER"
@@ -416,12 +415,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
-        ]
+        self.kv_cache = torch.tensor([])
 
         self.use_sparse = use_sparse
 
@@ -480,7 +474,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
@@ -935,12 +929,14 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     forward_context = get_forward_context()
-    if forward_context.attn_metadata is None:
-        # Dummy/profile forwards should not update live KV cache pages.
-        return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-
     attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache
+
+    # This needs to run even when we don't have metadata yet, so that the op
+    # is correctly captured.
+    if kv_cache.numel() == 0:
+        # Can't update an empty KV cache.
+        return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
@@ -1065,6 +1061,10 @@ except ImportError:
                 "MLA models using TRITON_MLA will require flash_attn. "
                 "AITER_MLA backends use aiter kernels instead."
             )
+    elif current_platform.is_xpu():
+        from vllm._xpu_ops import xpu_ops as ops
+
+        flash_attn_varlen_func = ops.flash_attn_varlen_func  # type: ignore[no-redef]
 
 
 def dynamic_per_batched_tensor_quant(
@@ -1181,6 +1181,7 @@ class MLACommonPrefillMetadata:
         padded_local_cu_seq_lens: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
         chunk_size: int | None = None
+        prefill_tokens_with_context: int | None = None
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -1743,6 +1744,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             prefill_query_start_loc = (
                 query_start_loc[reqs_start:] - query_start_loc[reqs_start]
             )
+            prefill_query_start_loc_cpu = (
+                query_start_loc_cpu[reqs_start:] - query_start_loc_cpu[reqs_start]
+            )
 
             chunked_context_metadata = None
             if max_context_len_cpu > 0:
@@ -1864,6 +1868,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     if self._use_cudnn_prefill
                     else MLACommonPrefillMetadata.ChunkedContextMetadata
                 )
+                prefill_tokens_with_context = None
+                if num_prefills_with_context_cpu > 0:
+                    prefill_tokens_with_context = prefill_query_start_loc_cpu[
+                        num_prefills_with_context_cpu
+                    ].item()
                 if self.dcp_world_size > 1:
                     chunked_context_metadata = chunked_context_metadata_cls(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
@@ -1883,6 +1892,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                         chunk_size=padded_local_max_context_chunk_across_ranks,
+                        prefill_tokens_with_context=prefill_tokens_with_context,
                     )
                 else:
                     chunked_context_metadata = chunked_context_metadata_cls(
@@ -1896,6 +1906,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         ),
                         chunk_total_token=chunk_total_token,
                         workspace=self.chunked_prefill_workspace,
+                        prefill_tokens_with_context=prefill_tokens_with_context,
                     )
 
                 if self._use_cudnn_prefill:
@@ -2188,7 +2199,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
         attn_out = self.flash_attn_varlen_func(
@@ -2382,14 +2393,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill.workspace_buffer is not None
 
-        out = torch.zeros(
+        out = torch.empty(
             q.shape[0],
             q.shape[1],
             v.shape[2],
             device=q.device,
             dtype=prefill.output_dtype,
         )
-        prefill.workspace_buffer.fill_(0)
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
@@ -2691,6 +2701,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         )
 
         if has_context:
+            assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
                 context_output, context_lse = (
@@ -2719,6 +2730,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 prefix_lse=context_lse,
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
+                prefill_tokens_with_context=prefill_metadata.chunked_context.prefill_tokens_with_context,
             )
         else:
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
