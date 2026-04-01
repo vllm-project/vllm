@@ -353,6 +353,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
     )
+    parser.add_argument(
+        "--grpc",
+        action="store_true",
+        default=False,
+        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+        "server. Requires: pip install vllm[grpc].",
+    )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
