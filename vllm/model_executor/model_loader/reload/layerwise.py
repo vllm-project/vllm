@@ -49,7 +49,10 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     information existed, a new entry is constructed
     """
     if layer not in LAYERWISE_INFO:
-        LAYERWISE_INFO[layer] = LayerReloadingInfo()
+        LAYERWISE_INFO[layer] = LayerReloadingInfo(
+            restore_metadata=({}, {}),
+            restore_device=torch.get_default_device(),
+        )
 
     return LAYERWISE_INFO[layer]
 
@@ -64,6 +67,7 @@ def record_metadata_for_reloading(model: torch.nn.Module):
     for layer in model.modules():
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
+        info.restore_device = torch.get_default_device()
 
 
 @torch.no_grad()
@@ -99,10 +103,18 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
 
+        # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
 
 
 def initialize_online_processing(layer: torch.nn.Module):
+    """
+    Wrap a layer's weight loaders with online processing loaders.
+    Called by either `initialize_layerwise_reload` or an online quantization scheme,
+    prevents double wrapping in the case of online quantization + reloading
+
+    :param layer: layer whose parameter weight loaders will be wrapped
+    """
     info = get_layerwise_info(layer)
 
     # Track loading progress to determine when to process/copy
@@ -209,12 +221,13 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         # No weights were loaded
         elif info.load_numel <= 0:
-            # first load but received no weights. This happens on dummy load
+            # first load: checkpoint did not contain weights for this layer
             if info.kernel_tensors is None:
-                materialize_layer(layer)
+                _layerwise_process(layer, info)
+                continue
 
             # reloading: place kernel tensors back as a fallback
-            else:
+            elif info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
                 _place_kernel_tensors(layer, info)
 
@@ -244,7 +257,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     4. Copies processed values back to original tensor storage
     """
     # Materialize layer tensors onto device
-    materialize_layer(layer)
+    materialize_layer(layer, info)
 
     # Reset online quantization flag so process_weights_after_loading
     # will run again during reload
