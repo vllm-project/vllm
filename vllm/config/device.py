@@ -27,6 +27,9 @@ class DeviceConfig:
     """Device type from the current platform. This is set in
     `__post_init__`."""
 
+    device_ids: list[int] = field(default_factory=list)
+    """List of physical GPU IDs used by this instance."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -71,3 +74,17 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
+
+        if not self.device_ids:
+            if current_platform.is_cuda_alike():
+                logical_id = (
+                    self.device.index
+                    if self.device.index is not None
+                    else torch.accelerator.current_device_index()
+                )
+                physical_id = current_platform.device_id_to_physical_device_id(
+                    logical_id
+                )
+                self.device_ids = [physical_id]
+            else:
+                self.device_ids = []

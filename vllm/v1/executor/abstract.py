@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import os
+import socket
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
+
+import psutil
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -308,18 +315,121 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
+    def _get_gpu_access_signal_path(self, device_id: int) -> Path:
+        """Get a node-local signal path for a specific GPU device."""
+        hostname = socket.gethostname()
+        base_dir = (
+            Path("/dev/shm")
+            if os.path.exists("/dev/shm")
+            else Path(tempfile.gettempdir())
+        )
+        sig_dir = base_dir / "vllm_signals"
+        try:
+            # 0o1777 sets the sticky bit,
+            # so only the owner can delete their signal files.
+            mode = 0o1777
+            sig_dir.mkdir(mode=mode, parents=True, exist_ok=True)
+            if os.name != "nt":
+                os.chmod(sig_dir, mode)
+        except OSError as e:
+            logger.warning(
+                "Failed to set permissions on signal directory %s: %s", sig_dir, e
+            )
+
+        return sig_dir / f"vmm_{hostname}_gpu_{device_id}.signal"
+
+    def _acquire_gpu_access(self):
+        """Acquire atomic signals for all GPUs managed by this executor."""
+        device_ids = self.device_config.device_ids
+        if not device_ids:
+            logger.warning(
+                "Could not determine device IDs for GPU access lock. "
+                "Falling back to locking GPU 0."
+            )
+            device_ids = [0]
+
+        sorted_ids = sorted(list(set(device_ids)))
+        my_pid = os.getpid()
+        try:
+            my_create_time = psutil.Process(my_pid).create_time()
+        except psutil.Error:
+            my_create_time = -1.0
+        my_lock_info = f"{my_pid}:{my_create_time}"
+        acquired_paths: list[Path] = []
+
+        for d_id in sorted_ids:
+            sig_path = self._get_gpu_access_signal_path(d_id)
+            while True:
+                try:
+                    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                    fd = os.open(str(sig_path), flags)
+                    with os.fdopen(fd, "w") as f:
+                        f.write(my_lock_info)
+                    acquired_paths.append(sig_path)
+                    break
+                except FileExistsError:
+                    try:
+                        owner_info = sig_path.read_text().strip()
+                        if owner_info == my_lock_info:
+                            acquired_paths.append(sig_path)
+                            break
+                        owner_pid = -1
+                        if owner_info:
+                            try:
+                                owner_pid = int(owner_info.split(":", 1)[0])
+                            except (ValueError, IndexError):
+                                raise ProcessLookupError from None
+
+                        if owner_pid != -1:
+                            os.kill(owner_pid, 0)
+                        else:
+                            raise ProcessLookupError from None
+                    except (ProcessLookupError, ValueError, OSError, psutil.Error):
+                        with contextlib.suppress(Exception):
+                            sig_path.unlink(missing_ok=True)
+                        continue
+                    logger.info(
+                        "GPU %d is busy (Owner: %d), retrying...", d_id, owner_pid
+                    )
+                    time.sleep(0.5)
+        return acquired_paths
+
+    def _release_gpu_access(self, acquired_paths: list[Path]):
+        """Release all held GPU signals with PID and create_time validation."""
+        my_pid = os.getpid()
+        try:
+            my_create_time = psutil.Process(my_pid).create_time()
+        except psutil.Error:
+            my_create_time = -1.0
+        my_lock_info = f"{my_pid}:{my_create_time}"
+
+        for sig_path in acquired_paths:
+            try:
+                if sig_path.exists():
+                    content = sig_path.read_text().strip()
+                    if content == my_lock_info:
+                        sig_path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
-        time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
-        time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
-        self.is_sleeping = True
-        logger.info(
-            "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
-        )
+
+        acquired = self._acquire_gpu_access()
+        try:
+            time_before_sleep = time.perf_counter()
+            self.collective_rpc("sleep", kwargs=dict(level=level))
+            time_after_sleep = time.perf_counter()
+            self.sleeping_tags = {"weights", "kv_cache"}
+            self.is_sleeping = True
+            logger.info(
+                "It took %.6f seconds to fall asleep.",
+                time_after_sleep - time_before_sleep,
+            )
+        finally:
+            self._release_gpu_access(acquired)
 
     def wake_up(self, tags: list[str] | None = None):
         if not self.is_sleeping:
@@ -332,14 +442,20 @@ class Executor(ABC):
                         "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
                     )
                     return
-        time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
-        time_after_wakeup = time.perf_counter()
-        logger.info(
-            "It took %.6f seconds to wake up tags %s.",
-            time_after_wakeup - time_before_wakeup,
-            tags if tags is not None else self.sleeping_tags,
-        )
+
+        acquired = self._acquire_gpu_access()
+        try:
+            time_before_wakeup = time.perf_counter()
+            self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+            time_after_wakeup = time.perf_counter()
+            logger.info(
+                "It took %.6f seconds to wake up tags %s.",
+                time_after_wakeup - time_before_wakeup,
+                tags if tags is not None else self.sleeping_tags,
+            )
+        finally:
+            self._release_gpu_access(acquired)
+
         if tags:
             for tag in tags:
                 self.sleeping_tags.remove(tag)
