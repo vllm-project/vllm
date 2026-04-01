@@ -919,10 +919,6 @@ def make_fused_moe_layer(
 
     layer.quant_method.process_weights_after_loading(layer)
 
-    # Temporary hack until #36286 or #36732 lands
-    if quantization is None:
-        layer.maybe_init_modular_kernel()
-
     def _moe(
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,

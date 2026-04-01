@@ -178,3 +178,20 @@ steps:
     - pytest -v -s kernels/moe/test_flashinfer_moe.py
     - pytest -v -s kernels/moe/test_nvfp4_moe.py
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
+
+
+- label: Kernels FusedMoE Layer Test (2 H100s)
+  timeout_in_minutes: 90
+  device: h100
+  num_devices: 2
+  commands:
+    - pytest -v -s kernels/moe/test_moe_layer.py
+
+
+- label: Kernels FusedMoE Layer Test (2 B200s)
+  timeout_in_minutes: 90
+  device: b200
+  num_devices: 2
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_moe_layer.py

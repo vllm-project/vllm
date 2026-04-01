@@ -316,8 +316,6 @@ class FusedMoE(CustomOp):
 
         assert self.moe_parallel_config.is_sequence_parallel == is_sequence_parallel
 
-        logger.debug("FusedMoEParallelConfig = %s", str(self.moe_parallel_config))
-
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
 
@@ -501,8 +499,6 @@ class FusedMoE(CustomOp):
             )
 
         self.quant_config = quant_config
-
-        logger.debug("FusedMoEConfig = %s", self.moe_config)
 
         def _get_quant_method() -> FusedMoEMethodBase:
             """
