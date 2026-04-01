@@ -123,6 +123,25 @@ class TrtLlmNvFp4ExpertsBase:
     def supports_expert_map(self) -> bool:
         return False
 
+    def prepare_monolithic_router_logits(
+        self,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        return (
+            router_logits.to(torch.float32)
+            if self.routing_method_type == RoutingMethodType.DeepSeekV3
+            else router_logits
+        )
+
+    def prepare_hidden_states_scale(
+        self,
+        hidden_states: torch.Tensor,
+        a1q_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return a1q_scale.view(torch.float8_e4m3fn).reshape(
+            *hidden_states.shape[:-1], -1
+        )
+
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
     """
@@ -274,6 +293,50 @@ class TrtLlmNvFp4ExpertsMonolithic(
             return routing_method == RoutingMethodType.DeepSeekV3
         return True
 
+    def run_flashinfer_monolithic(
+        self,
+        hidden_states: torch.Tensor,
+        hidden_states_scale: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        e_score_correction_bias: torch.Tensor | None,
+        routed_scaling_factor: float | None,
+        num_expert_group: int | None,
+        topk_group: int | None,
+    ) -> torch.Tensor:
+        return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+            routing_logits=router_logits,
+            routing_bias=e_score_correction_bias,
+            hidden_states=hidden_states,
+            hidden_states_scale=hidden_states_scale,
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
+            gemm1_bias=None,
+            gemm1_alpha=None,
+            gemm1_beta=None,
+            gemm1_clamp_limit=None,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
+            gemm2_bias=None,
+            output1_scale_scalar=self.g1_scale_c,
+            output1_scale_gate_scalar=self.quant_config.g1_alphas,
+            output2_scale_scalar=self.quant_config.g2_alphas,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            n_group=(num_expert_group or 0),
+            topk_group=(topk_group or 0),
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=routed_scaling_factor,
+            routing_method_type=self.routing_method_type,
+            do_finalize=True,
+            activation_type=activation_to_flashinfer_int(activation),
+        )[0]
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -302,43 +365,18 @@ class TrtLlmNvFp4ExpertsMonolithic(
             not apply_router_weight_on_input
             and self.routing_method_type != RoutingMethodType.Llama4
         )
-
-        # Prepare router logits for kernel format.
-        router_logits = (
-            router_logits.to(torch.float32)
-            if self.routing_method_type == RoutingMethodType.DeepSeekV3
-            else router_logits
-        )
-
-        # Invoke kernel.
-        return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
-            routing_logits=router_logits,
-            routing_bias=e_score_correction_bias,
+        return self.run_flashinfer_monolithic(
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
-                *hidden_states.shape[:-1], -1
+            hidden_states_scale=self.prepare_hidden_states_scale(
+                hidden_states, a1q_scale
             ),
-            gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
-            gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
-            gemm1_clamp_limit=None,
-            gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
-            gemm2_bias=None,
-            output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
-            output2_scale_scalar=self.quant_config.g2_alphas,
-            num_experts=global_num_experts,
-            top_k=self.topk,
-            n_group=(num_expert_group or 0),
-            topk_group=(topk_group or 0),
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
+            w1=w1,
+            w2=w2,
+            router_logits=self.prepare_monolithic_router_logits(router_logits),
+            activation=activation,
+            global_num_experts=global_num_experts,
+            e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
-            routing_method_type=self.routing_method_type,
-            do_finalize=True,
-            activation_type=activation_to_flashinfer_int(activation),
-        )[0]
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+        )
