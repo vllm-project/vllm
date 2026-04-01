@@ -16,7 +16,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -183,7 +183,7 @@ class CpuPlatform(Platform):
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(cache_config.cache_dtype):
             logger.warning(
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )
