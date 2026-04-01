@@ -5,6 +5,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -12,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
@@ -822,3 +824,85 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_r
     # Boolean should be deserialized as bool
     assert args["enabled"] is True
     assert isinstance(args["enabled"], bool)
+
+
+def test_extract_tool_calls_with_responses_format_tools(glm4_moe_tool_parser):
+    """Test extract tool call with Responses API input."""
+    request = Mock(spec=ResponsesRequest)
+    request.tools = [
+        FunctionTool(
+            type="function",
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>get_weather
+<arg_key>city</arg_key>
+<arg_value>Beijing</arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+    assert extracted_tool_calls.tool_calls[0].function.name == "get_weather"
+
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+
+    assert args["city"] == "Beijing"
+    assert isinstance(args["city"], str)
+
+
+def test_extract_tool_calls_with_responses_format_tools_streaming(glm4_moe_tool_parser):
+    """Test streaming extract tool call with Responses API input."""
+    _reset_streaming_state(glm4_moe_tool_parser)
+
+    request = Mock(spec=ResponsesRequest)
+    request.tools = [
+        FunctionTool(
+            type="function",
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                },
+            },
+        )
+    ]
+
+    chunks = [
+        "<tool_call>",
+        "get_weather\n",
+        "<arg_key>city</arg_key>",
+        "<arg_value>",
+        "Bei",
+        "jing",
+        "</arg_value>",
+        "</tool_call>",
+    ]
+
+    for chunk in chunks:
+        glm4_moe_tool_parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text="",
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+    assert len(glm4_moe_tool_parser.streamed_args_for_tool) == 1
+    args = json.loads(glm4_moe_tool_parser.streamed_args_for_tool[0])
+
+    assert args["city"] == "Beijing"
+    assert isinstance(args["city"], str)
