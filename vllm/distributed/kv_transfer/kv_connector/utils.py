@@ -686,7 +686,10 @@ class TpKVTopology:
         matched_positions = np.intersect1d(
             remote_global_positions, local_global_positions
         )
-        local_matched_indices = matched_positions // self.dcp_size
+        # Subtract offset before dividing to map back to local block indices
+        local_matched_indices = (
+            matched_positions - local_block_offset
+        ) // self.dcp_size
         remote_matched_indices = matched_positions // remote_dcp_size
         local_matched_block_ids = [
             [block_ids[i] for i in local_matched_indices if i < len(block_ids)]
