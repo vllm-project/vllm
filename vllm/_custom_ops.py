@@ -1258,7 +1258,7 @@ def _raise_ptx_error(original_error: Exception) -> None:
     except Exception:
         pass
     raise RuntimeError(
-        "Marlin MoE repack kernel failed with a CUDA error that usually "
+        "Marlin repack kernel failed with a CUDA error that usually "
         "indicates a PTX version mismatch: the pre-built vLLM wheel was "
         "compiled with a CUDA toolkit newer than what your GPU driver "
         f"supports (driver version: {cuda_ver}).\n\n"
