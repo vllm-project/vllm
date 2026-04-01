@@ -1307,6 +1307,7 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        self.expected_consumer_notifications_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
         self._physical_blocks_per_logical_kv_block = 1
@@ -1335,6 +1336,11 @@ class NixlConnectorWorker:
             self.block_size = kernel_block_size
             self._block_size[self.engine_id] = kernel_block_size
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
+
+    def _local_logical_block_size(self) -> int:
+        return (
+            self.block_size * self._physical_blocks_per_logical_kv_block * self.dcp_size
+        )
 
     def _nixl_handshake(
         self,
@@ -2499,6 +2505,7 @@ class NixlConnectorWorker:
             if now < expires:
                 break
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
+            self.expected_consumer_notifications_by_req.pop(req_id, None)
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
                 "Releasing expired KV blocks for request %s which were "
@@ -2541,11 +2548,23 @@ class NixlConnectorWorker:
                 # so P does not need to re-derive it from topology fields.
                 n_consumers = int(n_consumers_str)
 
+                consumers_per_producer = max(
+                    self.expected_consumer_notifications_by_req[req_id],
+                    n_consumers,
+                )
+                self.expected_consumer_notifications_by_req[req_id] = (
+                    consumers_per_producer
+                )
+
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait for all consumers (D) to finish reading before freeing.
-                if self.consumer_notification_counts_by_req[req_id] == n_consumers:
+                if (
+                    self.consumer_notification_counts_by_req[req_id]
+                    == consumers_per_producer
+                ):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
+                    del self.expected_consumer_notifications_by_req[req_id]
                     self._reqs_to_process.remove(req_id)
                     self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
@@ -2682,6 +2701,10 @@ class NixlConnectorWorker:
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
         # D may have to perform multiple reads from different remote ranks.
         remote_block_size = self.kv_topo.remote_block_size[meta.remote.engine_id]
+        local_prefix_blocks = (
+            meta.local_num_computed_tokens // self._local_logical_block_size()
+        )
+        local_block_offset = local_prefix_blocks * self.dcp_size
 
         launched_read = False
         for i, remote_worker_key in enumerate(remote_worker_keys):
@@ -2690,9 +2713,9 @@ class NixlConnectorWorker:
                 meta.remote.block_ids,
                 self._dcp_size[meta.remote.engine_id],
                 remote_worker_key[1],  # remote_dcp_rank
-                meta.local_num_computed_tokens // self.block_size,
+                local_block_offset,
             )
-            if local_block_ids and local_block_ids[0]:
+            if any(len(group) > 0 for group in local_block_ids):
                 launched_read = True
             local_physical_block_ids = self._logical_to_kernel_block_ids(
                 local_block_ids
@@ -2739,13 +2762,36 @@ class NixlConnectorWorker:
             )
 
             if self.use_mla and tp_ratio < 0:
-                # ..but we still need to notify the other remote ranks that we
-                # have the blocks we need so they can update the request state.
-                notif_id = f"{req_id}:{remote_worker_key[0]}".encode()
-                remote_agents = self._remote_agents[meta.remote.engine_id]
-                for rank_to_notify, agent in remote_agents.items():
-                    if rank_to_notify != remote_worker_key:
-                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                # Check if there is actually any block to read for this
+                # remote_worker_key.
+                # For empty intersection (no DCP overlap), we should not
+                # notify other ranks
+                # as this rank doesn't need data from this remote_worker_key.
+                has_valid_blocks = (
+                    local_block_ids
+                    and any(local_block_ids[i] for i in range(len(local_block_ids)))
+                ) or (
+                    remote_block_ids
+                    and any(remote_block_ids[i] for i in range(len(remote_block_ids)))
+                )
+
+                if has_valid_blocks:
+                    # When we successfully read from this remote_worker_key,
+                    # still notify the other remote ranks so they can update
+                    # request state.
+                    remote_agents = self._remote_agents[meta.remote.engine_id]
+                    for rank_to_notify, agent in remote_agents.items():
+                        if rank_to_notify != remote_worker_key:
+                            expected_consumers = (
+                                self.kv_topo.calculate_local_consumer_count(
+                                    meta.remote.engine_id, rank_to_notify
+                                )
+                            )
+                            notif_id = (
+                                f"{meta.remote.request_id}:"
+                                f"{expected_consumers}".encode()
+                            )
+                            self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
         if not launched_read and req_id not in self._failed_recv_reqs:
             self._done_recving_without_xfer.add(req_id)
 
@@ -2802,17 +2848,23 @@ class NixlConnectorWorker:
 
         # Total number of D workers (across TP and DCP) that will notify this
         # P worker. Embedded in the notification so P knows when to free blocks.
-        expected_consumers = (
-            self.kv_topo.get_local_consumer_count_for_remote_worker_key(
-                dst_engine_id, remote_worker_key
-            )
+        expected_consumers = self.kv_topo.calculate_local_consumer_count(
+            dst_engine_id, remote_worker_key
         )
         notif_id = f"{remote_request_id}:{expected_consumers}".encode()
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
-        if len(local_block_ids) == 0:
-            # A full prefix cache hit is indicated with an empty list.
+        has_any_local_blocks = any(len(group) > 0 for group in local_block_ids)
+        if not has_any_local_blocks:
+            # Check if this is a real prefix cache hit or an empty intersection.
+            # Empty intersection: remote_block_ids is also empty (DCP don't overlap).
+            # In this case we still send a no-op notification so sender-side
+            # completion can match the expected consumer count.
+            is_empty_intersection = all(len(group) == 0 for group in remote_block_ids)
+
+            # Real prefix cache hit or empty intersection: local does not need
+            # to issue a READ, but producer still needs this notification.
             agent_name = self._remote_agents[dst_engine_id][remote_worker_key]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
