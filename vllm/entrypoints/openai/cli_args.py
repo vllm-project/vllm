@@ -239,7 +239,7 @@ class FrontendArgs(BaseFrontendArgs):
     """Allowed methods."""
     allowed_headers: list[str] = field(default_factory=lambda: ["*"])
     """Allowed headers."""
-    allowed_hosts: list[str] = field(default_factory=lambda: [])
+    allowed_hosts: list[str] | None = None
     """Allowed hostnames for Host header validation, to protect against DNS
     rebinding attacks. Specified as a JSON list, e.g.
     '["localhost", "127.0.0.1"]'. When not set, defaults to localhost aliases

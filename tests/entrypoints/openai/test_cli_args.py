@@ -256,10 +256,10 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
 
 
 ### Tests for --allowed-hosts parsing
-def test_allowed_hosts_default_empty(serve_parser):
-    """Ensure allowed_hosts defaults to empty list when not specified"""
+def test_allowed_hosts_default_none(serve_parser):
+    """Ensure allowed_hosts defaults to None when not specified"""
     args = serve_parser.parse_args(args=[])
-    assert args.allowed_hosts == []
+    assert args.allowed_hosts is None
 
 
 def test_allowed_hosts_single(serve_parser):
