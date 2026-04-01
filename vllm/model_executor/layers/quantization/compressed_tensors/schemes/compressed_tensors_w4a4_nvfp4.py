@@ -106,9 +106,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             logger.warning_once(
                 "In NVFP4 linear, the global scale for input or weight are different"
                 " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely results in reduce accuracy. Please verify the model"
+                " will likely result in reduced accuracy. Please verify the model"
                 " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for parallel layers."
+                " scale for fused layers."
             )
 
         # Process global scales (CT stores as divisors, i.e. 1/scale)
