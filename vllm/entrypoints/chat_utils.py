@@ -907,13 +907,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             and self._mm_processor_kwargs
             and self._mm_processor_kwargs.get("use_audio_in_video", False)
         ):
-            try:
-                audio = self._connector.fetch_audio(video_url)
-            except ValueError:
-                audio = None
-            if audio is not None:
-                audio_placeholder = self._tracker.add("audio", (audio, uuid))
-                self._add_placeholder("audio", audio_placeholder)
+            audio = self._connector.fetch_audio(video_url) if video_url else None
+            audio_placeholder = self._tracker.add("audio", (audio, uuid))
+            self._add_placeholder("audio", audio_placeholder)
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -1067,26 +1063,15 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("video", coro)
         self._add_placeholder("video", placeholder)
 
-        # Extract audio from video if use_audio_in_video is True.
-        # Use sync fetch here so we can skip the placeholder entirely when
-        # the video has no audio stream (avoids prompt/data mismatch).
+        # Extract audio from video if use_audio_in_video is True
         if (
             video_url
             and self._mm_processor_kwargs
             and self._mm_processor_kwargs.get("use_audio_in_video", False)
         ):
-            try:
-                audio = self._connector.fetch_audio(video_url)
-            except ValueError:
-                audio = None
-            if audio is not None:
-                _audio = audio
-
-                async def _pre_fetched_audio(a=_audio, u=uuid):
-                    return a, u
-
-                audio_placeholder = self._tracker.add("audio", _pre_fetched_audio())
-                self._add_placeholder("audio", audio_placeholder)
+            audio_coro = self._audio_with_uuid_async(video_url, uuid)
+            audio_placeholder = self._tracker.add("audio", audio_coro)
+            self._add_placeholder("audio", audio_placeholder)
 
 
 @dataclass
@@ -1202,7 +1187,6 @@ def _get_full_multimodal_text_prompt(
     placeholder_storage: dict[str, list],
     texts: list[str],
     interleave_strings: bool,
-    multimodal_content_part_separator: str = "\n",
 ) -> str:
     """Combine multimodal prompts for a multimodal language model."""
 
@@ -1248,11 +1232,9 @@ def _get_full_multimodal_text_prompt(
     # NOTE: Default behaviour: we always add missing placeholders
     # at the front of the prompt, if interleave_strings=False
     if text_prompt:
-        return multimodal_content_part_separator.join(
-            missing_placeholders + [text_prompt]
-        )
+        return "\n".join(missing_placeholders + [text_prompt])
     else:
-        return multimodal_content_part_separator.join(missing_placeholders)
+        return "\n".join(missing_placeholders)
 
 
 # No need to validate using Pydantic again
@@ -1402,7 +1384,6 @@ def _parse_chat_message_content_parts(
     wrap_dicts: bool,
     interleave_strings: bool,
     mm_processor_kwargs: dict[str, Any] | None = None,
-    multimodal_content_part_separator="\n",
 ) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
@@ -1425,10 +1406,7 @@ def _parse_chat_message_content_parts(
     mm_placeholder_storage = mm_parser.mm_placeholder_storage()
     if mm_placeholder_storage:
         text_prompt = _get_full_multimodal_text_prompt(
-            mm_placeholder_storage,
-            texts,
-            interleave_strings,
-            multimodal_content_part_separator=multimodal_content_part_separator,
+            mm_placeholder_storage, texts, interleave_strings
         )
     else:
         text_prompt = "\n".join(texts)
