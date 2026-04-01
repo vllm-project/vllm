@@ -265,6 +265,7 @@ class ExtractHiddenStatesProposer:
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=slot_mapping_dict,
+            num_unpadded_tokens=num_tokens,
         ):
             self.model(
                 hidden_states=self.hidden_states[:num_input_tokens],
