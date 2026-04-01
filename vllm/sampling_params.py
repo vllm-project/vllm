@@ -559,6 +559,40 @@ class SamplingParams(
             if spec is not None:
                 self._validate_single_steering_spec(field_name, spec)
 
+        # Cross-validate overlapping dimensions between base and phase specs.
+        if self.steering_vectors:
+            for phase_name, phase_spec in [
+                ("prefill_steering_vectors", self.prefill_steering_vectors),
+                ("decode_steering_vectors", self.decode_steering_vectors),
+            ]:
+                if phase_spec is None:
+                    continue
+                for hook, layers in self.steering_vectors.items():
+                    if hook not in phase_spec:
+                        continue
+                    for layer_idx, base_entry in layers.items():
+                        if layer_idx not in phase_spec[hook]:
+                            continue
+                        from vllm.config.steering_types import (
+                            normalize_layer_entry,
+                        )
+
+                        base_vec, _ = normalize_layer_entry(base_entry)
+                        phase_vec, _ = normalize_layer_entry(
+                            phase_spec[hook][layer_idx]
+                        )
+                        if len(base_vec) != len(phase_vec):
+                            raise ValueError(
+                                f"steering_vectors[{hook!r}]"
+                                f"[{layer_idx}] has "
+                                f"dimension {len(base_vec)} but "
+                                f"{phase_name}[{hook!r}]"
+                                f"[{layer_idx}] has "
+                                f"dimension {len(phase_vec)}. "
+                                f"Overlapping entries must have "
+                                f"matching dimensions."
+                            )
+
     def _validate_single_steering_spec(
         self, field_name: str, spec: SteeringVectorSpec
     ) -> None:
