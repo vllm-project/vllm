@@ -3,17 +3,11 @@
 
 import time
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.inputs import (
-    EngineInput,
-    PromptType,
-    SingletonInput,
-    split_enc_dec_input,
-)
-from vllm.inputs.preprocess import InputPreprocessor
+from vllm.inputs import EngineInput, SingletonInput, split_enc_dec_input
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -64,12 +58,6 @@ class InputProcessor:
                 mm_budget.processor.info.skip_prompt_length_check
             )
             mm_budget.reset_cache()  # Not used anymore
-
-        self.input_preprocessor = InputPreprocessor(
-            vllm_config,
-            renderer=renderer,
-            mm_registry=mm_registry,
-        )
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
@@ -195,12 +183,11 @@ class InputProcessor:
     def process_inputs(
         self,
         request_id: str,
-        prompt: PromptType | EngineInput,
+        prompt: EngineInput,
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
@@ -219,32 +206,10 @@ class InputProcessor:
                 f"is out of range [0, {num_ranks})."
             )
 
-        if isinstance(prompt, dict) and "type" in prompt:
-            if tokenization_kwargs:
-                logger.warning_once(
-                    "Passing tokenization_kwargs to InputProcessor is deprecated "
-                    "and will be removed in v0.18. You should instead pass "
-                    "them to Renderer.render_cmpl() or Renderer.render_chat()."
-                )
+        if arrival_time is None:
+            arrival_time = prompt.get("arrival_time", time.time())
 
-            if arrival_time is None:
-                arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
-
-            processed_inputs: EngineInput = prompt  # type: ignore[assignment]
-        else:
-            logger.warning_once(
-                "Passing raw prompts to InputProcessor is deprecated "
-                "and will be removed in v0.18. You should instead pass "
-                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
-            )
-
-            if arrival_time is None:
-                arrival_time = time.time()
-
-            processed_inputs = self.input_preprocessor.preprocess(
-                prompt,
-                tokenization_kwargs=tokenization_kwargs,
-            )
+        processed_inputs = prompt
 
         current_platform.validate_request(processed_inputs, params)
 
