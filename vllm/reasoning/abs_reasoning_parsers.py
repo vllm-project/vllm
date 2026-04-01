@@ -39,6 +39,20 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    @property
+    def reasoning_start_str(self) -> str | None:
+        """Set `reasoning_start_str` to the strings that delimit
+        the reasoning block (e.g. `""<seed:think>""` and `"<think>"`).
+        """
+        return None
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        """Set `reasoning_end_str` to the strings that delimit
+        the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
+        """
+        return None
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
