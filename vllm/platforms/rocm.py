@@ -19,6 +19,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -903,3 +904,32 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        # TODO(luka/TJ) use aiter, vllm_c, native by default on ROCm
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # This (mostly) preserves previous CustomOp behavior
+        # Necessary on ROCm because it's common that users
+        # enable rms_norm to use the aiter kernel.
+        # TODO(luka/TJ) remove env vars completely
+        if (
+            cc.is_custom_op_enabled("rms_norm")
+            and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        ):
+            rms_norm = ["aiter"] + default
+        else:
+            rms_norm = default
+
+        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
