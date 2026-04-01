@@ -155,6 +155,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._on_write_complete: (
             "Callable[[np.ndarray], None] | None"
         ) = None
+        # Deferred write-through: block IDs collected in get_finished,
+        # flushed later via flush_write_through() outside the hot path
+        self._pending_write_through: deque[np.ndarray] = deque()
 
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
@@ -251,12 +254,10 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 transfer_type=self.transfer_type,
             )
 
-            # Write-through: after GPU→CPU completes, fire disk write
-            if (
-                transfer.dst_block_ids is not None
-                and self._on_write_complete is not None
-            ):
-                self._on_write_complete(transfer.dst_block_ids)
+            # Collect completed block IDs for deferred write-through
+            # (NOT in this hot path — flushed separately)
+            if transfer.dst_block_ids is not None:
+                self._pending_write_through.append(transfer.dst_block_ids)
 
             results.append(result)
             self._stream_pool.append(transfer.stream)
@@ -264,6 +265,14 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             self._event_pool.append(transfer.start_event)
             del self._transfer_events[transfer.job_id]
         return results
+
+    def flush_write_through(self) -> None:
+        """Flush pending disk write-through outside the critical path."""
+        if not self._pending_write_through or self._on_write_complete is None:
+            return
+        while self._pending_write_through:
+            block_ids = self._pending_write_through.popleft()
+            self._on_write_complete(block_ids)
 
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
@@ -331,10 +340,11 @@ class CpuGpuOffloadingHandlers:
                 disk_path=disk_path,
                 num_disk_blocks=num_disk_blocks,
             )
-            # TEMPORARILY DISABLED: disk write-through
-            # self.gpu_to_cpu_handler._on_write_complete = (
-            #     self._disk_write_through
-            # )
+            # Wire callback: after GPU→CPU transfer completes,
+            # write those CPU blocks to disk in background
+            self.gpu_to_cpu_handler._on_write_complete = (
+                self._disk_write_through
+            )
         # Inflight prefetch tracking: list of (DiskPrefetchSpec, [futures])
         self._inflight_prefetches: list[tuple] = []
 
