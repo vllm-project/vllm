@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
     quant_dequant_mxfp6,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    mxfp8_e4m3_quantize,
+    flashinfer_mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
@@ -201,7 +201,7 @@ def _mxfp8_e4m3_quantize(
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None or block_shape == [1, 32]
-    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
+    return flashinfer_mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
 
 
 def _mxfp6_e3m2_quantize(
