@@ -8,7 +8,9 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
+from starlette.datastructures import Headers
 
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.tracing import SpanKind, extract_trace_context, extract_trace_headers
 from vllm.tracing.otel import (
     get_trace_headers_from_context,
@@ -72,6 +74,43 @@ def test_get_trace_headers_from_context_preserves_parent(
     assert llm_request_span.parent is not None
     assert llm_request_span.parent.span_id == parent_context.span_id
     assert llm_request_span.context.span_id != parent_context.span_id
+
+
+@pytest.mark.asyncio
+async def test_openai_trace_headers_keep_llm_request_in_parent_trace(
+    span_exporter: InMemorySpanExporter,
+):
+    class DummyEngineClient:
+        async def is_tracing_enabled(self) -> bool:
+            return True
+
+    class DummyServing:
+        engine_client = DummyEngineClient()
+
+    tracer = trace.get_tracer(__name__)
+
+    with tracer.start_as_current_span("llm.run_mcp_agent"):
+        trace_headers = await OpenAIServing._get_trace_headers(
+            DummyServing(), Headers({})
+        )
+        assert trace_headers is not None
+
+        manual_instrument_otel(
+            "llm_request",
+            start_time=1,
+            context=extract_trace_context(trace_headers),
+            kind=SpanKind.SERVER,
+            use_environment_context=False,
+        )
+
+    spans = {span.name: span for span in span_exporter.get_finished_spans()}
+    app_span = spans["llm.run_mcp_agent"]
+    llm_request_span = spans["llm_request"]
+
+    assert llm_request_span.context.trace_id == app_span.context.trace_id
+    assert llm_request_span.parent is not None
+    assert llm_request_span.parent.span_id == app_span.context.span_id
+    assert llm_request_span.context.span_id != app_span.context.span_id
 
 
 def test_manual_instrument_otel_uses_environment_context_by_default(
