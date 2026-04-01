@@ -11,7 +11,6 @@ from copy import copy
 import torch
 
 import vllm.envs as envs
-from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -20,7 +19,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
-from vllm.inputs import EngineInput, PromptType
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -427,7 +426,7 @@ class AsyncLLM(EngineClient):
         # once the input stream is closed.
         final_req = self.input_processor.process_inputs(
             request_id=request_id,
-            prompt=TokensPrompt(prompt_token_ids=[0]),
+            prompt=tokens_input([0]),
             params=sampling_params,
             **inputs,  # type: ignore[arg-type]
         )
@@ -747,7 +746,7 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType | EngineInput,
+        prompt: EngineInput,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
