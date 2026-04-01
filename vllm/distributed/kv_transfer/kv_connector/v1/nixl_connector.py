@@ -1729,8 +1729,7 @@ class NixlConnectorWorker:
         # (x, B, C, ssm).  len(block_len_per_layer) == number of unique
         # cache tensors, independent of the blocks-first doubling that
         # num_regions may include.
-        num_unique_cache_tensors = len(self.block_len_per_layer)
-        self._mamba_num_regions = num_unique_cache_tensors * 4 if self._has_mamba else 0
+        self._mamba_num_regions = len(seen_base_addresses) * 4 if self._has_mamba else 0
 
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
@@ -1795,8 +1794,7 @@ class NixlConnectorWorker:
         blocks, enabling the 3-read transfer with DS conv layout."""
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets()
-        conv_size = self._mamba_ssm_size[0]
-        ssm_size = self._mamba_ssm_size[1]
+        conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks * block_size_ratio
         phys_ratio = self._physical_blocks_per_logical_kv_block
 
@@ -2377,8 +2375,8 @@ class NixlConnectorWorker:
         remote_block_len = nixl_agent_meta.block_lens[0]
         if self.use_mla or self.kv_topo.is_kv_replicated(remote_engine_id):
             # With replicated KV cache, only the number of blocks can differ.
-            # NOTE (ZhanqiuHu): HMA hybrid models have TP-dependent block
-            # padding, so this check doesn't hold for mamba models.
+            # TODO (ZhanqiuHu): For mamba models, validate FA and mamba
+            # block_lens separately.
             if not self._has_mamba:
                 for i in range(len(self.block_len_per_layer)):
                     assert (
