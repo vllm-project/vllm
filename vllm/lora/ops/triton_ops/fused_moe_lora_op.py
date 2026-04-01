@@ -383,7 +383,11 @@ def _fused_moe_lora_kernel(
         # compiler may infer different types for a and b when merging
         # if/else branches (TMA desc path returns fp32, tl.load returns
         # the pointer's element type).
-        accumulator += tl.dot(a.to(tl.bfloat16), b.to(tl.bfloat16))
+        # Use the output element type rather than hardcoding bfloat16
+        # so that fp16 models are handled correctly and precision from
+        # a float32 intermediate buffer is not discarded prematurely.
+        dot_dtype = c_ptr.dtype.element_ty
+        accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
@@ -772,7 +776,13 @@ def _fused_moe_lora(
 
     a_intermediate_cache1 = torch.zeros(
         intermediate_cache_shape,
-        dtype=output.dtype,
+        # Use float32 for the intermediate buffer to avoid precision loss
+        # when accumulating lora_a results, matching the non-MoE LoRA path
+        # in punica_gpu.py which explicitly uses float32. Using output.dtype
+        # (e.g. bfloat16) causes the float32 accumulator in the shrink
+        # kernel to be truncated, and the resulting precision loss compounds
+        # across experts and layers, leading to hallucinated outputs.
+        dtype=torch.float32,
         device=device,
     )
 
