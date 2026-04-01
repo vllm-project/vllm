@@ -420,7 +420,7 @@ class RayExecutorV2(MultiprocExecutor):
         for response_mq in self.response_mqs:
             response_mq.wait_until_ready()
 
-        self.futures_queue = deque[tuple[FutureWrapper, Any]]()
+        self.futures_queue = deque[FutureWrapper]()
         self._post_init_executor()
 
         self.start_worker_monitor()
