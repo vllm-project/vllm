@@ -488,13 +488,12 @@ class OpenAIServingRender:
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        if skip_mm_cache:
-            prompt_extras["_skip_mm_cache"] = True
 
         return await renderer.render_cmpl_async(
             parsed_prompts,
             tok_params,
             prompt_extras=prompt_extras,
+            skip_mm_cache=skip_mm_cache,
         )
 
     async def preprocess_chat(
@@ -535,14 +534,13 @@ class OpenAIServingRender:
             for k in ("mm_processor_kwargs", "cache_salt")
             if (v := getattr(request, k, None)) is not None
         }
-        if skip_mm_cache:
-            prompt_extras["_skip_mm_cache"] = True
 
         (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],
             chat_params,
             tok_params,
             prompt_extras=prompt_extras,
+            skip_mm_cache=skip_mm_cache,
         )
 
         # tool parsing is done only if a tool_parser has been set and if
