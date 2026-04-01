@@ -126,8 +126,7 @@ class AttentionSpec(KVCacheSpec):
         # raw KV cache allocation so it must be budgeted here.
         if self.kv_quant_mode.is_per_token_head:
             real_page_size += (
-                2 * self.block_size * self.num_kv_heads
-                * get_dtype_size(torch.float32)
+                2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
             )
         if self.page_size_padded is not None:
             assert self.page_size_padded >= real_page_size

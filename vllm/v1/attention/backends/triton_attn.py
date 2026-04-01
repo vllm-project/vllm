@@ -37,7 +37,6 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVQuantMode,
     get_kv_quant_mode,
     kv_cache_uses_per_token_head_scales,
 )
@@ -319,11 +318,8 @@ class TritonAttentionBackend(AttentionBackend):
             )
 
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
-            scale_pad = get_dtype_size(torch.float32) // get_dtype_size(
-                cache_dtype
-            )
-            return (num_blocks, 2, block_size, num_kv_heads,
-                    head_size + scale_pad)
+            scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
+            return (num_blocks, 2, block_size, num_kv_heads, head_size + scale_pad)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -403,9 +399,9 @@ class TritonAttentionImpl(AttentionImpl):
         hs = padded_hs - scale_pad
 
         raw = kv_cache.untyped_storage()
-        base_f32 = torch.tensor(
-            [], dtype=torch.float32, device=kv_cache.device
-        ).set_(raw)
+        base_f32 = torch.tensor([], dtype=torch.float32, device=kv_cache.device).set_(
+            raw
+        )
 
         # In the raw bytes, each (block, kv_half, slot, head) occupies
         # padded_hs * dtype_sz bytes.  The scale float32 sits at byte
