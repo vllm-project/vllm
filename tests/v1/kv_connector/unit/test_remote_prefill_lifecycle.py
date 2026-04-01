@@ -587,7 +587,7 @@ def test_cannot_recv():
     assert_scheduler_empty(scheduler)
 
 
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
 def test_p_side_chunked_prefill_mamba(mock_platform):
     """P-side integration: Mamba N-1 truncation + chunked prefill completes.
 

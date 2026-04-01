@@ -31,10 +31,10 @@ from .utils import (
         (False, [0]),
     ],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
 def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         NixlConnectorScheduler,
     )
 
@@ -65,7 +65,7 @@ def test_logical_to_kernel_block_ids_with_hma():
     When HMA is enabled, the logical block size may differ from the kernel
     block size. Each logical block maps to multiple kernel blocks.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         NixlConnectorWorker,
     )
 
@@ -169,7 +169,7 @@ def test_nixl_metadata_hma_block_ids_structure():
     Test that NixlConnectorMetadata correctly stores block IDs for multiple
     KV cache groups when HMA is enabled.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         NixlConnectorMetadata,
     )
 
@@ -211,7 +211,7 @@ def test_nixl_metadata_hma_block_ids_structure():
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _get_block_descs_ids uses per-group strides for hybrid FA+SSM
     when ratio=1 (no kernel block size mismatch)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         NixlConnectorWorker,
     )
 
@@ -244,7 +244,7 @@ def test_get_block_descs_ids_hybrid_ssm():
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _get_block_descs_ids uses different strides for FA (kernel blocks)
     vs SSM (logical blocks) when ratio > 1."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         NixlConnectorWorker,
     )
 
@@ -277,7 +277,7 @@ def test_get_block_descs_ids_kernel_block_mismatch():
 def test_nixl_metadata_hybrid_ssm_block_ids():
     """Test NixlConnectorMetadata correctly stores block IDs for FA + SSM
     groups with different block counts (kernel mismatch active)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         NixlConnectorMetadata,
     )
 
@@ -385,7 +385,7 @@ def test_mamba_n1_p_side_truncation():
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
 def test_has_mamba_init(
     mock_platform,
     swa_enabled,
@@ -394,7 +394,7 @@ def test_has_mamba_init(
     expected_is_hma,
 ):
     """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         NixlConnectorScheduler,
     )
 
