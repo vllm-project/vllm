@@ -337,20 +337,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 #endif
 
-  // Quantized GEMM for GPTQ.
-  // Note: even though the C++ inferred schema is correct for this op, it seems
-  // to prevent the meta function registry.
-  ops.def(
-      "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
-      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
-      "use_v2_format, int bit) "
-      "-> Tensor");
-  ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
-
-  // Post processing for GPTQ.
-  ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
-  ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
-
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"

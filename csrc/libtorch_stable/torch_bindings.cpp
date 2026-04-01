@@ -305,6 +305,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! scale, Tensor? scale_ub) -> "
       "()");
+
+  // Quantized GEMM for GPTQ.
+  // Note: even though the C++ inferred schema is correct for this op, it seems
+  // to prevent the meta function registry.
+  ops.def(
+      "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
+      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
+      "use_v2_format, int bit) "
+      "-> Tensor");
+
+  // Post processing for GPTQ.
+  ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -373,6 +385,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("dynamic_scaled_fp8_quant", TORCH_BOX(&dynamic_scaled_fp8_quant));
   ops.impl("dynamic_per_token_scaled_fp8_quant",
            TORCH_BOX(&dynamic_per_token_scaled_fp8_quant));
+
+  // GPTQ kernels
+  ops.impl("gptq_gemm", TORCH_BOX(&gptq_gemm));
+  ops.impl("gptq_shuffle", TORCH_BOX(&gptq_shuffle));
 }
 
 // These capability-check functions take only primitive args (no tensors), so
