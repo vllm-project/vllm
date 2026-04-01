@@ -420,7 +420,7 @@ class NemotronParseDummyInputsBuilder(
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = _get_image_size_tuple(
+        target_height, target_width = _get_image_size_tuple(
             self.info.get_hf_config().image_size)
 
         return {
