@@ -70,9 +70,15 @@ def reshape_and_cache_kernel_flash(
             + (cur_dim % x)
         )
     else:
-        tgt_base = block_idx * block_stride + block_offset * page_stride
-        tgt_idx_k = tgt_base + tile_pos
-        tgt_idx_v = tgt_base + tile_pos
+        cur_head = tile_pos // head_size
+        cur_dim = tile_pos % head_size
+        tgt_idx_k = (
+            block_idx * block_stride
+            + block_offset * page_stride
+            + cur_head * head_stride
+            + cur_dim
+        )
+        tgt_idx_v = tgt_idx_k
 
     # [TILE_SIZE]
     key_load = tl.load(
