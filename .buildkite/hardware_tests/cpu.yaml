@@ -22,6 +22,21 @@ steps:
       pytest -x -v -s tests/kernels/test_onednn.py
       pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py"
 
+- label: AMD-CPU-Kernel Tests
+  depends_on: []
+  soft_fail: false
+  device: amd_zen_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/model_executor/layers/utils.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/__init__.py
+  - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-amd-cpu-test.sh 20m "
+      pytest -x -v -s tests/model_executor/test_cpu_unquantized_gemm_dispatch.py"
+
 - label: CPU-Compatibility Tests
   depends_on: []
   device: intel_cpu
@@ -35,6 +50,23 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
       bash .buildkite/scripts/hardware_ci/run-cpu-compatibility-test.sh"
 
+- label: AMD-CPU-Compatibility Tests
+  depends_on: []
+  soft_fail: false
+  device: amd_zen_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - setup.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/interface.py
+  - vllm/platforms/__init__.py
+  - tests/test_zen_cpu_platform_detection.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-amd-cpu-test.sh 20m "
+      pytest -x -v -s tests/test_zen_cpu_platform_detection.py"
+
 - label: CPU-Language Generation and Pooling Model Tests
   depends_on: []
   device: intel_cpu
@@ -47,6 +79,27 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      pytest -x -v -s tests/models/language/generation -m cpu_model
+      pytest -x -v -s tests/models/language/pooling -m cpu_model"
+
+- label: AMD-CPU-Language Generation and Pooling Model Tests
+  depends_on: []
+  soft_fail: false
+  device: amd_zen_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/model_executor/layers/utils.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/__init__.py
+  - setup.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/interface.py
+  - vllm/v1/worker/cpu_model_runner.py
+  - tests/models/language/generation/
+  - tests/models/language/pooling/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-amd-cpu-test.sh 30m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model"
 
@@ -85,6 +138,26 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 10m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-distributed-smoke-test.sh"
+
+- label: AMD-CPU-Distributed Tests
+  depends_on: []
+  soft_fail: false
+  device: amd_zen_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - csrc/cpu/shm.cpp
+  - vllm/v1/worker/cpu_worker.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/worker/cpu_model_runner.py
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/distributed/parallel_state.py
+  - vllm/distributed/device_communicators/cpu_communicator.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-amd-cpu-test.sh 10m "
       bash .buildkite/scripts/hardware_ci/run-cpu-distributed-smoke-test.sh"
 
 - label: CPU-Multi-Modal Model Tests %N

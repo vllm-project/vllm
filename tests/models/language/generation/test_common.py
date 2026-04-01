@@ -42,6 +42,11 @@ AITER_MODEL_LIST = [
                 pytest.mark.core_model,
                 pytest.mark.slow_test,
                 pytest.mark.cpu_model,
+                pytest.mark.skipif(
+                    current_platform.is_zen_cpu(),
+                    reason="bloom-560m ALiBi is currently not supported on\
+                        AMD Zen CPUs due to lack of support for float16 compute.",
+                ),
             ],
         ),
         pytest.param(
