@@ -1339,101 +1339,31 @@ class OpenAIServingResponses(OpenAIServing):
         current_content_index = 0
         current_output_index = 0
         current_item_id = ""
-        reasoning_parser = None
-        if self.parser and self.parser.reasoning_parser_cls:
-            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-        tool_parser = None
-        if self.parser and self.parser.tool_parser_cls:
-            tool_parser = self.parser.tool_parser_cls(tokenizer, request.tools)
-        reasoning_ended = False
-        tool_call_text_started = False
-        previous_text = ""
-        previous_token_ids: list[int] = []
-        prompt_is_reasoning_end = None
+        parser = self.parser(tokenizer) if self.parser else None
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None:
                 continue
-            if reasoning_parser and prompt_is_reasoning_end is None:
-                prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
-                    ctx.last_output.prompt_token_ids
-                )
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
                 self._raise_if_error(output.finish_reason, request.request_id)
                 delta_text = output.text
                 delta_token_ids = as_list(output.token_ids)
-                current_text = previous_text + delta_text
-                current_token_ids = previous_token_ids + delta_token_ids
 
-                if reasoning_parser and tool_parser:
-                    if prompt_is_reasoning_end:
-                        reasoning_ended = True
-                    if not reasoning_ended:
-                        delta_message = reasoning_parser.extract_reasoning_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            delta_token_ids=delta_token_ids,
-                        )
-                        if reasoning_parser.is_reasoning_end(delta_token_ids):
-                            reasoning_ended = True
-                            current_token_ids = reasoning_parser.extract_content_ids(
-                                delta_token_ids
-                            )
-                            if delta_message and delta_message.content:
-                                current_text = delta_message.content
-                                delta_message.content = None
-                            else:
-                                current_text = ""
-
-                    if reasoning_ended:
-                        if not tool_call_text_started:
-                            tool_call_text_started = True
-                            previous_text = ""
-                            previous_token_ids = []
-                            delta_text = current_text
-                            delta_token_ids = current_token_ids
-
-                        delta_message = tool_parser.extract_tool_calls_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            delta_token_ids=delta_token_ids,
-                            request=request,  # type: ignore[arg-type]
-                        )
-                elif reasoning_parser:
-                    delta_message = reasoning_parser.extract_reasoning_streaming(
-                        previous_text=previous_text,
-                        current_text=current_text,
+                if parser:
+                    delta_message = parser.parse_delta(
                         delta_text=delta_text,
-                        previous_token_ids=previous_token_ids,
-                        current_token_ids=current_token_ids,
                         delta_token_ids=delta_token_ids,
-                    )
-                elif tool_parser:
-                    delta_message = tool_parser.extract_tool_calls_streaming(
-                        previous_text=previous_text,
-                        current_text=current_text,
-                        delta_text=delta_text,
-                        previous_token_ids=previous_token_ids,
-                        current_token_ids=current_token_ids,
-                        delta_token_ids=delta_token_ids,
-                        request=request,  # type: ignore[arg-type]
+                        request=request,
+                        prompt_token_ids=ctx.last_output.prompt_token_ids,
                     )
                 else:
                     delta_message = DeltaMessage(
                         content=output.text,
                     )
-                previous_text = current_text
-                previous_token_ids = current_token_ids
                 if not delta_message:
                     continue
                 if not first_delta_sent:
