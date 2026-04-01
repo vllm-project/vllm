@@ -240,7 +240,7 @@ class SchedulerOutput:
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
-    num_spec_tokens_to_schedule: int | None = None
+    num_spec_tokens_to_schedule: int = 0
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

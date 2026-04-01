@@ -214,11 +214,9 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
-        self.dynamic_sd_manager = None
+        self.dynamic_sd_manager: DynamicSpeculativeDecodingManager | None = None
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
-            # setup Dynamic Speculative Decoding
-            self.dynamic_sd_manager: DynamicSpeculativeDecodingManager | None = None
             if speculative_config.dynamic_config:
                 self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
                     speculative_config.dynamic_config,

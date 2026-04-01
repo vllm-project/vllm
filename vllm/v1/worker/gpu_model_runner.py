@@ -4398,6 +4398,7 @@ class GPUModelRunner(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
     ) -> None:
         if torch.is_tensor(self._draft_token_ids):
+            assert isinstance(self._draft_token_ids, torch.Tensor)
             self.prev_num_spec_tokens = self._draft_token_ids.shape[1]
         # Check if we need to copy draft tokens to CPU. In async scheduling,
         # we only copy when needed for structured output, penalties or bad_words.
@@ -4439,6 +4440,7 @@ class GPUModelRunner(
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_cpu is not None
         self.draft_token_ids_event.synchronize()
+        assert isinstance(self._draft_token_ids, torch.Tensor)
         num_spec_tokens = self._draft_token_ids.shape[1]
         return self.draft_token_ids_cpu[
             : len(req_ids), :num_spec_tokens
@@ -4493,13 +4495,15 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
+        num_spec_tokens_to_schedule = (
+            scheduler_output.num_spec_tokens_to_schedule)
         if spec_config.method == "ngram":
             from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(
-                scheduler_output.num_spec_tokens_to_schedule,
+                num_spec_tokens_to_schedule,
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
@@ -4525,7 +4529,7 @@ class GPUModelRunner(
             batch_size = next_token_ids.shape[0]
 
             draft_token_ids, num_valid_draft_tokens = self.drafter.propose(
-                scheduler_output.num_spec_tokens_to_schedule,
+                num_spec_tokens_to_schedule,
                 self.num_tokens_no_spec_gpu[:batch_size],
                 self.token_ids_gpu_tensor[:batch_size],
                 valid_sampled_token_ids_gpu,
@@ -4547,7 +4551,7 @@ class GPUModelRunner(
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, SuffixDecodingProposer)
             draft_token_ids = self.drafter.propose(
-                scheduler_output.num_spec_tokens_to_schedule,
+                num_spec_tokens_to_schedule,
                 self.input_batch,
                 sampled_token_ids,
                 slot_mappings=slot_mappings,
@@ -4574,7 +4578,7 @@ class GPUModelRunner(
                 hidden_states = sample_hidden_states[indices]
 
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                num_speculative_tokens=num_spec_tokens_to_schedule,
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
                 slot_mappings=slot_mappings,
@@ -4592,7 +4596,7 @@ class GPUModelRunner(
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                num_speculative_tokens=num_spec_tokens_to_schedule,
                 sampled_token_ids=sampled_token_ids,
                 target_hidden_states=target_hidden_states,
                 common_attn_metadata=common_attn_metadata,
@@ -4717,7 +4721,7 @@ class GPUModelRunner(
                 mm_embed_inputs = None
 
             draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                num_speculative_tokens=num_spec_tokens_to_schedule,
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,

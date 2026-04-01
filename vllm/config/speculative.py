@@ -73,7 +73,7 @@ class DynamicSpeculativeConfig:
     is_online: bool = False
     """Whether the statistics are updated online or not during inference."""
 
-    batch_stats: dict[int, dict[int, float]] = None
+    batch_stats: dict[int, dict[int, float]] | None = None
     """ 
     Batch statistics for different batch sizes and number of drafts.
     The structure is as follows:
@@ -92,10 +92,10 @@ class DynamicSpeculativeConfig:
     where bs 1 at K=3 has itl 9.41ms. K=0 means no speculative decoding.
     """
 
-    max_num_speculative_tokens: int = None
+    max_num_speculative_tokens: int | None = None
     """Maximum number of speculative tokens supported in the statistics."""
 
-    acceptance_rate_per_pos: list[float] = None
+    acceptance_rate_per_pos: list[float] | None = None
     """Acceptance rate per position on an offline dataset."""
 
 
