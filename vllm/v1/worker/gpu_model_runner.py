@@ -6624,8 +6624,8 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                num_blocks = kv_cache_config.num_blocks
-                assert raw_tensor.numel() >= kv_cache_spec.page_size_bytes * num_blocks
+                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -6643,8 +6643,7 @@ class GPUModelRunner(
                     dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                        if len(kv_cache_stride_order) != len(kv_cache_shape):
-                            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+                        assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
                     # The allocation respects the backend-defined stride order
@@ -6785,7 +6784,6 @@ class GPUModelRunner(
             self.kv_caches,
             num_attn_module,
         )
-
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(

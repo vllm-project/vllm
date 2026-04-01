@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for per-token KV cache quantization (INT8 and FP8).
+"""Tests for per-token-head KV cache quantization (INT8 and FP8).
 
 Covers:
-- Per-token Triton reshape-and-cache kernel
+- Per-token-head Triton reshape-and-cache kernel
 - Round-trip quantize/dequantize accuracy
 - process_weights_after_loading early-return path
 - End-to-end integration with Triton unified attention kernel
@@ -29,7 +29,7 @@ from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 pytestmark = [
     pytest.mark.skipif(
         not current_platform.is_cuda_alike(),
-        reason="Per-token KV cache tests require CUDA or ROCm GPU.",
+        reason="Per-token-head KV cache tests require CUDA or ROCm GPU.",
     ),
 ]
 
@@ -55,7 +55,7 @@ class QuantConfig:
     """Quantization parameters for a given cache dtype."""
 
     cache_dtype: torch.dtype  # torch.int8 or FP8_DTYPE
-    kv_cache_dtype_str: str  # "int8_per_token" or "fp8_per_token"
+    kv_cache_dtype_str: str  # "int8_per_token_head" or "fp8_per_token_head"
     quant_max: float
     quant_min: float
     kv_quant_mode: KVQuantMode
@@ -65,18 +65,18 @@ class QuantConfig:
 
 INT8_CONFIG = QuantConfig(
     cache_dtype=torch.int8,
-    kv_cache_dtype_str="int8_per_token",
+    kv_cache_dtype_str="int8_per_token_head",
     quant_max=127.0,
     quant_min=-128.0,
-    kv_quant_mode=KVQuantMode.INT8_PER_TOKEN,
+    kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
     uses_trunc=True,
 )
 FP8_CONFIG = QuantConfig(
     cache_dtype=FP8_DTYPE,
-    kv_cache_dtype_str="fp8_per_token",
+    kv_cache_dtype_str="fp8_per_token_head",
     quant_max=FP8_MAX,
     quant_min=FP8_MIN,
-    kv_quant_mode=KVQuantMode.FP8_PER_TOKEN,
+    kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD,
     uses_trunc=False,
 )
 
@@ -91,17 +91,17 @@ def qcfg(request) -> QuantConfig:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _quantize_per_token_ref(
+def _quantize_per_token_head_ref(
     data: torch.Tensor,  # [num_tokens, num_heads, head_size]
     cfg: QuantConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reference per-token quantization (one scale per token).
+    """Reference per-token-head quantization (one scale per token per head).
 
-    Returns (quantized, scales) where scales is [num_tokens].
+    Returns (quantized, scales) where scales is [num_tokens, num_heads].
     """
-    absmax = data.float().abs().amax(dim=(1, 2))  # [num_tokens]
+    absmax = data.float().abs().amax(dim=2)  # [num_tokens, num_heads]
     scales = (absmax / cfg.quant_max).clamp(min=1e-6)
-    scaled = data.float() / scales[:, None, None]
+    scaled = data.float() / scales[:, :, None]
     if cfg.uses_trunc:
         q = scaled.round().clamp(cfg.quant_min, cfg.quant_max).to(cfg.cache_dtype)
     else:
@@ -118,11 +118,11 @@ class TestIsQuantizedKvCache:
         assert is_quantized_kv_cache("fp8_e4m3")
         assert is_quantized_kv_cache("fp8_e5m2")
 
-    def test_int8_per_token(self):
-        assert is_quantized_kv_cache("int8_per_token")
+    def test_int8_per_token_head(self):
+        assert is_quantized_kv_cache("int8_per_token_head")
 
-    def test_fp8_per_token(self):
-        assert is_quantized_kv_cache("fp8_per_token")
+    def test_fp8_per_token_head(self):
+        assert is_quantized_kv_cache("fp8_per_token_head")
 
     def test_auto(self):
         assert not is_quantized_kv_cache("auto")
@@ -133,16 +133,18 @@ class TestIsQuantizedKvCache:
     def test_kv_quant_mode_int8(self):
         from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
-        assert get_kv_quant_mode("int8_per_token") == KVQuantMode.INT8_PER_TOKEN
+        assert (
+            get_kv_quant_mode("int8_per_token_head") == KVQuantMode.INT8_PER_TOKEN_HEAD
+        )
 
     def test_kv_quant_mode_fp8(self):
         from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
-        assert get_kv_quant_mode("fp8_per_token") == KVQuantMode.FP8_PER_TOKEN
+        assert get_kv_quant_mode("fp8_per_token_head") == KVQuantMode.FP8_PER_TOKEN_HEAD
 
 
 # ===========================================================================
-# 2. Triton per-token kernel (reshape-and-cache)
+# 2. Triton per-token-head kernel (reshape-and-cache)
 # ===========================================================================
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_KV_HEADS)
@@ -150,7 +152,7 @@ class TestIsQuantizedKvCache:
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_reshape_and_cache_per_token(
+def test_reshape_and_cache_per_token_head(
     qcfg: QuantConfig,
     num_tokens: int,
     num_heads: int,
@@ -158,9 +160,9 @@ def test_reshape_and_cache_per_token(
     block_size: int,
     seed: int,
 ):
-    """Test triton_reshape_and_cache_flash_per_token_quant kernel."""
+    """Test triton_reshape_and_cache_flash_per_token_head_quant kernel."""
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-        triton_reshape_and_cache_flash_per_token_quant,
+        triton_reshape_and_cache_flash_per_token_head_quant,
     )
 
     set_random_seed(seed)
@@ -177,15 +179,15 @@ def test_reshape_and_cache_per_token(
     value_cache = torch.zeros(
         num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
     )
-    k_scale_cache = torch.ones(num_blocks, block_size, dtype=torch.float32)
-    v_scale_cache = torch.ones(num_blocks, block_size, dtype=torch.float32)
+    k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
+    v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
 
     num_slots = block_size * num_blocks
     slot_mapping = torch.tensor(
         random.sample(range(num_slots), num_tokens), dtype=torch.long
     )
 
-    triton_reshape_and_cache_flash_per_token_quant(
+    triton_reshape_and_cache_flash_per_token_head_quant(
         key,
         value,
         key_cache,
@@ -196,8 +198,8 @@ def test_reshape_and_cache_per_token(
     )
 
     # Reference
-    ref_k_quant, ref_k_scales = _quantize_per_token_ref(key, qcfg)
-    ref_v_quant, ref_v_scales = _quantize_per_token_ref(value, qcfg)
+    ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, qcfg)
+    ref_v_quant, ref_v_scales = _quantize_per_token_head_ref(value, qcfg)
 
     # FP8 has wider range so needs looser tolerance on quantized values
     data_atol = 2.0 if not qcfg.uses_trunc else 1.0
@@ -219,6 +221,7 @@ def test_reshape_and_cache_per_token(
             atol=data_atol,
             rtol=data_rtol,
         )
+        # Per-head scales: [num_heads]
         torch.testing.assert_close(
             k_scale_cache[blk, off], ref_k_scales[i], atol=1e-4, rtol=1e-3
         )
@@ -228,27 +231,27 @@ def test_reshape_and_cache_per_token(
 
 
 # ===========================================================================
-# 3. Per-token round-trip accuracy (quantize -> dequantize)
+# 3. Per-token-head round-trip accuracy (quantize -> dequantize)
 # ===========================================================================
 @pytest.mark.parametrize("num_tokens", [1, 16])
 @pytest.mark.parametrize("num_heads", [4])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])
 @torch.inference_mode()
-def test_per_token_round_trip_accuracy(
+def test_per_token_head_round_trip_accuracy(
     qcfg: QuantConfig,
     num_tokens: int,
     num_heads: int,
     head_size: int,
     block_size: int,
 ):
-    """Verify per-token round-trip: kernel dequant matches reference.
+    """Verify per-token-head round-trip: kernel dequant matches reference.
 
     INT8: Triton truncates on float->int8 store.
     FP8: hardware cast (clamp then cast).
     """
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-        triton_reshape_and_cache_flash_per_token_quant,
+        triton_reshape_and_cache_flash_per_token_head_quant,
     )
 
     torch.set_default_device("cuda")
@@ -265,12 +268,12 @@ def test_per_token_round_trip_accuracy(
     value_cache = torch.zeros(
         num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
     )
-    k_scale_cache = torch.ones(num_blocks, block_size, dtype=torch.float32)
-    v_scale_cache = torch.ones(num_blocks, block_size, dtype=torch.float32)
+    k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
+    v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
 
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
 
-    triton_reshape_and_cache_flash_per_token_quant(
+    triton_reshape_and_cache_flash_per_token_head_quant(
         key,
         value,
         key_cache,
@@ -288,56 +291,59 @@ def test_per_token_round_trip_accuracy(
             ("key", key, key_cache, k_scale_cache),
             ("val", value, value_cache, v_scale_cache),
         ]:
-            orig = data[i].float()
-            absmax = orig.abs().amax()
-            ref_scale = (absmax / qcfg.quant_max).clamp(min=1e-6)
+            for h in range(num_heads):
+                orig = data[i, h].float()  # [head_size]
+                absmax = orig.abs().amax()
+                ref_scale = (absmax / qcfg.quant_max).clamp(min=1e-6)
 
-            # Build reference matching kernel semantics
-            scaled = orig / ref_scale
-            if qcfg.uses_trunc:
-                ref_q = (
-                    scaled.clamp(qcfg.quant_min, qcfg.quant_max)
-                    .trunc()
-                    .to(qcfg.cache_dtype)
-                )
-            else:
-                ref_q = scaled.clamp(qcfg.quant_min, qcfg.quant_max).to(
-                    qcfg.cache_dtype
-                )
-            ref_deq = ref_q.float() * ref_scale
+                # Build reference matching kernel semantics
+                scaled = orig / ref_scale
+                if qcfg.uses_trunc:
+                    ref_q = (
+                        scaled.clamp(qcfg.quant_min, qcfg.quant_max)
+                        .trunc()
+                        .to(qcfg.cache_dtype)
+                    )
+                else:
+                    ref_q = scaled.clamp(qcfg.quant_min, qcfg.quant_max).to(
+                        qcfg.cache_dtype
+                    )
+                ref_deq = ref_q.float() * ref_scale
 
-            actual_q = cache[blk, off]
-            actual_sc = sc[blk, off]
-            actual_deq = actual_q.float() * actual_sc
+                actual_q = cache[blk, off, h]
+                actual_sc = sc[blk, off, h]
+                actual_deq = actual_q.float() * actual_sc
 
-            # Scales must match
-            torch.testing.assert_close(actual_sc, ref_scale, atol=1e-5, rtol=1e-5)
+                # Scales must match
+                torch.testing.assert_close(actual_sc, ref_scale, atol=1e-5, rtol=1e-5)
 
-            if qcfg.uses_trunc:
-                # INT8: allow +-1 for bf16->f32 differences
-                torch.testing.assert_close(
-                    actual_q.float(), ref_q.float(), atol=1.0, rtol=0.0
-                )
-                # Dequantised error bounded by 1 * scale
-                err = (actual_deq - ref_deq).abs()
-                bound = actual_sc * 1.01
-                assert (err <= bound).all(), (
-                    f"{label} dequant error at token {i}: "
-                    f"max={err.max():.6f}, bound={bound.max():.6f}"
-                )
-            else:
-                # FP8: wider tolerance
-                torch.testing.assert_close(actual_deq, ref_deq, atol=0.05, rtol=0.05)
+                if qcfg.uses_trunc:
+                    # INT8: allow +-1 for bf16->f32 differences
+                    torch.testing.assert_close(
+                        actual_q.float(), ref_q.float(), atol=1.0, rtol=0.0
+                    )
+                    # Dequantised error bounded by 1 * scale
+                    err = (actual_deq - ref_deq).abs()
+                    bound = actual_sc * 1.01
+                    assert (err <= bound).all(), (
+                        f"{label} dequant error at token {i} head {h}: "
+                        f"max={err.max():.6f}, bound={bound.max():.6f}"
+                    )
+                else:
+                    # FP8: wider tolerance
+                    torch.testing.assert_close(
+                        actual_deq, ref_deq, atol=0.05, rtol=0.05
+                    )
 
 
 # ===========================================================================
 # 4. Negative slot mapping (padding tokens should be skipped)
 # ===========================================================================
 @torch.inference_mode()
-def test_per_token_negative_slot_skipped(qcfg: QuantConfig):
+def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
     """Tokens with slot_mapping=-1 should leave the cache unchanged."""
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-        triton_reshape_and_cache_flash_per_token_quant,
+        triton_reshape_and_cache_flash_per_token_head_quant,
     )
 
     torch.set_default_device("cuda")
@@ -356,15 +362,15 @@ def test_per_token_negative_slot_skipped(qcfg: QuantConfig):
     value_cache = torch.zeros(
         num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
     )
-    k_scale_cache = torch.ones(num_blocks, block_size, dtype=torch.float32)
-    v_scale_cache = torch.ones(num_blocks, block_size, dtype=torch.float32)
+    k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
+    v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
 
     slot_mapping = torch.tensor([0, -1, 1, -1], dtype=torch.long)
 
     key_cache_before = key_cache.clone()
     val_cache_before = value_cache.clone()
 
-    triton_reshape_and_cache_flash_per_token_quant(
+    triton_reshape_and_cache_flash_per_token_head_quant(
         key,
         value,
         key_cache,
@@ -386,11 +392,13 @@ def test_per_token_negative_slot_skipped(qcfg: QuantConfig):
 
 
 # ===========================================================================
-# 5. process_weights_after_loading -- per-token early return
+# 5. process_weights_after_loading -- per-token-head early return
 # ===========================================================================
-@pytest.mark.parametrize("kv_cache_dtype", ["int8_per_token", "fp8_per_token"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype", ["int8_per_token_head", "fp8_per_token_head"]
+)
 def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
-    """Per-token should set _k_scale=1.0, _v_scale=1.0
+    """Per-token-head should set _k_scale=1.0, _v_scale=1.0
     and delete checkpoint attrs."""
     from vllm.model_executor.layers.quantization.kv_cache import (
         BaseKVCacheMethod,
@@ -421,7 +429,7 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 
 
 # ===========================================================================
-# 6. Triton unified_attention -- per-token scale cache (INT8 and FP8)
+# 6. Triton unified_attention -- per-token-head scale cache (INT8 and FP8)
 # ===========================================================================
 @pytest.mark.parametrize(
     "seq_lens",
@@ -434,14 +442,14 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])
 @torch.inference_mode()
-def test_triton_unified_attention_per_token_scale(
+def test_triton_unified_attention_per_token_head_scale(
     qcfg: QuantConfig,
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
     block_size: int,
 ):
-    """End-to-end: quantized KV with per-token scale caches."""
+    """End-to-end: quantized KV with per-token-head scale caches."""
     from vllm.utils.math_utils import next_power_of_2
     from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
@@ -466,14 +474,14 @@ def test_triton_unified_attention_per_token_scale(
     )
     value_cache_bf16 = torch.randn_like(key_cache_bf16)
 
-    # Per-token quantization: one scale per (block, slot)
-    k_absmax = key_cache_bf16.float().abs().amax(dim=(-2, -1))
-    v_absmax = value_cache_bf16.float().abs().amax(dim=(-2, -1))
+    # Per-token-head quantization: one scale per (block, slot, head)
+    k_absmax = key_cache_bf16.float().abs().amax(dim=-1)  # [..., num_kv_heads]
+    v_absmax = value_cache_bf16.float().abs().amax(dim=-1)
     k_scale_cache = (k_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
     v_scale_cache = (v_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
 
-    scaled_k = key_cache_bf16.float() / k_scale_cache[:, :, None, None]
-    scaled_v = value_cache_bf16.float() / v_scale_cache[:, :, None, None]
+    scaled_k = key_cache_bf16.float() / k_scale_cache[:, :, :, None]
+    scaled_v = value_cache_bf16.float() / v_scale_cache[:, :, :, None]
     if qcfg.uses_trunc:
         key_cache_q = (
             scaled_k.round().clamp(qcfg.quant_min, qcfg.quant_max).to(qcfg.cache_dtype)
@@ -490,8 +498,8 @@ def test_triton_unified_attention_per_token_scale(
         )
 
     # Dequantized reference
-    key_cache_deq = key_cache_q.float() * k_scale_cache[:, :, None, None]
-    value_cache_deq = value_cache_q.float() * v_scale_cache[:, :, None, None]
+    key_cache_deq = key_cache_q.float() * k_scale_cache[:, :, :, None]
+    value_cache_deq = value_cache_q.float() * v_scale_cache[:, :, :, None]
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32

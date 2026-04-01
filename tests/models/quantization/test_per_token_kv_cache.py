@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""End-to-end accuracy tests for per-token KV cache quantization.
+"""End-to-end accuracy tests for per-token-head KV cache quantization.
 
 Compares logprobs between a baseline bf16 model and the same model with
-per-token quantized KV cache (int8 or fp8) using the Triton attention backend.
+per-token-head quantized KV cache (int8 or fp8) using the Triton attention
+backend.
 
 Run: pytest tests/models/quantization/test_per_token_kv_cache.py -v -s
 """
@@ -18,7 +19,7 @@ from ..utils import check_logprobs_close
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
-    reason="Per-token KV cache requires CUDA or ROCm GPU.",
+    reason="Per-token-head KV cache requires CUDA or ROCm GPU.",
 )
 @pytest.mark.parametrize(
     "base_model,test_model",
@@ -29,12 +30,14 @@ from ..utils import check_logprobs_close
         ),
     ],
 )
-@pytest.mark.parametrize("kv_cache_dtype", ["int8_per_token", "fp8_per_token"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype", ["int8_per_token_head", "fp8_per_token_head"]
+)
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("backend", ["TRITON_ATTN"])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_per_token_kv_cache_accuracy(
+def test_per_token_head_kv_cache_accuracy(
     vllm_runner,
     example_prompts,
     base_model: str,
@@ -46,10 +49,11 @@ def test_per_token_kv_cache_accuracy(
     tensor_parallel_size: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Compare logprobs between bf16 baseline and per-token quantized KV cache.
+    """Compare logprobs between bf16 baseline and per-token-head quantized KV
+    cache.
 
     Uses calculate_kv_scales (dynamic scale computation) since there are
-    no per-token calibrated checkpoints available yet.
+    no per-token-head calibrated checkpoints available yet.
     """
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")

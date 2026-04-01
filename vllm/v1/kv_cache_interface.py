@@ -36,21 +36,21 @@ class KVQuantMode(IntEnum):
 
     NONE = 0
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
-    INT8_PER_TOKEN = 2  # per-token dynamic scales for int8
-    FP8_PER_TOKEN = 3  # per-token dynamic scales for fp8
+    INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
+    FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
 
     @property
-    def is_per_token(self) -> bool:
-        """True for any per-token quantization mode."""
+    def is_per_token_head(self) -> bool:
+        """True for any per-token-head quantization mode."""
         return self >= 2
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
-    if kv_cache_dtype == "int8_per_token":
-        return KVQuantMode.INT8_PER_TOKEN
-    if kv_cache_dtype == "fp8_per_token":
-        return KVQuantMode.FP8_PER_TOKEN
+    if kv_cache_dtype == "int8_per_token_head":
+        return KVQuantMode.INT8_PER_TOKEN_HEAD
+    if kv_cache_dtype == "fp8_per_token_head":
+        return KVQuantMode.FP8_PER_TOKEN_HEAD
     if kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -60,9 +60,9 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
 
 
-def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token scales."""
-    return get_kv_quant_mode(kv_cache_dtype).is_per_token
+def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+    """Return True if *kv_cache_dtype* needs per-token-head scales."""
+    return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
 @dataclass(frozen=True)
@@ -121,10 +121,14 @@ class AttentionSpec(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         real_page_size = self.real_page_size_bytes
-        # For per-token quantization (int8/fp8), one float32 scale per
-        # token for K and one for V are appended after each data region.
-        if self.kv_quant_mode.is_per_token:
-            real_page_size += 2 * self.block_size * get_dtype_size(torch.float32)
+        # Per-token-head scales are stored in separate tensors managed
+        # by the attention backend, but the memory is carved from the
+        # raw KV cache allocation so it must be budgeted here.
+        if self.kv_quant_mode.is_per_token_head:
+            real_page_size += (
+                2 * self.block_size * self.num_kv_heads
+                * get_dtype_size(torch.float32)
+            )
         if self.page_size_padded is not None:
             assert self.page_size_padded >= real_page_size
             return self.page_size_padded

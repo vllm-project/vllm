@@ -21,8 +21,8 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
-    "int8_per_token",
-    "fp8_per_token",
+    "int8_per_token_head",
+    "fp8_per_token_head",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -239,11 +239,11 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
-        if cache_dtype in ("int8_per_token", "fp8_per_token"):
+        if cache_dtype in ("int8_per_token_head", "fp8_per_token_head"):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
-                "Dynamic per-token scales will be computed at runtime.",
+                "Dynamic per-token-head scales will be computed at runtime.",
                 str(cache_dtype),
             )
         elif is_quantized_kv_cache(cache_dtype):
