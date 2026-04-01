@@ -248,3 +248,76 @@ class TestCoLocatedScale:
         result = resolve_effective_vectors(spec, None)
         assert result is not None
         assert result["hp"][0] == pytest.approx([1.0, 2.0])
+
+
+# -----------------------------------------------------------------------
+# Cross-validation: base vs phase dimension mismatch at SamplingParams level
+# -----------------------------------------------------------------------
+
+
+class TestDimensionCrossValidation:
+    """Ensure SamplingParams rejects mismatched dimensions between
+    base and phase-specific steering vectors at construction time."""
+
+    def test_mismatched_base_prefill_raises(self):
+        """base dim=2 vs prefill dim=1 on same (hook, layer) -> ValueError."""
+        from vllm.sampling_params import SamplingParams
+
+        with pytest.raises(
+            ValueError, match="Overlapping entries must have matching dimensions"
+        ):
+            SamplingParams(
+                steering_vectors={
+                    "post_mlp_pre_ln": {15: [1.0, 2.0]},
+                },
+                prefill_steering_vectors={
+                    "post_mlp_pre_ln": {15: [1.0]},
+                },
+            )
+
+    def test_mismatched_base_decode_raises(self):
+        """base dim=3 vs decode dim=2 on same (hook, layer) -> ValueError."""
+        from vllm.sampling_params import SamplingParams
+
+        with pytest.raises(
+            ValueError, match="Overlapping entries must have matching dimensions"
+        ):
+            SamplingParams(
+                steering_vectors={
+                    "post_mlp_pre_ln": {0: [1.0, 2.0, 3.0]},
+                },
+                decode_steering_vectors={
+                    "post_mlp_pre_ln": {0: [1.0, 2.0]},
+                },
+            )
+
+    def test_matching_dimensions_pass(self):
+        """Overlapping entries with same dimension should pass."""
+        from vllm.sampling_params import SamplingParams
+
+        params = SamplingParams(
+            steering_vectors={
+                "post_mlp_pre_ln": {0: [1.0, 2.0]},
+            },
+            prefill_steering_vectors={
+                "post_mlp_pre_ln": {0: [3.0, 4.0]},
+            },
+        )
+        assert params.steering_vectors is not None
+        assert params.prefill_steering_vectors is not None
+
+    def test_non_overlapping_different_dims_pass(self):
+        """Non-overlapping entries may have different dimensions
+        since they never get added together."""
+        from vllm.sampling_params import SamplingParams
+
+        params = SamplingParams(
+            steering_vectors={
+                "post_mlp_pre_ln": {0: [1.0, 2.0]},
+            },
+            prefill_steering_vectors={
+                "post_mlp_pre_ln": {1: [1.0]},
+            },
+        )
+        assert params.steering_vectors is not None
+        assert params.prefill_steering_vectors is not None
