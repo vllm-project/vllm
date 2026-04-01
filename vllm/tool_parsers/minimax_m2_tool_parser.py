@@ -50,9 +50,6 @@ class MinimaxM2ToolParser(ToolParser):
         self.invoke_complete_regex = re.compile(
             r"<invoke name=(.*?)</invoke>", re.DOTALL
         )
-        self.parameter_complete_regex = re.compile(
-            r"<parameter name=(.*?)</parameter>", re.DOTALL
-        )
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -85,6 +82,48 @@ class MinimaxM2ToolParser(ToolParser):
         ):
             return name_str[1:-1]
         return name_str
+
+    def _extract_parameters(self, invoke_str: str) -> list[tuple[str, str]]:
+        """
+        Extract parameters from an invoke string using positional matching.
+
+        Key insight: a parameter's value ends at the LAST '</parameter>' that appears
+        BEFORE the next parameter starts (or before the string ends if no next param).
+        This correctly handles cases where the parameter value itself contains
+        '</parameter>' as a literal string.
+
+        Can't works great with nested <parameter name="">, but it works for most cases.
+
+        Returns:
+            List of (param_name, param_value) tuples.
+        """
+        results: list[tuple[str, str]] = []
+
+        param_tag_pattern = re.compile(r"<parameter\s+name=([\"'])(.*?)\1>")
+        param_tag_matches = list(param_tag_pattern.finditer(invoke_str))
+
+        if not param_tag_matches:
+            return results
+
+        for current_param_idx, current_match in enumerate(param_tag_matches):
+            param_name = current_match.group(2)
+            param_value_start_pos = current_match.end()
+
+            if current_param_idx + 1 < len(param_tag_matches):
+                next_param_start_pos = param_tag_matches[current_param_idx + 1].start()
+            else:
+                next_param_start_pos = len(invoke_str)
+
+            text_before_next_param = invoke_str[:next_param_start_pos]
+            closing_tag_pos = text_before_next_param.rfind("</parameter>")
+
+            if closing_tag_pos == -1:
+                continue
+
+            param_value = invoke_str[param_value_start_pos:closing_tag_pos]
+            results.append((param_name, param_value))
+
+        return results
 
     def _extract_types_from_schema(self, schema: Any) -> list[str]:
         """
@@ -267,21 +306,16 @@ class MinimaxM2ToolParser(ToolParser):
                         param_config = params["properties"]
                     break
 
-        # Extract parameters
+        # Extract parameters using the new positional matching method
         param_dict = {}
-        for match in self.parameter_complete_regex.findall(invoke_str):
-            param_match = re.search(r"^([^>]+)>(.*)", match, re.DOTALL)
-            if param_match:
-                param_name = self._extract_name(param_match.group(1))
-                param_value = param_match.group(2).strip()
+        for param_name, param_value in self._extract_parameters(invoke_str):
+            # Get parameter types (supports anyOf/oneOf/allOf)
+            param_type = self._get_param_types_from_config(param_name, param_config)
 
-                # Get parameter types (supports anyOf/oneOf/allOf)
-                param_type = self._get_param_types_from_config(param_name, param_config)
-
-                # Convert value
-                param_dict[param_name] = self._convert_param_value_with_types(
-                    param_value, param_type
-                )
+            # Convert value
+            param_dict[param_name] = self._convert_param_value_with_types(
+                param_value.strip(), param_type
+            )
 
         return ToolCall(
             type="function",
