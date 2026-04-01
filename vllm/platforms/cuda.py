@@ -30,6 +30,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -549,6 +550,26 @@ class CudaPlatformBase(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # Use oink if enabled for rms_norm
+        # TODO(Laurawly/luka): remove this env var,
+        #  users can just use IR op priority directly
+        rms_norm = default
+        if envs.VLLM_USE_OINK_OPS:
+            rms_norm = ["oink"] + default
+
+        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
 
 
 # NVML utils
