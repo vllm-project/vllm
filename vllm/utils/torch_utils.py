@@ -61,6 +61,10 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype.startswith("fp8")
+
+
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
     """
     Check if tensor is contiguous AND has no degenerate strides.

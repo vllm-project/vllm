@@ -27,14 +27,13 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_quantized_kv_cache, is_torch_equal_or_newer
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
