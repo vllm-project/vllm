@@ -193,17 +193,23 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
 
     Copy read-only numpy arrays so the returned output no longer retains
     references to Ray's shared-memory buffers.
+
+    We intentionally do not touch `prompt_logprobs_dict`: those entries are
+    `LogprobsTensors` backed by PyTorch-owned CPU tensors (`to_cpu_nonblocking`
+    or `empty_cpu`), not NumPy views decoded from Ray channels.
     """
     if output.logprobs is None:
         return
 
-    token_ids, logprobs, ranks, cu_num_tokens = output.logprobs
+    token_ids, logprobs, ranks, cu_num_generated_tokens = output.logprobs
 
     def _copy_if_readonly(arr):
         if isinstance(arr, np.ndarray) and not arr.flags.writeable:
             return arr.copy()
         return arr
 
+    # `cu_num_generated_tokens` is already a plain Python list (or None), so it
+    # never aliases Ray SHM buffers and can be reused as-is.
     token_ids_c = _copy_if_readonly(token_ids)
     logprobs_c = _copy_if_readonly(logprobs)
     ranks_c = _copy_if_readonly(ranks)
@@ -211,7 +217,7 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
         return
 
     output.logprobs = type(output.logprobs)(
-        token_ids_c, logprobs_c, ranks_c, cu_num_tokens
+        token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
     )
 
 
