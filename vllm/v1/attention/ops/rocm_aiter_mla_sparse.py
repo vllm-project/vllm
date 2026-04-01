@@ -343,7 +343,9 @@ def rocm_fp8_paged_mqa_logits(
         logger.warning(
             "AITER paged MQA logits kernel does not support %d heads "
             "(requires >= 16). Falling back to PyTorch reference. "
-            "See https://github.com/ROCm/aiter/issues/2563", heads)
+            "See https://github.com/ROCm/aiter/issues/2563",
+            heads,
+        )
         _AITER_MQA_SMALL_HEADS_WARNED = True
 
     if aiter_paged_mqa_logits_module is not None:
