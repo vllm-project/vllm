@@ -37,21 +37,24 @@ class MambaConvSplitInfo:
         """Total conv columns per rank: x + B + C."""
         return self.x_local + 2 * self.b_local
 
+    @property
     def x_bytes(self) -> int:
         """Byte size of the x sub-projection for one rank."""
         return self.x_local * self.conv_rows * self.conv_dtype_size
 
+    @property
     def b_bytes(self) -> int:
         """Byte size of the B (or C) sub-projection for one rank."""
         return self.b_local * self.conv_rows * self.conv_dtype_size
 
+    @property
     def local_conv_offsets(self) -> list[tuple[int, int]]:
         """(byte_offset, byte_size) of x, B, C within this engine's page.
 
         Used by both P and D for local descriptor registration.
         """
-        xb = self.x_bytes()
-        bb = self.b_bytes()
+        xb = self.x_bytes
+        bb = self.b_bytes
         return [(0, xb), (xb, bb), (xb + bb, bb)]
 
     def remote_conv_offsets(
@@ -69,8 +72,8 @@ class MambaConvSplitInfo:
             tp_ratio: effective ratio (>= 1 when D_TP > P_TP, 1 when
                 P_TP > D_TP since each P rank is read in full).
         """
-        xb = self.x_bytes()
-        bb = self.b_bytes()
+        xb = self.x_bytes
+        bb = self.b_bytes
         xr = xb * tp_ratio  # full remote x section in bytes
         br = bb * tp_ratio  # full remote B section in bytes
         return [

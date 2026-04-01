@@ -1793,7 +1793,7 @@ class NixlConnectorWorker:
         """Register 4 desc regions (x, B, C, ssm) per layer for local mamba
         blocks, enabling the 3-read transfer with DS conv layout."""
         assert self._conv_decomp is not None
-        conv_offsets = self._conv_decomp.local_conv_offsets()
+        conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks * block_size_ratio
         phys_ratio = self._physical_blocks_per_logical_kv_block
@@ -1892,8 +1892,8 @@ class NixlConnectorWorker:
             # are smaller than D's.  self._conv_decomp has D-sized dimensions,
             # but we need P-sized offsets.  Scale down by |tp_ratio|.
             abs_ratio = -tp_ratio
-            xb_p = self._conv_decomp.x_bytes() // abs_ratio
-            bb_p = self._conv_decomp.b_bytes() // abs_ratio
+            xb_p = self._conv_decomp.x_bytes // abs_ratio
+            bb_p = self._conv_decomp.b_bytes // abs_ratio
             conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
@@ -2284,7 +2284,6 @@ class NixlConnectorWorker:
                 tp_ratio,
             )
         else:
-            # Original path — unchanged from main.
             register_remote_blocks(blocks_data, mamba=False)
 
         # Register with NIXL.
