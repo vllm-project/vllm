@@ -11,7 +11,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from vllm.logger import init_logger
-from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
+from vllm.tracing.utils import (
+    TRACE_HEADERS,
+    LoadingSpanAttributes,
+    extract_trace_headers,
+)
 
 logger = init_logger(__name__)
 
@@ -151,6 +155,19 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
     return None
 
 
+def get_trace_headers_from_context(
+    context: Context | None = None,
+) -> Mapping[str, str] | None:
+    """Inject the provided OTel context into a trace-header carrier."""
+    if not _IS_OTEL_AVAILABLE:
+        return None
+
+    carrier: dict[str, str] = {}
+    inject(carrier, context=context)
+    trace_headers = extract_trace_headers(carrier)
+    return trace_headers or None
+
+
 def instrument_otel(func, span_name, attributes, record_exception):
     """Internal wrapper logic for sync and async functions."""
 
@@ -207,6 +224,7 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
+    use_environment_context: bool = True,
 ):
     """Manually create and end a span with explicit timestamps."""
     if not _IS_OTEL_AVAILABLE:
@@ -214,7 +232,11 @@ def manual_instrument_otel(
 
     tracer = trace.get_tracer(__name__)
     # Use provided context, or fall back to smart context detection
-    ctx = context if context is not None else _get_smart_context()
+    ctx = (
+        context
+        if context is not None
+        else _get_smart_context(use_environment_context=use_environment_context)
+    )
 
     span_kwargs: dict[str, Any] = {
         "name": span_name,
@@ -233,7 +255,7 @@ def manual_instrument_otel(
         span.end()
 
 
-def _get_smart_context() -> Context | None:
+def _get_smart_context(use_environment_context: bool = True) -> Context | None:
     """
     Determines the parent context.
     1. If a Span is already active in this process, use it.
@@ -241,6 +263,9 @@ def _get_smart_context() -> Context | None:
     """
     current_span = trace.get_current_span()
     if current_span.get_span_context().is_valid:
+        return None
+
+    if not use_environment_context:
         return None
 
     carrier = {}
@@ -252,7 +277,7 @@ def _get_smart_context() -> Context | None:
         carrier["tracestate"] = ts
 
     if not carrier:
-        carrier = dict(os.environ)
+        return None
 
     return TraceContextTextMapPropagator().extract(carrier)
 
