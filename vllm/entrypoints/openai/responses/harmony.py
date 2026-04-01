@@ -148,11 +148,17 @@ def response_input_to_harmony(
         response_msg = response_msg.model_dump()
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
-        content = response_msg["content"]
+        content = response_msg.get("content")
         # Add prefix for developer messages.
         # <|start|>developer<|message|># Instructions {instructions}<|end|>
         text_prefix = "Instructions:\n" if role == "developer" else ""
-        if isinstance(content, str):
+        if content is None:
+            if role == "assistant":
+                # Assistant messages with only tool calls may have no content.
+                # These should be skipped to avoid empty messages in history.
+                return None
+            msg = Message.from_role_and_content(role, text_prefix)
+        elif isinstance(content, str):
             msg = Message.from_role_and_content(role, text_prefix + content)
         else:
             contents = [TextContent(text=text_prefix + c["text"]) for c in content]
