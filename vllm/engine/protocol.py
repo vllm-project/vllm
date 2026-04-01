@@ -11,7 +11,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.inputs import EngineInput, PromptType
+from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
@@ -82,7 +82,7 @@ class EngineClient(ABC):
     @abstractmethod
     def encode(
         self,
-        prompt: PromptType | EngineInput,
+        prompt: EngineInput,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
