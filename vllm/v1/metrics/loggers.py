@@ -622,16 +622,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prompt_tokens_cached, per_engine_labelvalues
         )
 
-        # Recomputed tokens (last token recomputed when entire prompt is cached)
-        counter_prompt_tokens_recomputed = self._counter_cls(
-            name="vllm:prompt_tokens_recomputed",
-            documentation="Number of cached tokens recomputed for forward pass.",
-            labelnames=labelnames,
-        )
-        self.counter_prompt_tokens_recomputed = create_metric_per_engine(
-            counter_prompt_tokens_recomputed, per_engine_labelvalues
-        )
-
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
@@ -1122,7 +1112,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 pts.get_by_source(source)
             )
         self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
-        self.counter_prompt_tokens_recomputed[engine_idx].inc(pts.recomputed_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
