@@ -270,7 +270,7 @@ class ServingScores(PoolingServing):
             doc_pooling_params_list.append(pooling_params)
 
         assert (
-            n_queries
+            n_docs
             == len(doc_pooling_params_list)
             == len(doc_engine_inputs)
             == len(doc_keys)
