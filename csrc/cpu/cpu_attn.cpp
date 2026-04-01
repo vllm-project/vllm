@@ -1,4 +1,5 @@
 #include "cpu_attn_dispatch_generated.h"
+#include "cpu/cpu_attn_fp8.hpp"
 
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
@@ -120,6 +121,43 @@ void cpu_attn_reshape_and_cache(
               value_head_num_stride, num_blocks, num_blocks_stride,
               cache_head_num_stride, block_size, block_size_stride);
         });
+      });
+}
+
+void cpu_attn_reshape_and_cache_fp8(
+    const torch::Tensor& key,    // [token_num, num_kv_heads, head_size]
+    const torch::Tensor& value,  // [token_num, num_kv_heads, head_size]
+    torch::Tensor&
+        key_cache,  // [num_blocks, num_kv_heads, block_size, head_size] uint8
+    torch::Tensor& value_cache,         // same shape, uint8
+    const torch::Tensor& slot_mapping,  // [token_num]
+    const double k_scale, const double v_scale) {
+  TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
+              "key_cache must be uint8 for FP8 path");
+  TORCH_CHECK(value_cache.scalar_type() == at::ScalarType::Byte,
+              "value_cache must be uint8 for FP8 path");
+  TORCH_CHECK_EQ(key.dim(), 3);
+  TORCH_CHECK_EQ(value.dim(), 3);
+  TORCH_CHECK_EQ(key_cache.dim(), 4);
+  TORCH_CHECK_EQ(value_cache.dim(), 4);
+
+  const float k_inv = 1.0f / static_cast<float>(k_scale);
+  const float v_inv = 1.0f / static_cast<float>(v_scale);
+
+  const int64_t token_num = key.size(0);
+  const int64_t head_num = key.size(1);
+  const int64_t head_dim = key.size(2);
+  const int64_t block_size = key_cache.size(2);
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      key.scalar_type(), "cpu_attn_reshape_and_cache_fp8", [&]() {
+        reshape_and_cache_fp8_typed<scalar_t>(
+            key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+            key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
+            slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
+            block_size, key.stride(0), key.stride(1), value.stride(0),
+            value.stride(1), key_cache.stride(0), key_cache.stride(1),
+            value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
       });
 }
 

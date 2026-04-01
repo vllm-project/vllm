@@ -102,6 +102,13 @@ void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 const torch::Tensor& slot_mapping,
                                 const std::string& isa);
 
+void cpu_attn_reshape_and_cache_fp8(const torch::Tensor& key,
+                                    const torch::Tensor& value,
+                                    torch::Tensor& key_cache,
+                                    torch::Tensor& value_cache,
+                                    const torch::Tensor& slot_mapping,
+                                    double k_scale, double v_scale);
+
 void cpu_attention_with_kv_cache(
     const torch::Tensor& query, const torch::Tensor& key_cache,
     const torch::Tensor& value_cache, torch::Tensor& output,
@@ -319,6 +326,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
       "isa) -> ()",
       &cpu_attn_reshape_and_cache);
+  ops.def(
+      "cpu_attn_reshape_and_cache_fp8(Tensor key, Tensor value, Tensor(a2!) "
+      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, "
+      "float k_scale, float v_scale) -> ()",
+      &cpu_attn_reshape_and_cache_fp8);
   ops.def(
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "

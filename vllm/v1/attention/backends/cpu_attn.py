@@ -35,6 +35,7 @@ class CPUAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
+    supported_kv_cache_dtypes: ClassVar[list[str]] = ["auto", "fp8", "fp8_e4m3"]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -133,7 +134,10 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
+        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.isa = _get_attn_isa(
+            self.dtype, self.block_size, self.head_dim, kv_cache_dtype_str
+        )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
 
     def build(
@@ -247,8 +251,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if is_quantized_kv_cache(kv_cache_dtype):
-            raise NotImplementedError("FP8 KV cache is unsupported in CPU_ATTN")
+        self.is_fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
         self.attn_type = attn_type
 
         self.sinks = sinks
@@ -319,14 +322,25 @@ class CPUAttentionBackendImpl(AttentionImpl):
             and key is not None
             and value is not None
         ):
-            ops.cpu_attn_reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                attn_metadata.isa,
-            )
+            if self.is_fp8_kv_cache:
+                ops.cpu_attn_reshape_and_cache_fp8(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    layer._k_scale_float,
+                    layer._v_scale_float,
+                )
+            else:
+                ops.cpu_attn_reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    attn_metadata.isa,
+                )
 
         if attn_metadata.use_sdpa_prefill:
             assert self.sinks is None, "Attention sink is unsupported in SDPA prefill"
@@ -342,10 +356,22 @@ class CPUAttentionBackendImpl(AttentionImpl):
             num_actual_tokens = num_decode_tokens
 
         if num_actual_tokens > 0:
+            if self.is_fp8_kv_cache:
+                # Dequantize FP8 uint8 cache → float32 for the existing kernel.
+                # Phase 2 will move this inline into AttentionMainLoop.
+                key_cache_f = (
+                    key_cache.view(torch.float8_e4m3fn).float() * layer._k_scale_float
+                )
+                value_cache_f = (
+                    value_cache.view(torch.float8_e4m3fn).float() * layer._v_scale_float
+                )
+            else:
+                key_cache_f = key_cache
+                value_cache_f = value_cache
             ops.cpu_attention_with_kv_cache(
                 query=query[:num_actual_tokens],
-                key_cache=key_cache,
-                value_cache=value_cache,
+                key_cache=key_cache_f,
+                value_cache=value_cache_f,
                 output=output[:num_actual_tokens],  # type: ignore
                 query_start_loc=attn_metadata.query_start_loc,
                 seq_lens=attn_metadata.seq_lens,
@@ -478,14 +504,23 @@ def _make_sliding_window_bias(
 
 
 def _get_attn_isa(
-    dtype: torch.dtype, block_size: int, head_size: int | None = None
+    dtype: torch.dtype,
+    block_size: int,
+    head_size: int | None = None,
+    kv_cache_dtype: str | None = None,
 ) -> str:
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
         return "vec16"
     supports_amx = torch.cpu._is_amx_tile_supported()
     supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
-    if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
+    fp8_kv = is_quantized_kv_cache(kv_cache_dtype) if kv_cache_dtype else False
+    if (
+        supports_amx
+        and dtype in (torch.bfloat16,)
+        and block_size % 32 == 0
+        and not fp8_kv
+    ):
         return "amx"
     elif block_size % 32 == 0:
         if supports_arm:

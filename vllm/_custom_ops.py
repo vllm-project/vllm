@@ -3176,6 +3176,26 @@ def cpu_attn_reshape_and_cache(
     )
 
 
+def cpu_attn_reshape_and_cache_fp8(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_scale: float,
+    v_scale: float,
+) -> None:
+    torch.ops._C.cpu_attn_reshape_and_cache_fp8(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        k_scale,
+        v_scale,
+    )
+
+
 def cpu_attention_with_kv_cache(
     query: torch.Tensor,
     key_cache: torch.Tensor,
