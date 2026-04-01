@@ -83,26 +83,40 @@ async def call_vllm_api(
     stop: list[str] | None = None,
     url: str | None = None,
     seed: int | None = None,
+    chat: bool = False,
 ) -> tuple[str, int]:
-    """Call vLLM's OpenAI-compatible completions endpoint.
+    """Call vLLM's OpenAI-compatible completions or chat endpoint.
 
     Returns:
         Tuple of (response_text, completion_tokens)
     """
-    data = {
-        "prompt": prompt,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stop": stop,
-    }
+    if chat:
+        data = {
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stop": stop,
+        }
+        endpoint = f"{url}/v1/chat/completions"
+    else:
+        data = {
+            "prompt": prompt,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stop": stop,
+        }
+        endpoint = f"{url}/v1/completions"
     if seed is not None:
         data["seed"] = seed
 
     try:
-        async with session.post(f"{url}/v1/completions", json=data) as response:
+        async with session.post(endpoint, json=data) as response:
             response.raise_for_status()
             result = await response.json()
-            text = result["choices"][0]["text"]
+            if chat:
+                text = result["choices"][0]["message"]["content"]
+            else:
+                text = result["choices"][0]["text"]
             completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
             return text, completion_tokens
     except Exception as e:
@@ -177,6 +191,7 @@ def evaluate_gsm8k(
     port: int = 8000,
     temperature: float = 0.0,
     seed: int | None = 42,
+    chat: bool = False,
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -200,6 +215,7 @@ def evaluate_gsm8k(
                 stop=["Question", "Assistant:", "<|separator|>"],
                 url=base_url,
                 seed=seed,
+                chat=chat,
             )
             states[i] = answer
             output_tokens[i] = tokens
@@ -281,6 +297,11 @@ def main() -> None:
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="Use /v1/chat/completions instead of /v1/completions",
+    )
 
     args = parser.parse_args()
 
@@ -292,6 +313,7 @@ def main() -> None:
         port=args.port,
         temperature=args.temperature,
         seed=args.seed,
+        chat=args.chat,
     )
 
     # Print results to terminal
