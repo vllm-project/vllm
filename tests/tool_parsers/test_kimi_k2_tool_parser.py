@@ -410,6 +410,53 @@ class TestStreamingEdgeCases:
         ids = [tc.id for tc in rec.tool_calls]
         assert len(set(ids)) == 3  # unique ids
 
+    def test_truncated_tool_call_no_end_marker(self, parser):
+        """Stream ending mid-tool-call (max_tokens) doesn't crash."""
+        deltas = [
+            "I'll check. ",
+            SECTION_BEGIN,
+            TOOL_BEGIN,
+            "functions.get_weather:0 ",
+            ARG_BEGIN,
+            '{"city": "Bei',
+            # Stream ends here — no TOOL_END, no SECTION_END
+        ]
+        rec = run_tool_extraction_streaming(parser, deltas)
+
+        # Should not crash; tool name and partial args extracted
+        assert len(rec.tool_calls) == 1
+        assert rec.tool_calls[0].function.name == "get_weather"
+        assert rec.tool_calls[0].id == "functions.get_weather:0"
+        assert rec.tool_calls[0].function.arguments == '{"city": "Bei'
+        # No markers leaked into content
+        for marker in [SECTION_BEGIN, SECTION_END, TOOL_BEGIN, TOOL_END, ARG_BEGIN]:
+            assert marker not in rec.other_content
+
+    def test_content_after_tool_section(self, parser):
+        """Trailing text after section_end doesn't crash or leak markers."""
+        deltas = [
+            "Before. ",
+            SECTION_BEGIN,
+            TOOL_BEGIN,
+            "functions.get_weather:0 ",
+            ARG_BEGIN,
+            '{"city": "Tokyo"} ',
+            TOOL_END,
+            SECTION_END,
+            " After tools.",
+        ]
+        rec = run_tool_extraction_streaming(parser, deltas)
+
+        # Tool call extracted correctly
+        assert len(rec.tool_calls) == 1
+        assert rec.tool_calls[0].function.name == "get_weather"
+        assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Tokyo"}
+        # Trailing content after tool section is dropped
+        assert "After tools." not in rec.other_content
+        # No markers leaked into content
+        for marker in [SECTION_BEGIN, SECTION_END, TOOL_BEGIN, TOOL_END, ARG_BEGIN]:
+            assert marker not in rec.other_content
+
 
 class TestAdjustRequest:
     def test_sets_skip_special_tokens_false(self, parser):
