@@ -145,6 +145,7 @@ def _get_numa_node(parallel_config, gpu_index: int) -> int:
                 "GPU-to-NUMA topology automatically. Pass --numa-bind-nodes "
                 "explicitly or disable --numa-bind."
             )
+        parallel_config.numa_bind_nodes = numa_nodes
 
     if gpu_index >= len(numa_nodes):
         raise ValueError(
@@ -173,6 +174,7 @@ def _get_numactl_args(
     vllm_config: "VllmConfig",
     local_rank: int,
     dp_local_rank: int | None = None,
+    process_kind: str = "worker",
 ) -> str | None:
     parallel_config = vllm_config.parallel_config
     if not parallel_config.numa_bind:
@@ -185,7 +187,8 @@ def _get_numactl_args(
     if cpu_binding is not None:
         bind_arg = f"--physcpubind={cpu_binding}"
         logger.info(
-            "Binding worker (local_rank=%s, gpu_index=%s) to CPUs %s and NUMA node %s",
+            "Binding %s subprocess (local_rank=%s, gpu_index=%s) to CPUs %s and NUMA node %s",  # noqa: E501
+            process_kind,
             local_rank,
             gpu_index,
             cpu_binding,
@@ -194,7 +197,8 @@ def _get_numactl_args(
     else:
         bind_arg = f"--cpunodebind={numa_node}"
         logger.info(
-            "Binding worker (local_rank=%s, gpu_index=%s) to NUMA node %s",
+            "Binding %s subprocess (local_rank=%s, gpu_index=%s) to NUMA node %s",
+            process_kind,
             local_rank,
             gpu_index,
             numa_node,
@@ -221,7 +225,7 @@ def _log_numactl_show(label: str) -> bool:
         return False
 
     summary = ", ".join(line.strip() for line in output.splitlines() if line.strip())
-    logger.info("%s affinity: %s", label, summary)
+    logger.debug("%s affinity: %s", label, summary)
     return True
 
 
@@ -235,9 +239,12 @@ def configure_subprocess(
     vllm_config: "VllmConfig",
     local_rank: int,
     dp_local_rank: int | None = None,
+    process_kind: str = "worker",
 ):
     """Temporarily replace the multiprocessing executable with a numactl wrapper."""
-    numactl_args = _get_numactl_args(vllm_config, local_rank, dp_local_rank)
+    numactl_args = _get_numactl_args(
+        vllm_config, local_rank, dp_local_rank, process_kind
+    )
     if numactl_args is None:
         yield
         return
@@ -301,7 +308,6 @@ def _mp_set_executable(executable: str, debug_str: str):
 
     old_executable = os.fsdecode(multiprocessing.spawn.get_executable())
     multiprocessing.spawn.set_executable(executable)
-    logger.info("NUMA binding: %s -> %s (%s)", old_executable, executable, debug_str)
     try:
         yield
     finally:
@@ -310,4 +316,3 @@ def _mp_set_executable(executable: str, debug_str: str):
             f"expected {executable}, got {multiprocessing.spawn.get_executable()}"
         )
         multiprocessing.spawn.set_executable(old_executable)
-        logger.info("NUMA binding restored: %s", old_executable)
