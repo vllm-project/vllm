@@ -863,8 +863,9 @@ class BaseRenderer(ABC, Generic[_T]):
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
             engine_input = await self._process_enc_dec_async(
-                prompt, skip_mm_cache=skip_mm_cache
-            )  # type: ignore[arg-type]
+                prompt,  # type: ignore[arg-type]
+                skip_mm_cache=skip_mm_cache,
+            )
         else:
             engine_input = await self._process_singleton_async(
                 prompt, skip_mm_cache=skip_mm_cache
