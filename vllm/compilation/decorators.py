@@ -205,6 +205,8 @@ def support_torch_compile(
                 if v.annotation in [
                     torch.Tensor,
                     torch.Tensor | None,
+                    torch.FloatTensor,
+                    torch.FloatTensor | None,
                     IntermediateTensors,
                     IntermediateTensors | None,
                 ]:
