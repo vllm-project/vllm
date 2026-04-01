@@ -437,17 +437,30 @@ endpoint.
 
 ## Prefix Cache Key Integration
 
-Per-request prefill steering config hashes are included in block hash extra
-keys via `_gen_steering_extra_hash_keys()` in `kv_cache_utils.py`. This
-ensures that blocks computed under different prefill steering produce
-different cache entries.
+Per-request steering config hashes are included in block hash extra keys via
+`_gen_steering_extra_hash_keys()` in `kv_cache_utils.py`. This ensures that
+blocks computed under different steering configurations produce different
+cache entries.
+
+The helper classifies each block into one of three categories based on
+`start_token_idx`, `end_token_idx`, and `num_prompt_tokens`:
+
+- **Pure prompt block** (`start < num_prompt_tokens` and `end <= num_prompt_tokens`):
+  only the prefill steering hash is included.
+- **Boundary block** (`start < num_prompt_tokens` and `end > num_prompt_tokens`):
+  both the prefill and decode steering hashes are included. This prevents two
+  requests with identical prefill steering but different decode steering from
+  sharing a block that contains KV data computed under both phases.
+- **Pure decode block** (`start >= num_prompt_tokens`): only the decode steering
+  hash is included. The prefill hash is already embedded in the parent hash
+  chain through earlier prompt blocks.
 
 Key design decisions:
 
-- **Only prefill steering hash is included.** Decode steering does not affect
-  KV cache content during prefill, so it is excluded from block hashes.
-- **Zero impact when unused.** When `prefill_steering_config_hash` is 0 or
-  absent, the helper returns an empty list, adding nothing to the extra keys.
+- **Phase-aware hashing.** Each block includes only the steering hashes relevant
+  to the phases it spans: prefill-only, decode-only, or both for boundary blocks.
+- **Zero impact when unused.** When steering config hashes are 0 or absent, the
+  helper returns an empty list, adding nothing to the extra keys.
 - **Global prefill steering is NOT in per-request hashes.** Instead, global
   steering changes trigger `reset_prefix_cache()` to clear all cached blocks.
   This avoids encoding mutable global state into every block hash. The
