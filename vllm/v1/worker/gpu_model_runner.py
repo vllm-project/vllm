@@ -4322,6 +4322,29 @@ class GPUModelRunner(
                 cudagraph_stats=cudagraph_stats,
             )
 
+            # Compute attention importance scores for offloading eviction.
+            # Only runs when kv_connector is active and hidden_states exist.
+            if (
+                kv_connector_output is not None
+                and hidden_states is not None
+                and isinstance(hidden_states, torch.Tensor)
+                and hidden_states.dim() >= 2
+            ):
+                try:
+                    from vllm.v1.kv_offload.score_estimator import (
+                        compute_block_scores_from_hidden_states,
+                    )
+                    block_size = self.cache_config.block_size
+                    scores = compute_block_scores_from_hidden_states(
+                        hidden_states,
+                        scheduler_output.num_scheduled_tokens,
+                        block_size,
+                    )
+                    if scores:
+                        kv_connector_output.attention_block_scores = scores
+                except Exception:
+                    pass  # Non-critical: don't block inference
+
         if not self.use_async_scheduling:
             return output
 

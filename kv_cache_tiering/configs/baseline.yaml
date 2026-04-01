@@ -1,0 +1,6 @@
+# Baseline: No CPU offloading (GPU-only)
+# Run with: vllm serve <model> --gpu-memory-utilization 0.5
+name: baseline
+description: "No CPU offloading. GPU-only KV cache."
+kv_transfer_config: null
+gpu_memory_utilization: 0.5

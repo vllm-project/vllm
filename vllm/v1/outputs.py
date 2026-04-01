@@ -141,6 +141,10 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
+    # Per-block attention importance scores estimated from hidden state
+    # magnitudes. Used by attention-aware eviction policies.
+    # Format: {block_hash_int -> score}
+    attention_block_scores: dict | None = None
 
     def is_empty(self):
         return (

@@ -6,7 +6,13 @@ from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
+from vllm.v1.kv_offload.attention_manager import (
+    AttentionWeightedOffloadingManager,
+)
+from vllm.v1.kv_offload.backends.cpu import CPUBackend
+from vllm.v1.kv_offload.hybrid_manager import HybridOffloadingManager
+from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import CanonicalKVCaches, OffloadingSpec
@@ -60,29 +66,52 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-            offloaded_block_size = gpu_block_size * self.block_size_factor
-
-            self._manager = CPUOffloadingManager(
-                block_size=offloaded_block_size,
-                num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
-                enable_events=enable_events,
+            backend = CPUBackend(
+                block_size=self.offloaded_block_size, num_blocks=self.num_blocks
             )
 
-            # store_threshold: how many times a block must appear in lookup()
-            # before it is eligible for CPU offloading.  Values < 2 disable
-            # filtering (a threshold of 1 equals no filter; 0 is the default).
-            store_threshold = int(self.extra_config.get("store_threshold", 0))
-            if store_threshold >= 2:
-                max_tracker_size = int(
-                    self.extra_config.get("max_tracker_size", 64_000)
+            if self.eviction_policy == "lru":
+                self._manager = LRUOffloadingManager(
+                    backend=backend, enable_events=enable_events
                 )
-                self._manager = FilterReusedOffloadingManager(
-                    backing=self._manager,
-                    store_threshold=store_threshold,
-                    max_tracker_size=max_tracker_size,
+            elif self.eviction_policy == "arc":
+                self._manager = ARCOffloadingManager(
+                    backend=backend, enable_events=enable_events
+                )
+            elif self.eviction_policy == "attention":
+                score_decay = float(
+                    self.extra_config.get("score_decay", 0.95)
+                )
+                self._manager = AttentionWeightedOffloadingManager(
+                    backend=backend,
+                    enable_events=enable_events,
+                    score_decay=score_decay,
+                )
+            elif self.eviction_policy == "hybrid":
+                alpha = float(
+                    self.extra_config.get("attention_weight", 0.5)
+                )
+                beta = float(
+                    self.extra_config.get("recency_weight", 0.3)
+                )
+                gamma = float(
+                    self.extra_config.get("frequency_weight", 0.2)
+                )
+                score_decay = float(
+                    self.extra_config.get("score_decay", 0.95)
+                )
+                self._manager = HybridOffloadingManager(
+                    backend=backend,
+                    enable_events=enable_events,
+                    alpha=alpha,
+                    beta=beta,
+                    gamma=gamma,
+                    score_decay=score_decay,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown eviction policy: {self.eviction_policy}. "
+                    f"Supported policies: lru, arc, attention, hybrid"
                 )
         return self._manager
 

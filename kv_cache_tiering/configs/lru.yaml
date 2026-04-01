@@ -1,0 +1,11 @@
+# LRU eviction policy (existing vLLM default)
+name: lru
+description: "LRU eviction for CPU offloading."
+kv_connector: "OffloadingConnector"
+kv_role: "kv_both"
+kv_connector_extra_config:
+  spec_name: "CPUOffloadingSpec"
+  cpu_bytes_to_use: 16000000000  # 16 GB
+  block_size: 48
+  eviction_policy: "lru"
+gpu_memory_utilization: 0.5

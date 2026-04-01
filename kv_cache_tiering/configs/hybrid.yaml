@@ -1,0 +1,15 @@
+# Hybrid eviction policy (NEW)
+name: hybrid
+description: "Hybrid attention+recency+frequency eviction for CPU offloading."
+kv_connector: "OffloadingConnector"
+kv_role: "kv_both"
+kv_connector_extra_config:
+  spec_name: "CPUOffloadingSpec"
+  cpu_bytes_to_use: 16000000000
+  block_size: 48
+  eviction_policy: "hybrid"
+  attention_weight: 0.5
+  recency_weight: 0.3
+  frequency_weight: 0.2
+  score_decay: 0.95
+gpu_memory_utilization: 0.5
