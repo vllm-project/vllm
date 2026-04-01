@@ -77,65 +77,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 
-  // Activation ops
-  // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
-  ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
-
-  // SwiGLU activation with input clamping.
-  ops.def(
-      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit) "
-      "-> ()");
-  ops.impl("silu_and_mul_with_clamp", torch::kCUDA, &silu_and_mul_clamp);
-
+  // Activation ops (quantized only — basic ops moved to _C_stable_libtorch)
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
-
-  // Fused SiLU+Mul + per-block quantization
-  ops.def(
-      "silu_and_mul_per_block_quant("
-      "Tensor! out, "
-      "Tensor input, "
-      "Tensor! scales, "
-      "int group_size, "
-      "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
-  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
-           &silu_and_mul_per_block_quant);
-
-  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
-  ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
-
-  // Activation function used in GeGLU with `none` approximation.
-  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_and_mul", torch::kCUDA, &gelu_and_mul);
-
-  // Activation function used in GeGLU with `tanh` approximation.
-  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_tanh_and_mul", torch::kCUDA, &gelu_tanh_and_mul);
-
-  // FATReLU implementation.
-  ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
-  ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
-
-  ops.def(
-      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
-      "limit=7.0) "
-      "-> ()");
-  ops.impl("swigluoai_and_mul", torch::kCUDA, &swigluoai_and_mul);
-
-  // GELU implementation used in GPT-2.
-  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_new", torch::kCUDA, &gelu_new);
-
-  // Approximate GELU implementation.
-  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_fast", torch::kCUDA, &gelu_fast);
-
-  // Quick GELU implementation.
-  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
