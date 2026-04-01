@@ -63,6 +63,34 @@ class CPUModelRunner(GPUModelRunner):
             cpu_tl.compute_slot_mapping_kernel
         )
 
+        # Speculative decoding fallbacks
+        import vllm.v1.sample.rejection_sampler
+        import vllm.v1.spec_decode.eagle
+        import vllm.v1.spec_decode.utils
+
+        vllm.v1.spec_decode.eagle.eagle_prepare_inputs_padded_kernel = (
+            cpu_tl.eagle_prepare_inputs_padded_kernel
+        )
+        vllm.v1.spec_decode.eagle.eagle_prepare_next_token_padded_kernel = (
+            cpu_tl.eagle_prepare_next_token_padded_kernel
+        )
+        vllm.v1.spec_decode.eagle.copy_and_expand_eagle_inputs_kernel = (
+            cpu_tl.copy_and_expand_eagle_inputs_kernel
+        )
+        vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel = (
+            cpu_tl.eagle_step_slot_mapping_metadata_kernel
+        )
+        vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
+            cpu_tl.rejection_greedy_sample_kernel
+        )
+        vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel = (
+            cpu_tl.rejection_random_sample_kernel
+        )
+        vllm.v1.sample.rejection_sampler.expand_kernel = cpu_tl.expand_kernel
+        vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel = (
+            cpu_tl.sample_recovered_tokens_kernel
+        )
+
     @instrument(span_name="Loading (CPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
         if load_dummy_weights:
@@ -201,6 +229,7 @@ class CPUModelRunner(GPUModelRunner):
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         """CPU-safe version: direct tolist() without CUDA events."""
         return sampled_token_ids.tolist()
+
 
 @contextmanager
 def _torch_cuda_wrapper():

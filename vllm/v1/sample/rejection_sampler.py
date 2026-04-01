@@ -9,7 +9,6 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.triton_utils.importing import HAS_TRITON
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -18,12 +17,6 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.spec_decode_pytorch_utils import (
-    expand_pytorch,
-    rejection_greedy_sample_pytorch,
-    rejection_random_sample_pytorch,
-    sample_recovered_tokens_pytorch,
-)
 
 logger = init_logger(__name__)
 
@@ -399,25 +392,15 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
-        if HAS_TRITON:
-            rejection_greedy_sample_kernel[(batch_size,)](
-                output_token_ids,
-                cu_num_draft_tokens,
-                draft_token_ids,
-                target_argmax,
-                bonus_token_ids,
-                is_greedy,
-                max_spec_len,
-            )
-        else:
-            rejection_greedy_sample_pytorch(
-                output_token_ids,
-                cu_num_draft_tokens,
-                draft_token_ids,
-                target_argmax,
-                bonus_token_ids,
-                is_greedy,
-            )
+        rejection_greedy_sample_kernel[(batch_size,)](
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            is_greedy,
+            max_spec_len,
+        )
         if sampling_metadata.all_greedy:
             return output_token_ids
 
@@ -448,34 +431,20 @@ def rejection_sample(
     )
 
     # Rejection sampling for random sampling requests.
-    if HAS_TRITON:
-        rejection_random_sample_kernel[(batch_size,)](
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            draft_probs,
-            target_probs,
-            bonus_token_ids,
-            recovered_token_ids,
-            uniform_probs,
-            is_greedy,
-            max_spec_len,
-            vocab_size,
-            NO_DRAFT_PROBS=draft_probs is None,
-        )
-    else:
-        rejection_random_sample_pytorch(
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            draft_probs,
-            target_probs,
-            bonus_token_ids,
-            recovered_token_ids,
-            uniform_probs,
-            is_greedy,
-            no_draft_probs=draft_probs is None,
-        )
+    rejection_random_sample_kernel[(batch_size,)](
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        max_spec_len,
+        vocab_size,
+        NO_DRAFT_PROBS=draft_probs is None,
+    )
     return output_token_ids
 
 
@@ -566,23 +535,14 @@ def expand_batch_to_tokens(
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
     expanded_x = x.new_empty(num_tokens)
-    if HAS_TRITON:
-        expand_kernel[(batch_size,)](
-            expanded_x,
-            x,
-            cu_num_tokens,
-            replace_from,
-            replace_to,
-            MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
-        )
-    else:
-        expand_pytorch(
-            expanded_x,
-            x,
-            cu_num_tokens,
-            replace_from,
-            replace_to,
-        )
+    expand_kernel[(batch_size,)](
+        expanded_x,
+        x,
+        cu_num_tokens,
+        replace_from,
+        replace_to,
+        MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
+    )
     return expanded_x
 
 
@@ -674,28 +634,17 @@ def sample_recovered_tokens(
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     BLOCK_SIZE = 8192
-    if HAS_TRITON:
-        sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
-            recovered_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            draft_probs,
-            target_probs,
-            inv_q,
-            vocab_size,
-            BLOCK_SIZE,
-            NO_DRAFT_PROBS=draft_probs is None,
-        )
-    else:
-        sample_recovered_tokens_pytorch(
-            recovered_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            draft_probs,
-            target_probs,
-            inv_q,
-            no_draft_probs=draft_probs is None,
-        )
+    sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
+        recovered_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        inv_q,
+        vocab_size,
+        BLOCK_SIZE,
+        NO_DRAFT_PROBS=draft_probs is None,
+    )
     return recovered_token_ids
 
 
