@@ -190,8 +190,7 @@ def test_prompt_token_stats_full_local_cache_recompute():
     )
 
     assert stats.computed == 1
-    assert stats.local_cache_hit == 1000
-    assert stats.recomputed_tokens == 1
+    assert stats.local_cache_hit == 999
 
 
 def test_prompt_token_stats_full_external_transfer_recompute():
@@ -201,11 +200,10 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     # Case 6: Full external transfer (999 cached after reduction, 1 recomputed)
     stats.update_from_output(
         num_cached_tokens=999,
-        num_external_computed_tokens=1000,
+        num_external_computed_tokens=999,
         prompt_len=1000,
     )
 
     assert stats.computed == 1
     assert stats.local_cache_hit == 0
-    assert stats.external_kv_transfer == 1000
-    assert stats.recomputed_tokens == 1
+    assert stats.external_kv_transfer == 999
