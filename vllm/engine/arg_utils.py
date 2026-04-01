@@ -577,6 +577,9 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    enable_fused_moe_sum_all_reduce: bool = get_field(
+        KernelConfig, "enable_fused_moe_sum_all_reduce"
+    )
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1305,6 +1308,10 @@ class EngineArgs:
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
+        kernel_group.add_argument(
+            "--enable-fused-moe-sum-all-reduce",
+            **kernel_kwargs["enable_fused_moe_sum_all_reduce"],
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1921,6 +1928,10 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
+        if self.enable_fused_moe_sum_all_reduce:
+            kernel_config.enable_fused_moe_sum_all_reduce = (
+                self.enable_fused_moe_sum_all_reduce
+            )
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():

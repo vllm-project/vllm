@@ -13,6 +13,7 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -362,6 +363,8 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    FUSE_SUM_ALL_REDUCE: tl.constexpr,
+    ROUTER_TOPK: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -567,9 +570,18 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+    if FUSE_SUM_ALL_REDUCE:
+        offs_token_out = offs_token // ROUTER_TOPK
+        c_ptrs = (
+            c_ptr + stride_cm * offs_token_out[:, None] + stride_cn * offs_cn[None, :]
+        )
+        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+        tl.atomic_add(c_ptrs, accumulator, mask=c_mask)
+    else:
+        c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+        tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
 # NOTE(zyongye): we can remove all the wna16 kernel
@@ -702,8 +714,8 @@ def invoke_fused_moe_wna16_triton_kernel(
         B.stride(0),
         B.stride(2),
         B.stride(1),
-        C.stride(1),
-        C.stride(2),
+        C.stride(-2),
+        C.stride(-1),
         B_scale.stride(0),
         B_scale.stride(2),
         B_scale.stride(1),
@@ -743,6 +755,8 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    fuse_sum_all_reduce: bool = False,
+    router_topk: int = 1,
 ):
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -808,8 +822,8 @@ def invoke_fused_moe_triton_kernel(
         B.stride(0),
         B.stride(2),
         B.stride(1),
-        C.stride(1),
-        C.stride(2),
+        C.stride(-2),
+        C.stride(-1),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
         B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
@@ -829,6 +843,8 @@ def invoke_fused_moe_triton_kernel(
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
+        FUSE_SUM_ALL_REDUCE=fuse_sum_all_reduce,
+        ROUTER_TOPK=router_topk,
         **config,
     )
 
@@ -855,6 +871,8 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    fuse_sum_all_reduce: bool = False,
+    router_topk: int = 1,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -933,6 +951,8 @@ def dispatch_fused_moe_kernel(
             per_channel_quant,
             block_shape,
             B_bias,
+            fuse_sum_all_reduce=fuse_sum_all_reduce,
+            router_topk=router_topk,
         )
 
 
@@ -1740,6 +1760,14 @@ def fused_experts_impl(
         dtype=hidden_states.dtype,
     )
 
+    use_fused_moe_sum_all_reduce = (
+        get_current_vllm_config().kernel_config.enable_fused_moe_sum_all_reduce
+        and (topk_ids.shape[1] > 2)
+        and (not use_int8_w8a16)
+        and (not use_int4_w4a16)
+        and (num_tokens <= 32)
+    )
+
     if hidden_states.dtype == torch.bfloat16:
         compute_type = tl.bfloat16
     elif hidden_states.dtype == torch.float16:
@@ -1862,10 +1890,17 @@ def fused_experts_impl(
     if expert_map is not None:
         intermediate_cache3.zero_()
 
+    out_slice = None
+    if use_fused_moe_sum_all_reduce:
+        out_slice = out_hidden_states
+        out_slice.zero_()
+    else:
+        out_slice = intermediate_cache3
+
     dispatch_fused_moe_kernel(
         qintermediate_cache2,
         w2,
-        intermediate_cache3,
+        out_slice,
         a2q_scale,
         w2_scale,
         w2_zp,
@@ -1884,12 +1919,15 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w2_bias,
+        fuse_sum_all_reduce=use_fused_moe_sum_all_reduce,
+        router_topk=top_k_num,
     )
 
-    ops.moe_sum(
-        intermediate_cache3.view(*intermediate_cache3.size()),
-        out_hidden_states,
-    )
+    if not use_fused_moe_sum_all_reduce:
+        ops.moe_sum(
+            intermediate_cache3.view(*intermediate_cache3.size()),
+            out_hidden_states,
+        )
 
     return out_hidden_states
 
