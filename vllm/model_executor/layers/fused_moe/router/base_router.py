@@ -29,6 +29,7 @@ if current_platform.is_cuda_alike():
         out_size,
         numel,
         experts_per_token,
+        HAS_NUM_UNPADDED: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -73,12 +74,12 @@ if current_platform.is_cuda_alike():
         # to achieve better efficiency.
 
         record_enabled = tl.load(record_enabled_ptr) != 0
-        num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
-        # Skip padded tokens when recording. A negative sentinel
-        # means the count is unavailable, so record everything.
-        is_unpadded = (num_unpadded_tokens < 0) | (
-            offs < num_unpadded_tokens * experts_per_token
-        )
+        # Skip padded tokens when recording.
+        if HAS_NUM_UNPADDED:
+            num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
+            is_unpadded = offs < num_unpadded_tokens * experts_per_token
+        else:
+            is_unpadded = True
         valid = (
             mask
             & record_enabled
@@ -95,7 +96,7 @@ if current_platform.is_cuda_alike():
         logical_replica_count: torch.Tensor,
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
-        num_unpadded_tokens: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
         topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
@@ -118,6 +119,7 @@ if current_platform.is_cuda_alike():
             expert_load_view.shape[0],
             numel,
             experts_per_token,
+            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
             BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
@@ -128,7 +130,7 @@ if current_platform.is_cuda_alike():
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
-        num_unpadded_tokens: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fused triton implementation: mapping + optional recording in one kernel.
         return _eplb_map_and_record_triton(
@@ -147,7 +149,7 @@ else:
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
-        num_unpadded_tokens: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
 
@@ -184,7 +186,6 @@ class BaseRouter(FusedMoERouter):
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
-        self._num_unpadded_tokens_tensor: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -222,20 +223,11 @@ class BaseRouter(FusedMoERouter):
             assert self.eplb_state.logical_replica_count is not None
             assert self.eplb_state.should_record_tensor is not None
 
-            num_unpadded_tokens = -1
-            if is_forward_context_available():
-                ctx_val = get_forward_context().num_unpadded_tokens
-                if ctx_val is not None:
-                    num_unpadded_tokens = ctx_val
-
-            if self._num_unpadded_tokens_tensor is None:
-                self._num_unpadded_tokens_tensor = torch.tensor(
-                    num_unpadded_tokens,
-                    device=topk_ids.device,
-                    dtype=torch.int32,
-                )
-            else:
-                self._num_unpadded_tokens_tensor.fill_(num_unpadded_tokens)
+            num_unpadded_tokens_tensor = (
+                get_forward_context().num_unpadded_tokens_tensor
+                if is_forward_context_available()
+                else None
+            )
 
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
@@ -243,7 +235,7 @@ class BaseRouter(FusedMoERouter):
                 logical_replica_count=self.eplb_state.logical_replica_count,
                 expert_load_view=self.eplb_state.expert_load_view,
                 record_enabled=self.eplb_state.should_record_tensor,
-                num_unpadded_tokens=self._num_unpadded_tokens_tensor,
+                num_unpadded_tokens=num_unpadded_tokens_tensor,
             )
         return topk_ids
 

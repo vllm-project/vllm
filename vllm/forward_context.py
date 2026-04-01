@@ -238,11 +238,17 @@ class ForwardContext:
 
     num_unpadded_tokens: int | None = None
     """
-    Number of actual (non-padding) tokens in the batch. When CUDA graphs
-    or DP padding inflate the batch, padded tokens sit at the tail
-    (positions [num_unpadded_tokens, num_tokens)).  Used by the EPLB router
-    to avoid recording expert-load statistics for padding tokens.
+    Number of actual (non-padding) tokens in the batch.  When CUDA graphs
+    or DP padding inflate the batch, padded tokens sit at the tail.
     None means every token is real (no padding).
+    Kept as a plain int so the ubatch wrapper can do slice arithmetic
+    without a GPU→CPU sync (.item()) on the tensor.
+    """
+
+    num_unpadded_tokens_tensor: torch.Tensor | None = None
+    """
+    Same value as :attr:`num_unpadded_tokens` but as a persistent CUDA
+    tensor so the EPLB router kernel can read it inside CUDA-graph replays.
     """
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -254,6 +260,10 @@ class ForwardContext:
 
 
 _forward_context: ForwardContext | None = None
+
+# Persistent across forward passes so its device-pointer stays constant
+# inside CUDA-graph replays.  Filled by create_forward_context().
+_num_unpadded_tokens_tensor: torch.Tensor | None = None
 
 
 def get_forward_context() -> ForwardContext:
@@ -286,6 +296,17 @@ def create_forward_context(
     else:
         all_moe_layers = None
 
+    global _num_unpadded_tokens_tensor
+    num_unpadded_tensor: torch.Tensor | None = None
+    if num_unpadded_tokens is not None:
+        if _num_unpadded_tokens_tensor is None:
+            _num_unpadded_tokens_tensor = torch.tensor(
+                num_unpadded_tokens, dtype=torch.int32, device="cuda"
+            )
+        else:
+            _num_unpadded_tokens_tensor.fill_(num_unpadded_tokens)
+        num_unpadded_tensor = _num_unpadded_tokens_tensor
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
@@ -297,6 +318,7 @@ def create_forward_context(
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         num_unpadded_tokens=num_unpadded_tokens,
+        num_unpadded_tokens_tensor=num_unpadded_tensor,
         additional_kwargs=additional_kwargs or {},
     )
 

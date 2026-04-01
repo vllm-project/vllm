@@ -644,14 +644,12 @@ def test_eplb_map_no_redundancy(
     rec = torch.tensor(record_enabled, dtype=torch.bool, device="cuda")
     ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
 
-    num_unpadded = torch.tensor(-1, dtype=torch.int32, device="cuda")
     out = eplb_map_to_physical_and_record(
         topk_ids=ids,
         expert_load_view=load,
         logical_to_physical_map=l2p,
         logical_replica_count=rc,
         record_enabled=rec,
-        num_unpadded_tokens=num_unpadded,
     )
 
     exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
@@ -720,7 +718,6 @@ def test_eplb_map_with_redundancy(
     load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
     rec = torch.tensor(record_enabled, dtype=torch.bool, device="cuda")
     ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
-    num_unpadded = torch.tensor(-1, dtype=torch.int32, device="cuda")
 
     out = eplb_map_to_physical_and_record(
         topk_ids=ids,
@@ -728,7 +725,6 @@ def test_eplb_map_with_redundancy(
         logical_to_physical_map=l2p,
         logical_replica_count=rc,
         record_enabled=rec,
-        num_unpadded_tokens=num_unpadded,
     )
 
     exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
@@ -757,15 +753,15 @@ def test_eplb_map_with_redundancy(
             id="half_padded",
         ),
         pytest.param(
-            # record everything
+            # record everything (None = no padding info)
             [[0], [1], [2], [3]],
             [1, 1, 1, 1],
             4,
             [[0, 1], [2, 3], [0, 2], [1, 3]],
-            -1,
+            None,
             [[0, 1], [2, 3], [0, 2], [1, 3]],
             [2, 2, 2, 2],
-            id="negative_sentinel",
+            id="no_padding_info",
         ),
     ],
 )
@@ -783,7 +779,11 @@ def test_eplb_map_num_unpadded_tokens(
     load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
     rec = torch.tensor(True, dtype=torch.bool, device="cuda")
     ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
-    num_unpadded_t = torch.tensor(num_unpadded, dtype=torch.int32, device="cuda")
+    num_unpadded_t = (
+        torch.tensor(num_unpadded, dtype=torch.int32, device="cuda")
+        if num_unpadded is not None
+        else None
+    )
 
     out = eplb_map_to_physical_and_record(
         topk_ids=ids,
