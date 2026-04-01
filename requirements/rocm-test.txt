@@ -502,7 +502,7 @@ mbstrdecoder==1.1.4
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.10.0
+mistral-common==1.11.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/rocm-test.in
