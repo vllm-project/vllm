@@ -956,8 +956,7 @@ def _unify_page_size_per_token(
         for layer_name, spec in new_kv_cache_spec.items():
             if spec.page_size_bytes < target:
                 assert isinstance(spec, AttentionSpec)
-                new_kv_cache_spec[layer_name] = replace(
-                    spec, page_size_padded=target)
+                new_kv_cache_spec[layer_name] = replace(spec, page_size_padded=target)
     return new_kv_cache_spec
 
 
