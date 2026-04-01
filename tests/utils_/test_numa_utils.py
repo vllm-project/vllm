@@ -90,7 +90,8 @@ def test_log_numactl_show(monkeypatch):
     ]
 
 
-def test_get_numactl_executable_points_to_fixed_wrapper():
+def test_get_numactl_executable_points_to_fixed_wrapper(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/numactl")
     executable, debug_str = numa_utils._get_numactl_executable()
     assert executable.endswith("/vllm/utils/numa_wrapper.sh")
     assert "_VLLM_INTERNAL_NUMACTL_ARGS" in debug_str
