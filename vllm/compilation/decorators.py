@@ -599,9 +599,23 @@ def _support_torch_compile(
                     # AOT artifact.
                     self.save_aot_compiled_function()
 
+                # In compile-only mode, raise CompilationDone after all
+                # piecewise graphs are compiled and cache artifacts saved.
+                # This is caught in gpu_worker.compile_or_warm_up_model()
+                # to skip execution with fake tensors.
+                if self.compilation_config.compile_only:
+                    from .backends import CompilationDone
+
+                    raise CompilationDone
+
                 with monitor_profiling_run():
                     output = self.aot_compiled_fn(self, *args, **kwargs)
             else:
+                # Same as above for non-AOT path.
+                if self.compilation_config.compile_only:
+                    from .backends import CompilationDone
+
+                    raise CompilationDone
                 with monitor_torch_compile(
                     self.vllm_config,
                     "torch.compile and initial profiling/warmup "

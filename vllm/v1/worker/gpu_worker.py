@@ -5,7 +5,7 @@
 import gc
 import os
 from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
@@ -280,7 +280,12 @@ class Worker(WorkerBase):
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            if self.compilation_config.compile_only:
+                # In compile-only mode with fake weights, skip memory
+                # validation since we don't allocate real GPU memory.
+                self.requested_memory = 0
+            else:
+                self.requested_memory = request_memory(init_snapshot, self.cache_config)
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
@@ -573,10 +578,59 @@ class Worker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
+        if self.compilation_config.compile_only:
+            from vllm.compilation.backends import CompilationDone
+            from vllm.model_executor.model_loader.fake_loader import (
+                swap_meta_params_to_fake,
+            )
+
+            # Swap meta-device parameters to FakeTensors so that
+            # torch.compile sees cuda-device tensors during tracing.
+            swap_meta_params_to_fake(self.model_runner.model)
+
+            # Verify that no significant GPU memory was allocated for
+            # model weights. A small amount (< 64 MiB) may come from
+            # CUDA runtime or library initialization.
+            _COMPILE_ONLY_MEM_THRESHOLD = 64 * 1024 * 1024  # 64 MiB
+            mem_used = torch.accelerator.memory_allocated(self.device)
+            assert mem_used < _COMPILE_ONLY_MEM_THRESHOLD, (
+                f"compile-only mode should use minimal GPU memory after "
+                f"model loading, but {format_gib(mem_used)} GiB is "
+                f"allocated (threshold: "
+                f"{format_gib(_COMPILE_ONLY_MEM_THRESHOLD)} GiB)"
+            )
+
+            # In the normal path, the first torch.compile is triggered
+            # by profile_run() which calls _dummy_run(max_num_tokens).
+            # In compile-only mode we skip _initialize_kv_caches (which
+            # calls profile_run), so call it here to trigger compilation.
+            # CompilationDone is raised after vLLM's torch.compile cache
+            # and AOT artifact are saved, to prevent execution with fake
+            # tensors.
+            with suppress(CompilationDone):
+                self.model_runner.profile_run()
+
+            # Verify compilation didn't allocate significant GPU memory.
+            mem_used = torch.accelerator.memory_allocated(self.device)
+            assert mem_used < _COMPILE_ONLY_MEM_THRESHOLD, (
+                f"compile-only mode should use minimal GPU memory after "
+                f"compilation, but {format_gib(mem_used)} GiB is "
+                f"allocated (threshold: "
+                f"{format_gib(_COMPILE_ONLY_MEM_THRESHOLD)} GiB)"
+            )
+
+            logger.info(
+                "Compile-only mode: compilation complete. "
+                "Skipping kernel warmup, CUDA graphs, and "
+                "sampler warmup."
+            )
+            return self.compilation_config.compilation_time
+
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
