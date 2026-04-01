@@ -6625,10 +6625,7 @@ class GPUModelRunner(
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 num_blocks = kv_cache_config.num_blocks
-                assert (
-                    raw_tensor.numel()
-                    >= kv_cache_spec.total_bytes_per_block * num_blocks
-                )
+                assert raw_tensor.numel() >= kv_cache_spec.page_size_bytes * num_blocks
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (

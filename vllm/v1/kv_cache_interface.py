@@ -84,16 +84,6 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
-    @property
-    def scale_bytes_per_block(self) -> int:
-        """Extra bytes for per-token scales. Defaults to 0."""
-        return 0
-
-    @property
-    def total_bytes_per_block(self) -> int:
-        """Total allocation per block: data + scales."""
-        return self.page_size_bytes + self.scale_bytes_per_block
-
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
         The maximum possible memory usage of this KV cache in bytes.
@@ -131,22 +121,14 @@ class AttentionSpec(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         real_page_size = self.real_page_size_bytes
+        # For per-token quantization (int8/fp8), one float32 scale per
+        # token for K and one for V are appended after each data region.
+        if self.kv_quant_mode.is_per_token:
+            real_page_size += 2 * self.block_size * get_dtype_size(torch.float32)
         if self.page_size_padded is not None:
             assert self.page_size_padded >= real_page_size
             return self.page_size_padded
         return real_page_size
-
-    @property
-    def scale_bytes_per_block(self) -> int:
-        """Bytes for per-token scales packed into the KV cache block.
-
-        For per-token quantization (int8/fp8), one float32 scale per
-        token for K and one for V are appended after each data region.
-        Returns 0 for other quantization modes.
-        """
-        if self.kv_quant_mode.is_per_token:
-            return 2 * self.block_size * get_dtype_size(torch.float32)
-        return 0
 
     @property
     def real_page_size_bytes(self) -> int:
