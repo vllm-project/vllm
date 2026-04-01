@@ -676,7 +676,9 @@ class WorkerProc:
         )
 
         # Apply NUMA binding if configured
-        with numa_utils.configure_subprocess(vllm_config, local_rank):
+        with numa_utils.configure_subprocess(
+            vllm_config, local_rank, process_kind="worker"
+        ):
             proc.start()
 
         # Close child ends of pipes here in the parent

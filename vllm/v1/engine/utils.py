@@ -166,6 +166,7 @@ class CoreEngineProcManager:
                         vllm_config,
                         local_rank=0,
                         dp_local_rank=local_dp_rank,
+                        process_kind="EngineCore",
                     ),
                 ):
                     proc.start()
