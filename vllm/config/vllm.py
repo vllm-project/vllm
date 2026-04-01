@@ -657,7 +657,11 @@ class VllmConfig:
         )
 
         if kv_offloading_backend == "native":
-            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            if envs.VLLM_USE_SIMPLE_KV_OFFLOAD:
+                config_connector = "SimpleCPUOffloadConnector"
+            else:
+                config_connector = "OffloadingConnector"
+            self.kv_transfer_config.kv_connector = config_connector
             self.kv_transfer_config.kv_connector_extra_config.update(
                 {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
