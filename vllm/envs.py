@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
+    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -752,6 +753,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
+    ),
+    # When True and distributed_executor_backend="ray", use RayExecutorV2
+    # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
+    # TODO (jeffreywang): Enabled by default in vLLM 0.20.0.
+    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
+        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "0"))
     ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
