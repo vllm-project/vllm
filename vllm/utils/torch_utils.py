@@ -64,7 +64,7 @@ T = TypeVar("T")
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8") or kv_cache_dtype == "int8_per_token"
+    return kv_cache_dtype.startswith("fp8") or kv_cache_dtype.endswith("per_token")
 
 
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
