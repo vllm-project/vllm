@@ -89,7 +89,6 @@ class _ProcessorFactories(Generic[_I]):
         ctx: InputProcessingContext,
         *,
         cache: BaseMultiModalProcessorCache | None = None,
-        cache_read_only: bool = False,
     ):
         info = self.info(ctx)
         dummy_inputs_builder = self.dummy_inputs(info)
@@ -97,7 +96,6 @@ class _ProcessorFactories(Generic[_I]):
             info,
             dummy_inputs_builder,
             cache=cache,
-            cache_read_only=cache_read_only,
         )
 
 
@@ -205,7 +203,6 @@ class MultiModalRegistry:
         *,
         tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
-        cache_read_only: bool = False,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
@@ -221,7 +218,6 @@ class MultiModalRegistry:
         return factories.build_processor(
             ctx,
             cache=cache,
-            cache_read_only=cache_read_only,
         )
 
     def get_dummy_mm_inputs(

@@ -982,14 +982,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         dummy_inputs: "BaseDummyInputsBuilder[_I]",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
-        cache_read_only: bool = False,
     ) -> None:
         super().__init__()
 
         self.info = info
         self.dummy_inputs = dummy_inputs
         self.cache = cache
-        self.cache_read_only = cache_read_only
 
         self.data_parser = self.info.get_data_parser()
 
@@ -1354,14 +1352,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
-        read_only = self.cache_read_only
-
         # Need to touch all mm hashes before update to avoid hash in updated
         # list evict during update
-        if not read_only:
-            for hashes in mm_hashes.values():
-                for item_hash in hashes:
-                    cache.touch_sender_cache_item(item_hash)
+        for hashes in mm_hashes.values():
+            for item_hash in hashes:
+                cache.touch_sender_cache_item(item_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
@@ -1380,18 +1375,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_updates_item = missing_prompt_updates[missing_next_idx]
 
                     mm_missing_next_idx[modality] += 1
-
-                    if read_only:
-                        # Don't pollute the cache — just use the
-                        # freshly-processed item directly.
-                        merged_kwargs[modality].append(missing_kwargs_item)
-                        merged_prompt_updates[modality].append(
-                            [
-                                self._recompute_cached_prompt_update(update, item_idx)
-                                for update in missing_updates_item
-                            ]
-                        )
-                        continue
 
                     item = missing_kwargs_item, missing_updates_item
                 else:
