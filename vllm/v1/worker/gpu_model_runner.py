@@ -3755,6 +3755,12 @@ class GPUModelRunner(
 
         return slot_mappings_by_gid, slot_mappings_by_layer
 
+    def _is_all_req_chunk_prefill(self) -> bool:
+        """Check if all scheduled requests are chunked prefill (not the last
+        prefill chunk), which should not be sampled."""
+        num_reqs = self.input_batch.num_reqs
+        return bool(self.discard_request_mask.np[:num_reqs].all())
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -4116,7 +4122,12 @@ class GPUModelRunner(
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
-            if self.use_async_scheduling and get_pp_group().world_size > 1:
+            # skip for chunked prefill.
+            if (
+                self.use_async_scheduling
+                and get_pp_group().world_size > 1
+                and not self._is_all_req_chunk_prefill()
+            ):
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
@@ -4163,7 +4174,13 @@ class GPUModelRunner(
             # For torchrun external_launcher PP mode with broadcast_pp_output=True,
             # PP outputs have been broadcasted to all ranks at logits computation.
             # Therefore, here is no need to send sampled token ids again in this case.
-            if not self.broadcast_pp_output and pp.world_size > 1 and pp.is_last_rank:
+            # Skip for chunked prefill: sampled tokens are dummy ant will be discarded, no need to broadcast.
+            if (
+                not self.broadcast_pp_output
+                and pp.world_size > 1
+                and pp.is_last_rank
+                and not self._is_all_req_chunk_prefill()
+            ):
                 self._pp_broadcast_prev_sampled_token_ids(
                     sampler_output.sampled_token_ids
                 )
