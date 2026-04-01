@@ -1194,6 +1194,8 @@ def cutlass_moe_w4a8_fp8(
             quant_config=quant_config,
             group_size=group_size,
         ),
+        shared_experts=None,
+        inplace=False,
     )
 
     return fn.apply(
