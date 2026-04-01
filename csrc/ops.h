@@ -221,17 +221,6 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
-void static_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,
-    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
-
-void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor& scale);
-
-void dynamic_per_token_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
-    std::optional<torch::Tensor> const& scale_ub);
-
 void selective_scan_fwd(
     const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
     const torch::Tensor& B, const torch::Tensor& C,

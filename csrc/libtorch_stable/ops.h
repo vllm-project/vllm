@@ -182,3 +182,19 @@ void dynamic_scaled_int8_quant(torch::stable::Tensor& out,
                                torch::stable::Tensor const& input,
                                torch::stable::Tensor& scales,
                                std::optional<torch::stable::Tensor> const& azp);
+
+// FP8 quantization kernels (shared CUDA/ROCm)
+void static_scaled_fp8_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor const& scale,
+    std::optional<torch::headeronly::IntHeaderOnlyArrayRef> group_shape =
+        std::nullopt);
+
+void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor& scale);
+
+void dynamic_per_token_scaled_fp8_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor& scale,
+    std::optional<torch::stable::Tensor> const& scale_ub);
