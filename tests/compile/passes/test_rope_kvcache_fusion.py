@@ -28,6 +28,9 @@ from vllm.config import (
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
+    DeepseekScalingRotaryEmbedding,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -233,12 +236,13 @@ class RopeMLAKVCacheTestModel(torch.nn.Module):
         self.device = device
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
-        self.rotary_emb = RotaryEmbedding(
-            qk_rope_head_dim,
+        self.rotary_emb = DeepseekScalingRotaryEmbedding(
+            head_size=qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
             max_position_embeddings=4096,
             base=10000,
             is_neox_style=is_neox,
+            scaling_factor=1.0,
             dtype=self.dtype,
         )
         self.enable_rope_custom_op = self.rotary_emb.enabled()
@@ -300,7 +304,9 @@ class RopeMLAKVCacheTestModel(torch.nn.Module):
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
         ops_list = []
-        if self.enable_rope_custom_op:
+        if self.rotary_emb.use_flashinfer:
+            pass
+        elif self.enable_rope_custom_op:
             if rocm_aiter_ops.is_triton_rotary_embed_enabled():
                 ops_list.append(
                     torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
@@ -515,6 +521,11 @@ def test_mla_rope_kvcache_fusion(
             dtype=dtype,
             device=torch.get_default_device(),
         )
+        if not model.rotary_emb.use_flashinfer:
+            pytest.skip(
+                "DeepSeek MLA fusion test requires flashinfer rotary path "
+                "(use_flashinfer=True)."
+            )
 
         fusion_pass = RopeKVCacheFusionPass(vllm_config)
         passes = [
@@ -564,6 +575,10 @@ def test_mla_rope_kvcache_fusion(
 
         assert fusion_pass.matched_count == 1
 
+        flashinfer_op = torch.ops.vllm.flashinfer_rotary_embedding.default
+        assert backend.op_count(flashinfer_op, before=True) > 0
+        assert backend.op_count(flashinfer_op, before=False) == 0
+
         backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
 
@@ -573,7 +588,8 @@ def test_mla_rope_kvcache_fusion(
         torch.testing.assert_close(kv_u, kv_f, atol=ATOL, rtol=RTOL)
 
         if kv_cache_dtype.startswith("fp8"):
-            torch.testing.assert_close(kv_cache_unfused, kv_cache_fused)
+            # fp8 cache writeback can differ by 1 LSB between equivalent paths.
+            torch.testing.assert_close(kv_cache_unfused, kv_cache_fused, atol=1, rtol=0)
         else:
             torch.testing.assert_close(
                 kv_cache_unfused,
