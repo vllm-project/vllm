@@ -620,12 +620,6 @@ class GPUModelRunner(
             self.is_pooling_model,
             custom_logitsprocs,
         )
-        # Check whether any custom logits processor (CLI-passed OR
-        # entry-point plugin) is loaded.  Previously this flag was derived
-        # from `custom_logitsprocs` alone, which only contains CLI-passed
-        # processors.  Entry-point plugins loaded by build_logitsprocs()
-        # were not accounted for, causing their output_token_ids buffers to
-        # be filled with -1 placeholders when all penalties are neutral.
         # ThinkingTokenBudgetLogitsProcessor also needs output token ids to
         # correctly track think start/end token sequences in async scheduling.
         logitsprocs_need_output_token_ids = (
