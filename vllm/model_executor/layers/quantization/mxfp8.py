@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.fp8 import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     Mxfp8LinearOp,
-    mxfp8_e4m3_quantize,
+    flashinfer_mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
@@ -160,7 +160,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
+        weight_fp8, weight_scale = flashinfer_mxfp8_e4m3_quantize(layer.weight.contiguous())
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)
@@ -239,7 +239,7 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Batch quantization: bf16/fp16 weights -> MXFP8 (fp8 + uint8 scales)."""
         E = weight.size(0)
-        first_q, first_s = mxfp8_e4m3_quantize(weight[0], is_sf_swizzled_layout=False)
+        first_q, first_s = flashinfer_mxfp8_e4m3_quantize(weight[0], is_sf_swizzled_layout=False)
         # Pre-allocate the output tensors rather than stacking.
         # This is important for consistent memory layout.
         w_quant = torch.empty(
@@ -251,7 +251,7 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
         w_quant[0] = first_q
         w_scales[0] = first_s
         for i in range(1, E):
-            w_quant[i], w_scales[i] = mxfp8_e4m3_quantize(
+            w_quant[i], w_scales[i] = flashinfer_mxfp8_e4m3_quantize(
                 weight[i], is_sf_swizzled_layout=False
             )
 

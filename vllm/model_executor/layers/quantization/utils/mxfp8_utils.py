@@ -9,6 +9,7 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.utils import flashinfer as vllm_flashinfer
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -120,7 +121,7 @@ def _mxfp8_e4m3_quantize_torch(
     return x_fp8, scales_uint8
 
 
-def _mxfp8_e4m3_quantize_impl(
+def _flashinfer_mxfp8_e4m3_quantize_impl(
     x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
@@ -138,10 +139,10 @@ def _mxfp8_e4m3_quantize_impl(
     return _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout)
 
 
-def mxfp8_e4m3_quantize(
+def flashinfer_mxfp8_e4m3_quantize(
     x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout)
+    return torch.ops.vllm.flashinfer_mxfp8_quantize(x, is_sf_swizzled_layout)
 
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -160,7 +161,7 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     return dequantized.to(torch.bfloat16)
 
 
-def mxfp8_e4m3_quantize_fake(
+def flashinfer_mxfp8_e4m3_quantize_fake(
     x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile tracing."""
@@ -199,11 +200,54 @@ def mxfp8_e4m3_quantize_fake(
 
 
 direct_register_custom_op(
-    op_name="mxfp8_quantize",
-    op_func=_mxfp8_e4m3_quantize_impl,
-    fake_impl=mxfp8_e4m3_quantize_fake,
+    op_name="flashinfer_mxfp8_e4m3_quantize",
+    op_func=_flashinfer_mxfp8_e4m3_quantize_impl,
+    fake_impl=flashinfer_mxfp8_e4m3_quantize_fake,
 )
 
+def _xpu_mxfp8_quantize_impl(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if dtype is not None:
+        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
+            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
+            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
+        )
+    else:
+        dtype = current_platform.fp8_dtype()
+
+    finfo = torch.finfo(dtype)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+    eps = 1e-10
+    x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    torch.ops._C.per_token_group_fp8_quant(
+            x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
+        )
+    x_s = x_s.to(torch.float8_e8m0fnu)
+    return x_q, x_s
+
+def xpu_mxfp8_quantize_fake(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not dtype is None:
+        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
+            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
+            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
+        )
+    else:
+        dtype = current_platform.fp8_dtype()
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+
+    return x.to(dtype), torch.zeros(shape, device=x.device, dtype=torch.float32)
+
+direct_register_custom_op(
+    op_name="xpu_mxfp8_quantize",
+    op_func=_xpu_mxfp8_quantize_impl,
+    fake_impl=xpu_mxfp8_quantize_fake,
+)
 
 class Mxfp8LinearOp:
     def __init__(self):
@@ -310,7 +354,7 @@ class Mxfp8LinearOp:
             pad_rows = M_padded - M_orig
             input_2d = torch.nn.functional.pad(input_2d, (0, 0, 0, pad_rows))
 
-        input_mxfp8, input_scale = mxfp8_e4m3_quantize(
+        input_mxfp8, input_scale = flashinfer_mxfp8_e4m3_quantize(
             input_2d,
             is_sf_swizzled_layout=True,  # Swizzled for best accuracy
         )
