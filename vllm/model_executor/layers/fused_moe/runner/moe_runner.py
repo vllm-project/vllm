@@ -33,3 +33,7 @@ class MoERunner(ABC):
         final_hidden_states: torch.Tensor,
     ):
         raise NotImplementedError
+
+    @abstractmethod
+    def is_internal_router(self) -> bool:
+        raise NotImplementedError

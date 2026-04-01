@@ -647,23 +647,22 @@ def test_w4a16_moe_unquantized_explicit_unwrap(vllm_runner, monkeypatch):
                 router_logits.clone(),
             )
 
-            original_hidden_states = hidden_states.clone()
-            routed_hidden_states = (
+            routed_hidden_states, shared_experts_input = (
                 layer_unquantized.runner.apply_routed_input_transform(
                     hidden_states.clone()
                 )
             )
             routed_hidden_states, original_hidden_dims = (
                 layer_unquantized.runner._maybe_pad_hidden_states(
-                    original_hidden_states,
+                    shared_experts_input,
                     routed_hidden_states,
                 )
             )
-            manual_out = layer_unquantized.runner.forward_impl(
-                layer=layer_unquantized,
-                hidden_states=routed_hidden_states,
-                router_logits=router_logits.clone(),
-                shared_input=original_hidden_states,
+            manual_out = layer_unquantized.runner.forward_dispatch(
+                layer_unquantized,
+                routed_hidden_states,
+                router_logits.clone(),
+                shared_experts_input,
             )
             manual_out = layer_unquantized.runner._maybe_reduce_output(
                 manual_out,
