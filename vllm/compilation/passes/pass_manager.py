@@ -140,11 +140,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [AllReduceFusionPass(config)]
 
             if self.pass_config.fuse_norm_quant:
-                self.passes += [RMSNormQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [
                         RocmAiterRMSNormQuantFusionPass(config),
                     ]
+                self.passes += [RMSNormQuantFusionPass(config)]
+
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():

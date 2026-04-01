@@ -85,14 +85,10 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         ]
 
     def ops_in_model(self):
-        return (
-            [torch.ops.vllm_ir.rms_norm]
-            + [
-                torch.ops._C.fused_add_rms_norm.default,
-            ]
-            if RMSNorm.enabled()
-            else []
-        )
+        return [
+            torch.ops.vllm_ir.rms_norm,
+            torch.ops.vllm_ir.fused_add_rms_norm,
+        ]
 
 
 class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
@@ -148,16 +144,17 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
     def ops_in_model(self):
         if self.vllm_config.compilation_config.pass_config.fuse_norm_quant:
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
-        elif RMSNorm.enabled():
-            return [
-                torch.ops._C.fused_add_rms_norm.default,
-            ]
-        elif any(layer.is_quant_fp8_enabled() for layer in self.fp8_linear_layers):
-            return [
-                torch.ops._C.static_scaled_fp8_quant.default,
-            ]
         else:
-            return []
+            quant_ops = (
+                [torch.ops._C.static_scaled_fp8_quant.default]
+                if any(layer.is_quant_fp8_enabled() for layer in self.fp8_linear_layers)
+                else [torch.ops.aten.reciprocal]
+            )
+            return [
+                torch.ops.vllm_ir.rms_norm,
+                torch.ops.vllm_ir.fused_add_rms_norm,
+                *quant_ops,
+            ]
 
 
 @multi_gpu_test(num_gpus=2)

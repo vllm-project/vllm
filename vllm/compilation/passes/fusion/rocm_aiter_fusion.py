@@ -23,7 +23,6 @@ from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .act_quant_fusion import ActivationQuantPattern
 from .matcher_utils import (
-    MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherSiluAndMul,
 )
@@ -43,10 +42,6 @@ class AiterRMSNormQuantPattern:
         self.quant_dtype = key.quant.dtype
         self.device = torch.device("cuda")
 
-        if key.fused_add:
-            self.rmsnorm_matcher = MatcherFusedAddRMSNorm(
-                epsilon, match_rocm_aiter=True
-            )
         self.quant_matcher = MatcherQuantFP8(
             key.quant,
             match_rocm_aiter=match_aiter_quant,
@@ -139,7 +134,9 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
             result, scale = self.quant_matcher(result_rms)
 
             return result, residual_out, scale
@@ -157,10 +154,16 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
 
             return result[0], result[1], result[2]
 
+        inputs = [
+            self.empty(5, 16),  # input
+            self.empty(16),  # weight
+            self.empty(5, 16),  # residual
+        ]
+
         pm.register_replacement(
             pattern,
             replacement,
-            self.rmsnorm_matcher.inputs(),
+            inputs,
             pm.fwd_only,
             pm_pass,
         )
@@ -252,7 +255,9 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
             result, scale = self.quant_matcher(result_rms)
 
             return result, residual_out, scale
@@ -273,9 +278,13 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             # result, scale, residual
             return at[0], at[1], at[2]
 
-        pm.register_replacement(
-            pattern, replacement, self.rmsnorm_matcher.inputs(), pm.fwd_only, pm_pass
-        )
+        inputs = [
+            self.empty(5, 16),  # input
+            self.empty(16),  # weight
+            self.empty(5, 16),  # residual
+        ]
+
+        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
 
 
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
@@ -428,12 +437,15 @@ class AddAiterRMSNormPadPattern:
         self.epsilon = epsilon
         self.hidden_size = hidden_size
         self.x_pad_to_multiple = x_pad_to_multiple
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon, match_rocm_aiter=True)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input, weight, residual = self.rmsnorm_matcher.inputs()
-        router_weight = torch.empty([8, 16], dtype=weight.dtype, device=weight.device)
-        router_bias = torch.empty([8], dtype=weight.dtype, device=weight.device)
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        input = torch.empty(5, 16, dtype=dtype, device=device)
+        weight = torch.empty(16, dtype=dtype, device=device)
+        residual = torch.empty(5, 16, dtype=dtype, device=device)
+        router_weight = torch.empty([8, 16], dtype=dtype, device=device)
+        router_bias = torch.empty([8], dtype=dtype, device=device)
         return [input, weight, residual, router_weight, router_bias]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -447,7 +459,9 @@ class AddAiterRMSNormPadPattern:
             pad_size = self.x_pad_to_multiple - (
                 self.hidden_size % self.x_pad_to_multiple
             )
-            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
             router_logits = torch.ops.vllm.rocm_unquantized_gemm(
                 result_rms, router_weight, router_bias
             )
