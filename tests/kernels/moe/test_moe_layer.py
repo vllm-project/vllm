@@ -29,7 +29,11 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
+from vllm.distributed.parallel_state import (
+    get_eplb_group,
+)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE, fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -49,7 +53,7 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import (
     init_workspace_manager,
     is_workspace_manager_initialized,
@@ -145,7 +149,7 @@ def maybe_roundup_layer_hidden_size(
         Original hidden size otherwise.
     """
     if backend == "deepep_high_throughput":
-        from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
             DeepEPHTPrepareAndFinalize,
         )
 
@@ -154,7 +158,7 @@ def maybe_roundup_layer_hidden_size(
         )
 
     if backend == "deepep_low_latency":
-        from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
             DeepEPLLPrepareAndFinalize,
         )
 
@@ -275,6 +279,7 @@ def generate_valid_test_configs(
     ep_size: int,
     dp_size: int,
     tp_size: int,
+    enable_eplb: bool,
     verbosity: int = 0,
 ) -> list[MoETestConfig]:
     configs: list[MoETestConfig] = []
@@ -287,7 +292,6 @@ def generate_valid_test_configs(
         use_shared_experts,
         use_gate,
         use_routed_input_transform,
-        enable_eplb,
         reduce_results,
     ) in product(
         SHAPE_COMBOS,
@@ -297,7 +301,6 @@ def generate_valid_test_configs(
         [False, True],  # shared
         [False, True],  # gate
         [False, True],  # routed input exform
-        [False, True],  # eplb
         [False, True],  # reduce results
     ):
         config = MoETestConfig(
@@ -412,7 +415,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             )
 
         if config.backend == "deepep_low_latency":
-            from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (  # noqa: E501
                 DeepEPLLPrepareAndFinalize,
             )
 
@@ -432,6 +435,9 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                     False,
                     f"Skipping unsupported K {config.k} in {config.backend} w/o EP.",
                 )
+
+    if config.enable_eplb and config.ep_size == 1:
+        return False, "EPLB requires EP."
 
     if config.enable_eplb and config.quantization not in EPLB_SUPPORTED_QUANTS:
         return False, f"EPLB not supported with {config.quantization} quantization."
@@ -1186,13 +1192,21 @@ def _test_body_eplb(
     initial_indices = torch.arange(num_experts, dtype=torch.long)
     shuffled_indices = initial_indices[torch.randperm(num_experts)]
 
-    # Rearrange expert weights across EP ranks
     expert_weights = [list(moe_layer.get_expert_weights())]
+
+    communicator = create_eplb_communicator(
+        group_coordinator=get_eplb_group(),
+        backend=vllm_config.parallel_config.eplb_config.communicator,
+        expert_weights=expert_weights[0],
+    )
+
+    # Rearrange expert weights across EP ranks
     rearrange_expert_weights_inplace(
         old_global_expert_indices=initial_indices.unsqueeze(0),
         new_global_expert_indices=shuffled_indices.unsqueeze(0),
         expert_weights=expert_weights,
         ep_group=cpu_group,
+        communicator=communicator,
     )
 
     # Build logical_to_physical_map from shuffled_indices
@@ -1217,6 +1231,10 @@ def _test_body_eplb(
             dtype=torch.int32,
             device=device,
         ),
+    )
+
+    moe_layer.eplb_state.should_record_tensor = torch.ones(
+        (), dtype=torch.bool, device=device
     )
 
     # Get "after" output with rearranged weights and EPLB routing
@@ -1596,11 +1614,13 @@ def _parallel_worker(
 # TODO: add cudagraphs/torch.compile tests
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("enable_eplb", [False, True])
 def test_moe_layer(
     dp_size: int,
     tp_size: int,
     use_ep: bool,
     backend: str,
+    enable_eplb: bool,
     monkeypatch,
     pytestconfig,
     subtests,
@@ -1609,7 +1629,7 @@ def test_moe_layer(
 
     For non-parallel cases (world_size == 1), use test_moe_layer_no_parallel instead.
     """
-    num_gpus = cuda_device_count_stateless()
+    num_gpus = current_platform.device_count()
     world_size = tp_size * dp_size
     ep_size = 1 if not use_ep else world_size  # or dp_size?
     assert world_size > 1
@@ -1617,6 +1637,9 @@ def test_moe_layer(
     # Check if enough GPUs available
     if world_size is not None and num_gpus is not None and world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    if enable_eplb and not use_ep:
+        pytest.skip("EPLB requires EP.")
 
     verbosity = pytestconfig.getoption("verbose")
 
@@ -1639,6 +1662,7 @@ def test_moe_layer(
         tensor_parallel_size=tp_size,
         enable_expert_parallel=use_ep,
         all2all_backend=backend,
+        enable_eplb=enable_eplb,
     )
 
     compilation_config = CompilationConfig()
@@ -1650,7 +1674,7 @@ def test_moe_layer(
     )
 
     test_configs = generate_valid_test_configs(
-        backend, ep_size, dp_size, tp_size, verbosity
+        backend, ep_size, dp_size, tp_size, enable_eplb, verbosity
     )
 
     if subtests is not None:
@@ -1664,6 +1688,9 @@ def test_moe_layer(
                     "subtest config does not match any valid test configuration"
                 )
         test_configs = new_test_configs
+
+    if len(test_configs) == 0:
+        pytest.skip("No supported configs found for this testpoint.")
 
     try:
         parallel_launch_with_config(
