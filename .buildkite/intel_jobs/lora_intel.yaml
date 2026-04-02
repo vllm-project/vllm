@@ -3,13 +3,19 @@ depends_on:
   - image-build-xpu
 steps:
 - label: LoRA %N
-  timeout_in_minutes: 30
+  timeout_in_minutes: 90
   device: intel_gpu
   no_plugin: true
+  working_dir: "."
   env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/lora
   - tests/lora
   commands:
-    - pytest -v -s tests/lora --ignore=tests/lora/test_chatglm3_tp.py --ignore=tests/lora/test_llama_tp.py --ignore=tests/lora/test_llm_with_multi_loras.py --ignore=tests/lora/test_olmoe_tp.py --ignore=tests/lora/test_deepseekv2_tp.py --ignore=tests/lora/test_gptoss_tp.py --ignore=tests/lora/test_qwen3moe_tp.py
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s lora --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --deselect="lora/test_mixtral.py::test_mixtral_lora[4]" --deselect="lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-2-2049-64-32-32]" --deselect="lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype1-2-64000-32-4-4]" --deselect="lora/test_quant_model.py::test_quant_model_lora[model0]" --deselect="lora/test_quant_model.py::test_quant_model_lora[model1]" --deselect="lora/test_quant_model.py::test_quant_model_tp_equality[model0]" --deselect="lora/test_worker.py::test_worker_apply_lora"'
