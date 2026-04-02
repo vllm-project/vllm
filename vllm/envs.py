@@ -51,13 +51,16 @@ if TYPE_CHECKING:
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_SGL_KERNEL: bool = False
+    VLLM_CPU_ATTN_SPLIT_KV: bool = True
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
     VLLM_CPU_INT4_W4A8: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
+    VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
+    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -724,6 +727,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     else None,
     # (CPU backend only) whether to use SGL kernels, optimized for small batch.
     "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
+    # (CPU backend only) whether to enable attention spilt KV.
+    "VLLM_CPU_ATTN_SPLIT_KV": lambda: bool(
+        int(os.getenv("VLLM_CPU_ATTN_SPLIT_KV", "1"))
+    ),
     # (Zen CPU backend) eagerly prepack weights into ZenDNN blocked layout
     # at model load time. Eliminates per-inference layout conversion overhead.
     "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
@@ -751,6 +758,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
+    ),
+    # When True and distributed_executor_backend="ray", use RayExecutorV2
+    # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
+    # TODO (jeffreywang): Enabled by default in vLLM 0.20.0.
+    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
+        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "0"))
     ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -861,6 +874,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
+    # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.
+    # Default: 512 MB
+    "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
+        os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(
@@ -1673,6 +1692,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+    ),
+    # Enable simple KV offload.
+    "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
+        int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
 }
 

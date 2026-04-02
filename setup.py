@@ -1063,7 +1063,10 @@ setup(
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
-        "helion": ["helion==0.3.2"],
+        # NOTE: When updating helion version, also update CI files:
+        #   - .buildkite/test_areas/kernels.yaml
+        #   - .buildkite/test-amd.yaml
+        "helion": ["helion==0.3.3"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
         # Optional deps for OpenTelemetry tracing

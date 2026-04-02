@@ -34,10 +34,8 @@ from vllm.model_executor.layers.quantization.fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
-    Mxfp8LinearBackend,
     Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-    swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
@@ -71,7 +69,8 @@ class Mxfp8Config(Fp8Config):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 100
+        # Marlin kernel supports MXFP8 on SM80+
+        return 80
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Mxfp8Config":
@@ -128,24 +127,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
     def __init__(self, quant_config: "Mxfp8Config"):
         self.quant_config = quant_config
         self.out_dtype = torch.get_default_dtype()
-        self.mxfp8_linear = Mxfp8LinearOp(self._select_backend())
-        logger.info_once(
-            "Using %s backend for MXFP8 GEMM", self.mxfp8_linear.backend.value
-        )
-
-    @staticmethod
-    def _select_backend() -> Mxfp8LinearBackend:
-        try:
-            from vllm.utils import flashinfer as fi
-
-            _ = fi.mm_mxfp8
-            return Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        except Exception:
-            logger.warning(
-                "FlashInfer mm_mxfp8 not available, "
-                "falling back to MXFP8 emulation backend."
-            )
-            return Mxfp8LinearBackend.EMULATION
+        self.mxfp8_linear = Mxfp8LinearOp()
 
     def create_weights(
         self,
@@ -180,13 +162,11 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
 
         weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
 
-        if self.mxfp8_linear.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS:
-            N, K = layer.weight.shape[0], layer.weight.shape[1]
-            weight_scale = swizzle_mxfp8_scale(weight_scale, N, K)
-
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
+
+        self.mxfp8_linear.process_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -202,6 +182,9 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
             weight_scale=layer.weight_scale,
             out_dtype=self.out_dtype,
             bias=bias,
+            workspace=getattr(layer, "workspace", None),
+            size_n=layer.output_size_per_partition,
+            size_k=layer.input_size_per_partition,
         )
 
 
@@ -255,17 +238,24 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
         self, weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Batch quantization: bf16/fp16 weights -> MXFP8 (fp8 + uint8 scales)."""
-        num_batches = weight.size(0)
-        w_quant = []
-        w_scales = []
-        for i in range(num_batches):
-            mx_fp8_quant, mx_fp8_scale = mxfp8_e4m3_quantize(
+        E = weight.size(0)
+        first_q, first_s = mxfp8_e4m3_quantize(weight[0], is_sf_swizzled_layout=False)
+        # Pre-allocate the output tensors rather than stacking.
+        # This is important for consistent memory layout.
+        w_quant = torch.empty(
+            (E, *first_q.shape), dtype=first_q.dtype, device=weight.device
+        )
+        w_scales = torch.empty(
+            (E, *first_s.shape), dtype=first_s.dtype, device=weight.device
+        )
+        w_quant[0] = first_q
+        w_scales[0] = first_s
+        for i in range(1, E):
+            w_quant[i], w_scales[i] = mxfp8_e4m3_quantize(
                 weight[i], is_sf_swizzled_layout=False
             )
-            w_quant.append(mx_fp8_quant)
-            w_scales.append(mx_fp8_scale)
 
-        return torch.stack(w_quant), torch.stack(w_scales)
+        return w_quant, w_scales
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
