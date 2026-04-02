@@ -228,7 +228,7 @@ class XPUPlatform(Platform):
         from vllm.utils.math_utils import cdiv
 
         cache_config = vllm_config.cache_config
-        # special fix for GDN since kernel only support block size of 64
+        # special fix for GDN since kernel only supports block size dividable by 64
         attn_layers = get_layers_from_vllm_config(
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
