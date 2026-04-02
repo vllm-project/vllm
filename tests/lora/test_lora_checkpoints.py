@@ -141,3 +141,14 @@ def test_gemma4_lora_weights_mapping():
     assert ("model.layers.9.mlp.down_proj", True) == parse_fine_tuned_lora_name(
         name, mapper
     )
+
+
+def test_gemma4_moe_lora_weights_mapping():
+    mapper = Gemma4ForCausalLM.hf_to_vllm_mapper
+    name = (
+        "base_model.model.model.language_model.layers.9.moe.experts."
+        "gate_up_proj.lora_B.weight"
+    )
+    assert ("model.layers.9.moe.gate_up_proj", False) == parse_fine_tuned_lora_name(
+        name, mapper
+    )
