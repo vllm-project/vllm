@@ -21,9 +21,9 @@ class CpuGpuEvent:
     CUDA events alone are insufficient for cross-thread synchronization because
     waiting on an unrecorded CUDA event is a no-op. The wait will return
     immediately instead of blocking. This class adds a threading.Event so
-    that the waiting thread blocks on the CPU side until record() has
-    actually been called, at which point the CUDA event is guaranteed to be
-    in-flight and event.wait() will correctly synchronize the GPU stream.
+    that the waiting thread blocks on the CPU side until record() is called, at
+    which point the CUDA event is guaranteed to be in-flight and event.wait() will
+    correctly synchronize the GPU stream.
     """
 
     def __init__(self):
