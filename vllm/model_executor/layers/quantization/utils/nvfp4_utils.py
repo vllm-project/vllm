@@ -55,8 +55,16 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
         backend = NvFp4LinearBackend.EMULATION
     elif envs.VLLM_NVFP4_GEMM_BACKEND is None:
-        # Auto-select best available backend
-        if current_platform.has_device_capability(100) and has_flashinfer():
+        # Auto-select best available backend.
+        # cutlass_fp4_supported() checks that the vLLM NVFP4 kernels (both
+        # quantization and GEMM) were compiled for the current SM version.
+        # FlashInfer backends still rely on the vLLM quantization kernels,
+        # so we gate them on the same check.
+        if (
+            cutlass_fp4_supported()
+            and current_platform.has_device_capability(100)
+            and has_flashinfer()
+        ):
             backend = NvFp4LinearBackend.FLASHINFER_CUTLASS
         elif cutlass_fp4_supported():
             backend = NvFp4LinearBackend.VLLM_CUTLASS
@@ -72,6 +80,10 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
         NvFp4LinearBackend.FLASHINFER_CUDNN,
     ):
         assert has_flashinfer(), f"FlashInfer is required for {backend}"
+        assert cutlass_fp4_supported(), (
+            f"{backend} requires vLLM NVFP4 quantization kernels compiled "
+            f"for the current GPU (SM {current_platform.get_device_capability()})"
+        )
     elif backend == NvFp4LinearBackend.VLLM_CUTLASS:
         assert cutlass_fp4_supported(), f"Cutlass is required for {backend}"
     elif backend == NvFp4LinearBackend.MARLIN:
