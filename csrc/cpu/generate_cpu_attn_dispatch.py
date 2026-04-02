@@ -8,7 +8,7 @@ Generate CPU attention dispatch switch cases and kernel instantiations.
 import os
 
 # Head dimensions divisible by 32 (support all ISAs)
-HEAD_DIMS_32 = [32, 64, 96, 128, 160, 192, 224, 256]
+HEAD_DIMS_32 = [32, 64, 96, 128, 160, 192, 224, 256, 512]
 
 # Head dimensions divisible by 16 but not 32 (VEC16 only)
 HEAD_DIMS_16 = [80, 112]
