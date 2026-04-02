@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
+import enum
 import logging
 import os
 import queue
@@ -94,6 +95,13 @@ ReqId = str
 NIXL_CONNECTOR_VERSION: int = 2
 
 GET_META_MSG = b"get_meta_msg"
+
+
+class TransferMode(enum.Enum):
+    """Transfer direction for a KV cache request."""
+
+    PULL = "pull"
+
 
 logger = init_logger(__name__)
 
@@ -264,6 +272,7 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    mode: TransferMode = TransferMode.PULL
     remote: RemoteMeta | None = None
 
 
@@ -2538,8 +2547,9 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
+        mode: TransferMode = TransferMode.PULL,
     ):
-        """Issue READ transfers to one or more remote TP ranks."""
+        """Issue transfers to one or more remote TP ranks."""
         assert self.kv_topo is not None
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
             dst_engine_id
@@ -2587,6 +2597,7 @@ class NixlConnectorWorker:
                 remote_rank=remote_rank,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                mode=mode,
             )
 
             if self.use_mla and tp_ratio < 0:
@@ -2608,6 +2619,7 @@ class NixlConnectorWorker:
         remote_rank: int,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        mode: TransferMode = TransferMode.PULL,
     ):
         """
         Post a READ point-to-point xfer request from a single local worker to
@@ -2655,7 +2667,7 @@ class NixlConnectorWorker:
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
-        if len(local_block_ids) == 0:
+        if mode == TransferMode.PULL and len(local_block_ids) == 0:
             # A full prefix cache hit is indicated with an empty list.
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             try:
@@ -2674,19 +2686,20 @@ class NixlConnectorWorker:
                 self.xfer_stats.record_failed_notification()
             return
 
-        assert (
-            len(remote_block_ids)
-            == len(local_block_ids)
-            == len(self.kv_cache_config.kv_cache_groups)
-        )
-        remote_block_ids = list(remote_block_ids)
-        for i, remote_group in enumerate(remote_block_ids):
-            num_remote_blocks = len(remote_group)
-            num_local_blocks = len(local_block_ids[i])
-            assert num_local_blocks <= num_remote_blocks
-            # Partial prefix cache hit: just read uncomputed blocks.
-            if num_local_blocks < num_remote_blocks:
-                remote_block_ids[i] = remote_group[-num_local_blocks:]
+        if mode == TransferMode.PULL:
+            assert (
+                len(remote_block_ids)
+                == len(local_block_ids)
+                == len(self.kv_cache_config.kv_cache_groups)
+            )
+            remote_block_ids = list(remote_block_ids)
+            for i, remote_group in enumerate(remote_block_ids):
+                num_remote_blocks = len(remote_group)
+                num_local_blocks = len(local_block_ids[i])
+                assert num_local_blocks <= num_remote_blocks
+                # Partial prefix cache hit: just read uncomputed blocks.
+                if num_local_blocks < num_remote_blocks:
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
