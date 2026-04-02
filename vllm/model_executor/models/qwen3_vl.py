@@ -1803,31 +1803,6 @@ class Qwen3VLForConditionalGeneration(
             buffers=buffers,
         )
 
-    def _maybe_get_cached_replay_buffers(
-        self,
-        cache_key: tuple,
-    ) -> EncoderCudaGraphReplayBuffers | None:
-        # Cache keyed by (modality, grid_thw_list): identical grid shapes
-        # produce identical cu_seqlens, rotary embeddings, and positional
-        # embeddings, so the expensive CPU-side NumPy work inside
-        # prepare_encoder_metadata need only run once per unique shape.
-        self._replay_buffer_cache: dict[tuple, EncoderCudaGraphReplayBuffers] = {}
-        cached = self._replay_buffer_cache.get(cache_key, None)
-        return cached
-
-    def _maybe_set_cached_replay_buffers(
-        self,
-        cache_key: tuple,
-        buffers: EncoderCudaGraphReplayBuffers,
-    ) -> None:
-        # Update cuda graph replay buffer cache with the newly computed buffers, so
-        # that subsequent replays with the same grid_thw pattern can reuse them.
-        self._replay_buffer_cache[cache_key] = buffers
-
-        # TODO(shen-shanshan): Design more appropriate cache eviction strategy.
-        if len(self._replay_buffer_cache) > 10:
-            self._replay_buffer_cache.popitem(last=False)
-
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
@@ -1836,14 +1811,6 @@ class Qwen3VLForConditionalGeneration(
     ):
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
-
-        cache_key = (
-            modality,
-            tuple(tuple(thw) for thw in grid_thw_list),
-        )
-        cached = self._maybe_get_cached_replay_buffers(cache_key)
-        if cached is not None:
-            return cached
 
         if modality == "image":
             buffers = self.visual.prepare_encoder_metadata(
@@ -1856,9 +1823,7 @@ class Qwen3VLForConditionalGeneration(
                 max_frames_per_batch=max_frames_per_batch,
             )
 
-        result = EncoderCudaGraphReplayBuffers(buffers=buffers)
-        self._maybe_set_cached_replay_buffers(cache_key, result)
-        return result
+        return EncoderCudaGraphReplayBuffers(buffers=buffers)
 
     def encoder_cudagraph_forward(
         self,
