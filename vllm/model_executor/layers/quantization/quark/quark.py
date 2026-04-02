@@ -5,6 +5,7 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -36,7 +37,6 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
-from vllm.transformers_utils.config import get_config
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -44,6 +44,10 @@ if TYPE_CHECKING:
 __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
+
+# model_type values that use dynamic MXFP4 re-quantization for
+# OCP MX fp4 Quark checkpoints
+_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3"})
 
 
 class QuarkConfig(QuantizationConfig):
@@ -63,19 +67,28 @@ class QuarkConfig(QuantizationConfig):
         self.pack_method = pack_method
         self.dynamic_mxfp4_quant = False
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
-        self.hf_config = get_config(
-            model=model_name,
-            trust_remote_code=False,  # or get from model_config if available
-            revision=revision,
-            config_format="auto",
-        )
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
+        """Enable dynamic MXFP4 only for DeepSeek-V3-family + fp4 Quark checkpoints."""
 
-        quant_config = getattr(self.hf_config, "quantization_config", None)
+        if (
+            getattr(hf_config, "model_type", None)
+            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
+        ):
+            return
+
+        quant_config = getattr(hf_config, "quantization_config", None)
         if quant_config is not None:
-            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
-            model_type = self.hf_config.model_type
-            if quant_dtype == "fp4" and model_type == "deepseek_v3":
+            quant_dtype = (
+                quant_config.get("global_quant_config", {})
+                .get("weight", {})
+                .get("dtype")
+            )
+            if quant_dtype == "fp4":
                 self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
@@ -467,10 +480,17 @@ class QuarkConfig(QuantizationConfig):
                 layer_name.replace(proj_name, shard_proj_name)
                 for shard_proj_name in shard_proj_names
             ]
-            shard_configs = [
-                self._find_matched_config(shard_name, module)
-                for shard_name in shard_names
-            ]
+
+            shard_configs = []
+            for shard_name in shard_names:
+                if shard_name == layer_name:
+                    config = cast(
+                        dict[str, Any], self.quant_config.get("global_quant_config")
+                    )
+                else:
+                    config = self._find_matched_config(shard_name, module)
+                shard_configs.append(config)
+
             if not all(
                 deep_compare(q_config, shard_configs[0]) for q_config in shard_configs
             ):

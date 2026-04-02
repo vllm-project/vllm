@@ -3,6 +3,7 @@
 
 from unittest import mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -132,16 +133,12 @@ def test_prepare_next_token_ids_padded():
     device = torch.device(current_platform.device_type)
 
     num_requests = 4
-    batch_spec = BatchSpec(
-        seq_lens=[5] * num_requests,
-        query_lens=[5] * num_requests,
-    )
-
     req_ids = [f"req_{i + 1}" for i in range(num_requests)]
     mock_input_batch = mock.MagicMock(spec=InputBatch)
     mock_input_batch.req_ids = req_ids
     mock_input_batch.num_reqs = num_requests
     mock_input_batch.vocab_size = 100
+    mock_input_batch.num_tokens_no_spec = np.array([5] * num_requests)
 
     mock_requests = {}
     for req_id in req_ids:
@@ -174,12 +171,6 @@ def test_prepare_next_token_ids_padded():
 
     proposer = _create_proposer(num_speculative_tokens=1)
 
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=16,
-        device=device,
-    )
-
     # valid_sampled_tokens_count tracks if token is valid (not -1 and in vocab range)
     # It doesn't depend on whether the request is discarded
     expected_valid_sampled_tokens_count = torch.tensor(
@@ -187,7 +178,6 @@ def test_prepare_next_token_ids_padded():
     )
 
     next_token_ids, valid_sampled_tokens_count = proposer.prepare_next_token_ids_padded(
-        common_attn_metadata,
         sampled_token_ids,
         mock_requests,
         mock_input_batch,
@@ -252,29 +242,22 @@ def test_propose():
     ]
 
     # Sampled token IDs from target model
-    sampled_token_ids = torch.tensor([42, 60], dtype=torch.int32, device=device)
-
-    # Mock scheduler output
-    mock_scheduler_output = mock.MagicMock()
+    sampled_token_ids = torch.tensor(
+        [42, 60], dtype=torch.int32, device=device
+    ).unsqueeze(-1)
 
     # Call propose
-    with mock.patch(
-        "vllm.v1.spec_decode.extract_hidden_states.has_kv_transfer_group"
-    ) as mock_has_kv:
-        mock_has_kv.return_value = False
-
-        draft_tokens, kv_connector_output = proposer.propose(
-            sampled_token_ids=sampled_token_ids,
-            target_hidden_states=target_hidden_states,
-            common_attn_metadata=common_attn_metadata,
-            scheduler_output=mock_scheduler_output,
-            slot_mappings=None,
-        )
+    draft_tokens = proposer.propose(
+        sampled_token_ids=sampled_token_ids,
+        target_hidden_states=target_hidden_states,
+        common_attn_metadata=common_attn_metadata,
+        slot_mappings=None,
+    )
 
     # Verify draft tokens match sampled tokens
     # Shape should be [batch_size, 1] for num_speculative_tokens=1
     assert draft_tokens.shape == (batch_size, 1)
-    assert torch.equal(draft_tokens[:, 0], sampled_token_ids)
+    assert torch.equal(draft_tokens, sampled_token_ids)
 
     # Verify the model was called
     model_mock.assert_called_once()
@@ -326,21 +309,16 @@ def test_propose_different_layer_counts(num_hidden_layers):
         for _ in range(num_hidden_layers)
     ]
 
-    sampled_token_ids = torch.tensor([42, 60], dtype=torch.int32, device=device)
-    mock_scheduler_output = mock.MagicMock()
+    sampled_token_ids = torch.tensor(
+        [42, 60], dtype=torch.int32, device=device
+    ).unsqueeze(-1)
 
-    with mock.patch(
-        "vllm.v1.spec_decode.extract_hidden_states.has_kv_transfer_group"
-    ) as mock_has_kv:
-        mock_has_kv.return_value = False
-
-        draft_tokens, _ = proposer.propose(
-            sampled_token_ids=sampled_token_ids,
-            target_hidden_states=target_hidden_states,
-            common_attn_metadata=common_attn_metadata,
-            scheduler_output=mock_scheduler_output,
-            slot_mappings=None,
-        )
+    draft_tokens = proposer.propose(
+        sampled_token_ids=sampled_token_ids,
+        target_hidden_states=target_hidden_states,
+        common_attn_metadata=common_attn_metadata,
+        slot_mappings=None,
+    )
 
     assert draft_tokens.shape == (batch_size, 1)
-    assert torch.equal(draft_tokens[:, 0], sampled_token_ids)
+    assert torch.equal(draft_tokens, sampled_token_ids)

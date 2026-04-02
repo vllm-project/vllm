@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -38,6 +39,7 @@ class XPUMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
     ]
 
@@ -230,7 +232,7 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError("FP8 kv is not supported with XPU MLA Sparse yet")
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)

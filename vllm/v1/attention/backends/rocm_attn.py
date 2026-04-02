@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -166,6 +167,7 @@ class RocmAttentionBackend(AttentionBackend):
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -194,7 +196,10 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        return True
+        # ROCM custom attention kernel does not support sinks.
+        # Callink this backend with sinks will cause it to fall back to the Triton
+        # kernel, which is less efficient than the proper triton backends.
+        return False
 
     forward_includes_kv_cache_update: bool = False
 
@@ -208,12 +213,17 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """RocmAttention supports all attention types."""
+        """ENCODER_DECODER is not supported because
+        chunked_prefill_paged_decode's prefill kernel (context_attention_fwd)
+        assumes self-attention semantics: it treats passed K/V as new tokens
+        to mix with cached K/V. For cross-attention layers the encoder K/V
+        are already fully cached, so mixing them again produces incorrect
+        results when max_query_len > 1 (e.g. beam search).
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER_DECODER,
         )
 
     @staticmethod
@@ -306,7 +316,7 @@ class RocmAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
@@ -397,7 +407,7 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             assert layer._q_scale_float == 1.0, (
@@ -504,7 +514,7 @@ class RocmAttentionImpl(AttentionImpl):
         )
         flash_layout = False
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

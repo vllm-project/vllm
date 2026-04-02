@@ -16,8 +16,10 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
-from collections.abc import Iterable
+import sys
+from collections.abc import Callable, Iterable
 from itertools import chain
+from operator import attrgetter
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -28,6 +30,7 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -46,6 +49,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.utils import (
+    can_enable_torch_compile,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -116,6 +120,7 @@ class Base(
         self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
         self.device_config = vllm_config.device_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -154,14 +159,16 @@ class Base(
             if "gptq" in quant_method_name:
                 self.ignore_unexpected_suffixes.append(".bias")
 
-        # Patch config and init on "meta" to delay allocating GPU tensors
         self._patch_config()
+        from_config_kwargs = dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+        self._decorate_for_torch_compile(**from_config_kwargs)
+        # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
-            self.model: PreTrainedModel = AutoModel.from_config(
-                self.config,
-                dtype=self.model_config.dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
@@ -216,6 +223,82 @@ class Base(
             sub_config = getattr(self.config, sub_config_name)
             if sub_config.dtype != (dtype := self.config.dtype):
                 sub_config.dtype = dtype
+
+    def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
+        """
+        Get the decoder class from the model.
+
+        Args:
+            kwargs: The kwargs to create the model.
+
+        Returns:
+            The decoder class.
+        """
+        with torch.device("meta"):
+            model: PreTrainedModel = AutoModel.from_config(**kwargs)
+        decoder_cls = type(model.get_decoder())
+        logger.debug("Identified decoder class as: %s", decoder_cls)
+        del model
+        return decoder_cls
+
+    def _decorate_cls_for_torch_compile(
+        self,
+        cls: type[PreTrainedModel],
+        dynamic_arg_dims: dict[str, int] | None,
+        enable_if: Callable[["VllmConfig"], bool],
+        is_encoder: bool,
+    ):
+        """
+        Decorate `cls` to indicate to vLLM that it supports torch compile.
+
+        Args:
+            cls: The PreTrainedModel class to decorate.
+            dynamic_arg_dims: A mapping from argument name to the dynamic dimensions
+                of the argument. If None, default dynamic arg dims will be used. See
+                [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
+                for more details.
+            enable_if: A function which takes in the vLLM config and returns whether
+                torch compile should be enabled for this class.
+            is_encoder: Whether the class being decorated is an encoder.
+        """
+        logger.debug(
+            "Decorating `%s` as %s for torch compile with dynamic_arg_dims of %s",
+            cls.__name__,
+            "encoder" if is_encoder else "decoder",
+            dynamic_arg_dims,
+        )
+
+        @support_torch_compile(
+            dynamic_arg_dims=dynamic_arg_dims,
+            enable_if=enable_if,
+            is_encoder=is_encoder,
+        )
+        class SupportTorchCompileWrapper(cls): ...
+
+        # Patch the class in its module
+        module = sys.modules[cls.__module__]
+        setattr(module, cls.__name__, SupportTorchCompileWrapper)
+
+    def _decorate_for_torch_compile(self, **kwargs: dict):
+        """
+        Decorate the model's decoder class to indicate to vLLM that it supports torch
+        compile if `can_enable_torch_compile` is True.
+
+        Args:
+            kwargs: The kwargs to create the model, which are needed to get the decoder
+                class.
+        """
+        self._decorate_cls_for_torch_compile(
+            cls=self._get_decoder_cls(**kwargs),
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            dynamic_arg_dims=dict[str, int](
+                input_ids=1,  # shape: [1, seq_len]
+                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+            ),
+            enable_if=can_enable_torch_compile,
+            is_encoder=False,
+        )
 
     def _create_hf_to_vllm_mapper(self):
         """
@@ -296,6 +379,15 @@ class Base(
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
 
+    def _get_tie_word_embeddings(self):
+        """
+        Check if the model has tied word embeddings.
+        """
+        # Transformers v4 and v5 will store this in different places
+        tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
+        tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
+        return tie_word_embeddings_v4 or tie_word_embeddings_v5
+
     def pipeline_parallel(self):
         """
         Apply the model's pipeline parallelization plan.
@@ -311,11 +403,22 @@ class Base(
                 f"{type(self.model)} does not support pipeline parallel. {tip}"
             )
 
+        def attrsetter(attr: str) -> Callable[[object, object], None]:
+            """Set a possibly nested attribute, like the inverse of attrgetter."""
+            parent, _, name = attr.rpartition(".")
+
+            def setter(obj: object, value: object):
+                attr_parent = attrgetter(parent)(obj) if parent else obj
+                setattr(attr_parent, name, value)
+
+            return setter
+
         module_lists = []
         module_list_idx = None
         pp_plan = list(self.model._pp_plan.keys())
         for i, name in enumerate(pp_plan):
-            if isinstance(getattr(self.model, name), nn.ModuleList):
+            # attrgetter in case the module is nested (e.g. "text_model.layers")
+            if isinstance(attrgetter(name)(self.model), nn.ModuleList):
                 module_lists.append(name)
                 module_list_idx = i
 
@@ -330,11 +433,11 @@ class Base(
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
-                getattr(self.text_config, "tie_word_embeddings", False)
-                and self.pp_group.is_last_rank
+                self._get_tie_word_embeddings() and self.pp_group.is_last_rank
             ):
                 continue
-            setattr(self.model, name, PPMissingLayer())
+            # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
+            attrsetter(name)(self.model, PPMissingLayer())
 
         # Module list
         start_layer, end_layer = get_pp_indices(
@@ -343,7 +446,8 @@ class Base(
             self.pp_group.world_size,
         )
         layers_name = pp_plan[module_list_idx]
-        layers = getattr(self.model, layers_name)
+        # attrgetter in case the module is nested (e.g. "text_model.layers")
+        layers = attrgetter(layers_name)(self.model)
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
@@ -353,7 +457,8 @@ class Base(
         for name in pp_plan[module_list_idx + 1 :]:
             # Modules that should be on last rank
             if not self.pp_group.is_last_rank:
-                setattr(self.model, name, PPMissingLayer())
+                # attrsetter in case the module is nested (e.g. "text_model.norm")
+                attrsetter(name)(self.model, PPMissingLayer())
 
     def recursive_replace(self):
         """Recursively replace modules in the model as needed.
@@ -530,11 +635,6 @@ class Base(
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
 
-        if input_ids is not None:
-            input_ids = input_ids[None, ...]
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds[None, ...]
-
         # If the model scales embeddings inside the input embedding layer we must
         # ensure they are scaled here since VocabParallelEmbedding will not do it
         if (
@@ -545,22 +645,29 @@ class Base(
             inputs_embeds = self.embed_input_ids(input_ids)
             input_ids = None
 
-        if self.model_config.uses_mrope:
-            position_ids = positions[:, None]
-        else:
-            position_ids = positions[None, ...]
+        # Add batch dimension before entering Transformers model
+        if input_ids is not None and input_ids.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            input_ids = input_ids[None, ...]
+        if inputs_embeds is not None and inputs_embeds.ndim == 2:
+            # [seq_len, hidden_size] -> [1, seq_len, hidden_size]
+            inputs_embeds = inputs_embeds[None, ...]
+        if positions.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            positions = positions[None, ...]
 
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             use_cache=False,
-            position_ids=position_ids,
+            position_ids=positions,
             attention_instances=self.attention_instances,
             return_dict=False,
             **self._output_aux_hidden_states_kwargs,
             **kwargs,
         )
-        # We must remove the batch dimension from these outputs
+
+        # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
         if self._output_aux_hidden_states_kwargs:
             aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
@@ -618,6 +725,6 @@ class Base(
         # Ensure that the capture hooks are installed before dynamo traces the model
         maybe_install_capturing_hooks(self.model)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers
         return (2, num_layers // 2, num_layers - 3)

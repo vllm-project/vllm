@@ -47,7 +47,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import GateLinear, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    RoutingMethodType,
+    SharedFusedMoE,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -333,8 +337,12 @@ class DeepseekV2MoE(nn.Module):
         # NOTE(rob): this is a hack until we finish off the PR for
         # merging TRTLLM kernels into the MK framework. Then we can
         # query the MonolithicMK for the expected router logits.
+        # NOTE(dbari): Use BF16 if routing is not Deepseek, e.g. Mistral Large 3
         self.gate.set_out_dtype(
-            torch.float32 if self.experts.quant_method.is_monolithic else torch.bfloat16
+            torch.float32
+            if self.experts.quant_method.is_monolithic
+            and self.experts.routing_method_type == RoutingMethodType.DeepSeekV3
+            else torch.bfloat16
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -578,7 +586,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         self, head_dim: int, dtype: torch.dtype, prefix: str, cache_config: CacheConfig
     ):
         super().__init__()
-        self.kv_cache = [torch.tensor([])]
+        self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.prefix = prefix
         self.cache_config = cache_config
@@ -631,21 +639,19 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        self.wk = ReplicatedLinear(
+        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
+        # weights_proj does not get quantized, so we run both with quant_config=None
+        # wk may be upcasted from the default quant; experiments show fusion is always
+        # faster unless WK proj is in FP4, which is not the case for all known quants.
+        self.wk_weights_proj = MergedColumnParallelLinear(
             hidden_size,
-            self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wk",
-        )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
-        self.weights_proj = ReplicatedLinear(
-            hidden_size,
-            self.n_head,
+            [self.head_dim, self.n_head],
             bias=False,
             quant_config=None,
-            prefix=f"{prefix}.weights_proj",
+            disable_tp=True,
+            prefix=f"{prefix}.wk_weights_proj",
         )
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -686,7 +692,11 @@ class Indexer(nn.Module):
             q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
 
-        k, _ = self.wk(hidden_states)
+        # Fused wk + weights_proj: one GEMM, then split
+        kw, _ = self.wk_weights_proj(hidden_states)
+        k = kw[:, : self.head_dim]
+        weights_raw = kw[:, self.head_dim :]
+
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(
             k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
@@ -715,9 +725,8 @@ class Indexer(nn.Module):
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
         q_scale = q_scale.view(-1, self.n_head, 1)
 
-        weights, _ = self.weights_proj(hidden_states)
         weights = (
-            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+            weights_raw.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
         )
         weights = weights.squeeze(-1)
 
@@ -1197,6 +1206,11 @@ class DeepseekV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
+                if input_ids is None:
+                    raise ValueError(
+                        "Either input_ids or inputs_embeds must be provided "
+                        "to DeepseekV2Model.forward"
+                    )
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
@@ -1425,6 +1439,13 @@ class DeepseekV2ForCausalLM(
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
+        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        indexer_fused_mapping = [
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
+        ]
+        stacked_params_mapping.extend(indexer_fused_mapping)
+
         if self.use_mha:
             stacked_params_mapping.extend(mha_params_mapping)
         else:

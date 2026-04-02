@@ -13,6 +13,7 @@ from collections.abc import (
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
+    Any,
     ClassVar,
     Literal,
     Protocol,
@@ -29,8 +30,7 @@ from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.config import ModelConfig, SpeechToTextConfig
-from vllm.inputs import TokensPrompt
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -46,6 +46,11 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        EncoderCudaGraphCaptureInputs,
+        EncoderCudaGraphConfig,
+        EncoderCudaGraphReplayBuffers,
+    )
 else:
     VllmConfig = object
     WeightsMapper = object
@@ -357,7 +362,9 @@ class SupportsMultiModal(Protocol):
             # to ensure that any external configuration requiring offset tracking,
             # e.g., LoRA, are applied correctly regardless of whether or not
             # we have multimodal tokens.
-            in_vocab_ids = input_ids.masked_fill(is_multimodal, 0)
+            in_vocab_ids = input_ids.masked_fill(
+                is_multimodal.to(device=input_ids.device, non_blocking=True), 0
+            )
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
@@ -1273,6 +1280,25 @@ def supports_any_eagle(
     return supports_eagle(model) or supports_eagle3(model)
 
 
+class EagleModelMixin:
+    aux_hidden_state_layers: tuple[int, ...] = ()
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.aux_hidden_state_layers = layers
+
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            value = hidden_states + residual if residual is not None else hidden_states
+            aux_hidden_states.append(value)
+        return aux_hidden_states
+
+
 @runtime_checkable
 class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
@@ -1320,24 +1346,48 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
-        Set which layers should output auxiliary
-        hidden states for EAGLE-3.
+        Set which layers should output auxiliary hidden states for EAGLE-3.
 
         Args:
             layers: Tuple of layer indices that should output auxiliary
                 hidden states.
         """
-        ...
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
+            "Model instance must have 'model' attribute to set number of layers"
+        )
+        assert isinstance(parent_ref.model, EagleModelMixin), (
+            "Model instance must inherit from EagleModelMixin to set auxiliary layers"
+        )
+        parent_ref.model._set_aux_hidden_state_layers(layers)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
-        Get the layer indices that should output auxiliary hidden states
-        for EAGLE-3.
+        Get the default layer indices that should output auxiliary hidden states
+        for EAGLE-3 for this model. Models can override this method to provide
+        different default layers based on their architecture, but it is encouraged
+        to instead include the layer specification in the model's config if possible.
 
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
         """
-        ...
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
+            "Model instance must have 'model' attribute to get number of layers"
+        )
+        assert hasattr(parent_ref.model, "layers"), (
+            "Model instance must have 'layers' attribute to get number of layers"
+        )
+        num_layers = len(parent_ref.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
 
 @overload
@@ -1451,3 +1501,138 @@ def supports_xdrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
     return isinstance(model, SupportsXDRoPE)
+
+
+@runtime_checkable
+class SupportsEncoderCudaGraph(Protocol):
+    """Interface for models whose vision encoder supports CUDA graph
+    capture/replay.
+
+    Models implement these methods to provide the
+    :class:`EncoderCudaGraphManager` with all model-specific logic
+    (input handling, metadata computation, forward pass) without the
+    manager needing to know model internals.
+    """
+
+    supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+
+    def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> tuple[int, int]:
+        """Return (min_token_budget, max_token_budget) for auto-inference.
+
+        - min_token_budget: estimated smallest possible encoder input
+          (e.g. 64 for a 224x224 image)
+        - max_token_budget: estimated largest budget worth capturing
+          (e.g. max_num_batched_tokens)
+
+        Used when ``encoder_cudagraph_token_budgets`` and/or
+        ``encoder_cudagraph_max_images_per_batch`` are not explicitly
+        specified by the user.
+        """
+        ...
+
+    def get_encoder_cudagraph_num_items(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> int:
+        """Return the number of items (e.g. images) in the batch."""
+        ...
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        """Return output token count for each item.
+
+        Used for greedy packing and DP load balancing.
+        """
+        ...
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        """Return input size (e.g. patch count) for each item.
+
+        Used for input tensor slicing offsets.
+        """
+        ...
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        """Select a subset of items and return mm_kwargs for the sub-batch.
+
+        Called by the manager during greedy packing and DP sharding to
+        extract inputs for a specific set of items (e.g. images at
+        indices [0, 3, 5]).  The implementation is model-specific
+        because input formats differ:
+
+        - Qwen-family: slice concatenated pixel_values by cumulative
+          patch offsets, subset grid_thw by indices.
+        - Batched models (CLIP): index pixel_values along dim 0.
+        """
+        ...
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "EncoderCudaGraphCaptureInputs":
+        """Create dummy inputs and buffers for CUDA graph capture."""
+        ...
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+    ) -> "EncoderCudaGraphReplayBuffers":
+        """Compute buffer values from actual batch inputs for replay."""
+        ...
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Run the encoder forward pass with precomputed buffers.
+
+        Used during both CUDA graph capture and replay.
+        """
+        ...
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """Run the encoder forward pass without precomputed buffers.
+
+        Used as eager fallback when inputs exceed all budgets.
+        """
+        ...
+
+
+@overload
+def supports_encoder_cudagraph(
+    model: type[object],
+) -> TypeIs[type[SupportsEncoderCudaGraph]]: ...
+
+
+@overload
+def supports_encoder_cudagraph(
+    model: object,
+) -> TypeIs[SupportsEncoderCudaGraph]: ...
+
+
+def supports_encoder_cudagraph(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEncoderCudaGraph]] | TypeIs[SupportsEncoderCudaGraph]:
+    return isinstance(model, SupportsEncoderCudaGraph)

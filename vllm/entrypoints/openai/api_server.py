@@ -22,18 +22,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.server_utils import (
     engine_error_handler,
     exception_handler,
+    generation_error_handler,
     get_uvicorn_log_config,
     http_exception_handler,
     lifespan,
@@ -44,6 +46,7 @@ from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -76,7 +79,6 @@ async def build_async_engine_client(
     args: Namespace,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool | None = None,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
@@ -95,13 +97,9 @@ async def build_async_engine_client(
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
 
-    if disable_frontend_multiprocessing is None:
-        disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
-
     async with build_async_engine_client_from_engine_args(
         engine_args,
         usage_context=usage_context,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
         client_config=client_config,
     ) as engine:
         yield engine
@@ -112,7 +110,6 @@ async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool = False,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
     """
@@ -125,9 +122,6 @@ async def build_async_engine_client_from_engine_args(
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-
-    if disable_frontend_multiprocessing:
-        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -161,7 +155,9 @@ async def build_async_engine_client_from_engine_args(
 
 
 def build_app(
-    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
+    args: Namespace,
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -197,7 +193,7 @@ def build_app(
         attach_router as register_sagemaker_api_router,
     )
 
-    register_sagemaker_api_router(app, supported_tasks)
+    register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
@@ -248,7 +244,14 @@ def build_app(
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import register_pooling_api_routers
 
-        register_pooling_api_routers(app, supported_tasks)
+        register_pooling_api_routers(app, supported_tasks, model_config)
+
+    if "generate" in supported_tasks:
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            register_generative_scoring_api_router,
+        )
+
+        register_generative_scoring_api_router(app)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -263,6 +266,7 @@ def build_app(
     app.exception_handler(RequestValidationError)(validation_exception_handler)
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
+    app.exception_handler(GenerationError)(generation_error_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
@@ -362,12 +366,31 @@ async def init_app_state(
         lora_modules=lora_modules,
     )
     await state.openai_serving_models.init_static_loras()
-    state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
-        state.openai_serving_models,
+
+    state.openai_serving_render = OpenAIServingRender(
+        model_config=engine_client.model_config,
+        renderer=engine_client.renderer,
+        io_processor=engine_client.io_processor,
+        model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
+    )
+
+    state.openai_serving_tokenization = OpenAIServingTokenization(
+        engine_client,
+        state.openai_serving_models,
+        state.openai_serving_render,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -396,6 +419,13 @@ async def init_app_state(
         from vllm.entrypoints.pooling import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+
+    if "generate" in supported_tasks:
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            init_generative_scoring_state,
+        )
+
+        await init_generative_scoring_state(engine_client, state, args, request_logger)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -456,6 +486,9 @@ async def init_render_app_state(
     )
 
     state.openai_serving_models = model_registry
+
+    # Expose tokenization via the render handler (no engine required).
+    state.openai_serving_tokenization = state.openai_serving_render
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
@@ -566,8 +599,10 @@ async def build_and_serve(
         uvicorn_kwargs["log_config"] = log_config
 
     supported_tasks = await engine_client.get_supported_tasks()
+    model_config = engine_client.model_config
+
     logger.info("Supported tasks: %s", supported_tasks)
-    app = build_app(args, supported_tasks)
+    app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)

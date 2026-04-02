@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -433,18 +436,32 @@ def convert_to_fp8_moe_kernel_format(
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
-        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-        )
+        weight_block_size = getattr(layer, "weight_block_size", None)
+        if weight_block_size == [1, 32]:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+                prepare_mxfp8_moe_layer_for_marlin,
+            )
+
+            w13, w2, w13_scale, w2_scale = prepare_mxfp8_moe_layer_for_marlin(
+                layer,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+            )
+        else:
+            w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
+                layer,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+            )
     elif fp8_backend in [
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        w13, w2, w13_scale = prepare_fp8_moe_layer_for_fi(
+        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
             layer=layer,
             w13=w13,
             w2=w2,
@@ -512,6 +529,21 @@ def make_fp8_moe_quant_config(
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
         )
+    # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
+    # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
+    # Non-swizzled layout is required since the TRTLLM kernel expects
+    # scales in (num_tokens, hidden_dim // 32) format.
+    if block_shape == [1, 32]:
+        return FusedMoEQuantConfig.make(
+            "mxfp8",
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_shape,
+            is_nvfp4_scale_swizzled=False,
+        )
+
     # All other backends use normal config.
     return fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
@@ -530,7 +562,7 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
+    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -566,12 +598,7 @@ def make_fp8_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if moe_config.moe_parallel_config.use_deepep_ll_kernels
-            else None
-        ),
-        moe_parallel_config=moe_config.moe_parallel_config,
+        shared_experts=shared_experts,
         inplace=(
             not moe_config.disable_inplace
             and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS

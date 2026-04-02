@@ -24,6 +24,7 @@
 
 ARG CUDA_VERSION=12.9.1
 ARG PYTHON_VERSION=3.12
+ARG UBUNTU_VERSION=22.04
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -38,7 +39,7 @@ ARG PYTHON_VERSION=3.12
 # version are not backwards compatible with OSes that use an earlier version.
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -111,6 +112,10 @@ RUN apt-get update -y \
         gcc-10 \
         g++-10 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+    # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
+    # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
+    # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
+    && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
@@ -507,7 +512,6 @@ RUN apt-get update -y \
         software-properties-common \
         curl \
         sudo \
-        python3-pip \
         ffmpeg \
         libsm6 \
         libxext6 \
@@ -535,6 +539,7 @@ RUN apt-get update -y \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
@@ -582,16 +587,36 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer pre-compiled kernel cache and binaries
-# This is ~1.1GB and only changes when FlashInfer version bumps
+# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.6
+# 0.6.7: CUTLASS 4.4.2 bump, fixes TMA grouped GEMM on SM12x (flashinfer#2798)
+# TODO: bump to 0.6.8 when released for NVFP4/MXFP4 group GEMMs on
+#   SM120/SM121 (RTX 50 / DGX Spark) via flashinfer#2738
+ARG FLASHINFER_VERSION=0.6.7
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
-    && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
+
+# Pre-download FlashInfer TRTLLM BMM headers for air-gapped environments.
+# At runtime, MoE JIT compilation downloads these from edge.urm.nvidia.com
+# which fails without internet. This step caches them at build time.
+RUN python3 <<'PYEOF'
+from flashinfer.jit import env as jit_env
+from flashinfer.jit.cubin_loader import download_trtllm_headers, get_cubin
+from flashinfer.artifacts import ArtifactPath, CheckSumHash
+
+download_trtllm_headers(
+    'bmm',
+    jit_env.FLASHINFER_CUBIN_DIR / 'flashinfer' / 'trtllm' / 'batched_gemm' / 'trtllmGen_bmm_export',
+    f'{ArtifactPath.TRTLLM_GEN_BMM}/include/trtllmGen_bmm_export',
+    ArtifactPath.TRTLLM_GEN_BMM,
+    get_cubin(f'{ArtifactPath.TRTLLM_GEN_BMM}/checksums.txt', CheckSumHash.TRTLLM_GEN_BMM),
+)
+
+print('FlashInfer TRTLLM BMM headers downloaded successfully')
+PYEOF
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -620,7 +645,7 @@ RUN set -eux; \
 ARG BITSANDBYTES_VERSION_X86=0.46.1
 ARG BITSANDBYTES_VERSION_ARM64=0.42.0
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.3"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
@@ -628,7 +653,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
     uv pip install --system accelerate hf_transfer modelscope \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs]${RUNAI_MODEL_STREAMER_VERSION}"
+        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
