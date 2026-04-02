@@ -67,7 +67,7 @@ def run_rebalance_experts(
     # Wait for the main thread's all-reduce and clone to complete before
     # accessing the global_expert_load_window tensor.
     assert model_state.window_ready_event is not None
-    model_state.window_ready_event.synchronize()
+    model_state.window_ready_event.wait()
     model_state.window_ready_event = None
 
     # Move the global expert load window to CPU for computation.
