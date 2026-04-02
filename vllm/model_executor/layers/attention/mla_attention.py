@@ -2513,7 +2513,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 if hasattr(self.kv_b_proj, "weight")
                 else self.kv_b_proj.params_dtype
             )
-            if use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype():
+            if (
+                use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
+            ) and _kv_b_proj_w_dtype != torch.int8:
                 kv_c_normed = kv_c_normed.to(_kv_b_proj_w_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
