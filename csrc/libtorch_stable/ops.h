@@ -158,6 +158,14 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
                                          bool inplace);
 
+// Layernorm kernels (shared CUDA/ROCm)
+void rms_norm(torch::stable::Tensor& out, torch::stable::Tensor& input,
+              torch::stable::Tensor& weight, double epsilon);
+
+void fused_add_rms_norm(torch::stable::Tensor& input,
+                        torch::stable::Tensor& residual,
+                        torch::stable::Tensor& weight, double epsilon);
+
 // Positional encoding kernels (shared CUDA/ROCm)
 void rotary_embedding(torch::stable::Tensor& positions,
                       torch::stable::Tensor& query,
