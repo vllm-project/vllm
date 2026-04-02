@@ -53,10 +53,8 @@ echo "Uploading indices to $S3_COMMIT_PREFIX"
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "$S3_COMMIT_PREFIX"
 
 # copy to /nightly/ only if it is on the main branch and not a PR
-if [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
-    echo "Uploading indices to overwrite /nightly/"
-    aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
-fi
+echo "Uploading indices to overwrite /nightly/"
+aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
 
 # detect version from any wheel in the commit directory
 # download the first wheel we find to extract version metadata

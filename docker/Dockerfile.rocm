@@ -330,7 +330,8 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip install --system -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system *.whl \
+    && uv pip install --system "transformers==5.5.0"
 
 # Verify that PyTorch is the ROCm build, not CUDA
 RUN python3 -c "import torch; assert torch.version.hip is not None, \
@@ -428,6 +429,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
+    && uv pip install --system "transformers==5.5.0"
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
