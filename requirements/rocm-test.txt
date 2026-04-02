@@ -1227,7 +1227,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@2da00a3cec88fac160d481406e7961cf59472894
+transformers @ git+https://github.com/huggingface/transformers.git@abc417a4b6cf05e474921449641f2ff0cc93d3dd
     # via
     #   -c requirements/common.txt
     #   -r requirements/rocm-test.in
