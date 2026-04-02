@@ -147,7 +147,8 @@ class MistralToolParser(ToolParser):
             for attribute in so_non_supported_attributes
         )
         response_format_non_supported_active = (
-            request.response_format is not None
+            isinstance(request, ResponsesRequest)
+            or request.response_format is not None
             and request.response_format.type == "structural_tag"
         )
 
