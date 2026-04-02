@@ -130,22 +130,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor workspace, int k, int max_seq_len) -> ()");
   ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
 
-  // Fused Layernorm + Quant kernels
-  ops.def(
-      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
-      "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual) -> ()");
-  ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
-           &rms_norm_dynamic_per_token_quant);
-
-  // Fused Layernorm + Block quant kernels
-  ops.def(
-      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
-      "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual, int group_size, "
-      "bool is_scale_transposed) -> ()");
-  ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
-
   // Quantization ops
 #ifndef USE_ROCM
 

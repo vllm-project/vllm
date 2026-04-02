@@ -5,7 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "../../dispatch_utils.h"
-#include "quant_conversions.cuh"
+#include "libtorch_stable/quantization/fused_kernels/quant_conversions.cuh"
 #include "../w8a8/fp8/common.cuh"
 
 namespace vllm {

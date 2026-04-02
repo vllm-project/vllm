@@ -92,26 +92,13 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
                      int64_t max_seq_len);
 
-void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
-                                      torch::Tensor const& input,
-                                      torch::Tensor const& weight,
-                                      torch::Tensor& scales,
-                                      double const epsilon,
-                                      std::optional<torch::Tensor> scale_ub,
-                                      std::optional<torch::Tensor> residual);
-
-void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& weight,
-                              torch::Tensor& scales, double const epsilon,
-                              std::optional<torch::Tensor> scale_ub,
-                              std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed);
-
+#ifndef USE_ROCM
 void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   torch::Tensor const& input,
                                   torch::Tensor& scales, int64_t group_size,
                                   std::optional<torch::Tensor> scale_ub,
                                   bool is_scale_transposed);
+#endif
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
