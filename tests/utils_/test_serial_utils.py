@@ -7,28 +7,22 @@ from tests.models.utils import check_embeddings_close
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
     ENDIANNESS,
+    MM_METADATA_DTYPES,
     EmbedDType,
     Endianness,
+    MmMetadataDType,
     binary2tensor,
     tensor2binary,
 )
 
-FLOAT_EMBED_DTYPES = tuple(
-    embed_dtype
-    for embed_dtype, dtype_info in EMBED_DTYPES.items()
-    if dtype_info.torch_dtype.is_floating_point
-)
-INTEGER_EMBED_DTYPES = tuple(
-    embed_dtype
-    for embed_dtype, dtype_info in EMBED_DTYPES.items()
-    if not dtype_info.torch_dtype.is_floating_point
-)
+FLOAT_EMBED_DTYPES = tuple(EMBED_DTYPES.keys())
+INTEGER_EMBED_DTYPES = tuple(MM_METADATA_DTYPES.keys())
 
 
 def _build_integer_tensor(
-    embed_dtype: EmbedDType, shape: tuple[int, ...]
+    embed_dtype: MmMetadataDType, shape: tuple[int, ...]
 ) -> torch.Tensor:
-    torch_dtype = EMBED_DTYPES[embed_dtype].torch_dtype
+    torch_dtype = MM_METADATA_DTYPES[embed_dtype].torch_dtype
 
     if torch_dtype is torch.bool:
         return torch.randint(0, 2, shape, dtype=torch.int32).to(torch.bool)
@@ -73,7 +67,9 @@ def test_encode_and_decode_floats(embed_dtype: EmbedDType, endianness: Endiannes
 @pytest.mark.parametrize("endianness", ENDIANNESS)
 @pytest.mark.parametrize("embed_dtype", INTEGER_EMBED_DTYPES)
 @torch.inference_mode()
-def test_encode_and_decode_integers(embed_dtype: EmbedDType, endianness: Endianness):
+def test_encode_and_decode_integers(
+    embed_dtype: MmMetadataDType, endianness: Endianness
+):
     shape = (2, 3, 5, 7, 11, 13)
 
     for i in range(10):
@@ -81,5 +77,5 @@ def test_encode_and_decode_integers(embed_dtype: EmbedDType, endianness: Endiann
         binary = tensor2binary(tensor, embed_dtype, endianness)
         new_tensor = binary2tensor(binary, shape, embed_dtype, endianness)
 
-        assert new_tensor.dtype == EMBED_DTYPES[embed_dtype].torch_dtype
+        assert new_tensor.dtype == MM_METADATA_DTYPES[embed_dtype].torch_dtype
         torch.testing.assert_close(tensor, new_tensor, atol=0, rtol=0)
