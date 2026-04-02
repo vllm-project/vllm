@@ -57,6 +57,7 @@ logger = init_logger(__name__)
 
 # ── VAE components (needed for image understanding pipeline) ────────
 
+
 def _swish(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x)
 
@@ -127,12 +128,19 @@ class _Upsample(nn.Module):
 
 
 _VAE_ENCODER_DEFAULTS = {
-    "in_channels": 3, "ch": 128, "ch_mult": [1, 2, 4, 4],
-    "num_res_blocks": 2, "z_channels": 32,
+    "in_channels": 3,
+    "ch": 128,
+    "ch_mult": [1, 2, 4, 4],
+    "num_res_blocks": 2,
+    "z_channels": 32,
 }
 _VAE_DECODER_DEFAULTS = {
-    "in_channels": 3, "out_ch": 3, "ch": 128, "ch_mult": [1, 2, 4, 4],
-    "num_res_blocks": 2, "z_channels": 32,
+    "in_channels": 3,
+    "out_ch": 3,
+    "ch": 128,
+    "ch_mult": [1, 2, 4, 4],
+    "num_res_blocks": 2,
+    "z_channels": 32,
 }
 
 
@@ -283,7 +291,10 @@ class CheersVAEModel(nn.Module):
         z_ch = _cfg(enc_cfg, "z_channels", _VAE_ENCODER_DEFAULTS)
         self.bn = nn.BatchNorm2d(
             math.prod(self.ps) * z_ch,
-            eps=1e-4, momentum=0.1, affine=False, track_running_stats=True,
+            eps=1e-4,
+            momentum=0.1,
+            affine=False,
+            track_running_stats=True,
         )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -291,8 +302,10 @@ class CheersVAEModel(nn.Module):
         moments = self.encoder(x)
         mean = torch.chunk(moments, 2, dim=1)[0]
         z = rearrange(
-            mean, "... c (i pi) (j pj) -> ... (c pi pj) i j",
-            pi=self.ps[0], pj=self.ps[1],
+            mean,
+            "... c (i pi) (j pj) -> ... (c pi pj) i j",
+            pi=self.ps[0],
+            pj=self.ps[1],
         )
         return self.bn(z)
 
@@ -309,7 +322,10 @@ class CheersVAEDecoderProjector(nn.Module):
         z_ch = _cfg(enc_cfg, "z_channels", _VAE_ENCODER_DEFAULTS)
         self.bn = nn.BatchNorm2d(
             math.prod(self.ps) * z_ch,
-            eps=1e-4, momentum=0.1, affine=False, track_running_stats=True,
+            eps=1e-4,
+            momentum=0.1,
+            affine=False,
+            track_running_stats=True,
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -318,8 +334,10 @@ class CheersVAEDecoderProjector(nn.Module):
         m = self.bn.running_mean.view(1, -1, 1, 1)
         z = z * s + m
         z = rearrange(
-            z, "... (c pi pj) i j -> ... c (i pi) (j pj)",
-            pi=self.ps[0], pj=self.ps[1],
+            z,
+            "... (c pi pj) i j -> ... c (i pi) (j pj)",
+            pi=self.ps[0],
+            pj=self.ps[1],
         )
         return self.decoder(z)
 
@@ -584,14 +602,16 @@ class CheersForConditionalGeneration(
         if old_theta != _CHEERS_ROPE_THETA:
             logger.info(
                 "Overriding text_config.rope_theta from %s to %s",
-                old_theta, _CHEERS_ROPE_THETA,
+                old_theta,
+                _CHEERS_ROPE_THETA,
             )
             tc.rope_theta = _CHEERS_ROPE_THETA
         rp = getattr(tc, "rope_parameters", None)
         if rp is not None and rp.get("rope_theta") != _CHEERS_ROPE_THETA:
             logger.info(
                 "Overriding rope_parameters.rope_theta from %s to %s",
-                rp.get("rope_theta"), _CHEERS_ROPE_THETA,
+                rp.get("rope_theta"),
+                _CHEERS_ROPE_THETA,
             )
             rp["rope_theta"] = _CHEERS_ROPE_THETA
 
@@ -659,9 +679,7 @@ class CheersForConditionalGeneration(
 
         with torch.no_grad():
             vae_dtype = next(self.vae_model.parameters()).dtype
-            image_latent = self.vae_model.encode(
-                pixel_values.to(dtype=vae_dtype)
-            )
+            image_latent = self.vae_model.encode(pixel_values.to(dtype=vae_dtype))
             image_pixel_hat = self.vae_decoder_projector(image_latent)
 
         vision_features = self.vision_representation(image_pixel_hat)

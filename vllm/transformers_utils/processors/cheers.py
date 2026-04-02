@@ -44,13 +44,12 @@ class CheersProcessor(ProcessorMixin):
 
         if images is not None:
             import torch
+
             if isinstance(images, (list, tuple)):
                 all_pv = []
                 all_ghw = []
                 for img in images:
-                    result = self.image_processor(
-                        img, **output_kwargs["images_kwargs"]
-                    )
+                    result = self.image_processor(img, **output_kwargs["images_kwargs"])
                     all_pv.append(result["pixel_values"])
                     if "grid_hws" in result:
                         all_ghw.append(result["grid_hws"])
