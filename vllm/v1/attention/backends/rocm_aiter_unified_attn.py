@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
@@ -28,6 +29,13 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        logger.warning_once(
+            "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
+        )
+        return 64
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
@@ -193,7 +201,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         softmax_scale = self.scale
         fp8_post_attn_v_rescale = False
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             # When Q is FP8, triton kernel skips K/V dequant (for fp8xfp8 matmul).
@@ -292,7 +300,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         flash_layout = True
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

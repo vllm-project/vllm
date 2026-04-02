@@ -12,6 +12,7 @@ import vllm_xpu_kernels._C  # noqa
 import vllm_xpu_kernels._moe_C  # noqa
 import vllm_xpu_kernels._xpu_C  # noqa
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -20,6 +21,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -159,12 +161,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        cache_config = vllm_config.cache_config
-        model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
-        # in V1(or with chunked prefill) block_size is 64
-        if cache_config and not cache_config.user_specified_block_size:
-            cache_config.block_size = 64
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
@@ -181,6 +178,12 @@ class XPUPlatform(Platform):
             logger.warning(
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
+            )
+        elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(
+                "XPU Graph is disabled by environment variable, "
+                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
         elif parallel_config.world_size_across_dp > 1:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -209,28 +212,11 @@ class XPUPlatform(Platform):
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
-        if model_config and model_config.use_mla:
-            logger.info(
-                "MLA is enabled on a non-GPU platform; forcing chunked "
-                "prefill and prefix caching to be disabled."
-            )
-            vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.model_config.max_model_len,
-                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            )
-
         # In some cases, the internal memory type cache can misdetect GPU
         # memory as host memory, also leading to invalid memory access.
         # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
         # ref. https://openucx.readthedocs.io/en/master/faq.html
         os.environ["UCX_MEMTYPE_CACHE"] = "n"
-
-    @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: XPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -248,6 +234,7 @@ class XPUPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
+        torch.xpu.empty_cache()
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
 
@@ -270,6 +257,21 @@ class XPUPlatform(Platform):
                 " is not available."
             )
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use fused kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+
+        return IrOpPriorityConfig.with_default(default)
 
     @classmethod
     def device_count(cls) -> int:

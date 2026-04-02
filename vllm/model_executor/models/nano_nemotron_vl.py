@@ -10,10 +10,10 @@
 import copy
 import math
 import warnings
-from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Annotated, Literal, TypeAlias, TypeVar
+from io import BytesIO
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -47,13 +48,12 @@ from vllm.multimodal.evs import (
 )
 from vllm.multimodal.inputs import (
     AudioItem,
-    MultiModalDataDict,
+    BatchedTensorInputs,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
     VideoItem,
 )
-from vllm.multimodal.media.audio import extract_audio_from_video_bytes
+from vllm.multimodal.media.audio import load_audio_pyav
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
@@ -196,21 +196,58 @@ NanoNemotronVLVideoInputs: TypeAlias = (
 )
 
 
-class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
-    """Basic image-only ProcessingInfo for InternVL-style models."""
+class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
+    def get_hf_processor(self, **kwargs: object) -> NanoNemotronVLProcessor:
+        return self.ctx.init_processor(
+            NanoNemotronVLProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            video_token=self.get_video_token(),
+            video_pruning_rate=self.get_video_pruning_rate(),
+            max_model_len=self.ctx.model_config.max_model_len,
+            **kwargs,
+        )
 
-    @abstractmethod
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ) -> BaseNanoNemotronVLProcessor:
-        raise NotImplementedError
+    @cached_property
+    def is_dynamic_tiler(self) -> bool:
+        return self.get_hf_processor().dynamic_tiler is not None
+
+    @cached_property
+    def supports_video(self):
+        return self.get_hf_processor().supports_video
+
+    def get_video_token(self) -> str | None:
+        return IMG_CONTEXT
+
+    def get_video_pruning_rate(self) -> float | None:
+        return self.ctx.get_mm_config().video_pruning_rate
+
+    @property
+    def audio_extractor(self) -> ParakeetExtractor | None:
+        return self.get_hf_processor().audio_extractor
 
     def get_default_tok_params(self) -> TokenizeParams:
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
+        image_limit = {"image": None}
+        video_limit = {"video": None} if self.supports_video else {}
+        audio_limit = {"audio": None} if self.audio_extractor is not None else {}
+        return {**image_limit, **video_limit, **audio_limit}
+
+    def get_data_parser(self):
+        target_sr = None
+        target_channels = None
+        if extractor := self.audio_extractor:
+            target_sr = extractor.sampling_rate
+            target_channels = 1
+
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            target_sr=target_sr,
+            target_channels=target_channels,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
     def get_image_size_with_most_features(self, max_num_tiles: int) -> ImageSize:
         processor = self.get_hf_processor()
@@ -248,46 +285,6 @@ class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
             max_num_tiles=max_num_tiles,
         )
 
-
-_I = TypeVar("_I", bound=BaseNanoNemotronVLProcessingInfo)
-
-
-class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
-    """ProcessingInfo extended for video processing"""
-
-    @property
-    def supports_video(self):
-        return self.get_hf_processor().supports_video
-
-    @property
-    def audio_extractor(self) -> ParakeetExtractor | None:
-        return self.get_hf_processor().audio_extractor
-
-    def get_data_parser(self):
-        target_sr = None
-        target_channels = None
-        if extractor := self.audio_extractor:
-            target_sr = extractor.sampling_rate
-            target_channels = 1
-
-        return MultiModalDataParser(
-            video_needs_metadata=True,
-            target_sr=target_sr,
-            target_channels=target_channels,
-            expected_hidden_size=self._get_expected_hidden_size(),
-        )
-
-    def get_supported_mm_limits(self):
-        video_limit = {"video": None} if self.supports_video else {}
-        audio_limit = {"audio": None} if self.audio_extractor is not None else {}
-        return {**super().get_supported_mm_limits(), **video_limit, **audio_limit}
-
-    def get_video_token(self) -> str | None:
-        return IMG_CONTEXT
-
-    def get_video_pruning_rate(self) -> float | None:
-        return self.ctx.get_mm_config().video_pruning_rate
-
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
@@ -306,31 +303,26 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
         max_frames_per_video = max_tubelets_per_video * T
         return max(max_frames_per_video, 1)
 
-    def get_hf_processor(self, **kwargs: object) -> NanoNemotronVLProcessor:
-        return self.ctx.init_processor(
-            NanoNemotronVLProcessor,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
-            video_token=self.get_video_token(),
-            video_pruning_rate=self.get_video_pruning_rate(),
-            max_model_len=self.ctx.model_config.max_model_len,
-            **kwargs,
-        )
 
-
-class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    """Basic image-only MultiModalProcessor for InternVL-style models."""
-
-    @cached_property
-    def is_dynamic_tiler(self) -> bool:
-        return self.info.get_hf_processor().dynamic_tiler is not None
-
-    def _get_mm_fields_config(
+class NanoNemotronVLMultiModalProcessor(
+    BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]
+):
+    def _call_hf_processor(
         self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        if self.is_dynamic_tiler:
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """
+        Bypass `call_hf_processor_mm_only` by no-op overriding`_call_hf_processor`,
+        so it chooses this path:
+        `type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor`
+        """
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
+    def _get_image_fields_config(self, hf_inputs: BatchFeature):
+        if self.info.is_dynamic_tiler:
             pixel_values_flat = MultiModalFieldConfig.batched("image")
         else:
             image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -346,15 +338,50 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             imgs_sizes=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_updates(
+    def _get_video_fields_config(self, hf_inputs: BatchFeature):
+        video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
+
+        return dict(
+            pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
+                "video", video_num_patches
+            ),
+            video_num_patches=MultiModalFieldConfig.batched("video"),
+            frames_indices=MultiModalFieldConfig.batched("video"),
+            frame_duration_ms=MultiModalFieldConfig.batched("video"),
+        )
+
+    def _get_audio_fields_config(self, hf_inputs: BatchFeature):
+        audio_num_clips = torch.as_tensor(hf_inputs["audio_num_clips"])
+
+        return dict(
+            input_audio_features=MultiModalFieldConfig.flat_from_sizes(
+                "audio", audio_num_clips
+            ),
+            feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
+                "audio", audio_num_clips
+            ),
+            audio_num_clips=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
+        )
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        fields = self._get_image_fields_config(hf_inputs)
+        if self.info.supports_video:
+            fields |= self._get_video_fields_config(hf_inputs)
+        if self.info.audio_extractor:
+            fields |= self._get_audio_fields_config(hf_inputs)
+
+        return fields
+
+    def _get_prompt_repl_image(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        out_mm_data = out_mm_kwargs.get_data()
+        hf_processor: NanoNemotronVLProcessor,
+        out_mm_data: BatchedTensorInputs,
+    ):
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -365,7 +392,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             image_num_patches = []
 
-        def get_replacement_custom(item_idx: int):
+        def get_image_replacement(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems)
             )
@@ -377,10 +404,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 feature_size = tiler.get_cached_feature_size(image)
             else:
                 image_size = images.get_image_size(item_idx)
-                # Extract max_num_tiles from kwargs, default to 12
-                max_num_tiles = hf_processor_mm_kwargs.get(
-                    "max_num_tiles", hf_processor.max_num_tiles
-                )
+                max_num_tiles = hf_processor.max_num_tiles
                 feature_size = hf_processor.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
@@ -398,194 +422,18 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             return hf_processor.get_image_repl(feature_size, num_patches)
 
-        return [
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=get_replacement_custom,
-            )
-        ]
+        return PromptReplacement(
+            modality="image",
+            target="<image>",
+            replacement=get_image_replacement,
+        )
 
-
-class NanoNemotronVLMultiModalProcessor(
-    NanoNemotronBaseVLMultiModalProcessor[NanoNemotronVLProcessingInfo]
-):
-    """MultiModalProcessor extended for video support"""
-
-    def _extract_audio_from_videos(
+    def _get_prompt_repl_video(
         self,
         mm_items: MultiModalDataItems,
-    ) -> tuple[MultiModalDataItems, list[AudioItem]]:
-        """Extract audio tracks from video bytes in *mm_items*.
-
-        Returns:
-            The augmented *mm_items* (with audio added) and the list of
-            extracted audio items.
-        """
-        videos = mm_items.get_items("video", VideoProcessorItems)
-        assert isinstance(videos.metadata, list)
-        metadata_list = videos.metadata
-
-        audio_items: list[AudioItem] = []
-        for metadata in metadata_list:
-            video_bytes = metadata.get("original_video_bytes")
-            if video_bytes is None or len(video_bytes) == 0:
-                raise ValueError(
-                    "Cannot extract audio from video: original_video_bytes is "
-                    "missing or empty. When using use_audio_in_video=True, "
-                    "video must be loaded with keep_video_bytes=True (e.g. via "
-                    "the chat API with a model that sets use_audio_in_video)."
-                )
-            audio_items.append(extract_audio_from_video_bytes(video_bytes))
-
-        # Create a new VideoProcessorItems with metadata that does not contain
-        # the large video bytes, to avoid modifying the input `mm_items`.
-        new_metadata_list = [
-            {k: v for k, v in meta.items() if k != "original_video_bytes"}
-            for meta in metadata_list
-        ]
-        new_videos = VideoProcessorItems(data=videos.data, metadata=new_metadata_list)
-
-        audio_parsed = self.data_parser.parse_mm_data({"audio": audio_items})
-
-        # Create a new MultiModalDataItems with the new video and audio items.
-        new_mm_items_dict = {**mm_items, **audio_parsed, "video": new_videos}
-        mm_items = MultiModalDataItems(new_mm_items_dict)
-
-        return mm_items, audio_items
-
-    def apply(
-        self,
-        processor_inputs: ProcessorInputs,
-        timing_ctx: TimingContext | None = None,
-    ) -> MultiModalInputs:
-        if (hf_processor_mm_kwargs := processor_inputs.hf_processor_mm_kwargs) is None:
-            hf_processor_mm_kwargs = {}
-
-        use_audio_in_video = bool(
-            hf_processor_mm_kwargs.get("use_audio_in_video", False)
-        )
-
-        hf_processor_mm_kwargs = {
-            k: v for k, v in hf_processor_mm_kwargs.items() if k != "use_audio_in_video"
-        }
-
-        processor_inputs.hf_processor_mm_kwargs = hf_processor_mm_kwargs
-
-        if not (
-            use_audio_in_video
-            and "video" in processor_inputs.mm_data_items
-            and "audio" not in processor_inputs.mm_data_items
-        ):
-            return super().apply(
-                processor_inputs,
-                timing_ctx,
-            )
-
-        mm_items, audio_items = self._extract_audio_from_videos(
-            processor_inputs.mm_data_items
-        )
-        processor_inputs.mm_data_items = mm_items
-
-        prompt = processor_inputs.prompt
-        tokenizer = self.info.get_tokenizer()
-        if not isinstance(prompt, str):
-            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
-
-        for _ in audio_items:
-            prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
-
-        processor_inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
-
-        if processor_inputs.tokenization_kwargs is None:
-            processor_inputs.tokenization_kwargs = {}
-
-        # Bypass the cached path: the HF processor must receive the
-        # prompt (with injected <so_embedding>) and the audio data
-        # together so it can perform audio-token replacement natively.
-        (
-            prompt_ids,
-            mm_info,
-            is_update_applied,
-        ) = self._apply_hf_processor(
-            processor_inputs,
-            timing_ctx=timing_ctx,
-        )
-
-        prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
-            mm_items=mm_items,
-            prompt_ids=prompt_ids,
-            mm_kwargs=mm_info.kwargs,
-            mm_prompt_updates=mm_info.prompt_updates,
-            is_update_applied=is_update_applied,
-        )
-
-        mm_placeholder_ranges = {
-            modality: [item.to_range() for item in placeholders]
-            for modality, placeholders in mm_placeholders.items()
-        }
-
-        return MultiModalInputs(
-            type="multimodal",
-            prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_info.kwargs,
-            mm_hashes=mm_info.hashes,
-            mm_placeholders=mm_placeholder_ranges,
-        )
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
-        if self.info.supports_video:
-            video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
-
-            video_fields = dict(
-                pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
-                    "video", video_num_patches
-                ),
-                video_num_patches=MultiModalFieldConfig.batched("video"),
-                frames_indices=MultiModalFieldConfig.batched("video"),
-                frame_duration_ms=MultiModalFieldConfig.batched("video"),
-            )
-        else:
-            video_fields = {}
-
-        if self.info.audio_extractor is not None:
-            audio_num_clips = torch.as_tensor(hf_inputs["audio_num_clips"])
-            audio_fields = dict(
-                input_audio_features=MultiModalFieldConfig.flat_from_sizes(
-                    "audio", audio_num_clips
-                ),
-                feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
-                    "audio", audio_num_clips
-                ),
-                audio_num_clips=MultiModalFieldConfig.batched(
-                    "audio", keep_on_cpu=True
-                ),
-            )
-        else:
-            audio_fields = {}
-
-        return image_fields | video_fields | audio_fields
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        prompt_repl = super()._get_prompt_updates(
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            out_mm_kwargs=out_mm_kwargs,
-        )
-
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        out_mm_data = out_mm_kwargs.get_data()
+        hf_processor: NanoNemotronVLProcessor,
+        out_mm_data: BatchedTensorInputs,
+    ):
         if "video_num_patches" in out_mm_data:
             video_num_patches = out_mm_data["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
@@ -593,7 +441,7 @@ class NanoNemotronVLMultiModalProcessor(
         else:
             video_num_patches = []
 
-        def get_video_replacement_internvl(item_idx: int):
+        def get_video_replacement(item_idx: int):
             video, metadata = mm_items["video"][item_idx]
             patch_size = hf_processor.config.patch_size
             downsample_ratio = hf_processor.config.downsample_ratio
@@ -650,40 +498,206 @@ class NanoNemotronVLMultiModalProcessor(
                 video_temporal_patch_size=T,
             )
 
-        if self.info.supports_video:
-            prompt_repl = [
-                *prompt_repl,
-                PromptReplacement(
-                    modality="video",
-                    target="<video>",
-                    replacement=get_video_replacement_internvl,
-                ),
-            ]
+        return PromptReplacement(
+            modality="video",
+            target="<video>",
+            replacement=get_video_replacement,
+        )
 
+    def _get_prompt_repl_audio(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor: NanoNemotronVLProcessor,
+        out_mm_data: BatchedTensorInputs,
+    ):
         def get_audio_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             return hf_processor.get_audio_repl(audios.get(item_idx))
 
-        if self.info.audio_extractor is not None:
-            prompt_repl = [
-                *prompt_repl,
-                PromptReplacement(
-                    modality="audio",
-                    target=AUDIO_CONTEXT,
-                    replacement=get_audio_replacement,
-                ),
-            ]
+        return PromptReplacement(
+            modality="audio",
+            target=AUDIO_CONTEXT,
+            replacement=get_audio_replacement,
+        )
 
-        return prompt_repl
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        out_mm_data = out_mm_kwargs.get_data()
+
+        prompt_repls = [
+            self._get_prompt_repl_image(mm_items, hf_processor, out_mm_data),
+        ]
+        if self.info.supports_video:
+            prompt_repls.append(
+                self._get_prompt_repl_video(mm_items, hf_processor, out_mm_data)
+            )
+        if self.info.audio_extractor:
+            prompt_repls.append(
+                self._get_prompt_repl_audio(mm_items, hf_processor, out_mm_data)
+            )
+
+        return prompt_repls
+
+    def _extract_audio_from_videos(
+        self,
+        mm_items: MultiModalDataItems,
+    ) -> tuple[MultiModalDataItems, list[AudioItem]]:
+        """Extract audio tracks from video bytes in *mm_items*.
+
+        Returns:
+            The augmented *mm_items* (with audio added) and the list of
+            extracted audio items.
+        """
+        videos = mm_items.get_items("video", VideoProcessorItems)
+        assert isinstance(videos.metadata, list)
+        metadata_list = videos.metadata
+
+        audio_items: list[AudioItem] = []
+        for metadata in metadata_list:
+            video_bytes = metadata.get("original_video_bytes")
+            if video_bytes is None or len(video_bytes) == 0:
+                raise ValueError(
+                    "Cannot extract audio from video: original_video_bytes is "
+                    "missing or empty. When using use_audio_in_video=True, "
+                    "video must be loaded with keep_video_bytes=True (e.g. via "
+                    "the chat API with a model that sets use_audio_in_video)."
+                )
+            audio_items.append(load_audio_pyav(BytesIO(video_bytes)))
+
+        # Create a new VideoProcessorItems with metadata that does not contain
+        # the large video bytes, to avoid modifying the input `mm_items`.
+        new_metadata_list = [
+            {k: v for k, v in meta.items() if k != "original_video_bytes"}
+            for meta in metadata_list
+        ]
+        new_videos = VideoProcessorItems(data=videos.data, metadata=new_metadata_list)
+
+        audio_parsed = self.data_parser.parse_mm_data({"audio": audio_items})
+
+        # Create a new MultiModalDataItems with the new video and audio items.
+        new_mm_items_dict = {**mm_items, **audio_parsed, "video": new_videos}
+        mm_items = MultiModalDataItems(new_mm_items_dict)
+
+        return mm_items, audio_items
+
+    def apply(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        use_audio_in_video = bool(
+            inputs.hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        )
+        inputs.hf_processor_mm_kwargs = {
+            k: v
+            for k, v in inputs.hf_processor_mm_kwargs.items()
+            if k != "use_audio_in_video"
+        }
+
+        if not (
+            use_audio_in_video
+            and "video" in inputs.mm_data_items
+            and "audio" not in inputs.mm_data_items
+        ):
+            return super().apply(inputs, timing_ctx)
+
+        mm_items, audio_items = self._extract_audio_from_videos(inputs.mm_data_items)
+        inputs.mm_data_items = mm_items
+
+        prompt = inputs.prompt
+        tokenizer = self.info.get_tokenizer()
+        if not isinstance(prompt, str):
+            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+
+        for _ in audio_items:
+            prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
+
+        inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
+
+        if inputs.tokenization_kwargs is None:
+            inputs.tokenization_kwargs = {}
+
+        # Bypass the cached path: the HF processor must receive the
+        # prompt (with injected <so_embedding>) and the audio data
+        # together so it can perform audio-token replacement natively.
+        (
+            prompt_ids,
+            mm_info,
+            is_update_applied,
+        ) = self._apply_hf_processor(inputs, timing_ctx)
+
+        with timing_ctx.record("apply_prompt_updates"):
+            prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
+                mm_items=mm_items,
+                prompt_ids=prompt_ids,
+                mm_kwargs=mm_info.kwargs,
+                mm_prompt_updates=mm_info.prompt_updates,
+                is_update_applied=is_update_applied,
+            )
+
+        mm_placeholder_ranges = {
+            modality: [item.to_range() for item in placeholders]
+            for modality, placeholders in mm_placeholders.items()
+        }
+
+        return MultiModalInput(
+            type="multimodal",
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=mm_info.kwargs,
+            mm_hashes=mm_info.hashes,
+            mm_placeholders=mm_placeholder_ranges,
+        )
 
 
-class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
-    """Basic image-only DummyInputsBuilder for InternVL-style models."""
-
+class NanoNemotronVLDummyInputsBuilder(
+    BaseDummyInputsBuilder[NanoNemotronVLProcessingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        num_audios = mm_counts.get("audio", 0)
 
-        return "<image>" * num_images
+        return (
+            "<image>" * num_images + "<video>" * num_videos + AUDIO_CONTEXT * num_audios
+        )
+
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+        overrides: VideoDummyOptions | None = None,
+    ) -> list[VideoItem]:
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
+        video_items = []
+        for video in videos:
+            video_num_frames = video.shape[0]
+            video_metadata = {
+                "fps": 2,
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
+                "video_backend": "opencv_dynamic",
+                "do_sample_frames": False,
+            }
+            video_items.append((video, video_metadata))
+
+        return video_items
 
     def get_dummy_mm_data(
         self,
@@ -706,7 +720,7 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
         image_overrides = mm_options.get("image")
 
-        return {
+        dummy_image = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
@@ -715,64 +729,9 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             )
         }
 
-
-class NanoNemotronVLDummyInputsBuilder(
-    NanoNemotronVLDummyInputsBuilder[NanoNemotronVLProcessingInfo]
-):
-    """DummyInputsBuilder extended for video support"""
-
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_videos = mm_counts.get("video", 0)
-        num_audios = mm_counts.get("audio", 0)
-
-        return (
-            super().get_dummy_text(mm_counts)
-            + "<video>" * num_videos
-            + AUDIO_CONTEXT * num_audios
-        )
-
-    def _get_dummy_videos(
-        self,
-        *,
-        width: int,
-        height: int,
-        num_frames: int,
-        num_videos: int,
-        overrides: VideoDummyOptions | None = None,
-    ) -> list[VideoItem]:
-        video = super()._get_dummy_videos(
-            width=width,
-            height=height,
-            num_frames=num_frames,
-            num_videos=1,
-            overrides=overrides,
-        )[0]
-        video_items = []
-        for _ in range(num_videos):
-            video_metadata = {
-                "total_num_frames": num_frames,
-                "fps": 2,
-                "duration": num_frames / 2.0,
-                "video_backend": "opencv_dynamic",
-                "frames_indices": [i for i in range(num_frames)],
-                "do_sample_frames": False,
-            }
-            video_item = (video.copy(), video_metadata)
-            video_items.append(video_item)
-
-        return video_items
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
-    ) -> MultiModalDataDict:
-        dummy_image = super().get_dummy_mm_data(seq_len, mm_counts, mm_options)
         if self.info.supports_video:
             config = self.info.get_hf_config()
             image_size: int = config.force_image_size
-            processor = self.info.get_hf_processor()
 
             # When video_target_num_patches is set the per-frame pixel
             # resolution can exceed image_size.  Use the actual target
@@ -1256,7 +1215,6 @@ class NemotronH_Nano_VL_V2(
         These embeddings will replace the placeholder embeddings to create
         input_embeds for the LLM.
         """
-        device = video_embeddings.device
         tokenizer = cached_tokenizer_from_config(self.model_config)
 
         # Generate video replacement token IDs using get_video_repl
@@ -1275,10 +1233,10 @@ class NemotronH_Nano_VL_V2(
         )
 
         # video_repl.full is a list of token IDs
-        repl_token_ids = torch.tensor(video_repl.full, device=device)
+        repl_token_ids = torch.tensor(video_repl.full)
 
         # Get embedding token IDs for image context (use pre-tokenized version)
-        embed_token_ids = torch.tensor(self._img_context_token_ids, device=device)
+        embed_token_ids = torch.tensor(self._img_context_token_ids)
 
         # Create mask for video embedding positions
         is_video_embed = torch.isin(repl_token_ids, embed_token_ids)
