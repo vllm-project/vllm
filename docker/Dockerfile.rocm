@@ -428,7 +428,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system *.whl \
     && uv pip install --system "transformers==5.5.0"
 
 ARG COMMON_WORKDIR
