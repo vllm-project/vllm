@@ -766,6 +766,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),
+    "Cheers": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
+    "CheersForConditionalGeneration": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
     ),
