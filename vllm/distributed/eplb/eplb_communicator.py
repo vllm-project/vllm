@@ -4,6 +4,7 @@
 EPLB communicator implementations and factory.
 """
 
+import contextlib
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -382,6 +383,19 @@ class NixlEplbCommunicator(EplbCommunicator):
             )
             offset += flat.numel()
 
+    def _release_nixl_handles(
+        self,
+        xfer_handles: list[int],
+        dlist_handles: list[int],
+    ) -> None:
+        """Best-effort cleanup of NIXL handles on exception paths."""
+        for h in xfer_handles:
+            with contextlib.suppress(Exception):
+                self._nixl_wrapper.release_xfer_handle(h)
+        for h in dlist_handles:
+            with contextlib.suppress(Exception):
+                self._nixl_wrapper.release_dlist_handle(h)
+
     def _wait_for_all_transfers(self, handles: list[int]) -> None:
         pending = set(handles)
         while pending:
@@ -400,6 +414,8 @@ class NixlEplbCommunicator(EplbCommunicator):
                 time.sleep(0.0005)
 
     def execute(self) -> None:
+        xfer_handles: list[int] = []
+        dlist_handles: list[int] = []
         try:
             # Phase 1: pack send buffers.
             with torch.cuda.stream(self._cuda_stream):
@@ -448,8 +464,6 @@ class NixlEplbCommunicator(EplbCommunicator):
                 partition_bytes = peer_partition_numel * element_size
                 recv_base = recv_buffer.data_ptr()
 
-                transfer_handles: list[int] = []
-                temp_dlist_handles: list[int] = []
                 for src, peer_tensors in enumerate(recv_per_peer):
                     if not peer_tensors:
                         continue
@@ -472,7 +486,7 @@ class NixlEplbCommunicator(EplbCommunicator):
                         "NIXL_INIT_AGENT",
                         local_desc,
                     )
-                    temp_dlist_handles.append(local_handle)
+                    dlist_handles.append(local_handle)
 
                     # Remote send descriptor pointing at the slice of
                     # the source rank's send buffer packed for us.
@@ -494,7 +508,7 @@ class NixlEplbCommunicator(EplbCommunicator):
                         agent_name,
                         remote_desc,
                     )
-                    temp_dlist_handles.append(remote_handle)
+                    dlist_handles.append(remote_handle)
 
                     # Initiate READ from the remote send buffer
                     # into the local recv buffer.
@@ -506,12 +520,14 @@ class NixlEplbCommunicator(EplbCommunicator):
                         [0],
                     )
                     self._nixl_wrapper.transfer(xfer_handle)
-                    transfer_handles.append(xfer_handle)
+                    xfer_handles.append(xfer_handle)
 
-                self._wait_for_all_transfers(transfer_handles)
+                self._wait_for_all_transfers(xfer_handles)
+                xfer_handles.clear()
 
-                for h in temp_dlist_handles:
+                for h in dlist_handles:
                     self._nixl_wrapper.release_dlist_handle(h)
+                dlist_handles.clear()
 
                 with torch.cuda.stream(self._cuda_stream):
                     for src, peer_tensors in enumerate(recv_per_peer):
@@ -523,6 +539,7 @@ class NixlEplbCommunicator(EplbCommunicator):
                             src * peer_partition_numel,
                         )
         finally:
+            self._release_nixl_handles(xfer_handles, dlist_handles)
             self._send_tensors.clear()
             self._recv_tensors.clear()
 
