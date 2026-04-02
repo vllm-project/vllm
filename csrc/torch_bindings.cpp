@@ -106,19 +106,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-  // Layernorm
-  // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
-      "()");
-  ops.impl("rms_norm", torch::kCUDA, &rms_norm);
-
-  // In-place fused Add and RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
-      "float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
-
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
