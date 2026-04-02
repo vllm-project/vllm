@@ -97,11 +97,40 @@ class CPUWorker(Worker):
             local_dp_rank = self.parallel_config.data_parallel_rank_local
             omp_cpuids_list = omp_cpuids.split("|")
             if local_dp_rank is not None:
+                # In DP mode, slice the list to get configurations for
+                # current DP group
                 world_size = self.parallel_config.world_size
-                omp_cpuids_list = omp_cpuids_list[
-                    local_dp_rank * world_size : (local_dp_rank + 1) * world_size
-                ]
-            self.local_omp_cpuid = omp_cpuids_list[self.rank]
+                start_idx = local_dp_rank * world_size
+                end_idx = (local_dp_rank + 1) * world_size
+                omp_cpuids_list = omp_cpuids_list[start_idx:end_idx]
+                
+                # Defensive check: ensure the sliced list has enough entries
+                if len(omp_cpuids_list) < world_size:
+                    raise ValueError(
+                        f"VLLM_CPU_OMP_THREADS_BIND is misconfigured. "
+                        f"Expected at least {world_size} entries for DP rank "
+                        f"{local_dp_rank}, but got {len(omp_cpuids_list)} "
+                        f"from sliced list. Original "
+                        f"VLLM_CPU_OMP_THREADS_BIND: '{omp_cpuids}'"
+                    )
+                
+                # CRITICAL FIX: Use local index instead of global rank
+                # In multi-node DP scenarios, self.rank is global (e.g., 2, 3 on node 1)
+                # but omp_cpuids_list is sliced to local scope (length = world_size)
+                # We must use rank % world_size to get the local index
+                local_index = self.rank % world_size
+                self.local_omp_cpuid = omp_cpuids_list[local_index]
+            else:
+                # Non-DP mode: use global rank directly
+                # Defensive check: ensure the list has enough entries
+                if len(omp_cpuids_list) <= self.rank:
+                    raise ValueError(
+                        f"VLLM_CPU_OMP_THREADS_BIND is misconfigured. "
+                        f"Expected at least {self.rank + 1} entries, but got "
+                        f"{len(omp_cpuids_list)}. Original "
+                        f"VLLM_CPU_OMP_THREADS_BIND: '{omp_cpuids}'"
+                    )
+                self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
             ret = torch.ops._C.init_cpu_threads_env(self.local_omp_cpuid)
