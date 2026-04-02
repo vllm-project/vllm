@@ -23,7 +23,11 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import (
+    cp_all_gather_heads,
+    cp_lse_ag_out_rs,
+    reserve_cp_collective_workspace,
+)
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -655,6 +659,14 @@ class FlashAttentionImpl(AttentionImpl):
         self._dcp_dtype: torch.dtype | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
             self._dcp_dtype = vllm_config.model_config.dtype
+            reserve_cp_collective_workspace(
+                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                total_heads=self.num_heads * self.dcp_world_size,
+                gather_head_dim=self.head_size,
+                reduce_scatter_head_dim=self.head_size,
+                cp_world_size=self.dcp_world_size,
+                dtype=self._dcp_dtype,
+            )
 
     def forward(
         self,
@@ -877,7 +889,7 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        query_across_dcp = cp_all_gather_heads(query, get_dcp_group())
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )

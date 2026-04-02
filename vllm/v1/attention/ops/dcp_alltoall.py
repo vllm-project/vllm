@@ -28,6 +28,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.common import get_cp_collective_scratch_tensors
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -329,14 +330,19 @@ def dcp_a2a_lse_reduce(
 
     # Reshape for All-to-All: [B, H, D] -> [N, B, H/N, D]
     # Split heads into N chunks, each destined for a different rank
-    send_output = (
-        local_output.view(B, world_size, H_per_rank, D).permute(1, 0, 2, 3).contiguous()
+    send_output, recv_output, send_lse, recv_lse = get_cp_collective_scratch_tensors(
+        local_output.device,
+        ((world_size, B, H_per_rank, D), local_output.dtype),
+        ((world_size, B, H_per_rank, D), local_output.dtype),
+        ((world_size, B, H_per_rank), local_lse.dtype),
+        ((world_size, B, H_per_rank), local_lse.dtype),
     )
-    recv_output = torch.empty_like(send_output)
+    send_output.copy_(
+        local_output.view(B, world_size, H_per_rank, D).permute(1, 0, 2, 3)
+    )
 
     # Same for LSE: [B, H] -> [N, B, H/N]
-    send_lse = local_lse.view(B, world_size, H_per_rank).permute(1, 0, 2).contiguous()
-    recv_lse = torch.empty_like(send_lse)
+    send_lse.copy_(local_lse.view(B, world_size, H_per_rank).permute(1, 0, 2))
 
     # All-to-All for partial attention outputs and LSE values (async overlap)
     work_output = dist.all_to_all_single(

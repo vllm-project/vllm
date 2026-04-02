@@ -261,7 +261,11 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import (
+    cp_all_gather_heads,
+    cp_lse_ag_out_rs,
+    reserve_cp_collective_workspace,
+)
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
@@ -421,6 +425,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         vllm_config = get_current_vllm_config_or_none()
+        # reserve collective workspace for dcp
+        if vllm_config is not None:
+            dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+            if dcp_world_size > 1:
+                speculative_config = vllm_config.speculative_config
+                num_spec_tokens = (
+                    speculative_config.num_speculative_tokens
+                    if speculative_config is not None
+                    else 0
+                )
+                reserve_cp_collective_workspace(
+                    max_num_tokens=vllm_config.scheduler_config.max_num_seqs
+                    * (1 + num_spec_tokens),
+                    total_heads=self.num_heads * dcp_world_size,
+                    gather_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
+                    reduce_scatter_head_dim=self.kv_lora_rank,
+                    cp_world_size=dcp_world_size,
+                    dtype=vllm_config.model_config.dtype,
+                )
         self.dcp_a2a = (
             vllm_config is not None
             and vllm_config.parallel_config.decode_context_parallel_size > 1
@@ -679,8 +702,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                 mqa_q = torch.cat(mqa_q, dim=-1)
-                # mqa_q do allgather in head dim.
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                # mqa_q do allgather in head dim, reuse workspace
+                mqa_q = cp_all_gather_heads(mqa_q, get_dcp_group())
 
             # call decode attn
             if not is_sparse_impl:
@@ -2561,7 +2584,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
-        k_scale: torch.Tensor,
+        k_scale: torch.Tensor | None,
         dcp_world_size: int,
     ):
         assert k_scale is None, "DCP not support scaled kvcache now."
@@ -2602,8 +2625,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             ]
             assert toks * dcp_world_size <= cur_allgather_workspace.shape[0]
             cur_allgather_kvcache = cur_allgather_workspace[: toks * dcp_world_size]
-            cur_allgather_kvcache.copy_(
-                get_dcp_group().all_gather(local_gathered_kvcache, dim=0)
+            dcp_group = get_dcp_group()
+            dcp_group.all_gather_into_tensor(
+                cur_allgather_kvcache, local_gathered_kvcache
             )
             assert (
                 cur_allgather_kvcache.shape[-1]

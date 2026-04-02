@@ -236,10 +236,26 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def all_gather_into_tensor(
+        self, output_tensor: torch.Tensor, input_: torch.Tensor
+    ) -> torch.Tensor:
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().all_gather_into_tensor(output_tensor, input_)
+        pynccl_comm.all_gather(output_tensor, input_)
+        return output_tensor
+
+    def reduce_scatter_tensor(
+        self, output_tensor: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().reduce_scatter_tensor(output_tensor, input_tensor)
+        pynccl_comm.reduce_scatter(output_tensor, input_tensor)
+        return output_tensor
+
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
-        pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -256,7 +272,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        pynccl_comm.reduce_scatter(output, input_tensor)
+        self.reduce_scatter_tensor(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()

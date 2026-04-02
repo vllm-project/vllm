@@ -179,6 +179,21 @@ class DeviceCommunicatorBase:
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
+    def all_gather_into_tensor(
+        self, output_tensor: torch.Tensor, input_: torch.Tensor
+    ) -> torch.Tensor:
+        input_size = input_.size()
+        expected_output_size = (input_size[0] * self.world_size,) + input_size[1:]
+        assert output_tensor.shape == expected_output_size, (
+            "Invalid output shape for all_gather_into_tensor: "
+            f"expected {expected_output_size}, got {tuple(output_tensor.shape)}"
+        )
+        assert output_tensor.is_contiguous(), (
+            "all_gather_into_tensor requires a contiguous output tensor"
+        )
+        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        return output_tensor
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
             # Convert negative dim to positive.
@@ -193,7 +208,7 @@ class DeviceCommunicatorBase:
             output_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        self.all_gather_into_tensor(output_tensor, input_.contiguous())
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
@@ -238,12 +253,31 @@ class DeviceCommunicatorBase:
         )
 
         # Perform reduce-scatter operation
-        torch.distributed.reduce_scatter_tensor(
-            output_tensor, input_tensor, group=self.device_group
-        )
+        self.reduce_scatter_tensor(output_tensor, input_tensor)
 
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
+
+    def reduce_scatter_tensor(
+        self, output_tensor: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        expected_input_shape = (output_tensor.shape[0] * self.world_size,) + tuple(
+            output_tensor.shape[1:]
+        )
+        assert input_tensor.shape == expected_input_shape, (
+            "Invalid input shape for reduce_scatter_tensor: "
+            f"expected {expected_input_shape}, got {tuple(input_tensor.shape)}"
+        )
+        assert input_tensor.is_contiguous(), (
+            "reduce_scatter_tensor requires a contiguous input tensor"
+        )
+        assert output_tensor.is_contiguous(), (
+            "reduce_scatter_tensor requires a contiguous output tensor"
+        )
+        torch.distributed.reduce_scatter_tensor(
+            output_tensor, input_tensor, group=self.device_group
+        )
+        return output_tensor
 
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None

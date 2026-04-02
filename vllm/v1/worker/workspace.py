@@ -27,6 +27,9 @@ _GiB = 1024**3
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
 
+DEFAULT_WORKSPACE_POOL = "default"
+COMM_WORKSPACE_POOL = "comm"
+
 
 class WorkspaceManager:
     """Manager for workspace allocation.
@@ -39,8 +42,17 @@ class WorkspaceManager:
         self._device = device
         # Cache num ubatches at init based on configuration (default to 1)
         self._num_ubatches = num_ubatches if num_ubatches is not None else 1
-        self._current_workspaces: list[torch.Tensor | None] = [None, None]
+        self._current_workspaces: dict[str, list[torch.Tensor | None]] = {
+            DEFAULT_WORKSPACE_POOL: [None, None]
+        }
         self._locked: bool = False
+
+    def _get_workspace_pool(self, pool: str) -> list[torch.Tensor | None]:
+        workspaces = self._current_workspaces.get(pool)
+        if workspaces is None:
+            workspaces = [None, None]
+            self._current_workspaces[pool] = workspaces
+        return workspaces
 
     @staticmethod
     def _workspace_size_bytes(workspace: torch.Tensor | None) -> int:
@@ -57,13 +69,15 @@ class WorkspaceManager:
         """
         self._locked = True
         if envs.VLLM_DEBUG_WORKSPACE:
+            workspace_sizes = [
+                self._workspace_size_bytes(ws) / _MB
+                for pool in self._current_workspaces.values()
+                for ws in pool
+                if ws is not None
+            ]
             logger.info(
                 "[WORKSPACE DEBUG] Workspace locked. Current sizes: %s",
-                [
-                    self._workspace_size_bytes(ws) / _MB
-                    for ws in self._current_workspaces
-                    if ws is not None
-                ],
+                workspace_sizes,
             )
 
     def unlock(self) -> None:
@@ -74,13 +88,15 @@ class WorkspaceManager:
         """
         self._locked = False
         if envs.VLLM_DEBUG_WORKSPACE:
+            workspace_sizes = [
+                self._workspace_size_bytes(ws) / _MB
+                for pool in self._current_workspaces.values()
+                for ws in pool
+                if ws is not None
+            ]
             logger.info(
                 "[WORKSPACE DEBUG] Workspace unlocked. Current sizes: %s",
-                [
-                    self._workspace_size_bytes(ws) / _MB
-                    for ws in self._current_workspaces
-                    if ws is not None
-                ],
+                workspace_sizes,
             )
 
     def is_locked(self) -> bool:
@@ -88,12 +104,15 @@ class WorkspaceManager:
         return self._locked
 
     def get_simultaneous(
-        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+        self,
+        *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype],
+        pool: str = DEFAULT_WORKSPACE_POOL,
     ) -> list[torch.Tensor]:
         """Get multiple workspace tensors simultaneously from a single allocation.
 
         Args:
             *shapes_and_dtypes: One or more (shape, dtype) tuples.
+            pool: The workspace pool to allocate from.
 
         Returns:
             List of tensor views into the workspace buffer, one per shape/dtype pair.
@@ -105,7 +124,7 @@ class WorkspaceManager:
         # Calculate cumulative offsets using itertools.accumulate
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
 
-        current_workspace = self._ensure_workspace_size(total_bytes)
+        current_workspace = self._ensure_workspace_size(total_bytes, pool=pool)
 
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
@@ -114,7 +133,9 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
+    def _ensure_workspace_size(
+        self, required_bytes: int, pool: str = DEFAULT_WORKSPACE_POOL
+    ) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
         Args:
@@ -124,7 +145,8 @@ class WorkspaceManager:
             The current workspace tensor.
         """
         ubatch_id = dbo_current_ubatch_id()
-        current_workspace = self._current_workspaces[ubatch_id]
+        workspaces = self._get_workspace_pool(pool)
+        current_workspace = workspaces[ubatch_id]
         current_size = self._workspace_size_bytes(current_workspace)
 
         if current_size < required_bytes:
@@ -151,7 +173,8 @@ class WorkspaceManager:
                     )
                 return "unknown"
 
-            if self._locked:
+            can_initialize_locked_pool = current_size == 0
+            if self._locked and not can_initialize_locked_pool:
                 raise AssertionError(
                     f"Workspace is locked but allocation from '{get_caller_info()}' "
                     f"requires {required_bytes / _MB:.2f} MB, current size is "
@@ -160,7 +183,7 @@ class WorkspaceManager:
                 )
 
             for ubatch_id in range(self._num_ubatches):
-                current_workspace = self._current_workspaces[ubatch_id]
+                current_workspace = workspaces[ubatch_id]
                 if (
                     current_workspace is None
                     or self._workspace_size_bytes(current_workspace) < required_bytes
@@ -170,16 +193,17 @@ class WorkspaceManager:
                     # memory before freeing old, which can cause OOM.
                     # Must clear the list reference first since local var
                     # is just a copy of the reference.
-                    self._current_workspaces[ubatch_id] = None
+                    workspaces[ubatch_id] = None
                     del current_workspace
-                    self._current_workspaces[ubatch_id] = torch.empty(
+                    workspaces[ubatch_id] = torch.empty(
                         (required_bytes,), dtype=torch.uint8, device=self._device
                     )
 
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(
-                    "[WORKSPACE DEBUG] Resized workspace from '%s': %.2f MB -> "
+                    "[WORKSPACE DEBUG] Resized workspace (%s) from '%s': %.2f MB -> "
                     "%.2f MB (%d ubatches, total memory %.2f MB)",
+                    pool,
                     get_caller_info(),
                     current_size / _MB,
                     required_bytes / _MB,
@@ -187,7 +211,7 @@ class WorkspaceManager:
                     required_bytes * self._num_ubatches / _MB,
                 )
 
-            current_workspace = self._current_workspaces[dbo_current_ubatch_id()]
+            current_workspace = workspaces[dbo_current_ubatch_id()]
 
         return current_workspace
 
