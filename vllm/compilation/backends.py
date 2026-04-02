@@ -255,6 +255,121 @@ class CompilerManager:
         )
         return compiled_graph
 
+    def _compute_cache_key(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: list[Any],
+        inductor_config: dict[str, Any],
+        compile_range: Range,
+    ) -> str:
+        """Compute the autograd cache key for dedup without compiling.
+
+        Uses the public ``standalone_compile.autograd_cache_key`` API under
+        the same config patches that the actual compilation would apply.
+
+        Requires torch >= 2.12.
+        """
+        from torch._inductor.standalone_compile import (
+            autograd_cache_key as _autograd_cache_key,
+        )
+
+        dynamic_shapes = InductorStandaloneAdaptor.resolve_dynamic_shapes(
+            compile_range,
+        )
+        with (
+            torch._inductor.config.patch(inductor_config),
+            torch._functorch.config.patch(
+                autograd_cache_normalize_inputs=True,
+                bundled_autograd_cache=False,
+                unlift_effect_tokens=True,
+            ),
+            torch._inductor.config.patch(
+                "triton.autotune_at_compile_time", True,
+            ),
+        ):
+            key, _ = _autograd_cache_key(
+                graph, example_inputs, dynamic_shapes,
+            )
+        logger.debug("_compute_cache_key (standalone API): %s", key)
+        return key
+
+    def _assert_cache_key_equivalence(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: list[Any],
+        additional_inductor_config: dict[str, Any],
+        compile_range: Range,
+        legacy_key: str,
+    ) -> None:
+        """Assert that the standalone cache key API produces the same key
+        as the legacy monkey-patch path."""
+        standalone_key = self._compute_cache_key(
+            graph, example_inputs,
+            additional_inductor_config, compile_range,
+        )
+        assert legacy_key == standalone_key, (
+            "Cache key mismatch between standalone API and "
+            f"legacy path: {standalone_key!r} != {legacy_key!r}"
+        )
+        logger.debug("Cache key equivalence verified: %s", legacy_key)
+
+
+    def _compile_legacy(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: list[Any],
+        additional_inductor_config: dict[str, Any],
+        compile_range: Range,
+        key: str | None,
+    ) -> tuple[Any, Any, str | None]:
+        """Compile while capturing the cache key via monkey-patching.
+
+        Used on torch < 2.12 where ``standalone_compile.autograd_cache_key``
+        is not available.  Returns ``(compiled_graph, handle, cache_key)``.
+        """
+        from unittest.mock import patch
+
+        logger.debug("_compile_legacy: entering for range=%s", compile_range)
+        cache_key = None
+        orig = torch._functorch._aot_autograd.autograd_cache.autograd_cache_key
+
+        def patched_autograd_cache_key(*args, **kwargs):
+            result = orig(*args, **kwargs)
+            if result is None:
+                return None
+            nonlocal cache_key
+            cache_key = result[0]
+            if cache_key in self.loaded_artifacts:
+                raise _StopCompiling()
+            return result
+
+        with (
+            torch._functorch.config.patch(
+                autograd_cache_normalize_inputs=True,
+            ),
+            patch(
+                "torch._functorch._aot_autograd.autograd_cache"
+                ".autograd_cache_key",
+                patched_autograd_cache_key,
+            ),
+        ):
+            try:
+                compiled_graph, handle = self.compiler.compile(
+                    graph,
+                    example_inputs,
+                    additional_inductor_config,
+                    compile_range,
+                    key,
+                )
+            except _StopCompiling:
+                assert cache_key is not None
+                logger.debug(
+                    "_compile_legacy: dedup hit, cache_key=%s", cache_key)
+                return self.loaded_artifacts[cache_key], None, cache_key
+
+        logger.debug("_compile_legacy: compiled, cache_key=%s", cache_key)
+        return compiled_graph, handle, cache_key
+
     @instrument(span_name="Compile graph")
     def compile(
         self,
@@ -302,59 +417,57 @@ class CompilerManager:
             maybe_key += f"{compile_range.start}_{compile_range.end}"
             maybe_key += f"_subgraph_{graph_index}"
         with self.compile_context(compile_range):
-            # There is a compilation time optimization here.
-            #
-            # If the (input metadata, graph, compiler config) are the same, then
-            # we want to avoid compiling the same artifact again. If we didn't
-            # do this optimization, the backend compilation (InductorAdaptor or
-            # InductorStandaloneAdaptor)
-            # is able to cache hit and produce an artifact faster if it was
-            # already created, but it is still a duplicate artifact that
-            # requires unnecessary things e.g. disk IO.
-            #
-            # The optimization is: If the backend compilation cache hits,
-            # then do an early return from the backend compilation and look up
-            # which of the previous in-memory artifacts we created to reuse.
-            #
-            # We implemented this by monkey-patching torch (torch does not
-            # easily expose the cache_key function), but in the future torch
-            # should expose the cache_key function that we can just call
-            # directly before invoking backend compilation.
             cache_key = None
-            orig = torch._functorch._aot_autograd.autograd_cache.autograd_cache_key
 
-            def autograd_cache_key(*args, **kwargs):
-                result = orig(*args, **kwargs)
-                if result is None:
-                    return None
-                nonlocal cache_key
-                cache_key = result[0]
-                if cache_key in self.loaded_artifacts:
-                    raise StopCompiling()
-                return result
+            has_standalone_key_api = is_torch_equal_or_newer("2.12.0.dev")
+            use_standalone_key = (
+                has_standalone_key_api
+                and not envs.VLLM_DEBUG_COMPILE_CACHE_KEY
+            )
 
-            from unittest.mock import patch
-
-            with (
-                # Graphs that are isometric (different node names but same
-                # structure) should be treated as the same.
-                torch._functorch.config.patch(autograd_cache_normalize_inputs=True),
-                patch(
-                    "torch._functorch._aot_autograd.autograd_cache.autograd_cache_key",
-                    autograd_cache_key,
-                ),
-            ):
-                try:
-                    compiled_graph, handle = self.compiler.compile(
-                        graph,
-                        example_inputs,
-                        additional_inductor_config,
+            if use_standalone_key:
+                # Dedup optimization (Inductor only): compute the cache
+                # key up-front via the autograd_cache_key API and
+                # reuse a previously compiled artifact if available.
+                is_inductor = isinstance(
+                    self.compiler,
+                    (InductorAdaptor, InductorStandaloneAdaptor),
+                )
+                if is_inductor:
+                    cache_key = self._compute_cache_key(
+                        graph, example_inputs, additional_inductor_config,
                         compile_range,
-                        maybe_key,
                     )
-                except StopCompiling:
-                    assert cache_key is not None
-                    return self.loaded_artifacts[cache_key]
+                    if cache_key in self.loaded_artifacts:
+                        return self.loaded_artifacts[cache_key]
+
+                compiled_graph, handle = self.compiler.compile(
+                    graph,
+                    example_inputs,
+                    additional_inductor_config,
+                    compile_range,
+                    maybe_key,
+                )
+            else:
+                # torch < 2.12 or debug mode: capture key via
+                # monkey-patching during compilation.
+                compiled_graph, handle, cache_key = self._compile_legacy(
+                    graph,
+                    example_inputs,
+                    additional_inductor_config,
+                    compile_range,
+                    maybe_key,
+                )
+
+                if (envs.VLLM_DEBUG_COMPILE_CACHE_KEY
+                        and has_standalone_key_api
+                        and cache_key is not None):
+                    self._assert_cache_key_equivalence(
+                        graph, example_inputs,
+                        additional_inductor_config, compile_range,
+                        cache_key,
+                    )
+
             if cache_key is not None and compiled_graph is not None:
                 self.loaded_artifacts[cache_key] = compiled_graph
 
@@ -398,7 +511,9 @@ class CompilerManager:
         return compiled_graph
 
 
-class StopCompiling(BaseException):
+class _StopCompiling(BaseException):
+    """Raised by the legacy monkey-patched ``autograd_cache_key`` to
+    short-circuit compilation when an in-memory artifact already exists."""
     pass
 
 

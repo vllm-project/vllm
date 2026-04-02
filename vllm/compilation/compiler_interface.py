@@ -296,6 +296,13 @@ class InductorStandaloneAdaptor(CompilerInterface):
     ) -> None:
         self.cache_dir = cache_dir
 
+    @staticmethod
+    def resolve_dynamic_shapes(compile_range: Range):
+        if compile_range.is_single_size():
+            return  "from_example_inputs"
+        else:
+            return  "from_graph"
+
     def compile(
         self,
         graph: fx.GraphModule,
@@ -311,10 +318,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         set_inductor_config(current_config, compile_range)
         set_functorch_config()
 
-        if compile_range.is_single_size():
-            dynamic_shapes = "from_example_inputs"
-        else:
-            dynamic_shapes = "from_graph"
+        dynamic_shapes = self.resolve_dynamic_shapes(compile_range)
 
         from torch._inductor import standalone_compile
 
@@ -342,6 +346,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if use_aot:
             compile_kwargs["aot"] = True  # type: ignore[assignment]
 
+        # TODO: Is this still needed?
         # Inductor's pre-grad passes don't do anything for vLLM.
         # The pre-grad passes get run even on cache-hit and negatively impact
         # vllm cold compile times by O(1s)

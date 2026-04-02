@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
+    VLLM_DEBUG_COMPILE_CACHE_KEY: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
@@ -1612,6 +1613,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
+    # Cross-check the new standalone autograd_cache_key API against the
+    # legacy monkey-patching path before fully migrating to the new API.
+    # Only effective on torch >= 2.12.
+    "VLLM_DEBUG_COMPILE_CACHE_KEY": lambda: bool(int(os.getenv("VLLM_DEBUG_COMPILE_CACHE_KEY", "0"))),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
@@ -1811,6 +1816,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+        "VLLM_DEBUG_COMPILE_CACHE_KEY",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
