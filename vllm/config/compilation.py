@@ -134,7 +134,7 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
-    enable_cache_mla_rope_fusion: bool = True
+    enable_cache_mla_rope_fusion: bool = False
     """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions
@@ -296,7 +296,8 @@ class PassConfig:
         ]
 
         if enabled_fusions:
-            logger.info_once("Enabled custom fusions: %s", ", ".join(enabled_fusions), scope="global"
+            logger.info_once(
+                "Enabled custom fusions: %s", ", ".join(enabled_fusions), scope="global"
             )
 
 
