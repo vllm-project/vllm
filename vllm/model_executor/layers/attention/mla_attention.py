@@ -557,6 +557,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
             # Default path: use unified MLA attention ops
+            # Use kv_cache as dummy dependency to prevent DCE
+            kv_cache_dummy_dep = self.kv_cache
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
@@ -1402,6 +1404,9 @@ def mla_attention_decode_fake(
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile."""
+    # Get layer config to avoid hardcoding dimensions
+    _, attn_layer, _ = _get_mla_context(layer_name)
+
     # Handle both tuple and tensor input
     if isinstance(decode_q, tuple):
         q_tensor = decode_q[0]
@@ -1416,8 +1421,9 @@ def mla_attention_decode_fake(
         # FP8 case: decode_q is (B, N, L+R)
         batch_size = decode_q.shape[0]
         num_heads = decode_q.shape[1]
-        # For FP8, we need to estimate the kv_lora_rank
-        kv_lora_rank = decode_q.shape[2] - 64  # Subtract rope dim
+        # For FP8, we need to compute the kv_lora_rank from decode_q shape
+        # decode_q has shape (B, N, kv_lora_rank + qk_rope_head_dim)
+        kv_lora_rank = decode_q.shape[2] - attn_layer.qk_rope_head_dim
         out_dtype = decode_q.dtype
         out_device = decode_q.device
 
