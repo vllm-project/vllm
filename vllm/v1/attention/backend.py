@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+
+from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -739,6 +741,13 @@ class AttentionImplBase(ABC, Generic[T]):
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
+
+    kv_cache_dtype: str
+
+    @property
+    def kv_quant_mode(self) -> "KVQuantMode":
+        """Return the KV cache quantization mode for this layer."""
+        return get_kv_quant_mode(self.kv_cache_dtype)
 
     @abstractmethod
     def __init__(
