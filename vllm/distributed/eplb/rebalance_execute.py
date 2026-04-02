@@ -11,17 +11,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from torch.distributed import (
-    P2POp,
-    ProcessGroup,
-    all_gather,
-    batch_isend_irecv,
-    get_global_rank,
-)
+from torch.distributed import ProcessGroup, all_gather
 
+from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
-from vllm.distributed.parallel_state import get_ep_group
-from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -187,7 +180,8 @@ def move_to_buffer(
     expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: torch.cuda.Stream | None,
-    ep_group: ProcessGroup,
+    ep_rank: int,
+    communicator: EplbCommunicator,
 ) -> MoveToBufferResult:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -201,7 +195,8 @@ def move_to_buffer(
         expert_weights: Original expert weights for the layer.
         expert_weights_buffers: Intermediate buffers (one per tensor).
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
-        ep_group: Distributed process group for expert parallel comms.
+        ep_rank: Rank of this process in expert parallel group.
+        communicator: EplbCommunicator instance for P2P communication.
 
     Returns:
         is_unchanged (np.ndarray): (num_local_experts,), True where an expert row
@@ -211,8 +206,6 @@ def move_to_buffer(
         RecvMetadata: Metadata needed for completing remote weight transfers.
     """
     assert old_indices.shape == new_indices.shape
-    ep_rank = ep_group.rank()
-
     recv_primary_mask = np.zeros((num_local_experts,), dtype=np.bool_)
     send_expert_ids = np.full((num_local_experts,), -1, dtype=np.int64)
     send_src_rows = np.full((num_local_experts,), -1, dtype=np.int32)
@@ -276,22 +269,9 @@ def move_to_buffer(
             expert = new_local_expert_ids[dst]
             src_local = expert_to_src_map.get(expert, -1)
             if src_local != -1:
-                for w, b in zip(expert_weights, expert_weights_buffers):
-                    b[dst].copy_(w[src_local], non_blocking=True)
-
-    p2p_ops: list[P2POp] = []
-    if isinstance(get_ep_group(), StatelessGroupCoordinator):
-        ep_group = get_ep_group()
-        is_stateless = True
-    else:
-        is_stateless = False
-
-    # Pre-compute global ranks mapping (only needed for non-stateless groups)
-    ep_size = ep_group.size()
-    if not is_stateless:
-        rank_to_global = {
-            rank: get_global_rank(ep_group, rank) for rank in range(ep_size)
-        }
+                with torch.cuda.stream(cuda_stream):
+                    for w, b in zip(expert_weights, expert_weights_buffers):
+                        b[dst].copy_(w[src_local], non_blocking=True)
 
     # 2. Post sends
     if send_count > 0:
@@ -323,23 +303,8 @@ def move_to_buffer(
             if recver_pos < len(ranks_to_recv):
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
-                if is_stateless:
-                    for w in expert_weights:
-                        op = object.__new__(P2POp)
-                        op.op = torch.distributed.isend
-                        op.tensor = w[src]
-                        op.group_peer = dst
-                        p2p_ops.append(op)
-                else:
-                    dst_global = rank_to_global[dst]
-                    p2p_ops += [
-                        P2POp(
-                            torch.distributed.isend,
-                            w[src],
-                            dst_global,
-                        )
-                        for w in expert_weights
-                    ]
+                for w in expert_weights:
+                    communicator.add_send(w[src], dst)
 
     # 3. Post recvs
     if recv_count > 0:
@@ -368,40 +333,11 @@ def move_to_buffer(
                 src = ranks_to_send[recver_pos // num_dst_per_sender]
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
-            if is_stateless:
-                for b in expert_weights_buffers:
-                    op = object.__new__(P2POp)
-                    op.op = torch.distributed.irecv
-                    op.tensor = b[dst]
-                    op.group_peer = src
-                    p2p_ops.append(op)
-            else:
-                src_global = rank_to_global[src]
-                p2p_ops += [
-                    P2POp(
-                        torch.distributed.irecv,
-                        b[dst],
-                        src_global,
-                    )
-                    for b in expert_weights_buffers
-                ]
+            for b in expert_weights_buffers:
+                communicator.add_recv(b[dst], src)
 
     # 4. Execute the P2P operations. The real communication happens here.
-    if p2p_ops and cuda_stream is not None:
-        with torch.cuda.stream(cuda_stream):
-            if is_stateless:
-                ep_group.device_communicator.batch_isend_irecv(p2p_ops)
-            else:
-                reqs = batch_isend_irecv(p2p_ops)
-                for req in reqs:
-                    req.wait()
-    elif p2p_ops:
-        if is_stateless:
-            ep_group.device_communicator.batch_isend_irecv(p2p_ops)
-        else:
-            reqs = batch_isend_irecv(p2p_ops)
-            for req in reqs:
-                req.wait()
+    communicator.execute()
     # wait for the communication to finish
     return (
         is_unchanged,
@@ -500,6 +436,7 @@ async def transfer_layer(
     expert_weights: Sequence[torch.Tensor],
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
+    communicator: EplbCommunicator,
     is_profile: bool = False,
     cuda_stream: torch.cuda.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
@@ -518,6 +455,7 @@ async def transfer_layer(
             For example, a linear layer may have up and down projection.
         expert_weights_buffer: Intermediate buffers (one per weight tensor).
         ep_group: The device process group for expert parallelism.
+        communicator: EplbCommunicator instance for P2P communication.
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
@@ -571,7 +509,8 @@ async def transfer_layer(
         expert_weights=expert_weights,
         expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
-        ep_group=ep_group,
+        ep_rank=ep_group.rank(),
+        communicator=communicator,
     )
     return is_unchanged, is_received_locally, recv_metadata
 
@@ -581,6 +520,7 @@ def rearrange_expert_weights_inplace(
     new_global_expert_indices: torch.Tensor,
     expert_weights: Sequence[Sequence[torch.Tensor]],
     ep_group: ProcessGroup,
+    communicator: EplbCommunicator,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
 ) -> None:
@@ -598,6 +538,7 @@ def rearrange_expert_weights_inplace(
             For example, a linear layer may have up and down projection,
             so weight_count = 2. Each weight's hidden size can be different.
         ep_group: The device process group for expert parallelism.
+        communicator: EplbCommunicator instance for P2P communication.
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
@@ -628,6 +569,7 @@ def rearrange_expert_weights_inplace(
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
 
     ep_size = ep_group.size()
+    ep_rank = ep_group.rank()
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     first_layer_weights = list(expert_weights[0])
@@ -664,7 +606,8 @@ def rearrange_expert_weights_inplace(
             expert_weights=expert_weights[layer_idx],
             expert_weights_buffers=weights_buffer,
             cuda_stream=None,
-            ep_group=ep_group,
+            ep_rank=ep_rank,
+            communicator=communicator,
         )
 
         move_from_buffer(
@@ -674,7 +617,7 @@ def rearrange_expert_weights_inplace(
             is_received_locally=is_received_locally,
             recv_metadata=recv_metadata,
             new_indices=new_global_expert_indices_cpu[layer_idx],
-            ep_rank=ep_group.rank(),
+            ep_rank=ep_rank,
         )
 
 

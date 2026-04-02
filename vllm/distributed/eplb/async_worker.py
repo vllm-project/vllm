@@ -96,6 +96,8 @@ async def transfer_run_periodically(
         assert state.is_async
         for model_state in state.model_states.values():
             layer_idx = 0
+            # Set the async worker's CUDA stream on the communicator
+            model_state.communicator.set_stream(cuda_stream)
             current_num_layers = model_state.model.num_moe_layers
 
             # Snapshot the physical_to_logical_map and copy it to CPU
@@ -124,6 +126,7 @@ async def transfer_run_periodically(
                     new_layer_indices=new_physical_to_logical_map[layer_idx],
                     expert_weights=model_state.model.expert_weights[layer_idx],
                     expert_weights_buffer=model_state.expert_buffer,
+                    communicator=model_state.communicator,
                     ep_group=eplb_group,
                     is_profile=is_profile,
                     cuda_stream=cuda_stream,
