@@ -162,6 +162,9 @@ def _patch_hf_transformers_validate_rope():
     """
 
     if Version(version("transformers")) >= Version("5.0.0"):
+        if hasattr(PretrainedConfig.validate_rope, "__vllm_patched__"):
+            return
+        
         _original_validate_rope = PretrainedConfig.validate_rope
 
         @wraps(_original_validate_rope)
@@ -172,6 +175,7 @@ def _patch_hf_transformers_validate_rope():
             result =  _original_validate_rope(self, *args, **kwargs)
             return result
         
+        patched_validate_rope.__vllm_patched__ = True
         PretrainedConfig.validate_rope = patched_validate_rope
 
 class HFConfigParser(ConfigParserBase):
