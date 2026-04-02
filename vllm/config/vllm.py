@@ -181,7 +181,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_rope_kvcache": False,
-            "enable_cache_mla_rope_fusion": True,
+            "enable_cache_mla_rope_fusion": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
