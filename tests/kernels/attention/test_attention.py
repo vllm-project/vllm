@@ -141,14 +141,14 @@ def test_paged_attention(
     ):
         pytest.skip()
 
-    if (
-        version == "rocm"
-        and current_platform.is_navi()
-        and (
-            kv_cache_dtype == "fp8" or head_size != 128 or block_size != 16 or use_alibi
-        )
-    ):
-        pytest.skip()
+    if version == "rocm" and current_platform.is_navi():
+        # gfx12 (RDNA4) supports FP8 KV cache via software dequant;
+        # within is_navi(), supports_fp8() implies gfx12.
+        is_gfx12 = current_platform.supports_fp8()
+        fp8_unsupported = kv_cache_dtype == "fp8" and not is_gfx12
+        block_size_ok = block_size == 16 or (is_gfx12 and block_size == 32)
+        if fp8_unsupported or head_size != 128 or not block_size_ok or use_alibi:
+            pytest.skip()
 
     global PARTITION_SIZE
 
@@ -196,6 +196,8 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
+    # NOTE: non-trivial k_scale/v_scale would exercise FP8 dequant paths but
+    # the reference computation does not apply scales, so keep at 1.0 for now.
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Call the paged attention kernel.
