@@ -164,6 +164,7 @@ mod tests {
                         logit_bias: None,
                         allowed_token_ids: None,
                         bad_words_token_ids: None,
+                        structured_outputs: None,
                         extra_args: None,
                     },
                 ),

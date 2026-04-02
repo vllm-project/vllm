@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_engine_core_client::protocol::StructuredOutputsParams;
 
 use crate::error::{Error, Result};
 use crate::output::TextDecodeOptions;
@@ -75,6 +76,8 @@ pub struct SamplingParams {
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Words to avoid during generation (tokenized to IDs during lowering).
     pub bad_words: Option<Vec<String>>,
+    /// Parameters for configuring structured outputs (guided decoding).
+    pub structured_outputs: Option<StructuredOutputsParams>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
 }
@@ -100,6 +103,7 @@ impl Default for SamplingParams {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words: None,
+            structured_outputs: None,
             vllm_xargs: None,
         }
     }

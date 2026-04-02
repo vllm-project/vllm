@@ -87,6 +87,7 @@ pub fn lower_sampling_params(
         logit_bias,
         allowed_token_ids,
         bad_words,
+        structured_outputs,
         vllm_xargs,
     } = sampling_params;
 
@@ -134,6 +135,7 @@ pub fn lower_sampling_params(
         logit_bias,
         allowed_token_ids,
         bad_words_token_ids: tokenize_bad_words(bad_words.as_deref(), tokenizer)?,
+        structured_outputs,
         extra_args: vllm_xargs,
     })
 }
@@ -317,6 +319,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                structured_outputs: None,
                 extra_args: None,
             }
         "#]]
@@ -360,6 +363,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                structured_outputs: None,
                 extra_args: None,
             }
         "#]]
@@ -495,6 +499,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                structured_outputs: None,
                 extra_args: None,
             }
         "#]]
@@ -550,6 +555,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                structured_outputs: None,
                 extra_args: None,
             }
         "#]]
@@ -626,6 +632,7 @@ mod tests {
                 logit_bias: None,
                 allowed_token_ids: None,
                 bad_words_token_ids: None,
+                structured_outputs: None,
                 extra_args: None,
             }
         "#]]

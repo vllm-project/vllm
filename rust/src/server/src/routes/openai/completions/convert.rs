@@ -5,6 +5,7 @@ use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 use super::types::CompletionRequest;
 use crate::error::ApiError;
 use crate::routes::openai::completions::validate;
+use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::utils::{convert_logit_bias, merge_kv_transfer_params};
 
 /// Lowered completion request plus the public response metadata carried by every SSE chunk.
@@ -55,6 +56,9 @@ pub fn prepare_completion_request(
         Prompt::TokenIds(_) => unreachable!("validated above"),
     });
 
+    let structured_outputs =
+        convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
+
     let text_request = TextRequest {
         request_id: response_id.clone(),
         prompt: request.prompt.clone(),
@@ -76,6 +80,7 @@ pub fn prepare_completion_request(
             logit_bias: convert_logit_bias(request.logit_bias.clone())?,
             allowed_token_ids: request.allowed_token_ids.clone(),
             bad_words: None,
+            structured_outputs,
             vllm_xargs: merge_kv_transfer_params(
                 request.vllm_xargs.clone(),
                 request.kv_transfer_params.as_ref(),

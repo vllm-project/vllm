@@ -46,13 +46,6 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    if request.response_format.is_some() {
-        bail_invalid_request!(
-            param = "response_format",
-            "response_format is not supported."
-        );
-    }
-
     if let Some(tools) = request.tools.as_ref() {
         for tool in tools {
             if tool.tool_type != "function" {
@@ -106,12 +99,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.structured_outputs.is_some() {
-        bail_invalid_request!(
-            param = "structured_outputs",
-            "structured_outputs is not supported."
-        );
-    }
     Ok(())
 }
 
@@ -130,13 +117,12 @@ fn reject_non_default<T>(
 #[cfg(test)]
 mod tests {
     use openai_protocol::chat::{ChatMessage, MessageContent};
-    use openai_protocol::common::{
-        FunctionChoice, ResponseFormat, Tool, ToolChoice, ToolReference,
-    };
+    use openai_protocol::common::{FunctionChoice, Tool, ToolChoice, ToolReference};
     use serde_json::json;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
+    use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
@@ -237,12 +223,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_response_format() {
+    fn validate_request_compat_accepts_response_format() {
         let request = ChatCompletionRequest {
             response_format: Some(ResponseFormat::Text),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("response_format=text should be accepted");
+
+        let request = ChatCompletionRequest {
+            response_format: Some(ResponseFormat::JsonObject),
+            ..base_request()
+        };
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("response_format=json_object should be accepted");
     }
 
     #[test]

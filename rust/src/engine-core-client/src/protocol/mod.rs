@@ -29,6 +29,10 @@ fn default_opaque_value_nil() -> OpaqueValue {
     Value::Nil
 }
 
+fn is_false(v: &bool) -> bool {
+    !v
+}
+
 mod classfied_outputs;
 pub mod handshake;
 mod logprobs;
@@ -139,6 +143,46 @@ pub enum StopReason {
     Text(String),
 }
 
+/// Parameters for configuring structured outputs (guided decoding).
+///
+/// Exactly one constraint field (`json`, `regex`, `choice`, `grammar`,
+/// `json_object`, or `structural_tag`) should be set. The engine-core
+/// backend selects the appropriate grammar compiler based on which field
+/// is present.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L36-L107>
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StructuredOutputsParams {
+    /// JSON schema (as a dict/object or JSON string) constraining the output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<serde_json::Value>,
+    /// Regular expression the output must match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex: Option<String>,
+    /// List of allowed output strings (the model must produce one of these).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<Vec<String>>,
+    /// Context-free grammar (in EBNF-like notation) the output must conform to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar: Option<String>,
+    /// When `true`, output must be valid JSON (free-form, no schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_object: Option<bool>,
+    /// Disable any additional whitespace in guided JSON output.
+    #[serde(default, skip_serializing_if = "crate::protocol::is_false")]
+    pub disable_any_whitespace: bool,
+    /// Disable `additionalProperties` in JSON schema output.
+    #[serde(default, skip_serializing_if = "crate::protocol::is_false")]
+    pub disable_additional_properties: bool,
+    /// Custom whitespace pattern for guided JSON output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitespace_pattern: Option<String>,
+    /// Structural tag configuration (JSON-encoded string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<String>,
+}
+
 /// Engine-core-facing sampling parameters for text generation.
 ///
 /// This is the normalized southbound subset used by the Rust frontend when it
@@ -208,6 +252,9 @@ pub struct EngineCoreSamplingParams {
         rename = "_bad_words_token_ids"
     )]
     pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
+    /// Parameters for configuring structured outputs (guided decoding).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_outputs: Option<StructuredOutputsParams>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<HashMap<String, serde_json::Value>>,
@@ -235,6 +282,7 @@ impl EngineCoreSamplingParams {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words_token_ids: None,
+            structured_outputs: None,
             extra_args: None,
         }
     }
