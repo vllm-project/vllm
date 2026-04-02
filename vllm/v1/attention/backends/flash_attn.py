@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
     get_flash_attn_version,
+    is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -173,13 +174,11 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_head_size(cls, head_size: int) -> bool:
         if head_size % 8 != 0:
             return False
-        if (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(90)
-            and get_flash_attn_version() == 4
-        ):
+        if head_size <= 256:
+            return True
+        if is_fa_version_supported(4):
             return head_size <= 512
-        return head_size <= 256
+        return False
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -627,6 +626,14 @@ class FlashAttentionImpl(AttentionImpl):
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
         )
+        # head_size > 256 requires FA4 on SM90+; force upgrade from FA3
+        if (
+            head_size > 256
+            and self.vllm_flash_attn_version == 3
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+        ):
+            self.vllm_flash_attn_version = 4
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
