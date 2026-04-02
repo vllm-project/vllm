@@ -140,6 +140,7 @@ def reserve_cp_collective_workspace(
     cp_world_size: int,
     dtype: torch.dtype,
     lse_dtype: torch.dtype = torch.float32,
+    reserve_a2a: bool = False,
 ) -> None:
     # reserve workspace from workspace manager, call before allgather/reduce_scatter
     if (
@@ -165,6 +166,20 @@ def reserve_cp_collective_workspace(
         ((cp_world_size * max_num_tokens, total_heads), lse_dtype),
         pool=COMM_WORKSPACE_POOL,
     )
+    if reserve_a2a:
+        workspace_manager.get_simultaneous(
+            (
+                (cp_world_size, max_num_tokens, local_heads, reduce_scatter_head_dim),
+                dtype,
+            ),
+            (
+                (cp_world_size, max_num_tokens, local_heads, reduce_scatter_head_dim),
+                dtype,
+            ),
+            ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
+            ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
+            pool=COMM_WORKSPACE_POOL,
+        )
 
 
 def cp_all_gather_heads(

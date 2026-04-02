@@ -443,6 +443,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     reduce_scatter_head_dim=self.kv_lora_rank,
                     cp_world_size=dcp_world_size,
                     dtype=vllm_config.model_config.dtype,
+                    reserve_a2a=(vllm_config.parallel_config.dcp_comm_backend == "a2a"),
                 )
         self.dcp_a2a = (
             vllm_config is not None

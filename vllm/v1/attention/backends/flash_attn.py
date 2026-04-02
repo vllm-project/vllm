@@ -666,6 +666,7 @@ class FlashAttentionImpl(AttentionImpl):
                 reduce_scatter_head_dim=self.head_size,
                 cp_world_size=self.dcp_world_size,
                 dtype=self._dcp_dtype,
+                reserve_a2a=dcp_a2a,
             )
 
     def forward(
