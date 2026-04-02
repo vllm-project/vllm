@@ -7,6 +7,7 @@ EPLB communicator implementations and factory.
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from datetime import timedelta
 
 import torch
 from torch.distributed import (
@@ -530,7 +531,12 @@ class NixlEplbCommunicator(EplbCommunicator):
             else:
                 torch.cuda.current_stream().synchronize()
             # READ is receiver-initiated; synchronize all ranks before transfer.
-            torch.distributed.barrier(group=self._cpu_group)
+            # Use monitored_barrier so a rank that crashes or exits early
+            # produces a diagnostic timeout instead of a silent hang.
+            torch.distributed.monitored_barrier(
+                group=self._cpu_group,
+                timeout=timedelta(minutes=5),
+            )
 
             # Phase 2: communicate/unpack for each dtype.
             for (
@@ -580,8 +586,8 @@ class NixlEplbCommunicator(EplbCommunicator):
                 self._nixl_wrapper.deregister_memory(self._registered_desc)
             for agent_name in self._remote_agents.values():
                 self._nixl_wrapper.remove_remote_agent(agent_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Error during NixlEplbCommunicator cleanup: %s", e)
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
