@@ -410,6 +410,7 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     int64_t const pos_id = position_ids[tokenIdx];
     T_cache const* const cache_ptr = cos_sin_cache + pos_id * rotary_dim;
     int const copy_bytes = rotary_dim * static_cast<int>(sizeof(T_cache));
+    assert(copy_bytes % 16 == 0);
     int const num_copies = (copy_bytes + 15) / 16;
     for (int copyId = laneId; copyId < num_copies; copyId += 32) {
       char* smem_ptr =
@@ -615,6 +616,19 @@ void launchFusedQKNormRopeNTokenHeads(
         rotary_dim, eps, q_weight, k_weight, cos_sin_cache, interleave,
         position_ids, stream);
     return;
+  }
+
+  // NTokenHeads kernel uses cp.async to load cos/sin in 16-byte chunks.
+  // If rotary_dim * sizeof(cache_dtype) is not a multiple of 16, the last
+  // cp.async would write past the shared memory allocation.
+  {
+    size_t const rotary_bytes =
+        static_cast<size_t>(rotary_dim) *
+        (std::is_same_v<scalar_t_cache, float> ? sizeof(float) : 2u);
+    TORCH_CHECK(rotary_bytes % 16 == 0,
+                "NTokenHeads kernel requires rotary_dim * sizeof(cache_dtype) "
+                "to be a multiple of 16 for cp.async alignment, got ",
+                rotary_bytes, " bytes");
   }
 
   constexpr int blockSize = 256;
@@ -867,6 +881,7 @@ void fused_qk_norm_rope(
   TORCH_CHECK(cos_sin_cache.size(1) % 2 == 0, "rotary_dim must be even");
   TORCH_CHECK(cos_sin_cache.size(1) <= head_dim,
               "rotary_dim must be less than or equal to head_dim");
+
 
   TORCH_CHECK(qkv.scalar_type() == q_weight.scalar_type() &&
                   qkv.scalar_type() == k_weight.scalar_type(),
