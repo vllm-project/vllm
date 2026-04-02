@@ -1,0 +1,58 @@
+name: Build and Release Marin TPU Wheel
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-wheel:
+    name: Build Wheel
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Determine version
+      id: vars
+      run: |
+        SHORT_SHA=$(git rev-parse --short HEAD)
+        DATE=$(date -u +%Y%m%d)
+        VERSION="0.0.0.dev${DATE}+${SHORT_SHA}"
+        echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+        echo "Wheel version: ${VERSION}"
+
+    - name: Install build dependencies
+      run: python3 -m pip install build
+
+    - name: Build TPU wheel
+      env:
+        VLLM_TARGET_DEVICE: tpu
+        VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
+      run: python3 -m build --wheel
+
+    - name: Create GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: marin-${{ steps.vars.outputs.SHORT_SHA }}
+        name: marin-${{ steps.vars.outputs.SHORT_SHA }}
+        body: |
+          Auto-built TPU wheel from `main` at ${{ github.sha }}.
+
+          Install with:
+          ```
+          pip install "vllm @ https://github.com/marin-community/vllm/releases/download/marin-${{ steps.vars.outputs.SHORT_SHA }}/<wheel-filename>"
+          ```
+        files: dist/*.whl
+        prerelease: true
