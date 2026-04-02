@@ -99,6 +99,22 @@ void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
                         bool is_neox, torch::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
 
+void fused_qk_norm_rope_cache_quant(
+    torch::Tensor qkv, torch::Tensor k_cache, torch::Tensor v_cache,
+    torch::Tensor q_weight, torch::Tensor k_weight,
+    torch::Tensor cos_sin_cache, torch::Tensor positions,
+    torch::Tensor slot_mapping, double k_scale, double v_scale, double epsilon,
+    int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
+    int64_t block_size, bool is_neox, bool is_fp8);
+
+void fused_qk_norm_rope_cache_quant_v2(
+    torch::Tensor q_out, torch::Tensor k_cache, torch::Tensor v_cache,
+    torch::Tensor qkv, torch::Tensor q_weight, torch::Tensor k_weight,
+    torch::Tensor cos_sin_cache, torch::Tensor positions,
+    torch::Tensor slot_mapping, double k_scale, double v_scale, double epsilon,
+    int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
+    int64_t block_size, bool is_neox, bool is_fp8);
+
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
                                  const torch::Tensor& output_mask,

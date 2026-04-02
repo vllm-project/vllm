@@ -177,6 +177,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
 
+  // Fused QK RMSNorm + RoPE + KV cache write + FP8 quant
+  ops.def(
+      "fused_qk_norm_rope_cache_quant(Tensor! qkv, Tensor! k_cache,"
+      " Tensor! v_cache, Tensor q_weight, Tensor k_weight,"
+      " Tensor cos_sin_cache, Tensor positions, Tensor slot_mapping,"
+      " float k_scale, float v_scale, float epsilon,"
+      " int num_heads_q, int num_heads_kv, int head_dim,"
+      " int block_size, bool is_neox, bool is_fp8) -> ()");
+  ops.impl("fused_qk_norm_rope_cache_quant", torch::kCUDA,
+           &fused_qk_norm_rope_cache_quant);
+
+  // Fused QK RMSNorm + RoPE + KV cache write + FP8 quant (v2: naive fusion baseline)
+  ops.def(
+      "fused_qk_norm_rope_cache_quant_v2(Tensor! q_out, Tensor! k_cache,"
+      " Tensor! v_cache, Tensor qkv, Tensor q_weight, Tensor k_weight,"
+      " Tensor cos_sin_cache, Tensor positions, Tensor slot_mapping,"
+      " float k_scale, float v_scale, float epsilon,"
+      " int num_heads_q, int num_heads_kv, int head_dim,"
+      " int block_size, bool is_neox, bool is_fp8) -> ()");
+  ops.impl("fused_qk_norm_rope_cache_quant_v2", torch::kCUDA,
+           &fused_qk_norm_rope_cache_quant_v2);
+
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "

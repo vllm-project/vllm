@@ -3,77 +3,33 @@
 """
 Benchmark for the fused QK RMSNorm + RoPE + KV Cache + FP8-Quant CUDA kernel.
 
-Measures:
-  1. Fused kernel (v2) latency
-  2. Baseline: separate torch ops (matmul → RMSNorm → RoPE → cache write)
-  3. Both with a preceding QKV GEMM to simulate realistic L2 cache state
+Measures (kernel-only, no GEMM):
+  1. v3 (warp-per-head): register-based, warp shuffle RMSNorm, vectorized I/O
+  2. v2 (naive fusion):  block-per-token, smem RMSNorm, sequential heads
+  3. Baseline: existing vLLM CUDA kernels chained (2 launches)
+       fused_qk_norm_rope → reshape_and_cache_flash
 
-Run:
+Run (requires vllm to be installed):
     python tests/kernels/bench_fused_qk_norm_rope_cache_quant.py
 
 Requires a CUDA GPU.
 """
 
 import math
-import pathlib
-import time
 
 import torch
-import torch.nn.functional as F
 
-# ──────────────────────────────────────────────────────────────────────
-# JIT compile the CUDA extension
-# ──────────────────────────────────────────────────────────────────────
-
-_HERE = pathlib.Path(__file__).resolve().parent
-_CSRC = _HERE.parent.parent / "csrc" / "fused_qk_norm_rope_cache_quant.cu"
-
-assert _CSRC.exists(), f"CUDA source not found: {_CSRC}"
-
-
-def _load_extension():
-    from torch.utils.cpp_extension import load
-
-    return load(
-        name="fused_qknrc",
-        sources=[str(_CSRC)],
-        extra_cuda_cflags=["-O3", "--use_fast_math"],
-        verbose=False,
-    )
+import vllm._custom_ops as ops  # registers torch.ops._C / _C_cache_ops
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Baseline: separate PyTorch ops (simulates unfused path)
+# Baseline: existing vLLM CUDA kernels
+#   Step 1: fused_qk_norm_rope  (QK RMSNorm + RoPE, 1 warp/head, in-place)
+#   Step 2: reshape_and_cache_flash  (paged KV cache write ± FP8 quant)
 # ──────────────────────────────────────────────────────────────────────
 
 
-def rms_norm_per_head(x: torch.Tensor, weight: torch.Tensor, eps: float):
-    """RMSNorm over the last dim, applied per-head.
-    x: [T, num_heads, head_dim], weight: [head_dim]"""
-    variance = x.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
-    x_normed = x * torch.rsqrt(variance + eps)
-    return (x_normed * weight).to(x.dtype)
-
-
-def rotary_embedding_neox(
-    q: torch.Tensor,  # [T, num_heads, head_dim]
-    k: torch.Tensor,  # [T, num_kv_heads, head_dim]
-    cos: torch.Tensor,  # [T, head_dim/2]
-    sin: torch.Tensor,  # [T, head_dim/2]
-):
-    embed_dim = q.shape[-1] // 2
-    c = cos.unsqueeze(1)
-    s = sin.unsqueeze(1)
-
-    q_x, q_y = q[..., :embed_dim], q[..., embed_dim:]
-    k_x, k_y = k[..., :embed_dim], k[..., embed_dim:]
-
-    q_out = torch.cat([q_x * c - q_y * s, q_y * c + q_x * s], dim=-1)
-    k_out = torch.cat([k_x * c - k_y * s, k_y * c + k_x * s], dim=-1)
-    return q_out.to(q.dtype), k_out.to(k.dtype)
-
-
-def baseline_separate_ops(
+def baseline_cuda_ops(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
@@ -82,62 +38,43 @@ def baseline_separate_ops(
     slot_mapping: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    k_scale: float,
-    v_scale: float,
+    k_scale_t: torch.Tensor,
+    v_scale_t: torch.Tensor,
     epsilon: float,
     num_heads_q: int,
     num_heads_kv: int,
     head_dim: int,
-    block_size: int,
     is_fp8: bool,
+    k_buf: torch.Tensor | None = None,
+    v_buf: torch.Tensor | None = None,
 ):
-    """Baseline: separate kernel calls matching the unfused code path."""
-    T = qkv.shape[0]
+    """Baseline: chain two existing vLLM CUDA kernels.
+
+    k_buf / v_buf are pre-allocated contiguous [T, nkv, hd] buffers.
+    fused_qk_norm_rope works on packed QKV in-place; after it returns
+    the K region is normed+roped and V is unchanged.  We copy them into
+    the contiguous buffers before calling reshape_and_cache_flash.
+    """
     q_size = num_heads_q * head_dim
     kv_size = num_heads_kv * head_dim
 
-    q = qkv[:, :q_size].view(T, num_heads_q, head_dim)
-    k = qkv[:, q_size : q_size + kv_size].view(T, num_heads_kv, head_dim)
-    v = qkv[:, q_size + kv_size :].view(T, num_heads_kv, head_dim)
-
-    # RMSNorm
-    q_normed = rms_norm_per_head(q, q_weight, epsilon)
-    k_normed = rms_norm_per_head(k, k_weight, epsilon)
-
-    # Flatten for RoPE
-    q_flat = q_normed.view(T, q_size)
-    k_flat = k_normed.view(T, kv_size)
-
-    # RoPE
-    embed_dim = head_dim // 2
-    cos = cos_sin_cache[positions, :embed_dim].float()
-    sin = cos_sin_cache[positions, embed_dim:].float()
-    q_rope, k_rope = rotary_embedding_neox(
-        q_normed.float(), k_normed.float(), cos, sin
+    # ── Step 1: fused QK-Norm + RoPE (in-place) ──
+    ops.fused_qk_norm_rope(
+        qkv, num_heads_q, num_heads_kv, num_heads_kv,
+        head_dim, epsilon, q_weight, k_weight,
+        cos_sin_cache, True, positions,
     )
-    q_out = q_rope.to(qkv.dtype).view(T, q_size)
 
-    # Cache write (element-by-element to simulate reshape_and_cache_flash)
-    k_rope_heads = k_rope.to(qkv.dtype)
-    cache_dtype = torch.float8_e4m3fn if is_fp8 else qkv.dtype
-    for t in range(T):
-        slot = slot_mapping[t].item()
-        if slot < 0:
-            continue
-        blk = slot // block_size
-        off = slot % block_size
-        if is_fp8:
-            k_cache[blk, off] = (k_rope_heads[t].float() / k_scale).clamp(
-                -448, 448
-            ).to(torch.float8_e4m3fn)
-            v_cache[blk, off] = (v[t].float() / v_scale).clamp(-448, 448).to(
-                torch.float8_e4m3fn
-            )
-        else:
-            k_cache[blk, off] = k_rope_heads[t]
-            v_cache[blk, off] = v[t]
+    # ── Step 2: copy K, V into contiguous buffers → cache write ──
+    T = qkv.shape[0]
+    k_buf.copy_(qkv[:, q_size:q_size + kv_size].view(T, num_heads_kv, head_dim))
+    v_buf.copy_(qkv[:, q_size + kv_size:].view(T, num_heads_kv, head_dim))
 
-    return q_out
+    kv_cache_dtype = "fp8_e4m3" if is_fp8 else "auto"
+    ops.reshape_and_cache_flash(
+        k_buf, v_buf, k_cache, v_cache, slot_mapping,
+        kv_cache_dtype, k_scale_t, v_scale_t,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -172,7 +109,6 @@ def bench_one(
     v_scale: float = 1.0,
     warmup: int = 20,
     repeat: int = 100,
-    ext=None,
 ):
     device = "cuda"
 
@@ -206,54 +142,60 @@ def bench_one(
     )
     v_cache = torch.zeros_like(k_cache)
 
-    # ── Pre-allocate output ──
-    q_out = torch.empty(
+    # Scale tensors for reshape_and_cache_flash (expects Tensor, not float)
+    k_scale_t = torch.tensor([k_scale], dtype=torch.float32, device=device)
+    v_scale_t = torch.tensor([v_scale], dtype=torch.float32, device=device)
+
+    # Contiguous K, V buffers for baseline's reshape_and_cache_flash
+    k_buf = torch.empty(
+        num_tokens, num_heads_kv, head_dim, dtype=dtype, device=device
+    )
+    v_buf = torch.empty_like(k_buf)
+
+    # Pre-allocate q_out for v2 (naive fusion needs separate output)
+    q_out_v2 = torch.empty(
         num_tokens, q_size, dtype=dtype, device=device
     )
 
     # ==================================================================
-    #  Benchmark 1: GEMM + Fused kernel
+    #  v3 (warp-per-head): Q in-place in qkv
     # ==================================================================
-    def run_fused():
-        # QKV GEMM (simulates preceding linear projection)
-        qkv = torch.mm(hidden_states, w_qkv)
-        # Fused kernel
-        ext.fused_qk_norm_rope_cache_quant(
-            q_out, k_cache, v_cache,
-            qkv, q_weight, k_weight, cos_sin_cache, positions, slot_mapping,
+    def run_v3_only():
+        torch.ops._C.fused_qk_norm_rope_cache_quant(
+            qkv_static, k_cache, v_cache,
+            q_weight, k_weight, cos_sin_cache,
+            positions, slot_mapping,
             k_scale, v_scale, epsilon,
             num_heads_q, num_heads_kv, head_dim, block_size,
-            True,  # is_neox
-            is_fp8,
+            True, is_fp8,
         )
 
     # ==================================================================
-    #  Benchmark 2: GEMM + Separate ops (baseline)
+    #  v2 (naive fusion): block-per-token, smem reduce
     # ==================================================================
-    def run_baseline():
-        # QKV GEMM
-        qkv = torch.mm(hidden_states, w_qkv)
-        # Separate ops
-        baseline_separate_ops(
-            qkv, q_weight, k_weight, cos_sin_cache, positions, slot_mapping,
-            k_cache, v_cache, k_scale, v_scale, epsilon,
-            num_heads_q, num_heads_kv, head_dim, block_size, is_fp8,
-        )
-
-    # ==================================================================
-    #  Benchmark 3: Fused kernel only (no GEMM, isolate kernel perf)
-    # ==================================================================
-    qkv_static = torch.mm(hidden_states, w_qkv)
-
-    def run_fused_only():
-        ext.fused_qk_norm_rope_cache_quant(
-            q_out, k_cache, v_cache,
+    def run_v2_only():
+        torch.ops._C.fused_qk_norm_rope_cache_quant_v2(
+            q_out_v2, k_cache, v_cache,
             qkv_static, q_weight, k_weight, cos_sin_cache,
             positions, slot_mapping,
             k_scale, v_scale, epsilon,
             num_heads_q, num_heads_kv, head_dim, block_size,
-            True,  # is_neox
-            is_fp8,
+            True, is_fp8,
+        )
+
+    # ==================================================================
+    #  Baseline: existing CUDA kernels (2 launches)
+    #  fused_qk_norm_rope is in-place, so clone qkv each iteration.
+    # ==================================================================
+    qkv_static = torch.mm(hidden_states, w_qkv)
+
+    def run_baseline_only():
+        qkv_copy = qkv_static.clone()
+        baseline_cuda_ops(
+            qkv_copy, q_weight, k_weight, cos_sin_cache, positions,
+            slot_mapping, k_cache, v_cache, k_scale_t, v_scale_t,
+            epsilon, num_heads_q, num_heads_kv, head_dim, is_fp8,
+            k_buf, v_buf,
         )
 
     # ── Timing helper with CUDA events ──
@@ -262,8 +204,12 @@ def bench_one(
             fn()
         torch.cuda.synchronize()
 
-        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)]
-        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)]
+        start_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)
+        ]
+        end_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(repeat_iters)
+        ]
 
         for i in range(repeat_iters):
             start_events[i].record()
@@ -279,25 +225,47 @@ def bench_one(
         return sum(trimmed) / len(trimmed)  # ms
 
     # Run benchmarks
-    t_gemm_fused = timed(run_fused, warmup, repeat)
-    t_gemm_baseline = timed(run_baseline, warmup, repeat)
-    t_fused_only = timed(run_fused_only, warmup, repeat)
+    t_v3 = timed(run_v3_only, warmup, repeat)
+    t_v2 = timed(run_v2_only, warmup, repeat)
+    t_baseline = timed(run_baseline_only, warmup, repeat)
 
-    return t_gemm_fused, t_gemm_baseline, t_fused_only
+    return t_v3, t_v2, t_baseline
 
 
 # ──────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────
 
+_HEADER = (
+    f"{'Batch':>6} | "
+    f"{'v3 warp/hd':>12} | "
+    f"{'v2 naive':>12} | "
+    f"{'Baseline':>12} | "
+    f"{'v3/Base':>10} | "
+    f"{'v3/v2':>10} | "
+    f"{'v2/Base':>10}"
+)
+
+
+def _print_row(bs, t_v3, t_v2, t_base):
+    v3_vs_base = t_base / t_v3 if t_v3 > 0 else float("inf")
+    v3_vs_v2 = t_v2 / t_v3 if t_v3 > 0 else float("inf")
+    v2_vs_base = t_base / t_v2 if t_v2 > 0 else float("inf")
+    print(
+        f"{bs:>6} | "
+        f"{t_v3 * 1000:>10.1f}us | "
+        f"{t_v2 * 1000:>10.1f}us | "
+        f"{t_base * 1000:>10.1f}us | "
+        f"{v3_vs_base:>9.2f}x | "
+        f"{v3_vs_v2:>9.2f}x | "
+        f"{v2_vs_base:>9.2f}x"
+    )
+
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         print("CUDA not available, skipping.")
         exit(0)
-
-    print("Compiling CUDA extension ...")
-    ext = _load_extension()
-    print("Done.\n")
 
     gpu_name = torch.cuda.get_device_name(0)
     cap = torch.cuda.get_device_capability()
@@ -316,23 +284,16 @@ if __name__ == "__main__":
     batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 
     for config_name, hidden_size, nq, nkv, hd in configs:
-        print("=" * 80)
+        print("=" * 90)
         print(f"  {config_name}:  hidden={hidden_size}  "
               f"Q_heads={nq}  KV_heads={nkv}  head_dim={hd}")
-        print("=" * 80)
-        print(
-            f"{'Batch':>6} | "
-            f"{'GEMM+Fused':>12} | "
-            f"{'GEMM+Baseline':>14} | "
-            f"{'Fused Only':>12} | "
-            f"{'Speedup':>8} | "
-            f"{'Kernel us':>10}"
-        )
-        print("-" * 80)
+        print("=" * 90)
+        print(_HEADER)
+        print("-" * 90)
 
         for bs in batch_sizes:
             try:
-                t_gf, t_gb, t_fo = bench_one(
+                t_v3, t_v2, t_base = bench_one(
                     num_tokens=bs,
                     hidden_size=hidden_size,
                     num_heads_q=nq,
@@ -340,17 +301,8 @@ if __name__ == "__main__":
                     head_dim=hd,
                     dtype=torch.bfloat16,
                     is_fp8=False,
-                    ext=ext,
                 )
-                speedup = t_gb / t_gf if t_gf > 0 else float("inf")
-                print(
-                    f"{bs:>6} | "
-                    f"{t_gf * 1000:>10.1f}us | "
-                    f"{t_gb * 1000:>12.1f}us | "
-                    f"{t_fo * 1000:>10.1f}us | "
-                    f"{speedup:>7.2f}x | "
-                    f"{t_fo * 1000:>8.1f}us"
-                )
+                _print_row(bs, t_v3, t_v2, t_base)
             except Exception as e:
                 print(f"{bs:>6} | ERROR: {e}")
 
@@ -358,22 +310,15 @@ if __name__ == "__main__":
 
     # ── FP8 KV cache benchmark ──
     if cap >= (8, 9):
-        print("=" * 80)
+        print("=" * 90)
         print("  FP8 KV Cache (Qwen3-8B config)")
-        print("=" * 80)
-        print(
-            f"{'Batch':>6} | "
-            f"{'GEMM+Fused':>12} | "
-            f"{'GEMM+Baseline':>14} | "
-            f"{'Fused Only':>12} | "
-            f"{'Speedup':>8} | "
-            f"{'Kernel us':>10}"
-        )
-        print("-" * 80)
+        print("=" * 90)
+        print(_HEADER)
+        print("-" * 90)
 
         for bs in batch_sizes:
             try:
-                t_gf, t_gb, t_fo = bench_one(
+                t_v3, t_v2, t_base = bench_one(
                     num_tokens=bs,
                     hidden_size=4096,
                     num_heads_q=32,
@@ -383,17 +328,8 @@ if __name__ == "__main__":
                     is_fp8=True,
                     k_scale=1.0,
                     v_scale=1.0,
-                    ext=ext,
                 )
-                speedup = t_gb / t_gf if t_gf > 0 else float("inf")
-                print(
-                    f"{bs:>6} | "
-                    f"{t_gf * 1000:>10.1f}us | "
-                    f"{t_gb * 1000:>12.1f}us | "
-                    f"{t_fo * 1000:>10.1f}us | "
-                    f"{speedup:>7.2f}x | "
-                    f"{t_fo * 1000:>8.1f}us"
-                )
+                _print_row(bs, t_v3, t_v2, t_base)
             except Exception as e:
                 print(f"{bs:>6} | ERROR: {e}")
 
