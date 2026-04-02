@@ -188,6 +188,16 @@ class FixFunctionalizationPass(VllmInductorPass):
             ):
                 mutated_args = {1: "x"}
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "fused_concat_and_cache_mla_rope")
+                and at_target == torch.ops.vllm.fused_concat_and_cache_mla_rope.default
+            ):
+                mutated_args = {1: "q_pe", 2: "k_pe"}
+                self.defunctionalize(
+                    graph,
+                    node,
+                    mutated_args=mutated_args,
+                )
             else:
                 continue  # skip the count
 

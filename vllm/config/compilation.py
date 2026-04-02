@@ -134,6 +134,8 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    enable_cache_mla_rope_fusion: bool = False
+    """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
@@ -221,6 +223,7 @@ class PassConfig:
         "fuse_allreduce_rms",
         "fuse_act_padding",
         "fuse_rope_kvcache",
+        "enable_cache_mla_rope_fusion",
         mode="wrap",
     )
     @classmethod
@@ -272,6 +275,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
+        if self.enable_cache_mla_rope_fusion and not current_platform.is_cuda():
+            logger.warning_once(
+                "MLA KV cache update with RoPE fusion enabled but the "
+                "current platform is not CUDA. The fusion will be disabled."
+            )
+            self.enable_cache_mla_rope_fusion = False
 
     def log_enabled_passes(self) -> None:
         """
