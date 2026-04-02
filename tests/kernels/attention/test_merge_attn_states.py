@@ -316,12 +316,18 @@ def test_merge_attn_states(
     # https://arxiv.org/pdf/2410.10989, 3.3 Correctness
     # use rtol = 1e-2 for bfloat16.
     if use_fp8:
-        # FP8 e4m3 has coarse quantization levels, so wider tolerances.
+        # Compare in dequantized space (multiply back by scale) so that
+        # absolute differences reflect real precision, not amplified FP8
+        # quantization steps.
         atol, rtol = 1e-1, 1e-1
+        assert output_scale is not None
+        scale = output_scale.item()
     elif output_dtype == torch.bfloat16:
         atol, rtol = 1e-3, 1e-2
+        scale = 1.0
     else:
         atol, rtol = 1e-3, 1e-3
+        scale = 1.0
 
     def diff(a: torch.Tensor, b: torch.Tensor):
         max_diff = torch.max(torch.abs(a.float() - b.float()))
@@ -333,12 +339,22 @@ def test_merge_attn_states(
     output_ref = output_ref_triton
     output_lse_ref = output_lse_ref_triton
     torch.testing.assert_close(
-        output_cuda.float(), output_ref.float(), atol=atol, rtol=rtol
+        output_cuda.float() * scale,
+        output_ref.float() * scale,
+        atol=atol,
+        rtol=rtol,
     )
-    print("Output all match, max abs diff:")
-    print(f"(Triton vs Torch) : {diff(output_torch, output_ref)}")
-    print(f"  (CUDA vs Torch) : {diff(output_torch, output_cuda)}")
-    print(f"  (CUDA vs Triton): {diff(output_ref, output_cuda)}")
+    print(
+        "Output all match, max abs diff (dequantized):"
+        if use_fp8
+        else "Output all match, max abs diff:"
+    )
+    _diff = diff(output_ref.float() * scale, output_torch.float() * scale)
+    print(f"(Triton vs Torch) : {_diff}")
+    _diff = diff(output_torch.float() * scale, output_cuda.float() * scale)
+    print(f"  (CUDA vs Torch) : {_diff}")
+    _diff = diff(output_ref.float() * scale, output_cuda.float() * scale)
+    print(f"  (CUDA vs Triton): {_diff}")
     print("-" * 100)
 
     torch.testing.assert_close(
