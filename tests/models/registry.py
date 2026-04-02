@@ -279,7 +279,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
     "Gemma4ForCausalLM": _HfExamplesInfo(
         "google/gemma-4-E2B-it",
-        is_available_online=True,
+        min_transformers_version="5.0.0",
     ),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
