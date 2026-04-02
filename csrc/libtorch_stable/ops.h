@@ -165,6 +165,14 @@ void rotary_embedding(torch::stable::Tensor& positions,
                       int64_t head_size, torch::stable::Tensor& cos_sin_cache,
                       bool is_neox);
 
+void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
+                        int64_t num_heads_k, int64_t num_heads_v,
+                        int64_t head_dim, double eps,
+                        torch::stable::Tensor& q_weight,
+                        torch::stable::Tensor& k_weight,
+                        torch::stable::Tensor& cos_sin_cache, bool is_neox,
+                        torch::stable::Tensor& position_ids);
+
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
