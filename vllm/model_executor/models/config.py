@@ -39,12 +39,6 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        from vllm.transformers_utils.config import set_default_rope_theta
-
-        set_default_rope_theta(model_config.hf_config, default_theta=500000)
-
-    @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         # Ernie4.5-VL conditionally executes text/vision MoE branches, so
         # fast_moe_cold_start can silently produce incorrect execution order.

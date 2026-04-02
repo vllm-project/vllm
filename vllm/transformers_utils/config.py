@@ -412,6 +412,20 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             config.partial_rotary_factor = partial_rotary_factor
         # Standardize and validate RoPE parameters
         config.standardize_rope_params()
+        # standardize_rope_params uses setdefault and won't overwrite an
+        # existing None value. This can happen when rope_parameters is
+        # populated via the rope_scaling property setter (Transformers v5
+        # maps rope_scaling -> rope_parameters) before self.rope_theta is
+        # assigned in the subclass __init__ — causing rope_theta: None to
+        # be set by an earlier standardize call, which setdefault won't fix.
+        if rope_theta is not None:
+            rp = getattr(config, "rope_parameters", None)
+            if (
+                isinstance(rp, dict)
+                and not is_rope_parameters_nested(rp)
+                and rp.get("rope_theta") is None
+            ):
+                rp["rope_theta"] = rope_theta
         config.validate_rope()
 
     # No RoPE parameters to patch
