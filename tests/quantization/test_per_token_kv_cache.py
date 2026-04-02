@@ -55,7 +55,9 @@ class QuantConfig:
     """Quantization parameters for a given cache dtype."""
 
     cache_dtype: torch.dtype  # torch.uint8, torch.int8, or FP8_DTYPE
-    kv_cache_dtype_str: str  # "int4_per_token_head", "int8_per_token_head", or "fp8_per_token_head"
+    kv_cache_dtype_str: (
+        str  # "int4_per_token_head", "int8_per_token_head", or "fp8_per_token_head"
+    )
     quant_max: float
     quant_min: float
     kv_quant_mode: KVQuantMode
@@ -263,9 +265,7 @@ def test_reshape_and_cache_per_token_head(
                 # Asymmetric dequant: (q_uint - zp) * scale
                 deq = (full - zp[:, None]) * clean_scale[:, None]
                 ref_deq = data[i].float()
-                torch.testing.assert_close(
-                    deq, ref_deq, atol=deq_atol, rtol=deq_rtol
-                )
+                torch.testing.assert_close(deq, ref_deq, atol=deq_atol, rtol=deq_rtol)
         else:
             actual_k_scale = k_scale_cache[blk, off]  # [num_heads]
             k_deq = key_cache[blk, off].float() * actual_k_scale[:, None]
