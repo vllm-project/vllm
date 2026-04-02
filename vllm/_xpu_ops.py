@@ -556,12 +556,6 @@ class xpu_ops:
                 fake_impl=xpu_mxfp8_quantize_fake,
             )
 
-            direct_register_custom_op(
-                op_name="xpu_mxfp8_quantize",
-                op_func=_xpu_mxfp8_quantize_impl,
-                fake_impl=xpu_mxfp8_quantize_fake,
-            )
-
             _OPS_REGISTERED = True
 
 

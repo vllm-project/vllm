@@ -138,10 +138,10 @@ def _mxfp8_e4m3_quantize_impl(
     return _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout)
 
 
-def flashinfer_mxfp8_e4m3_quantize(
+def mxfp8_e4m3_quantize(
     x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.flashinfer_mxfp8_quantize(x, is_sf_swizzled_layout)
+    return torch.ops.vllm.mxfp8_e4m3_quantize(x, is_sf_swizzled_layout)
 
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -160,7 +160,7 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     return dequantized.to(torch.bfloat16)
 
 
-def flashinfer_mxfp8_e4m3_quantize_fake(
+def mxfp8_e4m3_quantize_fake(
     x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile tracing."""
@@ -199,9 +199,9 @@ def flashinfer_mxfp8_e4m3_quantize_fake(
 
 
 direct_register_custom_op(
-    op_name="flashinfer_mxfp8_e4m3_quantize",
-    op_func=_flashinfer_mxfp8_e4m3_quantize_impl,
-    fake_impl=flashinfer_mxfp8_e4m3_quantize_fake,
+    op_name="mxfp8_e4m3_quantize",
+    op_func=_mxfp8_e4m3_quantize_impl,
+    fake_impl=mxfp8_e4m3_quantize_fake,
 )
 
 
@@ -322,7 +322,7 @@ class Mxfp8LinearOp:
             pad_rows = M_padded - M_orig
             input_2d = torch.nn.functional.pad(input_2d, (0, 0, 0, pad_rows))
 
-        input_mxfp8, input_scale = flashinfer_mxfp8_e4m3_quantize(
+        input_mxfp8, input_scale = mxfp8_e4m3_quantize(
             input_2d,
             is_sf_swizzled_layout=True,  # Swizzled for best accuracy
         )
