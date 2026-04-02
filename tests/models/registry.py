@@ -636,6 +636,7 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
+        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
@@ -765,6 +766,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),
+    "Cheers": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
+    "CheersForConditionalGeneration": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
     ),
@@ -1163,6 +1172,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     #     "JackFram/llama-160m",
     #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
     # ),
+    # [DFlash]
+    "DFlashDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.5-4B",
+        speculative_model="z-lab/Qwen3.5-4B-DFlash",
+        use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     # [Eagle]
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",

@@ -95,9 +95,11 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
     otherwise Inductor handles fusion."""
 
-    return cfg.compilation_config.is_custom_op_enabled(
-        "rms_norm"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    return (
+        cfg.compilation_config.is_custom_op_enabled("rms_norm")
+        or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+        or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
+    )
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
@@ -417,6 +419,10 @@ class VllmConfig:
             vllm_factors.append(self.compilation_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.kernel_config:
+            vllm_factors.append(self.kernel_config.compute_hash())
+        else:
+            vllm_factors.append(None)
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
@@ -660,7 +666,11 @@ class VllmConfig:
         )
 
         if kv_offloading_backend == "native":
-            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            if envs.VLLM_USE_SIMPLE_KV_OFFLOAD:
+                config_connector = "SimpleCPUOffloadConnector"
+            else:
+                config_connector = "OffloadingConnector"
+            self.kv_transfer_config.kv_connector = config_connector
             self.kv_transfer_config.kv_connector_extra_config.update(
                 {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
@@ -886,6 +896,13 @@ class VllmConfig:
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
+        # By default, enable torch wrapping only when using custom Inductor lowering
+        if self.compilation_config.ir_enable_torch_wrap is None:
+            self.compilation_config.ir_enable_torch_wrap = (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                and self.compilation_config.backend == "inductor"
+            )
+
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
@@ -894,6 +911,11 @@ class VllmConfig:
                 self.compilation_config.custom_ops.append("none")
             else:
                 self.compilation_config.custom_ops.append("all")
+
+        # This populates IR op priorities,
+        # must happen after compilation mode and backend are decided,
+        # but before fusion defaults are applied as those may depend on op priority.
+        self.kernel_config.set_platform_defaults(self)
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
@@ -1327,6 +1349,26 @@ class VllmConfig:
                     max_num_batched_tokens - scheduled_token_delta
                 )
 
+            if self.scheduler_config.max_num_scheduled_tokens <= 0:
+                raise ValueError(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings, which does not allow"
+                    " any tokens to be scheduled. Increase max_num_batched_tokens"
+                    " to accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs."
+                )
+            if self.scheduler_config.max_num_scheduled_tokens < 8192:
+                logger.warning_once(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings. This may lead to suboptimal"
+                    " performance. Consider increasing max_num_batched_tokens to"
+                    " accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs.",
+                    scope="local",
+                )
+
             max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
             if max_num_batched_tokens < max_num_scheduled_tokens + (
                 self.speculative_config.max_num_new_slots_for_drafting
@@ -1682,7 +1724,8 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}"
+            f"compilation_config={self.compilation_config!r}, "
+            f"kernel_config={self.kernel_config!r}"
         )
 
     def validate_block_size(self) -> None:
