@@ -92,7 +92,11 @@ def pick_silu_mul_block_quant_fp8_config(
 
 
 @register_kernel
-def silu_mul_block_quant_fp8(input: torch.Tensor) -> torch.Tensor:
+def silu_mul_block_quant_fp8(
+    input: torch.Tensor,
+    scale_ub: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
+) -> torch.Tensor:
     original_shape = input.shape
     two_d = hl.specialize(original_shape[-1])
     d = two_d // 2
@@ -108,9 +112,16 @@ def silu_mul_block_quant_fp8(input: torch.Tensor) -> torch.Tensor:
     scale_d = hl.cdiv(d, block_d)
 
     out = torch.empty((m, d), device=input.device, dtype=torch.float8_e4m3fn)
-    scale_out = torch.empty(
-        (scale_m, scale_d), device=input.device, dtype=torch.float32
-    )
+    min_scaling_factor = 1 / (torch.finfo(torch.float8_e4m3fn).max * 512.0)
+
+    if is_scale_transposed:
+        scale_out = torch.empty(
+            (scale_d, scale_m), device=input.device, dtype=torch.float32
+        )
+    else:
+        scale_out = torch.empty(
+            (scale_m, scale_d), device=input.device, dtype=torch.float32
+        )
 
     input_part_a = input_2d[:, :d]
     input_part_b = input_2d[:, d:]
@@ -123,16 +134,34 @@ def silu_mul_block_quant_fp8(input: torch.Tensor) -> torch.Tensor:
         result_f32 = result.to(torch.float32)
 
         abs_max = torch.max(torch.abs(result_f32))
-        block_scale = torch.finfo(torch.float8_e4m3fn).max / abs_max
-        scaled_result = result_f32 / block_scale
+        block_scale = abs_max / torch.finfo(torch.float8_e4m3fn).max
 
-        out[tile_m, tile_n] = scaled_result.to(torch.float8_e4m3fn)
-        scale_out[tile_m.begin // block_m, tile_n.begin // block_d] = 1 / block_scale
+        if scale_ub is not None:
+            block_scale = torch.min(block_scale, scale_ub)
+
+        block_scale = torch.max(block_scale, min_scaling_factor)
+        inv_block_scale = 1.0 / block_scale
+
+        out[tile_m, tile_n] = (result_f32 * inv_block_scale).to(torch.float8_e4m3fn)
+
+        if is_scale_transposed:
+            scale_out[tile_n.begin // block_d, tile_m.begin // block_m] = (
+                inv_block_scale
+            )
+        else:
+            scale_out[tile_m.begin // block_m, tile_n.begin // block_d] = (
+                inv_block_scale
+            )
 
     return out.view(output_shape), scale_out
 
 
 def silu_mul_block_quant_fp8_baseline(
-    input: torch.Tensor, block_size: torch.Tensor
+    input: torch.Tensor,
+    block_size: int,
+    scale_ub: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
 ) -> torch.Tensor:
-    pass
+    return torch.ops._C.silu_and_mul_per_block_quant(
+        input, block_size, scale_ub, is_scale_transposed
+    )
