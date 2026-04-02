@@ -911,6 +911,5 @@ def make_marlin_moe_kernel(
         prepare_finalize,
         experts,
         shared_experts=shared_experts,
-        moe_parallel_config=moe_config.moe_parallel_config,
         inplace=not moe_config.disable_inplace,
     )
