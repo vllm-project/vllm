@@ -289,6 +289,11 @@ class RocmAttentionImpl(AttentionImpl):
 
         self._need_kv_flash_permute = False
 
+        self._cached_k_scale_val: float | None = None
+        self._cached_k_scale_cpu: torch.Tensor | None = None
+        self._cached_v_scale_val: float | None = None
+        self._cached_v_scale_cpu: torch.Tensor | None = None
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -519,12 +524,18 @@ class RocmAttentionImpl(AttentionImpl):
         block_size = key_cache.shape[1]
         x = 16 // key_cache.element_size()
 
-        # Use CPU scalar tensors for scales so the C++ kernel's .item()
+        # Cache CPU scalar tensors for scales so the C++ kernel's .item()
         # call doesn't trigger a device-to-host sync during CUDA graph capture.
-        k_scale_cpu = torch.tensor(layer._k_scale_float,
-                                   dtype=torch.float32)
-        v_scale_cpu = torch.tensor(layer._v_scale_float,
-                                   dtype=torch.float32)
+        k_scale_val = layer._k_scale_float
+        v_scale_val = layer._v_scale_float
+        if self._cached_k_scale_val != k_scale_val:
+            self._cached_k_scale_cpu = torch.tensor(k_scale_val,
+                                                    dtype=torch.float32)
+            self._cached_k_scale_val = k_scale_val
+        if self._cached_v_scale_val != v_scale_val:
+            self._cached_v_scale_cpu = torch.tensor(v_scale_val,
+                                                    dtype=torch.float32)
+            self._cached_v_scale_val = v_scale_val
 
         rocm_aiter_ops.hip_qk_norm_rope_and_cache(
             qkv,
@@ -542,8 +553,8 @@ class RocmAttentionImpl(AttentionImpl):
             key_cache,
             value_cache,
             layer_slot_mapping,
-            k_scale_cpu,
-            v_scale_cpu,
+            self._cached_k_scale_cpu,
+            self._cached_v_scale_cpu,
             k_out,
             None,
             True,
