@@ -388,8 +388,8 @@ class GemmaRMSNorm(CustomOp):
                 else x + residual
             )
             residual = x
-            return ir.ops.gemma_rms_norm(
-                x, self.weight.data, self.variance_epsilon
+            return ir.ops.gemma_rms_norm(x, self.weight.data, self.variance_epsilon).to(
+                orig_dtype
             ), residual
 
     def forward_cuda(
