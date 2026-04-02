@@ -1,3 +1,4 @@
+root@f0c74a9cf91c:/workspace# cat vllm/tests/distributed/test_mnnvl_alltoall.py 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -48,34 +49,64 @@ def has_sys_ptrace_capability() -> bool:
     MNNVL (Multi-Node NVLink) requires SYS_PTRACE to share memory file descriptors
     between processes using pidfd_getfd() system call.
 
+    In CI environments, this function will raise an error if SYS_PTRACE is not
+    available, ensuring tests are not silently skipped. In local development,
+    it returns False to allow graceful test skipping.
+
     Returns:
         True if SYS_PTRACE is available, False otherwise.
+
+    Raises:
+        RuntimeError: If running in CI and SYS_PTRACE is not available.
     """
+    has_capability = False
+
     try:
         # Try to check capabilities using capsh if available
         result = subprocess.run(
             ["capsh", "--print"], capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0 and "cap_sys_ptrace" in result.stdout.lower():
-            return True
+            has_capability = True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Alternative check: try to read /proc/self/status
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("CapEff:"):
-                    # SYS_PTRACE is capability bit 19 (0x80000 = 1 << 19)
-                    cap_eff = int(line.split()[1], 16)
-                    # Check if bit 19 is set
-                    return bool(cap_eff & (1 << 19))
-    except Exception:
-        pass
+    if not has_capability:
+        # Alternative check: try to read /proc/self/status
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("CapEff:"):
+                        # SYS_PTRACE is capability bit 19 (0x80000 = 1 << 19)
+                        cap_eff = int(line.split()[1], 16)
+                        # Check if bit 19 is set
+                        has_capability = bool(cap_eff & (1 << 19))
+                        break
+        except Exception:
+            pass
 
-    # If we can't determine, assume it's not available in container environments
-    # Check if we're in a container; if not, assume it's available
-    return not (os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"))
+    if not has_capability:
+        # If we can't determine, assume it's not available in container environments
+        # Check if we're in a container; if not, assume it's available
+        has_capability = not (
+            os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+        )
+
+    # In CI, fail loudly if SYS_PTRACE is not available
+    # Check common CI environment variables
+    is_ci = any(
+        os.environ.get(var, "").lower() in ("true", "1", "yes")
+        for var in ["CI", "CONTINUOUS_INTEGRATION", "GITHUB_ACTIONS", "GITLAB_CI"]
+    )
+
+    if is_ci and not has_capability:
+        raise RuntimeError(
+            "SYS_PTRACE capability is required for MNNVL tests but not available in CI. "
+            "Please ensure the CI environment is configured with: "
+            "docker run --cap-add=SYS_PTRACE"
+        )
+
+    return has_capability
 
 
 def test_flashinfer_nvlink_two_sided_import():
@@ -543,15 +574,29 @@ def one_sided_workspace_reinitialization_worker(rank: int, world_size: int):
 # These tests validate that the a2a (all-to-all) backends correctly communicate
 # data between ranks by comparing results against reference implementations.
 #
-# NOTE: These tests use AgRsAll2AllManager (all-gather/reduce-scatter) and
-# do NOT test the FlashInfer NVLink backends directly, since:
-# - Two-sided backend: Has dispatch/combine but needs TRTLLM MoE kernel integration
-# - One-sided backend: Does not implement dispatch/combine methods at all
+# Backend Test Coverage:
 #
-# Three levels of validation:
-# 1. Basic data communication - compares AgRs vs Naive backends
-# 2. FlashInfer validation - tests MNNVL a2a backend against reference
-# 3. Deterministic validation - verifies exact data values with known patterns
+# 1. AgRsAll2AllManager (all-gather/reduce-scatter): ✅ Full validation
+#    * Tests dispatch_router_logits, dispatch, and combine operations
+#    * Validates both shapes and actual data values
+#    * Uses deterministic patterns to verify correctness
+#    * Three levels: basic, value validation, deterministic validation
+#
+# 2. FlashInfer NVLink Two-Sided: ⚠️  Initialization only
+#    * Workspace creation, cleanup, reinitialization: ✅ Tested
+#    * Data communication (MnnvlMoe API): ❌ Not tested in unit tests
+#    * Reason: MnnvlMoe functions (mnnvl_moe_alltoallv_prepare, mnnvl_moe_alltoallv,
+#      mnnvl_moe_alltoallv_combine) require tensors prepared by MoE quantization
+#      kernels. Testing requires integration with full MoE layer infrastructure.
+#    * Validation: Happens in end-to-end MoE model tests, not unit tests.
+#
+# 3. FlashInfer NVLink One-Sided: ⚠️ Initialization only
+#    * Workspace initialization with MoE-specific parameters: ✅ Tested
+#    * Data communication (MoeAlltoAll API): ❌ Not tested in unit tests
+#    * Same reason as two-sided: requires full MoE kernel integration
+#
+# TODO: Consider adding integration tests that run actual MoE layers with
+#       FlashInfer backends to validate end-to-end data communication.
 # =============================================================================
 
 
@@ -956,9 +1001,9 @@ def flashinfer_data_communication_worker(rank: int, world_size: int):
 
 @pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.parametrize("world_size", [2])
-def test_flashinfer_alltoall_data_communication(world_size: int):
+def test_agrs_alltoall_data_communication_with_values(world_size: int):
     """
-    Test All2All data communication with value validation.
+    Test AgRs All2All data communication with value validation.
 
     This test validates that AgRsAll2AllManager correctly communicates data
     across ranks by using deterministic input values (each rank has unique values)
