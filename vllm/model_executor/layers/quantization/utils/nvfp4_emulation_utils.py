@@ -53,7 +53,7 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
 def dequantize_to_dtype(
     tensor_fp4: torch.Tensor,
     tensor_sf: torch.Tensor,
-    global_scale: torch.Tensor | float,
+    global_scale: torch.Tensor,
     dtype: torch.dtype,
     block_size: int = 16,
     swizzle: bool | None = True,

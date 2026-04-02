@@ -107,7 +107,7 @@ def backend_to_kernel_cls(
 
         return [MarlinExperts]
     elif backend == NvFp4MoeBackend.EMULATION:
-        from vllm.model_executor.layers.fused_moe.nvfp4_simulation_moe import (
+        from vllm.model_executor.layers.fused_moe.nvfp4_emulation_moe import (
             Nvfp4QuantizationEmulationTritonExperts,
         )
 
