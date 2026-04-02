@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -753,7 +752,9 @@ class LLM:
         )
         device = "cpu"  # use tensor on cpu
         batch_size = len(prompts)
-        lora_requests = self._lora_request_to_seq(lora_request, len(prompts) * num_beams)
+        lora_requests = self._lora_request_to_seq(
+            lora_request, len(prompts) * num_beams
+        )
 
         if use_tqdm and concurrency_limit is not None:
             logger.warning(

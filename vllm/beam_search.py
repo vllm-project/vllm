@@ -10,7 +10,6 @@ from vllm.inputs import (
     EncoderDecoderInput,
     MultiModalInput,
     TokensInput,
-    TokensPrompt,
     mm_input,
     tokens_input,
 )
