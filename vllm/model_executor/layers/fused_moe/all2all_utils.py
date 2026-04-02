@@ -113,6 +113,20 @@ def maybe_make_prepare_finalize(
 
         # For DP/TP case, fall back to naive P/F.
         if moe.moe_parallel_config.dp_size > 1:
+            is_xpu_restricted_visibility = (
+                current_platform.is_xpu()
+                and current_platform.device_count()
+                < moe.moe_parallel_config.dp_size
+            )
+            if is_xpu_restricted_visibility:
+                logger.info_once(
+                    "XPU: Visible device count (%d) < DP size (%d). "
+                    "Using no-DP/EP MoE to avoid cross-rank communication.",
+                    current_platform.device_count(),
+                    moe.moe_parallel_config.dp_size,
+                )
+                return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
+
             logger.info_once(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
