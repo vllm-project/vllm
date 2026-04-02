@@ -49,6 +49,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert not self.base_layer.use_ep, (
             "EP support for Fused MoE LoRA is not implemented yet."
         )
+        assert not self.base_layer.quant_method.is_monolithic, (
+            "Monolithic kernels are not supported for Fused MoE LoRA."
+        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)

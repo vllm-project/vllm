@@ -136,13 +136,6 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
-        serve_parser.add_argument(
-            "--grpc",
-            action="store_true",
-            default=False,
-            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
-            "server. Requires: pip install vllm[grpc].",
-        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
@@ -225,7 +218,7 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        engine_manager.monitor_engine_liveness()
     finally:
         timeout = None
         if shutdown_requested:
