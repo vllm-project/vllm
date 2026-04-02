@@ -689,6 +689,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
 
+# Pin transformers to 5.5.0, overwriting the version from dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system "transformers==5.5.0"
+
 # Install deepgemm wheel that has been built in the `build` stage
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
