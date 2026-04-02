@@ -29,8 +29,14 @@ def init_pooling_io_processors(
 
     if enable_scoring_api(supported_tasks, model_config):
         score_type = model_config.score_type
-        if score_type is not None and score_type in ScoringIOProcessors:
-            processors.append((score_type, ScoringIOProcessors[score_type]))
+
+        if model_config.architecture == "JinaForRanking":
+            processors.append(
+                (score_type, ScoringIOProcessors["jina-late-interaction"])
+            )
+        else:
+            if score_type is not None and score_type in ScoringIOProcessors:
+                processors.append((score_type, ScoringIOProcessors[score_type]))
 
     return {
         task: processor_cls(

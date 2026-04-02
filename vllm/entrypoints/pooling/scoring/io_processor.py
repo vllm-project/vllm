@@ -34,7 +34,7 @@ ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
 
 class ScoringIOProcessor(PoolingIOProcessor):
-    name: ScoreType
+    name: str
     pooling_task: PoolingTask
 
     def __init__(self, *args, **kwargs):
@@ -412,8 +412,69 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-ScoringIOProcessors: dict[ScoreType, type[ScoringIOProcessor]] = {
-    "bi-encoder": BiEncoderIOProcessor,
-    "late-interaction": LateInteractionIOProcessor,
-    "cross-encoder": CrossEncoderIOProcessor,
+class JinaLateInteractionIOProcessor(LateInteractionIOProcessor):
+    name = "jina-late-interaction"
+    pooling_task: PoolingTask = "token_embed"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        from vllm.model_executor.models.jina import format_docs_prompts_func
+
+        self.format_docs_prompts_func = format_docs_prompts_func
+
+    #######################################
+    # helpers
+
+    def _pre_process(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        if len(scoring_data.data_1) == 1:
+            prompts = self.format_docs_prompts_func(
+                query=scoring_data.data_1[0], docs=scoring_data.data_2
+            )
+        else:
+            prompts = [
+                self.format_docs_prompts_func(query=q, docs=[d])
+                for q, d in zip(scoring_data.data_1, scoring_data.data_2)
+            ]
+
+        return self._preprocess_completion_offline(
+            prompts=prompts, tok_params=tok_params, prompt_extras=prompt_extras
+        )
+
+    def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
+        final_res_batch: list[PoolingRequestOutput] = []
+
+        for i in range(len(outputs)):
+            embeds = outputs[i].outputs.data.float()
+            emb_1 = embeds[0]
+            emb_2 = embeds[1:]
+
+            scores = F.cosine_similarity(emb_1, emb_2)
+
+            for score in scores:
+                final_res_batch.append(
+                    PoolingRequestOutput(
+                        request_id=outputs[i].request_id,
+                        outputs=score,
+                        prompt_token_ids=outputs[i].prompt_token_ids,
+                        num_cached_tokens=outputs[i].num_cached_tokens,
+                        finished=True,
+                    )
+                )
+        return final_res_batch
+
+
+ScoringIOProcessors: dict[str, type[ScoringIOProcessor]] = {
+    p.name: p
+    for p in [
+        BiEncoderIOProcessor,
+        LateInteractionIOProcessor,
+        JinaLateInteractionIOProcessor,
+        CrossEncoderIOProcessor,
+    ]
 }

@@ -6,7 +6,6 @@
 
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import VllmConfig
@@ -22,11 +21,12 @@ from ..layers.pooler.tokwise import (
     TokenPoolerHeadOutputItem,
     TokenPoolingMethodOutputItem,
 )
+from .interfaces import SupportsLateInteraction
 from .qwen3 import Qwen3Model
 from .utils import maybe_prefix
 
 
-class JinaForRanking(nn.Module):
+class JinaForRanking(nn.Module, SupportsLateInteraction):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.projector_dim = 512
@@ -92,7 +92,7 @@ class JinaForRankingPoolerHead(TokenPoolerHead):
         pooling_params = pooling_metadata.pooling_params
         assert len(pooled_data) == len(pooling_params)
 
-        scores = []
+        embeds_list = []
         for b in range(len(pooled_data)):
             hidden_states = pooled_data[b]
             prompt_token_ids_cpu = pooling_metadata.prompt_token_ids_cpu[b]
@@ -105,15 +105,10 @@ class JinaForRankingPoolerHead(TokenPoolerHead):
             )[0]
 
             indexes = torch.cat([query_embed_token_indexes, doc_embed_token_indexes])
-            if len(indexes) == 0:
-                # profiling run
-                scores.append(torch.empty(0))
-                continue
+            embeds = self.projector(hidden_states[indexes])
+            embeds_list.append(embeds)
 
-            embeds = self.projector(hidden_states[indexes]).float()
-            scores.append(F.cosine_similarity(embeds[0], embeds[1:], dim=-1))
-
-        return scores
+        return embeds_list
 
 
 def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
@@ -125,11 +120,19 @@ def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
 def format_docs_prompts_func(
     query: str,
     docs: list[str],
-    special_tokens: dict[str, str],
+    special_tokens: dict[str, str] | None = None,
     instruction: str | None = None,
     no_thinking: bool = True,
 ) -> str:
     # TODO: Try converting the code below into a chat template.
+
+    default_special_tokens = {
+        "query_embed_token": "<|rerank_token|>",
+        "doc_embed_token": "<|embed_token|>",
+    }
+    if special_tokens is None:
+        special_tokens = default_special_tokens
+
     query = sanitize_input(query, special_tokens)
     docs = [sanitize_input(doc, special_tokens) for doc in docs]
 
