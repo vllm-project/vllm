@@ -173,24 +173,14 @@ kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 
 # TODO: we use torch.float16 for the scale dtype only currently, fp32/bf16 may
-# be needed for some cases, need to verify and change the dtype here.
+# be needed for some cases, need to verify and change the dtype here. Besides,
+# we may need specify concrete GroupShape(32/64/128) and Symmetric/Asymmetric
+# setting, for kernel impl to decide whether it's supported.
 kInt4StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
 
 kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
-
-kInt4StaticGroupScale128 = ScaleDesc(torch.float16, True, GroupShape(1, 128))
-kInt4StaticGroupScale64 = ScaleDesc(torch.float16, True, GroupShape(1, 64))
-kInt4StaticGroupScale32 = ScaleDesc(torch.float16, True, GroupShape(1, 32))
-kInt4StaticSym128 = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale128, symmetric=True)
-kInt4StaticSym64 = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale64, symmetric=True)
-kInt4StaticSym32 = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale32, symmetric=True)
-kInt4StaticAsym128 = QuantKey(
-    INT4_DTYPE, scale=kInt4StaticGroupScale128, symmetric=False
-)
-kInt4StaticAsym64 = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale64, symmetric=False)
-kInt4StaticAsym32 = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale32, symmetric=False)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
