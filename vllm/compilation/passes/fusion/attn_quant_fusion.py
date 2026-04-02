@@ -424,9 +424,7 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
             for layer in layers:
                 for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
                     scale = ScaleDesc(torch.float32, False, group_shape)
-                    quant_key = QuantKey(
-                        dtype=FP8_DTYPE, scale=scale, symmetric=True
-                    )
+                    quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
                     if not layer.impl.fused_output_quant_supported(quant_key):
                         continue
                     for has_col_major in [True, False]:
