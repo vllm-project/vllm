@@ -32,7 +32,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -86,6 +86,7 @@ class DeciLMAttention(LlamaAttention):
         bias: bool = False,
         bias_o_proj: bool = False,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -99,6 +100,7 @@ class DeciLMAttention(LlamaAttention):
             bias,
             bias_o_proj,
             cache_config,
+            model_config,
             prefix,
             attn_type,
         )
@@ -131,6 +133,7 @@ class DeciLMDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -164,6 +167,7 @@ class DeciLMDecoderLayer(nn.Module):
                 bias=attention_bias,
                 bias_o_proj=bias_o_proj,
                 cache_config=cache_config,
+                model_config=model_config,
                 prefix=f"{prefix}.self_attn",
             )
             self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -236,6 +240,7 @@ class DeciModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -262,6 +267,7 @@ class DeciModel(nn.Module):
                 layer_idx,
                 cache_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=prefix,
             )
 

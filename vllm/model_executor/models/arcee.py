@@ -105,6 +105,7 @@ class ArceeDecoderLayer(nn.Module):
         config: LlamaConfig,
         cache_config: Any | None = None,
         quant_config: Any | None = None,
+        model_config: Any | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -135,6 +136,7 @@ class ArceeDecoderLayer(nn.Module):
             bias=attention_bias,
             bias_o_proj=bias_o_proj,
             cache_config=cache_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
             attn_type=getattr(
                 config, "attn_type", "decoder"
@@ -191,6 +193,7 @@ class ArceeModel(nn.Module, EagleModelMixin):
         config: LlamaConfig = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
         self.quant_config = quant_config
         self.config = config
         self.vocab_size = config.vocab_size
@@ -214,6 +217,7 @@ class ArceeModel(nn.Module, EagleModelMixin):
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
