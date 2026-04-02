@@ -314,15 +314,9 @@ def get_conv_copy_spec(
     offset = num_accepted_tokens - 1
     if is_conv_state_dim_first():
         # DS layout: (num_blocks, dim, state_len) — state_len is last.
-        if offset > 0:
-            # Slicing along the last dim yields a non-contiguous view
-            # because features (dim) are strided by state_len.
-            raise NotImplementedError(
-                "DS conv state layout does not yet support speculative "
-                "decoding with mamba_cache_mode='all' "
-                "(num_accepted_tokens > 1)."
-            )
-        src_state = state[src_block_id]
+        # Slicing along the last dim yields a non-contiguous view
+        # because features (dim) are strided by state_len.
+        src_state = state[src_block_id].contiguous()
     else:
         # SD layout: (num_blocks, state_len, dim) — dim contiguous.
         src_state = state[src_block_id, offset:]
