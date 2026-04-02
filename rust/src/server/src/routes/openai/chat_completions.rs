@@ -124,6 +124,7 @@ async fn collect_chat_completion(
         logprobs,
         output_token_count,
         finish_reason,
+        kv_transfer_params,
     } = collected;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
@@ -184,6 +185,7 @@ async fn collect_chat_completion(
         usage: Some(usage),
         system_fingerprint: None,
         prompt_logprobs,
+        kv_transfer_params,
     })
 }
 
@@ -792,6 +794,7 @@ mod tests {
                 prompt_token_count: 1,
                 output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
             }),
         ]);
 
@@ -849,6 +852,7 @@ mod tests {
                 prompt_token_count: 1,
                 output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
             }),
         ]);
 

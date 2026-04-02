@@ -171,6 +171,7 @@ pub(super) struct CompletionResponse {
     pub choices: Vec<CompletionChoice>,
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
+    pub kv_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `CompletionResponseChoice` class.

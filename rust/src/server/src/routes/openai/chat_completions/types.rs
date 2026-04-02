@@ -326,6 +326,7 @@ pub(super) struct ChatCompletionResponse {
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+    pub kv_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponseChoice` class.

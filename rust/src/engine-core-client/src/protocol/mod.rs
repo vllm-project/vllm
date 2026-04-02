@@ -361,7 +361,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub events: Option<Vec<EngineCoreEvent>>,
     #[serde(default)]
-    pub kv_transfer_params: Option<OpaqueValue>,
+    pub kv_transfer_params: Option<serde_json::Value>,
     #[serde(default)]
     pub trace_headers: Option<OpaqueValue>,
     /// Number of tokens with prefix-cache hits, local plus external.

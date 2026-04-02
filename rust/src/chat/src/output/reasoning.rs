@@ -128,6 +128,7 @@ pub(crate) async fn reasoning_event_stream(
                         prompt_token_count: finished.prompt_token_count,
                         output_token_count: finished.output_token_count,
                         finish_reason: finished.finish_reason,
+                        kv_transfer_params: finished.kv_transfer_params,
                     };
                 }
             }
@@ -203,6 +204,7 @@ mod tests {
                     prompt_token_count: 3,
                     output_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
+                    kv_transfer_params: None,
                 }),
             }),
         ]);
@@ -238,6 +240,7 @@ mod tests {
                     prompt_token_count: 3,
                     output_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
+                    kv_transfer_params: None,
                 },
             ]
         );

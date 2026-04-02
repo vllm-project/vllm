@@ -10,6 +10,7 @@ test-util = []
 enum-as-inner.workspace = true
 futures.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 vllm-engine-core-client.workspace = true

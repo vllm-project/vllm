@@ -21,6 +21,8 @@ pub struct CollectedTextOutput {
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub finish_reason: FinishReason,
+    /// Connector-specific KV transfer parameters for disaggregated serving.
+    pub kv_transfer_params: Option<serde_json::Value>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -64,9 +66,10 @@ impl<T: TextOutputStream> T {
                                 prompt_logprobs: prompt_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
-                                // These are updated below.
+                                // These are updated below when finished.
                                 prompt_token_count: 0,
                                 finish_reason: FinishReason::Error,
+                                kv_transfer_params: None,
                             })
                         };
 
@@ -74,6 +77,7 @@ impl<T: TextOutputStream> T {
                             let mut collected = collected.unwrap();
                             collected.prompt_token_count = finished.prompt_token_count;
                             collected.finish_reason = finished.finish_reason;
+                            collected.kv_transfer_params = finished.kv_transfer_params;
                             return Ok(collected);
                         }
                     }
@@ -137,6 +141,7 @@ mod tests {
                     prompt_token_count: 2,
                     output_token_count: 2,
                     finish_reason: FinishReason::stop_eos(),
+                    kv_transfer_params: None,
                 }),
             }),
         ]);
@@ -242,6 +247,7 @@ mod tests {
                     prompt_token_count: 2,
                     output_token_count: 5,
                     finish_reason: FinishReason::stop_eos(),
+                    kv_transfer_params: None,
                 }),
             }),
         ]);

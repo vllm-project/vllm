@@ -126,6 +126,13 @@ impl GenerateOutput {
         })
     }
 
+    /// Takes connector-specific KV transfer parameters from the engine output, if present.
+    ///
+    /// These are only populated on the terminal output for disaggregated-serving requests.
+    pub fn take_kv_transfer_params(&mut self) -> Option<serde_json::Value> {
+        self.raw.kv_transfer_params.take()
+    }
+
     /// Returns whether this output is terminal for the request.
     pub fn finished(&self) -> bool {
         self.raw.finished()

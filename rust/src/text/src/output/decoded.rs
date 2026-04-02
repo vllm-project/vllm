@@ -41,6 +41,8 @@ pub struct Finished {
     pub prompt_token_count: usize,
     pub output_token_count: usize,
     pub finish_reason: FinishReason,
+    /// Connector-specific KV transfer parameters for disaggregated serving.
+    pub kv_transfer_params: Option<serde_json::Value>,
 }
 
 /// Internal decoded-text event emitted before higher-level assistant adaptation.
@@ -143,6 +145,7 @@ pub async fn decoded_text_event_stream(
             started = true;
         }
 
+        let kv_transfer_params = output.take_kv_transfer_params();
         let mut finish_reason = output.finish_reason();
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
             && !decode_options.include_stop_str_in_output;
@@ -255,6 +258,7 @@ pub async fn decoded_text_event_stream(
                     prompt_token_count,
                     output_token_count,
                     finish_reason: reason,
+                    kv_transfer_params,
                 }),
             };
             return Ok(());
