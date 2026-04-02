@@ -521,15 +521,15 @@ def _gen_steering_extra_hash_keys(
     num_prompt_tokens = request.num_prompt_tokens
 
     if start_token_idx < num_prompt_tokens and end_token_idx > num_prompt_tokens:
-        # Boundary block — straddles prompt/decode boundary, need both
+        # Boundary block — straddles prompt/decode boundary, need both.
+        # Always include both hashes in fixed positions [prefill, decode]
+        # so that (prefill=X, decode=0) is distinguishable from
+        # (prefill=0, decode=X).
         prefill_hash = getattr(request, "prefill_steering_config_hash", 0)
         decode_hash = getattr(request, "decode_steering_config_hash", 0)
-        keys: list[int] = []
-        if prefill_hash != 0:
-            keys.append(prefill_hash)
-        if decode_hash != 0:
-            keys.append(decode_hash)
-        return keys
+        if prefill_hash == 0 and decode_hash == 0:
+            return []
+        return [prefill_hash, decode_hash]
     elif start_token_idx < num_prompt_tokens:
         # Pure prompt block — only prefill steering affects KV
         prefill_hash = getattr(request, "prefill_steering_config_hash", 0)
