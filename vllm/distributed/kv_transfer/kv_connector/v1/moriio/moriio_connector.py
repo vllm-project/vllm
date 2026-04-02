@@ -585,6 +585,7 @@ class MoRIIOConnectorScheduler:
             )
 
         # If we execute in P-D serial mode, no notification port is needed.
+        # Return KV transfer params that will be forwarded to decode instance by router
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -592,6 +593,8 @@ class MoRIIOConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_host=self.host_ip,
             remote_port=self.handshake_port,
+            remote_handshake_port=self.handshake_port,  # For router compatibility
+            remote_notify_port=self.notify_port,        # For router compatibility
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
 
