@@ -544,11 +544,10 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async:
+            # Run _move_to_workspace if all ranks have finished transferring the
+            # new weights to the intermediate buffer
             for eplb_model_state in self.model_states.values():
-                if (
-                    eplb_model_state.pending_result is not None
-                    and self._all_ranks_result_ready(eplb_model_state)
-                ):
+                if self._all_ranks_result_ready(eplb_model_state):
                     _move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
@@ -1048,7 +1047,7 @@ def _move_to_workspace(
         is_unchanged=result.is_unchanged,
         is_received_locally=result.is_received_locally,
         recv_metadata=result.recv_metadata,
-        new_indices=result.new_physical_to_logical_map.numpy(),
+        new_indices=result.new_physical_to_logical_map[result.layer_idx].numpy(),
         ep_rank=ep_group.rank(),
     )
 
@@ -1062,6 +1061,9 @@ def _move_to_workspace(
         model_state.model_name,
         ep_group.rank(),
     )
+
+    if result.layer_idx == model_state.model.num_moe_layers - 1:
+        model_state.rebalanced = False
 
     # Reset pending_result before unblocking the async worker
     model_state.pending_result = None
