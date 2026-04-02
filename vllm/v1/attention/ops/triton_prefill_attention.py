@@ -39,6 +39,7 @@ def _fwd_kernel(
     K,
     V,
     sm_scale,
+    skip_softmax_threshold_scale,
     B_Start_Loc,
     B_Seqlen,
     Out,
@@ -57,6 +58,7 @@ def _fwd_kernel(
     IS_CAUSAL: tl.constexpr,
     SLIDING_WINDOW_Q: tl.constexpr,
     SLIDING_WINDOW_K: tl.constexpr,
+    ENABLE_SKIP_SOFTMAX: tl.constexpr,
     Lk: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
@@ -99,6 +101,9 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
+    skip_threshold = skip_softmax_threshold_scale / tl.maximum(
+        cur_batch_seq_len.to(tl.float32), 1.0
+    )
 
     # Calculate the end position for attention computation
     end_n = cur_batch_seq_len
@@ -144,13 +149,38 @@ def _fwd_kernel(
 
         qk = tl.dot(q, k)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
-        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        local_max = tl.max(qk, 1)
+
+        skip_rows = tl.zeros([BLOCK_M], dtype=tl.int1)
+        if ENABLE_SKIP_SOFTMAX:
+            # BLASST-style criterion:
+            # exp(local_max - running_max) < lambda
+            # where lambda = threshold_scale_factor / context_len.
+            has_running_max = m_i > float("-inf")
+            rel_contrib = tl.math.exp2(local_max - m_i)
+            skip_rows = has_running_max & (rel_contrib < skip_threshold)
+
+            # Ignore padded rows in the all-skip decision.
+            skip_rows_padded = tl.where(offs_m < cur_batch_seq_len, skip_rows, True)
+            all_rows_skipped = tl.min(skip_rows_padded.to(tl.int32), axis=0) == 1
+            if all_rows_skipped:
+                continue
+
+        m_ij = tl.maximum(m_i, local_max)
         qk -= m_ij[:, None]
         p = tl.math.exp2(qk)
         l_ij = tl.sum(p, 1)
 
         # -- update m_i and l_i
         alpha = tl.math.exp2(m_i - m_ij)
+
+        if ENABLE_SKIP_SOFTMAX:
+            # Keep state unchanged for skipped rows.
+            p = tl.where(skip_rows[:, None], 0.0, p)
+            l_ij = tl.where(skip_rows, 0.0, l_ij)
+            alpha = tl.where(skip_rows, 1.0, alpha)
+            m_ij = tl.where(skip_rows, m_i, m_ij)
+
         l_i = l_i * alpha + l_ij
         # -- update output accumulator --
         acc = acc * alpha[:, None]
@@ -200,6 +230,7 @@ def context_attention_fwd(
     softmax_scale: float | None = None,
     sliding_window_q: int | None = None,
     sliding_window_k: int | None = None,
+    skip_softmax_threshold_scale: float | None = None,
 ):
     """
     q, k, v: [b * s, head, head_dim]
@@ -215,6 +246,13 @@ def context_attention_fwd(
     # rescale with 1/ln(2) for triton exp2
     sm_scale *= RCP_LN2
 
+    threshold_scale = (
+        float(skip_softmax_threshold_scale)
+        if skip_softmax_threshold_scale is not None
+        else 0.0
+    )
+    enable_skip_softmax = threshold_scale > 0.0
+
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
@@ -229,6 +267,7 @@ def context_attention_fwd(
         k,
         v,
         sm_scale,
+        threshold_scale,
         b_start_loc,
         b_seq_len,
         o,
@@ -247,6 +286,7 @@ def context_attention_fwd(
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,
+        ENABLE_SKIP_SOFTMAX=enable_skip_softmax,
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,

@@ -82,6 +82,8 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_ATTENTION_SKIP_SOFTMAX: bool = False
+    VLLM_ATTENTION_SKIP_SOFTMAX_THRESHOLD_SCALE: float = 0.0
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -507,6 +509,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Experimental: bypass softmax normalization in Triton prefill attention op.
+    "VLLM_ATTENTION_SKIP_SOFTMAX": lambda: bool(
+        int(os.getenv("VLLM_ATTENTION_SKIP_SOFTMAX", "0"))
+    ),
+    # Scale factor for Skip-Softmax threshold (BLASST style):
+    # lambda = threshold_scale_factor / context_length.
+    "VLLM_ATTENTION_SKIP_SOFTMAX_THRESHOLD_SCALE": lambda: float(
+        os.getenv("VLLM_ATTENTION_SKIP_SOFTMAX_THRESHOLD_SCALE", "0.0")
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),

@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -341,6 +342,11 @@ class RocmAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             sliding_window_q=self.sliding_window[0],
             sliding_window_k=self.sliding_window[1],
+            skip_softmax_threshold_scale=(
+                envs.VLLM_ATTENTION_SKIP_SOFTMAX_THRESHOLD_SCALE
+                if envs.VLLM_ATTENTION_SKIP_SOFTMAX
+                else None
+            ),
         )
         return output
 
