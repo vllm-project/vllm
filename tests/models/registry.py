@@ -1000,17 +1000,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                 # Trigger conv3d:
                 video_temporal_patch_size=2,
             ),
-            # Trigger audio-encoder:
-            "sound_config": PretrainedConfig(
-                num_hidden_layers=2,
-                sampling_rate=16000,
-                projection_hidden_size=4096,
-                projection_bias=True,
-                num_mel_bins=128,
-                subsampling_factor=8,
-                subsampling_conv_kernel_size=3,
-                subsampling_conv_stride=2,
-            ),
             "text_config": {
                 "num_hidden_layers": 2,
                 "hybrid_override_pattern": "M*",

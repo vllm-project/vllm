@@ -356,15 +356,6 @@ class DynamicResolutionImageTiler:
                 feature_sizes.append(param.num_embeddings)
         return images, feature_sizes
 
-    feature_size_cache: dict[Image.Image, int] = {}
-
-    @classmethod
-    def get_cached_feature_size(cls, image: Image.Image) -> int:
-        feature_size = cls.feature_size_cache[id(image)]
-        # hard assert that we only use the feature size once
-        del cls.feature_size_cache[id(image)]
-        return feature_size
-
     @dataclass
     class DynamicResolutionParams:
         media: Image.Image
@@ -519,7 +510,6 @@ class DynamicResolutionImageTiler:
                 param, token_count = self.process_media(media, tokens_for_media)
                 params.append(param)
                 token_counts.append(token_count)
-                self.feature_size_cache[id(param.media)] = param.num_embeddings
 
             # Step 2: Check if total tokens is within budget
             total_tokens = sum(token_counts)

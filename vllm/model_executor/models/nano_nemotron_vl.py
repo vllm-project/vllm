@@ -402,9 +402,8 @@ class NanoNemotronVLMultiModalProcessor(
 
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
-            elif tiler := hf_processor.dynamic_tiler:
-                image = images.get(item_idx)
-                feature_size = tiler.get_cached_feature_size(image)
+            elif self.info.is_dynamic_tiler:
+                feature_size = out_mm_data["num_tokens_per_image"][item_idx]
             else:
                 image_size = images.get_image_size(item_idx)
                 max_num_tiles = hf_processor.max_num_tiles
@@ -1034,9 +1033,13 @@ class NemotronH_Nano_VL_V2(
                 data=image_embeds,
             )
 
+        pixel_values_flat = kwargs.pop("pixel_values_flat", None)
+        if pixel_values_flat is None:
+            return None
+
         if self.dynamic_resolution:
             pixel_values_flat = DynamicResolutionImageTiler.stack(
-                kwargs.pop("pixel_values_flat"), self.patch_size
+                pixel_values_flat, self.patch_size
             )
             return NanoNemotronVLImagePixelInputsDynamic(
                 pixel_values_flat=pixel_values_flat, **kwargs
