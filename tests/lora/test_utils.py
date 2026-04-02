@@ -14,6 +14,7 @@ from vllm.lora.utils import (
     parse_fine_tuned_lora_name,
     replace_submodule,
 )
+from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 
 
@@ -110,6 +111,17 @@ def test_parse_fine_tuned_lora_name_invalid():
     for name in fixture:
         with pytest.raises(ValueError, match="unsupported LoRA weight"):
             parse_fine_tuned_lora_name(name)
+
+
+def test_parse_fine_tuned_gemma4_lora_name_with_mapper():
+    mapper = Gemma4ForCausalLM.hf_to_vllm_mapper
+    name = (
+        "base_model.model.model.language_model.layers.9.mlp.down_proj."
+        "lora_A.weight"
+    )
+    assert ("model.layers.9.mlp.down_proj", True) == parse_fine_tuned_lora_name(
+        name, mapper
+    )
 
 
 def test_replace_submodule():

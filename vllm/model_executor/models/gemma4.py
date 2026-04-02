@@ -60,6 +60,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_layers,
@@ -1043,8 +1044,17 @@ class Gemma4Model(nn.Module):
 
         return loaded_params
 
-
-class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
+class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
+                        MixtureOfExperts):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # Gemma4 PEFT adapters are often produced from the text submodule
+            # inside Gemma4ForConditionalGeneration and therefore use
+            # `model.language_model.*` keys. The vLLM text-only model lives
+            # directly under `model.*`.
+            "model.language_model.": "model.",
+        }
+    )
     # Note: qkv_proj packing applies to non-k_eq_v layers (sliding
     # attention and full attention without k_eq_v). k_eq_v layers use
     # separate q_proj + k_proj without packing.
