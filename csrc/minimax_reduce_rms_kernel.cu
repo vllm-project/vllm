@@ -245,6 +245,9 @@ __global__ void __launch_bounds__(1024)
 
   LamportComm<NRanks> comm(params.workspace, params.rank);
   int clear_access = comm.clear_size / kElemsPerAccess<DType>;
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.wait;");
+#endif
   for (int idx = access_id; idx < tot_access;
        idx += access_stride, token_id += token_stride) {
     alignas(16) DType vals[kElemsPerAccess<DType>];
@@ -306,6 +309,9 @@ __global__ void __launch_bounds__(1024)
     reinterpret_cast<float4*>(comm.clear_buf)[idx] = clear_vec;
   }
   comm.update(params.size_q * NRanks);
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 /**
@@ -367,6 +373,9 @@ __global__ void __launch_bounds__(1024)
   LamportComm<NRanks> comm(params.workspace, params.rank);
 
   DType norm_weight[kElemsPerAccess<DType>]{};
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.wait;");
+#endif
   if (is_q) {
     if (is_valid_q) {
       *reinterpret_cast<typename ElemsPerAccess<DType>::vec_type*>(
@@ -576,6 +585,9 @@ __global__ void __launch_bounds__(1024)
       }
     }
   }  // end group loop
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
 
   int clear_access = static_cast<int>(comm.clear_size / kElemsPerAccess<DType>);
   int clear_stride = group_stride * blockDim.x;
@@ -651,6 +663,7 @@ void minimax_reduce_rms_kernel_launcher(MiniMaxReduceRMSParams const& params) {
 
   cudaLaunchAttribute attribute[2];
   attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attribute[0].val.programmaticStreamSerializationAllowed = 1;
   attribute[1].id = cudaLaunchAttributeClusterDimension;
   attribute[1].val.clusterDim.x = cluster_size;
   attribute[1].val.clusterDim.y = 1;
@@ -718,6 +731,7 @@ void minimax_reduce_rms_kernel_launcher_float4(
 
   cudaLaunchAttribute attribute[2];
   attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attribute[0].val.programmaticStreamSerializationAllowed = 1;
   attribute[1].id = cudaLaunchAttributeClusterDimension;
   attribute[1].val.clusterDim.x = cluster_size;
   attribute[1].val.clusterDim.y = 1;

@@ -109,7 +109,7 @@ class MiniMaxQKNormWrapper(nn.Module):
         self._lamport_max_token: int = 0
 
         if current_platform.is_cuda() and self.tp_world > 1:
-            self._lamport_max_token = min(64, max_tokens)
+            self._lamport_max_token = min(2048, max_tokens)
             from .lamport_workspace import get_allreduce_workspace
 
             self._ar_workspace = get_allreduce_workspace(
@@ -149,7 +149,7 @@ class MiniMaxQKNormWrapper(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         return q, k, v
 
-    @torch.compile()
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _native_ops(
         self, qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
