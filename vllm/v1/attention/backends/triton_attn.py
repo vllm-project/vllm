@@ -275,12 +275,6 @@ class TritonAttentionBackend(AttentionBackend):
         return [MultipleOf(16)]
 
     @classmethod
-    def get_preferred_block_size(cls, default_block_size: int) -> int:
-        if current_platform.is_xpu():
-            return max(default_block_size, 64)
-        return super().get_preferred_block_size(default_block_size)
-
-    @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
         if block_size is None:
             return True
