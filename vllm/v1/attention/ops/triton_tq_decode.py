@@ -215,7 +215,7 @@ def _tq_decode_stage1(
                 KV_cache_ptr + val_addrs,
                 mask=kv_mask[:, None] & d_mask[None, :], other=0,
             )
-            values = val_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+            values = val_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
         elif VQB == 4:
             vb_idx = d_offs // 2                            # [BLOCK_D]
             vb_shift = (d_offs % 2) * 4                     # [BLOCK_D]
@@ -367,7 +367,7 @@ def _tq_full_dequant_kv(
     elif VQB == 8:
         val_raw = tl.load(KV_cache_ptr + val_base + d_offs,
                           mask=d_mask, other=0)
-        v_vals = val_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        v_vals = val_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
     else:
         v_vals = tl.zeros([BLOCK_D], dtype=tl.float32)
 

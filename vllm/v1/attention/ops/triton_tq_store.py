@@ -260,7 +260,7 @@ def _tq_semifused_store(
                       other=0.0).to(tl.float32)
 
     if VQB == 8:
-        val_u8 = val_vec.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
+        val_u8 = val_vec.to(tl.float8e4b15).to(tl.uint8, bitcast=True)
         tl.store(KV_cache_ptr + slot_base + val_cache_offset + d_offs,
                  val_u8, mask=d_mask)
     elif VQB == 4:
@@ -439,7 +439,7 @@ def _tq_fused_store(
         d_offs = tl.arange(0, BLOCK_D)
         d_mask = d_offs < D
         val_vec = tl.load(Value_ptr + base + d_offs, mask=d_mask, other=0.0)
-        val_u8 = val_vec.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
+        val_u8 = val_vec.to(tl.float8e4b15).to(tl.uint8, bitcast=True)
         tl.store(KV_cache_ptr + slot_base + val_cache_offset + d_offs, val_u8, mask=d_mask)
 
     elif VQB == 4:
