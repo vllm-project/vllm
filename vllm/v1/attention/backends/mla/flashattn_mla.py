@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,
+    get_flash_attn_version,
     should_use_system_flash_attn,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -121,7 +122,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             supports_dcp_with_varlen=(interleave_size == 1),
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.fa_aot_schedule = should_use_system_flash_attn() == 3
+        self.fa_aot_schedule = get_flash_attn_version() == 3
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
