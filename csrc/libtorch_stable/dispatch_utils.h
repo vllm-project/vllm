@@ -58,6 +58,35 @@
   THO_DISPATCH_SWITCH(TYPE, NAME,                        \
                       VLLM_STABLE_DISPATCH_CASE_HALF_TYPES(__VA_ARGS__))
 
+// Quant type dispatch (FP8 + INT8)
+#ifdef USE_ROCM
+  #define VLLM_STABLE_DISPATCH_CASE_QUANT_TYPES(...)                  \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float8_e4m3fn,   \
+                      __VA_ARGS__)                                    \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float8_e4m3fnuz, \
+                      __VA_ARGS__)                                    \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Char, __VA_ARGS__)
+#else
+  #define VLLM_STABLE_DISPATCH_CASE_QUANT_TYPES(...)                \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float8_e4m3fn, \
+                      __VA_ARGS__)                                  \
+    THO_DISPATCH_CASE(torch::headeronly::ScalarType::Char, __VA_ARGS__)
+#endif
+
+#define VLLM_STABLE_DISPATCH_QUANT_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(TYPE, NAME,                         \
+                      VLLM_STABLE_DISPATCH_CASE_QUANT_TYPES(__VA_ARGS__))
+
+// Group size dispatch (pure C++ if/else, no ATen dependency)
+#define VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, const_group_size, ...) \
+  if (group_size == 128) {                                                 \
+    constexpr int const_group_size = 128;                                  \
+    __VA_ARGS__();                                                         \
+  } else if (group_size == 64) {                                           \
+    constexpr int const_group_size = 64;                                   \
+    __VA_ARGS__();                                                         \
+  }
+
 // Boolean dispatch
 #define VLLM_STABLE_DISPATCH_BOOL(expr, const_expr, ...) \
   if (expr) {                                            \
