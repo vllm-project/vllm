@@ -185,14 +185,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_scale_transposed) -> ()");
   ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
 
-  // Rotary embedding
-  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
-  ops.def(
-      "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox) -> ()");
-  ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
-
   // Quantization ops
 #ifndef USE_ROCM
   // Fused SiLU+Mul + per-block quantization

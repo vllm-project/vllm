@@ -248,6 +248,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // conditionally compiled so impl registration is in source file
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
+  // Rotary embedding
+  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
+  ops.def(
+      "rotary_embedding(Tensor positions, Tensor! query,"
+      "                 Tensor!? key, int head_size,"
+      "                 Tensor cos_sin_cache, bool is_neox) -> ()");
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
@@ -392,6 +399,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // AllSpark ops: conditionally compiled so impl registrations are in source
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
+
+  // Positional encoding kernels (shared CUDA/ROCm)
+  ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));

@@ -158,6 +158,13 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
                                          bool inplace);
 
+// Positional encoding kernels (shared CUDA/ROCm)
+void rotary_embedding(torch::stable::Tensor& positions,
+                      torch::stable::Tensor& query,
+                      std::optional<torch::stable::Tensor> key,
+                      int64_t head_size, torch::stable::Tensor& cos_sin_cache,
+                      bool is_neox);
+
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
