@@ -67,10 +67,8 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
-    Mxfp8LinearBackend,
     Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-    swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     apply_nvfp4_linear,
@@ -952,7 +950,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -977,7 +975,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1436,7 +1434,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -1461,7 +1459,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1516,8 +1514,8 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # MXFP8 hardware acceleration requires Blackwell (SM100) or newer
-        return 100
+        # Marlin kernel supports MXFP8 on SM80+
+        return 80
 
     @classmethod
     def override_quantization_method(
@@ -1572,9 +1570,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        self.backend: Mxfp8LinearBackend = Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        self.mxfp8_linear_op = Mxfp8LinearOp(backend=self.backend)
-        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
+        self.mxfp8_linear_op = Mxfp8LinearOp()
 
     def create_weights(
         self,
@@ -1632,36 +1628,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
-    def _process_weights_after_loading_scale_2d(self, layer: torch.nn.Module) -> None:
-        """Not swizzled - MXFP8 GEMM emulation"""
-        weight = layer.weight.data  # [N, K]
-        N, K = weight.shape
-        scale_k = K // MXFP8_BLOCK_SIZE
-
-        # Slice weight_scale to match weight dimensions (handles padding)
-        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
-
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-
-    def _process_weights_after_loading_scale_1d(self, layer: torch.nn.Module) -> None:
-        """Swizzled - MXFP8 GEMM Flashinfer CUTLASS"""
-        weight = layer.weight.data  # [N, K]
-        N, K = weight.shape
-
-        # 2D weight scale
-        weight_scale = layer.weight_scale.data
-
-        # Swizzle the weight scales
-        scale_k = K // MXFP8_BLOCK_SIZE
-        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
-        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
-
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale_swizzled.contiguous(), requires_grad=False
-        )
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Validate weight tensor
         if layer.weight.ndim != 2:
@@ -1686,14 +1652,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f" got {layer.weight_scale.dtype}"
         )
 
-        if self.backend == Mxfp8LinearBackend.EMULATION:
-            # Swizzled layout is not used
-            self._process_weights_after_loading_scale_2d(layer)
-            return
-
-        assert self.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        # Swizzled layout is required for Flashinfer CUTLASS
-        self._process_weights_after_loading_scale_1d(layer)
+        self.mxfp8_linear_op.process_weights(layer)
 
     def apply(
         self,
@@ -1701,22 +1660,15 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if layer.weight.dtype != MXFP8_VALUE_DTYPE:
-            raise ValueError(
-                f"Weight dtype {layer.weight.dtype} != expected {MXFP8_VALUE_DTYPE}"
-            )
-        if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
-            raise ValueError(
-                f"Weight scale dtype {layer.weight_scale.dtype} != "
-                f"expected {MXFP8_SCALE_DTYPE}"
-            )
-
         return self.mxfp8_linear_op.apply(
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
             out_dtype=x.dtype,
             bias=bias,
+            workspace=getattr(layer, "workspace", None),
+            size_n=layer.output_size_per_partition,
+            size_k=layer.input_size_per_partition,
         )
 
 
