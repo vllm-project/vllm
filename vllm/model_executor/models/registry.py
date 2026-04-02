@@ -344,14 +344,14 @@ _MULTIMODAL_MODELS = {
         "AyaVisionForConditionalGeneration",
     ),
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
-    "Cheers": ("cheers", "CheersForConditionalGeneration"),
-    "CheersForConditionalGeneration": ("cheers", "CheersForConditionalGeneration"),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": (
         "chameleon",
         "ChameleonForConditionalGeneration",
     ),
+    "Cheers": ("cheers", "CheersForConditionalGeneration"),
+    "CheersForConditionalGeneration": ("cheers", "CheersForConditionalGeneration"),
     "Cohere2VisionForConditionalGeneration": (
         "cohere2_vision",
         "Cohere2VisionForConditionalGeneration",
