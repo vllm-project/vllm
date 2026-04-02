@@ -156,9 +156,9 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
 
 def _patch_hf_transformers_validate_rope():
     """Transformers v5 moved the ignore_keys option from the method signature of validate rope 
-    and replaced it with the ignore_keys_at_rope_validation paramter in the PreTrainedConfig class
+    and replaced it with the ignore_keys_at_rope_validation parameter in the PreTrainedConfig class
     This is a patch to make older versions of validate_rope() with the ignore_keys parameter work with 
-    newer versions of hf transformers (from v5 onnwards)
+    newer versions of hf transformers (from v5 onwards)
     """
 
     if Version(version("transformers")) >= Version("5.0.0"):
