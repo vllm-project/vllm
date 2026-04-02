@@ -143,7 +143,7 @@ async def transfer_run_periodically(
 
                 model_state.pending_result = AsyncEplbLayerResult(
                     layer_idx=layer_idx,
-                    new_physical_to_logical_map=new_physical_to_logical_map,
+                    new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
                     is_unchanged=is_unchanged,
                     is_received_locally=is_received_locally,
                     recv_metadata=recv_metadata,

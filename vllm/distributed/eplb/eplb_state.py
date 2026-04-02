@@ -1064,7 +1064,7 @@ def _commit_eplb_maps_for_layer(
     """
 
     # Commit physical_to_logical_map
-    src = new_physical_to_logical_map[layer]
+    src = new_physical_to_logical_map
     dst = model_state.physical_to_logical_map[layer]
     assert src.shape == dst.shape, (
         "The number of physical experts must stay the same while running Async EPLB. "
@@ -1137,7 +1137,7 @@ def _move_to_workspace(
         is_unchanged=result.is_unchanged,
         is_received_locally=result.is_received_locally,
         recv_metadata=result.recv_metadata,
-        new_indices=result.new_physical_to_logical_map[result.layer_idx].numpy(),
+        new_indices=result.new_physical_to_logical_map.numpy(),
         ep_rank=ep_group.rank(),
     )
 
