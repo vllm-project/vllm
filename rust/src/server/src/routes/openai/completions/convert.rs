@@ -97,6 +97,7 @@ pub fn prepare_completion_request(
         },
         intermediate: request.stream,
         priority: request.priority.unwrap_or(0),
+        cache_salt: request.cache_salt.clone(),
     };
 
     Ok(PreparedRequest {

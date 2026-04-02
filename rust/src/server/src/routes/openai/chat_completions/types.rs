@@ -187,7 +187,7 @@ pub struct ChatCompletionRequest {
     pub add_special_tokens: bool,
 
     /// Documents for RAG (retrieval-augmented generation)
-    pub documents: Option<Vec<HashMap<String, String>>>,
+    pub documents: Option<Vec<Value>>,
 
     /// Jinja chat template override
     pub chat_template: Option<String>,

@@ -116,6 +116,8 @@ pub fn prepare_chat_request(
         },
         intermediate: request.stream,
         priority: request.priority.unwrap_or(0),
+        documents: request.documents.clone(),
+        cache_salt: request.cache_salt.clone(),
     };
 
     Ok(PreparedRequest {
@@ -378,6 +380,8 @@ mod tests {
                 },
                 intermediate: true,
                 priority: 0,
+                documents: None,
+                cache_salt: None,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -437,6 +441,8 @@ mod tests {
                 },
                 intermediate: true,
                 priority: 0,
+                documents: None,
+                cache_salt: None,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -513,6 +519,8 @@ mod tests {
                 },
                 intermediate: true,
                 priority: 0,
+                documents: None,
+                cache_salt: None,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -617,6 +625,8 @@ mod tests {
                 },
                 intermediate: true,
                 priority: 0,
+                documents: None,
+                cache_salt: None,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -740,6 +750,8 @@ mod tests {
                 },
                 intermediate: true,
                 priority: 0,
+                documents: None,
+                cache_salt: None,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);

@@ -96,6 +96,8 @@ async fn main() -> Result<()> {
         decode_options: Default::default(),
         intermediate: true,
         priority: 0,
+        documents: None,
+        cache_salt: None,
     };
 
     println!("request_id={request_id}");

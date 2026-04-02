@@ -96,7 +96,7 @@ impl ChatTemplate {
                 ChatTemplateParams {
                     add_generation_prompt: request.chat_options.add_generation_prompt,
                     tools: tools.as_deref(),
-                    documents: None,
+                    documents: request.documents.as_deref(),
                     template_kwargs: Some(&merged_template_kwargs),
                 },
             )
@@ -269,6 +269,8 @@ mod tests {
             decode_options: Default::default(),
             intermediate: true,
             priority: 0,
+            documents: None,
+            cache_salt: None,
         }
     }
 

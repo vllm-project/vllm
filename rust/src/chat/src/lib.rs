@@ -115,6 +115,7 @@ impl ChatLlm {
             decode_options: request.decode_options.clone(),
             intermediate: request.intermediate,
             priority: request.priority,
+            cache_salt: request.cache_salt.clone(),
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from);
         let structured_stream = output::output_stream(

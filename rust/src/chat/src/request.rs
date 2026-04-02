@@ -283,6 +283,10 @@ pub struct ChatRequest {
     pub intermediate: bool,
     /// Request scheduling priority (lower means earlier handling; default 0).
     pub priority: i32,
+    /// Documents for RAG (retrieval-augmented generation), passed to the chat template.
+    pub documents: Option<Vec<Value>>,
+    /// Salt for prefix cache isolation in multi-user environments.
+    pub cache_salt: Option<String>,
 }
 
 impl ChatRequest {

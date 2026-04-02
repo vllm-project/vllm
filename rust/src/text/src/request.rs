@@ -128,6 +128,8 @@ pub struct TextRequest {
     /// Request scheduling priority (lower means earlier handling; default 0).
     #[serde(default)]
     pub priority: i32,
+    /// Salt for prefix cache isolation in multi-user environments.
+    pub cache_salt: Option<String>,
 }
 
 impl TextRequest {

@@ -297,6 +297,8 @@ fn sample_request(request_id: &str) -> ChatRequest {
         decode_options: Default::default(),
         intermediate: true,
         priority: 0,
+        documents: None,
+        cache_salt: None,
     }
 }
 

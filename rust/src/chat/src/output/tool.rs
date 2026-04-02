@@ -434,6 +434,8 @@ mod tests {
             decode_options: Default::default(),
             intermediate: true,
             priority: 0,
+            documents: None,
+            cache_salt: None,
         }
     }
 

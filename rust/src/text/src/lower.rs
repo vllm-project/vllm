@@ -35,11 +35,11 @@ pub fn lower_text_request(
             prompt_len,
             tokenizer,
         )?,
+        cache_salt: request.cache_salt.clone(),
+        priority: request.priority,
         // Fields below are currently placeholders.
         arrival_time: None,
-        cache_salt: None,
         trace_headers: None,
-        priority: request.priority,
         data_parallel_rank: None,
         reasoning_ended: None,
         lora_request: None,
@@ -264,6 +264,7 @@ mod tests {
             decode_options: Default::default(),
             intermediate: true,
             priority: 0,
+            cache_salt: None,
         }
     }
 
