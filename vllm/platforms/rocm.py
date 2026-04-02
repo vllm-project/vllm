@@ -932,4 +932,8 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        rms_norm_gated = ["triton", "native"]
+
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, rms_norm_gated=rms_norm_gated
+        )
