@@ -58,7 +58,18 @@ impl ChatTemplate {
 
     /// Apply the chat template to one chat request, rendering the prompt string to be tokenized and
     /// submitted to the model.
+    ///
+    /// If the request carries a per-request `chat_template` override, a temporary template is
+    /// compiled from that string and used instead of the model's default.
     pub fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
+        if let Some(override_template) = &request.chat_options.chat_template {
+            let overridden = ChatTemplate::new(Some(override_template.clone()))?;
+            return overridden.apply_chat_template_inner(request);
+        }
+        self.apply_chat_template_inner(request)
+    }
+
+    fn apply_chat_template_inner(&self, request: &ChatRequest) -> Result<String> {
         let messages = template_messages_to_json(&request.messages, self.inner.content_format())?;
         let tools = request.template_tools();
         trace!(
@@ -352,6 +363,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "hello|world|");
+    }
+
+    #[test]
+    fn chat_template_per_request_override() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+
+        // Default template renders one way.
+        let default_rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
+        assert_eq!(default_rendered, "hello");
+
+        // Per-request override replaces the default template entirely.
+        request.chat_options.chat_template = Some("override:{{ messages[0].content }}".to_string());
+        let overridden = render(Some("{{ messages[0].content }}"), &request).unwrap();
+        assert_eq!(overridden, "override:hello");
     }
 
     #[test]

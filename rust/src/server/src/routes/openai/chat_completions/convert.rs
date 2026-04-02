@@ -100,6 +100,7 @@ pub fn prepare_chat_request(
         chat_options: ChatOptions {
             add_generation_prompt: request.add_generation_prompt && !request.continue_final_message,
             continue_final_message: request.continue_final_message,
+            chat_template: request.chat_template.clone(),
             template_kwargs,
         },
         tools: convert_tools(request.tools.as_deref())?,
@@ -362,6 +363,7 @@ mod tests {
                 chat_options: ChatOptions {
                     add_generation_prompt: false,
                     continue_final_message: true,
+                    chat_template: None,
                     template_kwargs: {
                         "foo": String("bar"),
                     },
@@ -422,6 +424,7 @@ mod tests {
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
                     continue_final_message: false,
+                    chat_template: None,
                     template_kwargs: {},
                 },
                 tools: [],
@@ -497,6 +500,7 @@ mod tests {
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
                     continue_final_message: false,
+                    chat_template: None,
                     template_kwargs: {},
                 },
                 tools: [],
@@ -600,6 +604,7 @@ mod tests {
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
                     continue_final_message: false,
+                    chat_template: None,
                     template_kwargs: {},
                 },
                 tools: [],
@@ -706,6 +711,7 @@ mod tests {
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
                     continue_final_message: false,
+                    chat_template: None,
                     template_kwargs: {},
                 },
                 tools: [

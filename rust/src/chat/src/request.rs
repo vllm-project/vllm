@@ -203,6 +203,10 @@ pub struct ChatOptions {
     /// message can be left open-ended for continuation instead of starting a new assistant turn.
     pub continue_final_message: bool,
 
+    /// Per-request Jinja chat template override. When set, this template is used instead of the
+    /// model's default chat template.
+    pub chat_template: Option<String>,
+
     /// Additional keyword arguments exposed to the chat template.
     pub template_kwargs: HashMap<String, Value>,
 }
@@ -212,6 +216,7 @@ impl Default for ChatOptions {
         Self {
             add_generation_prompt: true,
             continue_final_message: false,
+            chat_template: None,
             template_kwargs: HashMap::new(),
         }
     }
