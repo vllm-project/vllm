@@ -596,10 +596,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
 
     @property
-    def _shared_experts(self):
-        return self.base_layer._shared_experts
-
-    @property
     def quant_method(self):
         return self.base_layer.quant_method
 
