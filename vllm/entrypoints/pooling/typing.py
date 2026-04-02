@@ -83,6 +83,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    ## for bi-encoder & late-interaction
+    n_queries: int | None = None
+
 
 @dataclass
 class OfflineInputsContext:
@@ -92,7 +95,7 @@ class OfflineInputsContext:
     chat_template: str | None = None
 
     ## for bi-encoder & late-interaction
-    offset: int | None = None
+    n_queries: int | None = None
 
 
 @dataclass
@@ -100,4 +103,4 @@ class OfflineOutputsContext:
     outputs: list[PoolingRequestOutput]
 
     ## for bi-encoder & late-interaction
-    offset: int | None = None
+    n_queries: int | None = None
