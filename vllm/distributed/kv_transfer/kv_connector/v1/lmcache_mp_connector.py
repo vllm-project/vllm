@@ -32,10 +32,10 @@ try:
     from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
 except ImportError:
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
-        RequestAllocationRecord,
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
+        RequestAllocationRecord,
     )
 
 if TYPE_CHECKING:
@@ -1028,23 +1028,19 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             tracker = self.request_trackers.get(new_request.req_id)
             if tracker is None:
                 continue
-            num_new_tokens = scheduler_output.num_scheduled_tokens[
-                new_request.req_id
-            ]
-            records.append(RequestAllocationRecord(
-                req_id=new_request.req_id,
-                new_block_ids=list(tracker.allocated_block_ids),
-                new_token_ids=list(
-                    tracker.all_token_ids[:num_new_tokens]
-                ),
-            ))
+            num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
+            records.append(
+                RequestAllocationRecord(
+                    req_id=new_request.req_id,
+                    new_block_ids=list(tracker.allocated_block_ids),
+                    new_token_ids=list(tracker.all_token_ids[:num_new_tokens]),
+                )
+            )
 
         # Cached requests: only the newly added blocks and tokens
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
-            new_block_ids = reformat_block_ids(
-                cached_reqs.new_block_ids[idx]
-            )
+            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
             num_new_tokens = cached_reqs.num_computed_tokens[idx]
             if not new_block_ids and num_new_tokens == 0:
                 continue
@@ -1053,16 +1049,20 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 continue
             # Get the newly scheduled token_ids from the end
             total_tokens = len(tracker.all_token_ids)
-            new_token_ids = list(
-                tracker.all_token_ids[
-                    total_tokens - num_new_tokens : total_tokens
-                ]
-            ) if num_new_tokens > 0 else []
-            records.append(RequestAllocationRecord(
-                req_id=request_id,
-                new_block_ids=new_block_ids,
-                new_token_ids=new_token_ids,
-            ))
+            new_token_ids = (
+                list(
+                    tracker.all_token_ids[total_tokens - num_new_tokens : total_tokens]
+                )
+                if num_new_tokens > 0
+                else []
+            )
+            records.append(
+                RequestAllocationRecord(
+                    req_id=request_id,
+                    new_block_ids=new_block_ids,
+                    new_token_ids=new_token_ids,
+                )
+            )
 
         if records:
             self.scheduler_adapter.report_block_allocations(records)
