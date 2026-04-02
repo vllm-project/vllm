@@ -179,6 +179,22 @@ void fused_add_rms_norm_static_fp8_quant(torch::stable::Tensor& out,
                                          torch::stable::Tensor& scale,
                                          double epsilon);
 
+// Fused layernorm + dynamic per-token quant kernels (shared CUDA/ROCm)
+void rms_norm_dynamic_per_token_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor const& weight, torch::stable::Tensor& scales,
+    double const var_epsilon, std::optional<torch::stable::Tensor> scale_ub,
+    std::optional<torch::stable::Tensor> residual);
+
+void rms_norm_per_block_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor const& weight,
+                              torch::stable::Tensor& scales,
+                              double const var_epsilon,
+                              std::optional<torch::stable::Tensor> scale_ub,
+                              std::optional<torch::stable::Tensor> residual,
+                              int64_t group_size, bool is_scale_transposed);
+
 // Positional encoding kernels (shared CUDA/ROCm)
 void rotary_embedding(torch::stable::Tensor& positions,
                       torch::stable::Tensor& query,

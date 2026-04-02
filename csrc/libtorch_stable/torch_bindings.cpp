@@ -271,6 +271,19 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! residual, Tensor weight, "
       "Tensor scale, float epsilon) -> ()");
 
+  // Fused Layernorm + Quant kernels
+  ops.def(
+      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual) -> ()");
+
+  // Fused Layernorm + Block quant kernels
+  ops.def(
+      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual, int group_size, "
+      "bool is_scale_transposed) -> ()");
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -439,6 +452,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("rms_norm_static_fp8_quant", TORCH_BOX(&rms_norm_static_fp8_quant));
   ops.impl("fused_add_rms_norm_static_fp8_quant",
            TORCH_BOX(&fused_add_rms_norm_static_fp8_quant));
+
+  // Fused layernorm + dynamic per-token quant kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm_dynamic_per_token_quant",
+           TORCH_BOX(&rms_norm_dynamic_per_token_quant));
+  ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
