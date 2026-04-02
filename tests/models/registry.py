@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import pytest
 from packaging.version import Version
+from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config.model import ModelDType, TokenizerMode
@@ -986,6 +987,35 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        # NemotronH layers are constructed via `hybrid_override_pattern`:
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,  # Trigger image dynamic res
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                # Trigger conv3d:
+                video_temporal_patch_size=2,
+            ),
+            # Trigger audio-encoder:
+            "sound_config": PretrainedConfig(
+                num_hidden_layers=2,
+                sampling_rate=16000,
+                projection_hidden_size=4096,
+                projection_bias=True,
+                num_mel_bins=128,
+                subsampling_factor=8,
+                subsampling_conv_kernel_size=3,
+                subsampling_conv_stride=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
         trust_remote_code=True,
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(

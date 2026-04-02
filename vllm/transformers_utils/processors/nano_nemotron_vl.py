@@ -1054,6 +1054,13 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
         combined_inputs = {**text_inputs, **video_inputs, **audio_inputs}
+        frames_indices = combined_inputs.get("frames_indices")
+        ragged_frames_indices = (
+            isinstance(frames_indices, list)
+            and len({len(frame_indices) for frame_indices in frames_indices}) > 1
+        )
+        if ragged_frames_indices:
+            combined_inputs.pop("frames_indices")
 
         if self.dynamic_tiler is None:
             batch = BatchFeature(
@@ -1065,6 +1072,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             # allow images to be exempt from the BatchFeature validation:
             # We will .stack() them in _parse_and_validate_image_input
             batch.update(image_inputs)
+        if ragged_frames_indices:
+            assert isinstance(frames_indices, list)
+            batch["frames_indices"] = [
+                torch.as_tensor(frame_indices, dtype=torch.int64)
+                for frame_indices in frames_indices
+            ]
         return batch
 
     def get_image_repl(
