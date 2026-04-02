@@ -2520,11 +2520,31 @@ class NixlConnectorWorker:
                 self._reqs_to_send[req_id] = expiration_time
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
-        assert meta.remote is not None and self.kv_topo is not None
-        remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
-            meta.remote.engine_id
+        """Start READ transfers for a request. Thin wrapper around
+        _xfer_blocks_for_req that unpacks ReqMeta."""
+        assert meta.remote is not None
+        self._xfer_blocks_for_req(
+            req_id=req_id,
+            remote_request_id=meta.remote.request_id,
+            dst_engine_id=meta.remote.engine_id,
+            local_block_ids=meta.local_physical_block_ids,
+            remote_block_ids=meta.remote.block_ids,
         )
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
+
+    def _xfer_blocks_for_req(
+        self,
+        req_id: str,
+        remote_request_id: str,
+        dst_engine_id: str,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+    ):
+        """Issue READ transfers to one or more remote TP ranks."""
+        assert self.kv_topo is not None
+        remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
+            dst_engine_id
+        )
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(dst_engine_id)
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             if self.use_mla and tp_ratio < 0 and i > 0:
@@ -2532,11 +2552,11 @@ class NixlConnectorWorker:
                 # the first remote rank (cache is duplicated)..
                 break
 
-            remote_block_size = self.kv_topo.remote_block_size[meta.remote.engine_id]
+            remote_block_size = self.kv_topo.remote_block_size[dst_engine_id]
             logger.debug(
-                "Remote agent %s available, calling _read_blocks"
+                "Remote agent %s available, calling _xfer_blocks"
                 " on remote rank %s with remote block size %s for req %s",
-                meta.remote.engine_id,
+                dst_engine_id,
                 remote_rank,
                 remote_block_size,
                 req_id,
@@ -2555,15 +2575,15 @@ class NixlConnectorWorker:
                 ]
 
             # Destination handle: remote_engine_id -> remote_rank -> handle.
-            remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
+            remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id][
                 remote_rank
             ]
-            self._read_blocks(
+            self._xfer_blocks(
                 request_id=req_id,
-                dst_engine_id=meta.remote.engine_id,
-                remote_request_id=meta.remote.request_id,
-                local_block_ids=meta.local_physical_block_ids,
-                remote_block_ids=meta.remote.block_ids,
+                dst_engine_id=dst_engine_id,
+                remote_request_id=remote_request_id,
+                local_block_ids=local_block_ids,
+                remote_block_ids=remote_block_ids,
                 remote_rank=remote_rank,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
@@ -2573,12 +2593,12 @@ class NixlConnectorWorker:
                 # ..but we still need to notify the other remote ranks that we
                 # have the blocks we need so they can update the request state.
                 notif_id = f"{req_id}:{self.world_size}".encode()
-                remote_agents = self._remote_agents[meta.remote.engine_id]
+                remote_agents = self._remote_agents[dst_engine_id]
                 for rank_to_notify, agent in remote_agents.items():
                     if rank_to_notify != remote_rank:
                         self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
-    def _read_blocks(
+    def _xfer_blocks(
         self,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
