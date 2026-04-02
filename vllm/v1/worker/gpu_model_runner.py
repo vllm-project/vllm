@@ -1214,11 +1214,27 @@ class GPUModelRunner(
                         new_req_data.decode_steering_config_hash != 0
                         and sp.effective_decode_steering
                     ):
-                        self._steering_manager.register_config(
-                            new_req_data.decode_steering_config_hash,
-                            sp.effective_decode_steering,
-                            phase="decode",
-                        )
+                        try:
+                            self._steering_manager.register_config(
+                                new_req_data.decode_steering_config_hash,
+                                sp.effective_decode_steering,
+                                phase="decode",
+                            )
+                        except RuntimeError:
+                            self._pending_steering_registrations.append(
+                                (
+                                    req_id,
+                                    new_req_data.decode_steering_config_hash,
+                                    sp.effective_decode_steering,
+                                    "decode",
+                                )
+                            )
+                            logger.warning(
+                                "Deferred decode steering config "
+                                "(hash=%d) -- capacity full, "
+                                "will retry next step",
+                                new_req_data.decode_steering_config_hash,
+                            )
                     self._req_steering_phase[req_id] = "decode"
                 else:
                     # Normal: start in prefill; decode registered
@@ -1227,11 +1243,27 @@ class GPUModelRunner(
                         new_req_data.prefill_steering_config_hash != 0
                         and sp.effective_prefill_steering
                     ):
-                        self._steering_manager.register_config(
-                            new_req_data.prefill_steering_config_hash,
-                            sp.effective_prefill_steering,
-                            phase="prefill",
-                        )
+                        try:
+                            self._steering_manager.register_config(
+                                new_req_data.prefill_steering_config_hash,
+                                sp.effective_prefill_steering,
+                                phase="prefill",
+                            )
+                        except RuntimeError:
+                            self._pending_steering_registrations.append(
+                                (
+                                    req_id,
+                                    new_req_data.prefill_steering_config_hash,
+                                    sp.effective_prefill_steering,
+                                    "prefill",
+                                )
+                            )
+                            logger.warning(
+                                "Deferred prefill steering config "
+                                "(hash=%d) -- capacity full, "
+                                "will retry next step",
+                                new_req_data.prefill_steering_config_hash,
+                            )
                     self._req_steering_phase[req_id] = "prefill"
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
@@ -3162,11 +3194,7 @@ class GPUModelRunner(
                     if num_computed < num_prompt:
                         # In prefill — register prefill config
                         ph = int(self.input_batch.request_prefill_steering_hash[ri])
-                        if (
-                            ph != 0
-                            and (ph, "prefill")
-                            not in self._steering_manager.config_to_row
-                        ):
+                        if ph != 0:
                             eff = rs.sampling_params.effective_prefill_steering
                             if eff:
                                 try:
@@ -3188,11 +3216,7 @@ class GPUModelRunner(
                         # In decode (full prefix-cache hit) — register
                         # decode config
                         dh = int(self.input_batch.request_decode_steering_hash[ri])
-                        if (
-                            dh != 0
-                            and (dh, "decode")
-                            not in self._steering_manager.config_to_row
-                        ):
+                        if dh != 0:
                             eff = rs.sampling_params.effective_decode_steering
                             if eff:
                                 try:
