@@ -359,18 +359,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _materialize_tool_calls(cls, data: Any) -> Any:
-        """Eagerly convert tool_calls from Iterable to list.
+    def _materialize_tool_calls_before(cls, data: Any) -> Any:
+        """Eagerly convert tool_calls generators/iterators to lists.
 
-        The OpenAI Python library types tool_calls as Iterable[...] in
-        ChatCompletionAssistantMessageParam. When Pydantic v2 validates from
-        Python objects (not JSON), it wraps Iterable fields in a one-shot
-        ValidatorIterator. If anything iterates that field first (e.g. debug
-        logging via model_dump_json()), the iterator is exhausted and
-        downstream code (e.g. the Mistral tokenizer) sees empty tool_calls.
-
-        Must run in mode="before" so generators/iterators are materialised
-        before Pydantic consumes them during union type validation.
+        Must run before Pydantic field validation so that one-shot
+        generators are not consumed during union type matching of
+        ChatCompletionAssistantMessageParam (which types tool_calls
+        as Iterable[...]).
         """
         if not isinstance(data, dict):
             return data
@@ -384,6 +379,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
         return data
+
+    @model_validator(mode="after")
+    def _materialize_tool_calls_after(self) -> "ChatCompletionRequest":
+        """Convert Pydantic ValidatorIterator wrappers back to lists.
+
+        Even after the "before" validator converts iterables to lists,
+        Pydantic re-wraps them in a ValidatorIterator when validating
+        against ChatCompletionAssistantMessageParam's Iterable[...] type.
+        This "after" pass materialises those wrappers so downstream code
+        (tokenizers, model_dump_json) always sees plain lists.
+        """
+        for msg in self.messages:
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+        return self
 
     def build_chat_params(
         self,
