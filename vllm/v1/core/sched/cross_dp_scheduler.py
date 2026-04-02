@@ -165,7 +165,7 @@ class CrossDPScheduler(Scheduler):
         # self.graph_size_for_cp = self.vllm_config.compilation_config.cudagraph_capture_sizes_for_cp
         self.graph_size_for_cp = self.scheduler_config.num_cp_seqs
         assert self.max_cp_tokens >= self.graph_size_for_cp, "max_cp_tokens should be greater than or equal to graph_size_for_cp"
-        self.dynamic_cp_threshold = 128 * 1024
+        self.dynamic_cp_threshold = 1 * 1024
         # Request queue control the token threshold for long requests.
         self.waiting = LongShortRequestQueue(
             long_request_threshold=self.dynamic_cp_threshold,
@@ -1190,7 +1190,7 @@ class CrossDPScheduler(Scheduler):
                     scheduler_output
                 )
                 scheduler_output.kv_connector_metadata = meta
-            self.connector.clear_reqs_need_recv()
+            self.connector.clear_reqs_need_recv() # debug
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             # self._update_after_schedule(scheduler_output)

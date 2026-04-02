@@ -869,7 +869,7 @@ def reorder_batch_to_split_cp_and_normal(
     scheduler_output: "SchedulerOutput",
 ) -> bool:
     """Move CP-flagged requests to the front of the batch."""
-    logger.info(f"chenxiao--debug input_batch:{input_batch._req_ids}")
+    # logger.info(f"chenxiao--debug input_batch:{input_batch._req_ids}")
     req_ids = input_batch.req_ids
     is_cp = np.array([True if scheduler_output.cp_rank_scheduled_tokens[rid] > 1 else False for rid in req_ids])
     if not is_cp.any() or is_cp.all():
@@ -894,6 +894,6 @@ def reorder_batch_to_split_cp_and_normal(
             if len(cycle) > 1:
                 for i in range(len(cycle) - 1):
                     pos1, pos2 = cycle[i], cycle[i + 1]
-                    logger.info(f"chenxiao--debug swap_states src: {pos1}, dst: {pos2}")
+                    # logger.info(f"chenxiao--debug swap_states src: {pos1}, dst: {pos2}")
                     input_batch.swap_states(pos1, pos2)
     return True
