@@ -3,6 +3,7 @@
 
 import importlib
 import importlib.abc
+import importlib.util
 import os
 import sys
 
@@ -18,18 +19,13 @@ if os.path.islink(_cute_dir):
         _PREFIX = "flash_attn.cute"
         _TARGET = "vllm.vllm_flash_attn.cute"
 
-        def find_module(self, fullname, path=None):
-            if fullname == self._PREFIX or fullname.startswith(self._PREFIX + "."):
-                return self
-            return None
-
-        def load_module(self, fullname):
-            if fullname in sys.modules:
-                return sys.modules[fullname]
-            target = self._TARGET + fullname[len(self._PREFIX) :]
-            mod = importlib.import_module(target)
+        def find_spec(self, fullname, path, target=None):
+            if fullname != self._PREFIX and not fullname.startswith(self._PREFIX + "."):
+                return None
+            actual = self._TARGET + fullname[len(self._PREFIX) :]
+            mod = importlib.import_module(actual)
             sys.modules[fullname] = mod
-            return mod
+            return importlib.util.find_spec(fullname)
 
     sys.meta_path.insert(0, _CuteImportRedirector())
 
