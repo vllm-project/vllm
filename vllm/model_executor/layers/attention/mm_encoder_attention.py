@@ -44,14 +44,27 @@ _FP8_AMAX_HISTORY_LEN = 16
 def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     """Load per-layer FP8 Q/K/V scales from a JSON file. Results are cached.
 
-    Expected format:
-        {"visual.blocks.0.attn": {"q": 224.0, "k": 198.0, "v": 210.0}, ...}
+    Expected format example (keys like ``q_scale`` also accepted)::
 
-    Also accepts a nested "layers" wrapper:
-        {"layers": {"visual.blocks.0.attn": {"q": 224.0, ...}, ...}}
+        {
+            "visual.blocks.0.attn": {"q": 224.0, "k": 198.0, "v": 210.0},
+            "visual.blocks.1.attn": {"q": 218.0, "k": 195.0, "v": 207.0},
+            ...
+        }
 
-    Keys "q_scale"/"k_scale"/"v_scale" are accepted as aliases.
-    All scale values must be positive floats.
+    To generate a scale file, enable dynamic scaling (enabled by default when
+    no scale file is provided) and run some forward passes. Then dump::
+
+        scales = {}
+        for name, module in model.named_modules():
+            if hasattr(module, "_fp8_q_scale"):
+                scales[name] = {
+                    "q": module._fp8_q_scale.item(),
+                    "k": module._fp8_k_scale.item(),
+                    "v": module._fp8_v_scale.item(),
+                }
+        with open("fp8_vit_scales.json", "w") as f:
+            json.dump(scales, f, indent=2)
     """
     if path is None:
         return {}
