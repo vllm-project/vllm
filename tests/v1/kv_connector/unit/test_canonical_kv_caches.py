@@ -44,16 +44,6 @@ class MockFlashAttnBackend:
     ):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
-    @classmethod
-    def get_kv_cache_block_dim(
-        cls, block_size, num_kv_heads, head_size, cache_dtype_str="auto"
-    ):
-        _S = 1234567
-        shape = cls.get_kv_cache_shape(
-            _S, block_size, num_kv_heads, head_size, cache_dtype_str
-        )
-        return shape.index(_S)
-
     @staticmethod
     def get_kv_cache_stride_order(include_num_layers_dimension=False):
         if include_num_layers_dimension:
@@ -290,25 +280,23 @@ def test_allocate_canonical_kv_caches():
     assert kv_caches["full.0"].data_ptr() == kv_caches["sw.0"].data_ptr()
     assert kv_caches["full.1"].data_ptr() == kv_caches["sw.2"].data_ptr()
 
-    # -- block tensors: 2 positions * 2 splits (K/V) = 4
-    assert len(canonical.tensors) == 4
+    # -- block tensors: one per position (num_blocks is leading dim)
+    assert len(canonical.tensors) == 2
     for bt in canonical.tensors:
-        assert bt.tensor.shape == (NUM_BLOCKS, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
+        assert bt.tensor.shape == (NUM_BLOCKS, 2, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
 
-    # contiguity: V0 starts right after K0, K1 starts right after V0
-    k_block_bytes = BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE * DTYPE.itemsize
+    # contiguity: position 1 starts right after position 0 for block 0
+    page_bytes = 2 * BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE * DTYPE.itemsize
     ptrs = [bt.tensor.data_ptr() for bt in canonical.tensors]
-    assert ptrs[1] - ptrs[0] == k_block_bytes  # K0 -> V0
-    assert ptrs[2] - ptrs[1] == k_block_bytes  # V0 -> K1
+    assert ptrs[1] - ptrs[0] == page_bytes
 
-    # -- group_data_refs: 3 groups, each with 2 layers * 2 splits = 4 refs
+    # -- group_data_refs: 3 groups, each with 2 layers
     assert len(canonical.group_data_refs) == 3
     for refs in canonical.group_data_refs:
-        assert len(refs) == 4
-        assert [r.tensor_idx for r in refs] == [0, 1, 2, 3]
+        assert len(refs) == 2
+        assert [r.tensor_idx for r in refs] == [0, 1]
 
-    # ref page_size = spec page_size // num_splits
     full_page = config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     for refs in canonical.group_data_refs:
         for ref in refs:
-            assert ref.page_size_bytes == full_page // 2
+            assert ref.page_size_bytes == full_page
