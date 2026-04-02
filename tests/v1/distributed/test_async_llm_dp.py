@@ -16,6 +16,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -23,6 +24,11 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
+
+
+def get_engine_input(engine: AsyncLLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 async def generate(
@@ -47,7 +53,7 @@ async def generate(
     )
     async for out in engine.generate(
         request_id=request_id,
-        prompt=prompt,
+        prompt=get_engine_input(engine, prompt),
         sampling_params=sampling_params,
         data_parallel_rank=data_parallel_rank,
     ):
@@ -229,7 +235,7 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
         sampling_params = SamplingParams(max_tokens=5)
         async for out in engine.generate(
             request_id="after-resume",
-            prompt=DP_PAUSE_PROMPT,
+            prompt=get_engine_input(engine, DP_PAUSE_PROMPT),
             sampling_params=sampling_params,
         ):
             pass
@@ -255,7 +261,7 @@ async def test_dp_pause_abort(expert_parallel: bool):
             outputs_by_id[rid] = out_list
             async for out in engine.generate(
                 request_id=rid,
-                prompt=DP_PAUSE_PROMPT,
+                prompt=get_engine_input(engine, DP_PAUSE_PROMPT),
                 sampling_params=sampling_params,
             ):
                 out_list.append(out)
@@ -281,7 +287,7 @@ async def test_dp_pause_abort(expert_parallel: bool):
         # New request completes after resume
         async for out in engine.generate(
             request_id="after-abort",
-            prompt=DP_PAUSE_PROMPT,
+            prompt=get_engine_input(engine, DP_PAUSE_PROMPT),
             sampling_params=SamplingParams(max_tokens=5),
         ):
             pass
@@ -311,7 +317,7 @@ async def test_dp_pause_keep_then_resume(expert_parallel: bool):
             out = None
             async for output in engine.generate(
                 request_id="keep-resume-req",
-                prompt=DP_PAUSE_PROMPT,
+                prompt=get_engine_input(engine, DP_PAUSE_PROMPT),
                 sampling_params=sampling_params,
             ):
                 token_count = len(output.outputs[0].token_ids)
@@ -375,7 +381,7 @@ async def test_dp_pause_keep_race_staggered_engines():
             async def consume_gen(req_id: str) -> None:
                 async for _ in engine.generate(
                     request_id=req_id,
-                    prompt=DP_PAUSE_PROMPT,
+                    prompt=get_engine_input(engine, DP_PAUSE_PROMPT),
                     sampling_params=sp,
                 ):
                     pass

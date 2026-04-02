@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -58,6 +59,11 @@ VISION_PROMPT = {
 }
 
 
+def get_engine_input(engine: AsyncLLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
+
+
 async def generate(
     engine: AsyncLLM,
     request_id: str,
@@ -82,7 +88,9 @@ async def generate(
         prompt_logprobs=prompt_logprobs,
     )
     async for out in engine.generate(
-        request_id=request_id, prompt=prompt, sampling_params=sampling_params
+        request_id=request_id,
+        prompt=get_engine_input(engine, prompt),
+        sampling_params=sampling_params,
     ):
         num_tokens = sum(len(output.token_ids) for output in out.outputs)
         if output_kind == RequestOutputKind.DELTA:
@@ -321,7 +329,9 @@ async def test_finished_flag(
         outputs = [
             out
             async for out in engine.generate(
-                request_id="request-33", prompt=prompt, sampling_params=sampling_params
+                request_id="request-33",
+                prompt=get_engine_input(engine, prompt),
+                sampling_params=sampling_params,
             )
         ]
 
@@ -475,7 +485,7 @@ async def test_dp_rank_argument():
         # Test with valid DP rank.
         async for _ in engine.generate(
             request_id="request-34",
-            prompt=TEXT_PROMPT,
+            prompt=get_engine_input(engine, TEXT_PROMPT),
             sampling_params=sampling_params,
             data_parallel_rank=0,
         ):
@@ -485,7 +495,7 @@ async def test_dp_rank_argument():
         with pytest.raises(ValueError):
             async for _ in engine.generate(
                 request_id="request-35",
-                prompt=TEXT_PROMPT,
+                prompt=get_engine_input(engine, TEXT_PROMPT),
                 sampling_params=sampling_params,
                 data_parallel_rank=1,
             ):
@@ -665,7 +675,9 @@ async def collect_outputs(
     """Helper to collect outputs and return the final one."""
     final_output: RequestOutput | None = None
     async for output in engine.generate(
-        request_id=request_id, prompt=prompt, sampling_params=sampling_params
+        request_id=request_id,
+        prompt=get_engine_input(engine, prompt),
+        sampling_params=sampling_params,
     ):
         if not output.finished:
             outputs_list.append(output)
@@ -737,7 +749,7 @@ async def test_pause_resume_basic():
         sampling_params = SamplingParams(max_tokens=5)
         async for out in engine.generate(
             request_id="post-cycles",
-            prompt=TEXT_PROMPT,
+            prompt=get_engine_input(engine, TEXT_PROMPT),
             sampling_params=sampling_params,
         ):
             pass
@@ -759,7 +771,7 @@ async def test_pause_abort():
         async def gen():
             async for out in engine.generate(
                 request_id="test-abort-pause",
-                prompt=TEXT_PROMPT,
+                prompt=get_engine_input(engine, TEXT_PROMPT),
                 sampling_params=sampling_params,
             ):
                 outputs.append(out)
@@ -792,7 +804,7 @@ async def test_pause_abort():
             nonlocal request_completed
             async for out in engine.generate(
                 request_id="test-blocked",
-                prompt=TEXT_PROMPT,
+                prompt=get_engine_input(engine, TEXT_PROMPT),
                 sampling_params=SamplingParams(max_tokens=5),
             ):
                 pass
@@ -837,7 +849,7 @@ async def test_pause_then_abort_queued_request():
         async def gen():
             async for out in engine.generate(
                 request_id=request_id,
-                prompt=TEXT_PROMPT,
+                prompt=get_engine_input(engine, TEXT_PROMPT),
                 sampling_params=sampling_params,
             ):
                 outputs.append(out)
@@ -879,7 +891,7 @@ async def test_pause_wait():
             nonlocal request_completed
             async for out in engine.generate(
                 request_id="test-wait",
-                prompt=TEXT_PROMPT,
+                prompt=get_engine_input(engine, TEXT_PROMPT),
                 sampling_params=sampling_params,
             ):
                 got_first_token.set()
@@ -921,7 +933,7 @@ async def test_pause_keep_single_request():
             """Generate tokens and record timestamps."""
             async for output in engine.generate(
                 request_id="test-keep-single",
-                prompt=TEXT_PROMPT,
+                prompt=get_engine_input(engine, TEXT_PROMPT),
                 sampling_params=sampling_params,
             ):
                 token_count = len(output.outputs[0].token_ids)
@@ -982,7 +994,7 @@ async def test_pause_keep_multi_request():
         async def gen_multi(request_id: str):
             async for out in engine.generate(
                 request_id=request_id,
-                prompt=TEXT_PROMPT,
+                prompt=get_engine_input(engine, TEXT_PROMPT),
                 sampling_params=sampling_params,
             ):
                 any_token_generated.set()
