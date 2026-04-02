@@ -101,7 +101,7 @@ class Fp8BlockScaledMMLinearKernel(
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        maybe_out_dtype = self.config.out_dtype
+        out_dtype = self.config.out_dtype
         params = self._get_layer_params(layer)
         weight = params.weight
         weight_scale = (
@@ -115,7 +115,6 @@ class Fp8BlockScaledMMLinearKernel(
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
         output_shape = [*x.shape[:-1], weight.shape[0]]
-        out_dtype = input_2d.dtype if maybe_out_dtype is None else maybe_out_dtype
 
         if self.apply_input_quant:
             q_input, input_scale = self.quant_fp8(
@@ -153,20 +152,14 @@ class Fp8BlockScaledMMLinearKernel(
 
 
 class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
-    """Dynamic FP8 block-scaled kernel that dispatches via torch.cond at runtime.
+    """Dynamic FP8 block-scaled kernel that dispatches at runtime.
 
     Extends Fp8BlockScaledMMLinearKernel to inherit apply_weights and overrides
-    apply_block_scaled_mm to dispatch between two sub-kernels using torch.cond,
-    enabling torch.compile compatibility.
+    apply_block_scaled_mm to dispatch between two sub-kernels using torch.cond.
 
     Subclasses must define:
-        base_type:     The primary kernel class (used when predicate is True).
-        fallback_type: The fallback kernel class (used when predicate is False).
-
-    By default both branches receive FP8 input (apply_input_quant=True inherited).
-    Override apply_input_quant=False when the base kernel requires BF16 input
-    (e.g. FlashInfer), and override apply_block_scaled_mm to handle quantization
-    inside the fallback branch closure.
+        base_type:     The primary kernel class.
+        fallback_type: The fallback kernel class.
     """
 
     base_type: ClassVar[type[Fp8BlockScaledMMLinearKernel]]
@@ -214,37 +207,3 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not can_implement_base:
             return False, f"base cannot implement due to {reason_1}"
         return False, f"fallback cannot implement due to {reason_2}"
-
-    @abstractmethod
-    def predicate(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return a scalar boolean Tensor selecting the branch for torch.cond.
-
-        Returns True to dispatch to base, False to dispatch to fallback.
-        Must return a scalar boolean Tensor (not a Python bool) for
-        torch.compile compatibility.
-        """
-        raise NotImplementedError
-
-    def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-    ) -> torch.Tensor:
-        # torch.cond registers both branches in the computation graph so
-        # torch.compile can capture dynamic dispatch without breaking tracing.
-        # All operands must be concrete Tensors — non-tensor state is accessed
-        # via self.config or captured by the branch method closures.
-        return torch.cond(
-            self.predicate(A, B, As, Bs),
-            self.base.apply_block_scaled_mm,
-            self.fallback.apply_block_scaled_mm,
-            [A, B, As, Bs],
-        )
