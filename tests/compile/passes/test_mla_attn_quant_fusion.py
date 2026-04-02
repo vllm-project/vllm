@@ -88,6 +88,9 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         kv_b_proj_weight = kwargs.get("kv_b_proj_weight")
         if kv_b_proj_weight is not None:
             kv_b_proj.weight.data.copy_(kv_b_proj_weight)
+        elif kv_b_proj.weight.data.isnan().any():
+            # Sanitize NaN from recycled CUDA memory
+            kv_b_proj.weight.data.normal_()
 
         # Create MLAAttention
         self.mla_attn = MLAAttention(
