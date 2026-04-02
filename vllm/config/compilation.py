@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -134,7 +134,7 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
-    enable_cache_mla_rope_fusion: bool = False
+    enable_cache_mla_rope_fusion: bool = True
     """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions
