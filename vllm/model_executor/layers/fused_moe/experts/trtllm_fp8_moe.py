@@ -53,6 +53,7 @@ class TrtLlmFp8ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
+        self.moe_config = moe_config
         self.quant_config = quant_config
 
     @staticmethod
