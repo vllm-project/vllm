@@ -317,6 +317,34 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
+
+  // Dequantization for GGML.
+  ops.def(
+      "ggml_dequantize(Tensor W, int type, SymInt m, SymInt n, ScalarType? "
+      "dtype) -> Tensor");
+
+  // mmvq kernel for GGML.
+  ops.def(
+      "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, SymInt row) "
+      "-> Tensor");
+
+  // mmq kernel for GGML.
+  ops.def(
+      "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
+
+  // moe kernel for GGML.
+  ops.def(
+      "ggml_moe_a8(Tensor X, Tensor W, "
+      "Tensor sorted_token_ids, Tensor expert_ids, Tensor "
+      "num_tokens_post_padded, "
+      "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
+
+  ops.def(
+      "ggml_moe_a8_vec(Tensor X, Tensor W, "
+      "Tensor topk_ids, int top_k, "
+      "int type, SymInt row, SymInt tokens) -> Tensor");
+
+  ops.def("ggml_moe_get_block_size(int type) -> int");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -389,6 +417,13 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // GPTQ kernels
   ops.impl("gptq_gemm", TORCH_BOX(&gptq_gemm));
   ops.impl("gptq_shuffle", TORCH_BOX(&gptq_shuffle));
+
+  // GGML kernels
+  ops.impl("ggml_dequantize", TORCH_BOX(&ggml_dequantize));
+  ops.impl("ggml_mul_mat_vec_a8", TORCH_BOX(&ggml_mul_mat_vec_a8));
+  ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
+  ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
+  ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
 }
 
 // These capability-check functions take only primitive args (no tensors), so
@@ -406,6 +441,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
   ops.impl("cutlass_scaled_mm_supports_fp4",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
 #endif
+
+  // GGML block size lookup (no tensor args)
+  ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
 }
 
 REGISTER_EXTENSION(_C_stable_libtorch)

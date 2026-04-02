@@ -184,28 +184,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
 
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
-torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
-                              int64_t n,
-                              std::optional<at::ScalarType> const& dtype);
-
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
-                                  int64_t type, int64_t row);
-
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
-                              int64_t row);
-
-torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
-                          torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t type,
-                          int64_t row, int64_t top_k, int64_t tokens);
-
-torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
-                              torch::Tensor topk_ids, int64_t top_k,
-                              int64_t type, int64_t row, int64_t tokens);
-
-int64_t ggml_moe_get_block_size(int64_t type);
-
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
                               std::optional<torch::Tensor> const& azp);
