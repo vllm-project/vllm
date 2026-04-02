@@ -276,6 +276,10 @@ class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
         )
 
 
+def is_nvfp4_supported():
+    return current_platform.has_device_capability(100)
+
+
 # MLA test configuration
 MLA_DIMS: list[tuple[int, int, int, int, int]] = []
 PATTERN_TEST_MODELS_MLA_FP8: list[tuple[str, type]] = []
@@ -340,6 +344,12 @@ def test_mla_attention_quant_pattern(
     use_fresh_inductor_cache,
 ):
     """Test MLA AttentionQuantPattern fusion pass"""
+    if (
+        model_class is TestMLAAttentionNvfp4QuantPatternModel
+        and not is_nvfp4_supported()
+    ):
+        pytest.skip("NVFP4 is not supported on this GPU (requires SM 100+).")
+
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
