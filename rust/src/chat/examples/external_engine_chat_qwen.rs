@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
         priority: 0,
         documents: None,
         cache_salt: None,
+        add_special_tokens: false,
     };
 
     println!("request_id={request_id}");

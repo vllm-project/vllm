@@ -116,6 +116,7 @@ impl ChatLlm {
             intermediate: request.intermediate,
             priority: request.priority,
             cache_salt: request.cache_salt.clone(),
+            add_special_tokens: request.add_special_tokens,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from);
         let structured_stream = output::output_stream(

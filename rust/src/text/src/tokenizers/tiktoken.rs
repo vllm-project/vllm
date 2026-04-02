@@ -95,7 +95,9 @@ impl TiktokenTokenizer {
 }
 
 impl Tokenizer for TiktokenTokenizer {
-    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+    fn encode(&self, text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+        // tiktoken-rs does not have a separate add_special_tokens toggle;
+        // `encode_with_special_tokens` always recognizes special tokens in the input.
         Ok(self.inner.encode_with_special_tokens(text))
     }
 
@@ -162,12 +164,12 @@ mod tests {
     fn tiktoken_decode_incomplete_utf8_produces_replacement_char() {
         let backend = tiktoken_backend();
 
-        let ids = backend.encode("你").unwrap();
+        let ids = backend.encode("你", false).unwrap();
         let full = backend.decode(&ids, false).unwrap();
         assert_eq!(full, "你");
 
         let text_with_multibyte = "Hello你好World";
-        let all_ids = backend.encode(text_with_multibyte).unwrap();
+        let all_ids = backend.encode(text_with_multibyte, false).unwrap();
         for &id in &all_ids {
             let result = backend.decode(&[id], false);
             assert!(result.is_ok(), "decode of token {id} should not error");
@@ -180,7 +182,7 @@ mod tests {
     fn tiktoken_streaming_decode_multibyte() {
         let backend = tiktoken_backend();
         let text = "你好世界"; // 4 CJK characters
-        let ids = backend.encode(text).unwrap();
+        let ids = backend.encode(text, false).unwrap();
 
         let mut decoder = backend.create_decode_stream(&[], false, 0);
         let mut output = String::new();
@@ -204,7 +206,7 @@ mod tests {
     fn tiktoken_streaming_decode_mixed_ascii_and_multibyte() {
         let backend = tiktoken_backend();
         let text = "Hello 你好 World 🌍";
-        let ids = backend.encode(text).unwrap();
+        let ids = backend.encode(text, false).unwrap();
 
         let mut decoder = backend.create_decode_stream(&[], false, 0);
         let mut output = String::new();

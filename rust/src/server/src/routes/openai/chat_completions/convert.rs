@@ -118,6 +118,7 @@ pub fn prepare_chat_request(
         priority: request.priority.unwrap_or(0),
         documents: request.documents.clone(),
         cache_salt: request.cache_salt.clone(),
+        add_special_tokens: request.add_special_tokens,
     };
 
     Ok(PreparedRequest {
@@ -382,6 +383,7 @@ mod tests {
                 priority: 0,
                 documents: None,
                 cache_salt: None,
+                add_special_tokens: false,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -443,6 +445,7 @@ mod tests {
                 priority: 0,
                 documents: None,
                 cache_salt: None,
+                add_special_tokens: false,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -521,6 +524,7 @@ mod tests {
                 priority: 0,
                 documents: None,
                 cache_salt: None,
+                add_special_tokens: false,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -627,6 +631,7 @@ mod tests {
                 priority: 0,
                 documents: None,
                 cache_salt: None,
+                add_special_tokens: false,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -752,6 +757,7 @@ mod tests {
                 priority: 0,
                 documents: None,
                 cache_salt: None,
+                add_special_tokens: false,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);

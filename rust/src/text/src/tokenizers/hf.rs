@@ -42,17 +42,19 @@ impl HuggingFaceTokenizer {
 }
 
 impl Tokenizer for HuggingFaceTokenizer {
-    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+    fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         match self {
             Self::Hf(t) => {
-                let encoding = t.encode(text, false).map_err(|error| {
+                let encoding = t.encode(text, add_special_tokens).map_err(|error| {
                     Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
                 })?;
                 Ok(encoding.get_ids().to_vec())
             }
-            Self::Fastokens(t) => t.encode_with_special_tokens(text, false).map_err(|error| {
-                Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
-            }),
+            Self::Fastokens(t) => t
+                .encode_with_special_tokens(text, add_special_tokens)
+                .map_err(|error| {
+                    Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
+                }),
         }
     }
 

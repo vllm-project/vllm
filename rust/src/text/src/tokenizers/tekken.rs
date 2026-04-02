@@ -28,9 +28,9 @@ impl TekkenTokenizer {
 }
 
 impl Tokenizer for TekkenTokenizer {
-    fn encode(&self, text: &str) -> Result<Vec<u32>> {
+    fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         self.inner
-            .encode(text, false, false)
+            .encode(text, add_special_tokens, false)
             .map_err(|error| Error::Tokenizer(format!("encoding failed: {error}")))
     }
 

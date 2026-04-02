@@ -160,8 +160,8 @@ fn tokenize_bad_words(
         // With a leading space we only keep it when the prefix-space variant produces a
         // distinct first token but the same sequence length — this mirrors the Python
         // dedup condition that avoids redundant entries.
-        let without_space = tokenizer.encode(bad_word)?;
-        let with_space = tokenizer.encode(&format!(" {}", bad_word.trim_start()))?;
+        let without_space = tokenizer.encode(bad_word, false)?;
+        let with_space = tokenizer.encode(&format!(" {}", bad_word.trim_start()), false)?;
 
         if !without_space.is_empty() {
             all_token_ids.push(without_space);
@@ -235,7 +235,7 @@ mod tests {
     struct StubTokenizer;
 
     impl Tokenizer for StubTokenizer {
-        fn encode(&self, _text: &str) -> crate::error::Result<Vec<u32>> {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> crate::error::Result<Vec<u32>> {
             Ok(vec![])
         }
 
@@ -265,6 +265,7 @@ mod tests {
             intermediate: true,
             priority: 0,
             cache_salt: None,
+            add_special_tokens: false,
         }
     }
 

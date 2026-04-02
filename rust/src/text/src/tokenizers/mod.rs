@@ -13,7 +13,7 @@ pub use tiktoken::TiktokenTokenizer;
 
 pub trait Tokenizer: Send + Sync {
     /// Encode one prompt string into token IDs.
-    fn encode(&self, text: &str) -> Result<Vec<u32>>;
+    fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>>;
 
     /// Decode one token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;

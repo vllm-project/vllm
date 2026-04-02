@@ -124,7 +124,7 @@ mod tests {
     struct ByteTokenizer;
 
     impl crate::tokenizers::Tokenizer for ByteTokenizer {
-        fn encode(&self, _text: &str) -> crate::Result<Vec<u32>> {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> crate::Result<Vec<u32>> {
             unreachable!()
         }
 

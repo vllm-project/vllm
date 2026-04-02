@@ -127,7 +127,7 @@ mod tests {
     struct Utf8Backend;
 
     impl Tokenizer for Utf8Backend {
-        fn encode(&self, _text: &str) -> Result<Vec<u32>> {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
             unreachable!()
         }
 
@@ -197,7 +197,7 @@ mod tests {
     struct SpecialTokenBackend;
 
     impl Tokenizer for SpecialTokenBackend {
-        fn encode(&self, _text: &str) -> Result<Vec<u32>> {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
             unreachable!()
         }
 

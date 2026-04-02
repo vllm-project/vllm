@@ -160,7 +160,7 @@ struct FakeChatBackend {
 struct FakeChatTokenizer;
 
 impl Tokenizer for FakeChatTokenizer {
-    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
+    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_text::Result<Vec<u32>> {
         Ok(text.bytes().map(u32::from).collect())
     }
 
@@ -252,8 +252,8 @@ struct FailingDecodeBackend {
 struct FailingDecodeTokenizer;
 
 impl Tokenizer for FailingDecodeTokenizer {
-    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
-        FakeChatTokenizer.encode(text)
+    fn encode(&self, text: &str, add_special_tokens: bool) -> vllm_text::Result<Vec<u32>> {
+        FakeChatTokenizer.encode(text, add_special_tokens)
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
@@ -299,6 +299,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
         priority: 0,
         documents: None,
         cache_salt: None,
+        add_special_tokens: false,
     }
 }
 
