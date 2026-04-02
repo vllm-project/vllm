@@ -514,6 +514,235 @@ class TestTransitionAwareCapacity:
         assert len(configs) + len(new_unique) > max_configs
 
 
+class TestDecodeOnlyCapacityCheck:
+    """Test that decode-only steering (prefill_hash=0, decode_hash!=0)
+    is capacity-checked at the WAITING admission gate.
+
+    Bug: The original admission gate only checked prefill_hash.  If a
+    request had prefill_hash==0 but decode_hash!=0, new_hashes stayed
+    empty and the capacity check was completely skipped, allowing the
+    request to exceed max_steering_configs.
+
+    Fix: Add an elif for decode-only steering so that requests with
+    only a decode hash are also gated.
+    """
+
+    @staticmethod
+    def _should_skip(
+        scheduled_configs: set[tuple[int, str]],
+        prefill_hash: int,
+        decode_hash: int,
+        max_configs: int,
+    ) -> bool:
+        """Reproduce the fixed scheduler admission check that also
+        considers decode-only steering.
+
+        The elif is correct: if a request has both hashes, only
+        prefill needs counting (the decode row replaces the prefill
+        row after transition -- one row at a time).
+        """
+        new_hashes: set[tuple[int, str]] = set()
+        if prefill_hash != 0:
+            new_hashes.add((prefill_hash, "prefill"))
+        elif decode_hash != 0:
+            new_hashes.add((decode_hash, "decode"))
+        if not new_hashes:
+            return False
+        new_unique = new_hashes - scheduled_configs
+        return len(scheduled_configs) + len(new_unique) > max_configs
+
+    def test_decode_only_is_capacity_checked(self):
+        """A request with prefill_hash=0, decode_hash!=0 should be
+        capacity-checked and skipped when at capacity."""
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert self._should_skip(scheduled, 0, 333, max_configs=2)
+
+    def test_decode_only_admitted_when_capacity(self):
+        """A decode-only request is admitted when there is capacity."""
+        scheduled = {(111, "prefill")}
+        assert not self._should_skip(scheduled, 0, 333, max_configs=2)
+
+    def test_decode_only_existing_hash_fits(self):
+        """A decode-only request whose hash is already scheduled fits."""
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert not self._should_skip(scheduled, 0, 222, max_configs=2)
+
+    def test_both_hashes_only_counts_prefill(self):
+        """When both hashes are nonzero, only the prefill hash is
+        counted (elif branch: decode is not reached)."""
+        # Only 1 slot, occupied by a different prefill hash => skip
+        # because prefill hash 333 is new.
+        scheduled = {(111, "prefill")}
+        assert self._should_skip(scheduled, 333, 444, max_configs=1)
+
+    def test_both_hashes_prefill_dedup(self):
+        """When both hashes are nonzero and prefill hash is already
+        in the set, request passes even at capacity."""
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert not self._should_skip(scheduled, 111, 444, max_configs=2)
+
+    def test_no_hashes_always_admits(self):
+        """A request with both hashes=0 always passes (no steering)."""
+        scheduled = {(111, "prefill"), (222, "decode")}
+        assert not self._should_skip(scheduled, 0, 0, max_configs=2)
+
+    def test_decode_only_single_slot(self):
+        """Decode-only with max_configs=1."""
+        assert not self._should_skip(set(), 0, 111, max_configs=1)
+        assert self._should_skip({(222, "decode")}, 0, 111, max_configs=1)
+        assert not self._should_skip({(111, "decode")}, 0, 111, max_configs=1)
+
+
+class TestWaitingTransitionPrediction:
+    """Test that WAITING requests that will complete prefill this step
+    have their decode row reserved in scheduled_steering_configs.
+
+    Bug: The post-admission hash tracking for WAITING requests only added
+    the starting phase (prefill).  But if a WAITING request has
+    num_computed + num_new >= num_prompt, it will complete prefill this
+    step and _handle_steering_transition will register its decode config.
+    The scheduler didn't reserve that decode row, so subsequent WAITING
+    requests saw undercounted capacity.
+
+    Fix: After adding the prefill config, check whether the request will
+    complete prefill this step and, if so, also add the decode config.
+    """
+
+    @staticmethod
+    def _admit_transition_aware(
+        scheduled_configs: set[tuple[int, str]],
+        prefill_hash: int,
+        decode_hash: int,
+        num_computed_tokens: int,
+        num_prompt_tokens: int,
+        num_new_tokens: int,
+    ) -> None:
+        """Reproduce the fixed scheduler post-admission hash update
+        with transition prediction for WAITING requests."""
+        if num_computed_tokens < num_prompt_tokens:
+            if prefill_hash != 0:
+                scheduled_configs.add((prefill_hash, "prefill"))
+            # Predict transition: if this request will complete
+            # prefill this step, also reserve its decode row.
+            will_complete = num_computed_tokens + num_new_tokens >= num_prompt_tokens
+            if will_complete and decode_hash != 0:
+                scheduled_configs.add((decode_hash, "decode"))
+        else:
+            if decode_hash != 0:
+                scheduled_configs.add((decode_hash, "decode"))
+
+    def test_transition_reserves_decode_row(self):
+        """A WAITING request completing prefill this step reserves
+        both prefill and decode rows."""
+        configs: set[tuple[int, str]] = set()
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=111,
+            decode_hash=222,
+            num_computed_tokens=90,
+            num_prompt_tokens=100,
+            num_new_tokens=20,  # 90+20=110 >= 100
+        )
+        assert (111, "prefill") in configs
+        assert (222, "decode") in configs
+        assert len(configs) == 2
+
+    def test_no_transition_only_prefill(self):
+        """A WAITING request NOT completing prefill this step only
+        reserves the prefill row."""
+        configs: set[tuple[int, str]] = set()
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=111,
+            decode_hash=222,
+            num_computed_tokens=50,
+            num_prompt_tokens=100,
+            num_new_tokens=10,  # 50+10=60 < 100
+        )
+        assert configs == {(111, "prefill")}
+
+    def test_transition_exact_boundary(self):
+        """Transition fires at exact boundary
+        (num_computed + num_new == num_prompt)."""
+        configs: set[tuple[int, str]] = set()
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=111,
+            decode_hash=222,
+            num_computed_tokens=80,
+            num_prompt_tokens=100,
+            num_new_tokens=20,  # 80+20=100 == 100
+        )
+        assert (111, "prefill") in configs
+        assert (222, "decode") in configs
+
+    def test_transition_zero_decode_hash(self):
+        """Transition prediction with decode_hash=0 does not add a
+        zero hash."""
+        configs: set[tuple[int, str]] = set()
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=111,
+            decode_hash=0,
+            num_computed_tokens=90,
+            num_prompt_tokens=100,
+            num_new_tokens=20,
+        )
+        assert configs == {(111, "prefill")}
+
+    def test_transition_zero_prefill_hash(self):
+        """Transition prediction with prefill_hash=0 only adds the
+        decode row."""
+        configs: set[tuple[int, str]] = set()
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=0,
+            decode_hash=222,
+            num_computed_tokens=90,
+            num_prompt_tokens=100,
+            num_new_tokens=20,
+        )
+        assert (222, "decode") in configs
+        assert (0, "prefill") not in configs
+
+    def test_full_cache_hit_only_decode(self):
+        """Full prefix-cache hit -> only decode row, no transition
+        prediction needed."""
+        configs: set[tuple[int, str]] = set()
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=111,
+            decode_hash=222,
+            num_computed_tokens=100,
+            num_prompt_tokens=100,
+            num_new_tokens=1,
+        )
+        assert configs == {(222, "decode")}
+
+    def test_transition_blocks_subsequent_admission(self):
+        """A WAITING request's transition prediction that reserves a
+        decode row blocks a subsequent WAITING request from admission."""
+        max_configs = 2
+        configs: set[tuple[int, str]] = set()
+
+        # First request: will complete prefill, reserves both rows.
+        self._admit_transition_aware(
+            configs,
+            prefill_hash=111,
+            decode_hash=222,
+            num_computed_tokens=90,
+            num_prompt_tokens=100,
+            num_new_tokens=20,
+        )
+        assert len(configs) == 2
+
+        # Second request: new prefill hash -> would need a 3rd slot
+        # but max is 2.
+        new_hashes: set[tuple[int, str]] = {(333, "prefill")}
+        new_unique = new_hashes - configs
+        assert len(configs) + len(new_unique) > max_configs
+
+
 class TestSteeringAdmissionLogicLegacy:
     """Legacy single-hash admission tests kept for reference.
 

@@ -644,10 +644,14 @@ class Scheduler(SchedulerInterface):
                         new_hashes.add(
                             (request.prefill_steering_config_hash, "prefill")
                         )
-                    # Decode hash is NOT counted here — the request
-                    # only occupies one row at a time; the prefill row
-                    # is released before the decode row is registered
-                    # in _handle_steering_transition.
+                    elif request.decode_steering_config_hash != 0:
+                        # Decode-only steering: if the request has no
+                        # prefill hash but does have a decode hash, we
+                        # must still capacity-check it.  The elif is
+                        # correct: when both hashes are present, only
+                        # the prefill hash is counted because the
+                        # request occupies one row at a time.
+                        new_hashes.add((request.decode_steering_config_hash, "decode"))
                     if new_hashes:
                         new_unique = new_hashes - scheduled_steering_configs
                         if (
@@ -897,14 +901,22 @@ class Scheduler(SchedulerInterface):
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
                 if self.steering_config:
-                    # Only add the starting phase — the request
-                    # occupies one row at a time (see admission
-                    # check above).
                     if num_computed_tokens < request.num_prompt_tokens:
                         # Starting in prefill.
                         if request.prefill_steering_config_hash != 0:
                             scheduled_steering_configs.add(
                                 (request.prefill_steering_config_hash, "prefill")
+                            )
+                        # Predict transition: if this request will
+                        # complete prefill this step, also reserve
+                        # its decode row.
+                        will_complete = (
+                            num_computed_tokens + num_new_tokens
+                            >= request.num_prompt_tokens
+                        )
+                        if will_complete and request.decode_steering_config_hash != 0:
+                            scheduled_steering_configs.add(
+                                (request.decode_steering_config_hash, "decode")
                             )
                     else:
                         # Full prefix-cache hit — starting in decode.
