@@ -1,3 +1,4 @@
 # GFX950 model configurations for GPQA evaluation
 # Tests different environment variable combinations
 gpt-oss-20b-rocm-baseline.yaml
+gpt-oss-20b-rocm-mxfp4-fp8.yaml
