@@ -36,8 +36,9 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
     Returns:
         MaxSim score (sum over query tokens of max similarity to any doc token)
     """
+    # compute in float32 for numerical stability
     # [query_len, doc_len]
-    token_scores = torch.matmul(q_emb, d_emb.T)
+    token_scores = torch.matmul(q_emb.float(), d_emb.float().T)
     # Max over document tokens, sum over query tokens
     return token_scores.amax(dim=-1).sum()
 
