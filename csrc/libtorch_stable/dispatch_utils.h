@@ -67,3 +67,56 @@
     constexpr bool const_expr = false;                   \
     __VA_ARGS__();                                       \
   }
+
+// Vec size dispatch (pure C++ switch, no ATen dependency)
+#define VLLM_STABLE_DISPATCH_VEC_SIZE(VEC_SIZE, ...) \
+  switch (VEC_SIZE) {                                \
+    case 16: {                                       \
+      constexpr int vec_size = 16;                   \
+      __VA_ARGS__();                                 \
+      break;                                         \
+    }                                                \
+    case 8: {                                        \
+      constexpr int vec_size = 8;                    \
+      __VA_ARGS__();                                 \
+      break;                                         \
+    }                                                \
+    case 4: {                                        \
+      constexpr int vec_size = 4;                    \
+      __VA_ARGS__();                                 \
+      break;                                         \
+    }                                                \
+    case 2: {                                        \
+      constexpr int vec_size = 2;                    \
+      __VA_ARGS__();                                 \
+      break;                                         \
+    }                                                \
+    default: {                                       \
+      constexpr int vec_size = 1;                    \
+      __VA_ARGS__();                                 \
+      break;                                         \
+    }                                                \
+  }
+
+// Tensor rank dispatch (2D, 3D, 4D)
+#define VLLM_STABLE_DISPATCH_RANK234(NUM_DIMS, ...)                          \
+  switch (NUM_DIMS) {                                                        \
+    case 2: {                                                                \
+      constexpr int tensor_rank = 2;                                         \
+      __VA_ARGS__();                                                         \
+      break;                                                                 \
+    }                                                                        \
+    case 3: {                                                                \
+      constexpr int tensor_rank = 3;                                         \
+      __VA_ARGS__();                                                         \
+      break;                                                                 \
+    }                                                                        \
+    case 4: {                                                                \
+      constexpr int tensor_rank = 4;                                         \
+      __VA_ARGS__();                                                         \
+      break;                                                                 \
+    }                                                                        \
+    default:                                                                 \
+      STD_TORCH_CHECK(                                                       \
+          false, "Expects rank 2, 3 or 4 tensors but got unsupported rank"); \
+  }
