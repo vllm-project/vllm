@@ -327,6 +327,8 @@ class WorkerBase:
             all_tiers.append(("decode", decode_vectors))
 
         if not all_tiers:
+            if replace:
+                self.clear_steering_vectors()
             return []
 
         # Validate all tiers.
@@ -429,9 +431,7 @@ class WorkerBase:
                                 )
             else:
                 # Phase-specific norms from pending globals (before manager init)
-                pending = getattr(
-                    self.model_runner, "_pending_steering_globals", None
-                )
+                pending = getattr(self.model_runner, "_pending_steering_globals", None)
                 if pending:
                     for captured_vectors, phase in pending:
                         if phase == "base":
@@ -445,9 +445,9 @@ class WorkerBase:
                                         result[layer_idx] = {}
                                     if hp_str not in result[layer_idx]:
                                         result[layer_idx][hp_str] = {}
-                                    result[layer_idx][hp_str][
-                                        f"{phase_name}_norm"
-                                    ] = round(norm, 6)
+                                    result[layer_idx][hp_str][f"{phase_name}_norm"] = (
+                                        round(norm, 6)
+                                    )
         return result
 
     def get_model_inspection(self) -> str:
