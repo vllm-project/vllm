@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import queue
 import socket
 import time
 
@@ -9,12 +8,7 @@ import pytest
 import zmq
 from msgspec import msgpack
 
-from vllm.config import (
-    DeviceConfig,
-    FaultToleranceConfig,
-    ParallelConfig,
-    VllmConfig,
-)
+from vllm.config import ParallelConfig
 from vllm.v1.fault_tolerance import EngineCoreSentinel
 from vllm.v1.fault_tolerance.utils import FaultInfo
 
@@ -38,31 +32,20 @@ def addr_dict():
 
 
 def create_engine_core_sentinel(
-    fault_signal_q: queue.Queue,
+    parallel_config: ParallelConfig,
     addr_dict: dict,
     sentinel_identity: bytes = b"engine_sentinel_0",
 ):
-    vllm_cfg = VllmConfig(
-        device_config=DeviceConfig("cpu"),
-        parallel_config=ParallelConfig(
-            tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1
-        ),
-        fault_tolerance_config=FaultToleranceConfig(enable_fault_tolerance=True),
-    )
-
     return EngineCoreSentinel(
+        parallel_config,
         engine_index=0,
-        fault_signal_q=fault_signal_q,
         engine_fault_socket_addr=addr_dict["engine_fault_socket_addr"],
         sentinel_identity=sentinel_identity,
-        vllm_config=vllm_cfg,
     )
 
 
-def test_engine_core_sentinel_initialization(addr_dict):
-    fault_signal_q: queue.Queue = queue.Queue()
-
-    sentinel = create_engine_core_sentinel(fault_signal_q, addr_dict)
+def test_engine_core_sentinel_initialization(addr_dict, mock_parallel_config):
+    sentinel = create_engine_core_sentinel(mock_parallel_config, addr_dict)
 
     assert sentinel.engine_index == 0
     assert sentinel.engine_fault_socket.type == zmq.DEALER
@@ -70,16 +53,15 @@ def test_engine_core_sentinel_initialization(addr_dict):
     sentinel.shutdown()
 
 
-def test_busy_loop_exception_forwarded_to_client(addr_dict):
+def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config):
     """
     Verify that when an engine exception is put into fault_signal_q,
     EngineCoreSentinel forwards a FaultInfo message to the
     client-facing engine fault socket.
     """
-    fault_signal_q: queue.Queue = queue.Queue()
     sentinel_identity = b"engine_sentinel_0"
     sentinel = create_engine_core_sentinel(
-        fault_signal_q, addr_dict, sentinel_identity=sentinel_identity
+        mock_parallel_config, addr_dict, sentinel_identity=sentinel_identity
     )
 
     # Bind a ROUTER to the engine_fault_socket_addr to receive the fault report.
@@ -89,8 +71,7 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict):
 
     try:
         time.sleep(0.1)
-        fault_signal_q.put(RuntimeError("test exception"))
-
+        sentinel.fault_signal_q.put(RuntimeError("test exception"))
         # Wait for the sentinel to forward the fault to the engine_fault socket.
         if not engine_fault_receiver.poll(timeout=5000):
             pytest.fail("Timeout waiting for engine fault message from sentinel")

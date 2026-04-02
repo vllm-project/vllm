@@ -1858,6 +1858,13 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
+        fault_tolerance_config = FaultToleranceConfig(
+            enable_fault_tolerance=self.enable_fault_tolerance,
+            engine_recovery_timeout_sec=self.engine_recovery_timeout_sec,
+            internal_fault_report_port=self.internal_fault_report_port,
+            external_fault_notify_port=self.external_fault_notify_port,
+        )
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1902,6 +1909,7 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            fault_tolerance_config=fault_tolerance_config,
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
@@ -2085,13 +2093,6 @@ class EngineArgs:
             enable_logging_iteration_details=self.enable_logging_iteration_details,
         )
 
-        fault_tolerance_config = FaultToleranceConfig(
-            enable_fault_tolerance=self.enable_fault_tolerance,
-            engine_recovery_timeout_sec=self.engine_recovery_timeout_sec,
-            internal_fault_report_port=self.internal_fault_report_port,
-            external_fault_notify_port=self.external_fault_notify_port,
-        )
-
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
         if self.cudagraph_capture_sizes is not None:
@@ -2149,7 +2150,6 @@ class EngineArgs:
             ec_transfer_config=self.ec_transfer_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
-            fault_tolerance_config=fault_tolerance_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
