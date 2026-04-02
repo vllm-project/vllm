@@ -36,10 +36,6 @@ inline int64_t get_row_size<int8_t>(int64_t K) {
   return K + sizeof(int32_t);
 }
 
-inline int64_t get_row_size(int64_t K, bool use_int8_w8a8) {
-  return use_int8_w8a8 ? K + sizeof(int32_t) : K;
-}
-
 inline int64_t get_4bit_block_k_size(int64_t group_size) {
   return group_size > 128 ? 128 : group_size;
 }
@@ -107,25 +103,6 @@ void fused_experts_int4_w4a16_kernel_impl(
     int64_t E,
     int64_t topk,
     int64_t num_tokens_post_pad);
-
-// shared expert implementation for int8 w8a8
-template <typename scalar_t>
-void shared_expert_int8_kernel_impl(
-    scalar_t* __restrict__ output,
-    scalar_t* __restrict__ ic1,
-    float* __restrict__ C_tmp,
-    uint8_t* __restrict__ Aq_tmp,
-    float* __restrict__ As_tmp,
-    const scalar_t* __restrict__ input,
-    const int8_t* __restrict__ packed_w1,
-    const int8_t* __restrict__ packed_w2,
-    const float* __restrict__ w1s,
-    const float* __restrict__ w2s,
-    const scalar_t* __restrict__ fused_experts_out,
-    float routed_scaling_factor,
-    int64_t M,
-    int64_t N,
-    int64_t K);
 
 template <typename scalar_t>
 void shared_expert_fp8_kernel_impl(

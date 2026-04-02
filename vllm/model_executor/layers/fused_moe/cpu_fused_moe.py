@@ -203,7 +203,6 @@ class SGLFusedMOE:
             topk_ids,
             True,
             False,
-            False,
             None,
             None,
             None,

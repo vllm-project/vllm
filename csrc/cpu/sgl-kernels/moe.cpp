@@ -918,19 +918,12 @@ void shared_expert_kernel_impl(
 
 // common checks
 static inline void check_moe_scales(
-    bool use_int8_w8a8,
     bool use_fp8_w8a16,
     const std::optional<at::Tensor>& w1_scale,
     const std::optional<at::Tensor>& w2_scale,
     const std::optional<std::vector<int64_t>> block_size,
     const std::optional<at::Tensor>& a1_scale,
     const std::optional<at::Tensor>& a2_scale) {
-  if (use_int8_w8a8) {
-    TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for int8 w8a8.");
-    TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for int8 w8a8.");
-    TORCH_CHECK(!a1_scale.has_value(), "static quantization for activation not supported.");
-    TORCH_CHECK(!a2_scale.has_value(), "static quantization for activation not supported.");
-  }
   if (use_fp8_w8a16) {
     TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for fp8 w8a16.");
     TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for fp8 w8a16.");
@@ -963,7 +956,6 @@ at::Tensor fused_experts_cpu(
     at::Tensor& topk_weights,
     at::Tensor& topk_ids,
     bool inplace,
-    bool use_int8_w8a8,
     bool use_fp8_w8a16,
     const std::optional<at::Tensor>& w1_scale,
     const std::optional<at::Tensor>& w2_scale,
@@ -999,18 +991,14 @@ at::Tensor fused_experts_cpu(
   int64_t E = w1.size(0);
   int64_t topk = topk_weights.size(1);
 
-  // we use int32_t compensation for int8 w8a8
-  int64_t packed_K = get_row_size(K, use_int8_w8a8);
-  int64_t packed_N = get_row_size(N, use_int8_w8a8);
-
   // check weight shapes
   CHECK_EQ(w2.size(0), E);
   CHECK_EQ(w2.size(1), K);
-  CHECK_EQ(packed_w1.size(2), packed_K);
-  CHECK_EQ(packed_w2.size(2), packed_N);
+  CHECK_EQ(packed_w1.size(2), K);
+  CHECK_EQ(packed_w2.size(2), N);
 
   // check scales
-  check_moe_scales(use_int8_w8a8, use_fp8_w8a16, w1_scale, w2_scale, block_size, a1_scale, a2_scale);
+  check_moe_scales(use_fp8_w8a16, w1_scale, w2_scale, block_size, a1_scale, a2_scale);
 
   at::Tensor out_hidden_states = inplace ? hidden_states : at::empty_like(hidden_states);
 
@@ -1067,12 +1055,9 @@ at::Tensor fused_experts_cpu(
   //   8. B_tmp : [T, BLOCK_N, std::max(K, N)]
   //
   int64_t buffer_size_nbytes = M * topk * N * 2 + M * topk * K * 2 +
-      num_threads * BLOCK_M * K * (use_int8_w8a8 ? 1 : 2) +
+      num_threads * BLOCK_M * K * 2 +
       num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
 
-  if (use_int8_w8a8) {
-    buffer_size_nbytes += std::max(M * K, M * topk * N) + M * topk * sizeof(float);
-  }
   if (use_fp8_w8a16) {
     buffer_size_nbytes += M * topk * 2 * N * 2 + num_threads * BLOCK_N * std::max(K, N) * 2;
   }
@@ -1157,7 +1142,6 @@ at::Tensor shared_expert_cpu(
     at::Tensor& fused_experts_out,
     double routed_scaling_factor,
     bool inplace,
-    bool use_int8_w8a8,
     bool use_fp8_w8a16,
     std::optional<at::Tensor>& w1_scale,
     std::optional<at::Tensor>& w2_scale,
@@ -1188,17 +1172,13 @@ at::Tensor shared_expert_cpu(
   int64_t K = hidden_states.size(1);
   int64_t N = w1.size(0) / 2;
 
-  // we use int32_t compensation for int8 w8a8
-  int64_t packed_K = get_row_size(K, use_int8_w8a8);
-  int64_t packed_N = get_row_size(N, use_int8_w8a8);
-
   // check weight shapes
   CHECK_EQ(w2.size(0), K);
-  CHECK_EQ(packed_w1.size(1), packed_K);
-  CHECK_EQ(packed_w2.size(1), packed_N);
+  CHECK_EQ(packed_w1.size(1), K);
+  CHECK_EQ(packed_w2.size(1), N);
 
   // check scales
-  check_moe_scales(use_int8_w8a8, use_fp8_w8a16, w1_scale, w2_scale, block_size, a1_scale, a2_scale);
+  check_moe_scales(use_fp8_w8a16, w1_scale, w2_scale, block_size, a1_scale, a2_scale);
 
   at::Tensor out_hidden_states = inplace ? hidden_states : at::empty_like(hidden_states);
 
@@ -1217,9 +1197,6 @@ at::Tensor shared_expert_cpu(
   int num_threads = at::get_num_threads();
   int64_t buffer_size_nbytes = M * N * 2 + num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
 
-  if (use_int8_w8a8) {
-    buffer_size_nbytes += std::max(M * K, M * N) + M * sizeof(float);
-  }
   if (use_fp8_w8a16) {
     buffer_size_nbytes += M * 2 * N * 2 + num_threads * BLOCK_M * std::max(K, N) * 2;
   }

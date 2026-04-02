@@ -2983,7 +2983,6 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         inplace: bool,
-        use_int8_w8a8: bool,
         use_fp8_w8a16: bool,
         w1_scale: torch.Tensor | None,
         w2_scale: torch.Tensor | None,
