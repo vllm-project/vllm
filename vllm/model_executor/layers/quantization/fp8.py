@@ -73,7 +73,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
     normalize_e4m3fn_to_e4m3fnuz,
 )
-from vllm.model_executor.model_loader.weight_utils import initialize_single_dummy_weight
+from vllm.model_executor.model_loader.reload.layerwise import (
+    initialize_online_processing,
+)
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ModelWeightParameter,
@@ -129,6 +131,7 @@ class Fp8Config(QuantizationConfig):
                     f"{activation_scheme} activation scheme."
                 )
         self.weight_block_size = weight_block_size
+        self.use_deep_gemm: bool | None = None
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -276,7 +279,10 @@ class Fp8LinearMethod(LinearMethodBase):
         self.marlin_input_dtype = None
 
         self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
-        self.use_deep_gemm = is_deep_gemm_supported()
+        if self.quant_config.use_deep_gemm is not None:
+            self.use_deep_gemm = self.quant_config.use_deep_gemm
+        else:
+            self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
@@ -311,6 +317,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 act_quant_group_shape=GroupShape(1, self.weight_block_size[0]),
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+                use_deep_gemm=self.use_deep_gemm,
             )
 
     def create_weights(
@@ -428,7 +435,7 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             layer.input_scale = None
 
-        if self.block_quant:
+        if self.block_quant and self.use_deep_gemm:
             maybe_post_process_fp8_weight_block(layer)
 
     def apply(
@@ -491,8 +498,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
 
 class Fp8OnlineLinearMethod(Fp8LinearMethod):
-    """Online version of Fp8LinearMethod, loads the fp16/bf16 checkpoint
-    and quantized the weights during loading."""
+    """Online version of Fp8LinearMethod which loads a full precision checkpoint
+    and quantizes weights during loading."""
 
     uses_meta_device: bool = True
 
@@ -514,83 +521,24 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        # WEIGHT
-        def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-            # track how many elements we have updated
-            if not hasattr(layer, "_loaded_numel"):
-                layer._loaded_numel = 0
-
-                # when the first `loaded_weight` is about to be
-                # loaded to `param`, materialize `param` just-in-time
-                weight = ModelWeightParameter(
-                    data=torch.empty_like(layer.weight, device=layer._load_device),
-                    input_dim=1,
-                    output_dim=0,
-                    weight_loader=patched_weight_loader,
-                )
-                _copy_missing_attrs(layer.weight, weight)
-                layer.register_parameter("weight", weight)
-                del layer._load_device
-
-            # refresh the reference to `param` to reflect just-in-time
-            # materialization
-            param = layer.weight
-
-            # load the current weight chunk
-            copy_numel_counter = CopyNumelCounter()
-            with copy_numel_counter:
-                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-            layer._loaded_numel += copy_numel_counter.copied_numel
-
-            # if we have loaded all of the elements, call
-            # process_weights_after_loading
-            target_loaded_numel = layer.weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
-                self.process_weights_after_loading(layer)
-
-                # Prevent the usual `process_weights_after_loading` call from doing
-                # anything
-                layer._already_called_process_weights_after_loading = True
-
-                # Note that we keep `layer._loaded_numel` around just in case
-                # there is logic added to vllm in the future which calls a
-                # weight loader twice - we do not want to re-initialize in
-                # that case.
-
-            return res
-
         weight = ModelWeightParameter(
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                # materialized just-in-time in `patched_weight_loader`
-                device="meta",
+                device="meta",  # materialized and processed during loading
                 dtype=params_dtype,
             ),
             input_dim=1,
             output_dim=0,
-            weight_loader=patched_weight_loader,
+            weight_loader=weight_loader,
         )
-        # stash the correct device for `patched_weight_loader`
-        layer._load_device = torch.get_default_device()
         layer.register_parameter("weight", weight)
+
+        initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
-
-        # deferred initialization of randomly initialized weights for the
-        # `--load_format dummy` feature
-        if layer.weight.device == torch.device("meta"):
-            weight = ModelWeightParameter(
-                data=torch.empty_like(layer.weight, device=layer._load_device),
-                input_dim=1,
-                output_dim=0,
-                weight_loader=layer.weight.weight_loader,
-            )
-            _copy_missing_attrs(layer.weight, weight)
-            layer.register_parameter("weight", weight)
-            initialize_single_dummy_weight(layer.weight)
 
         # TODO(future): support block_quant in online quant path
         assert not self.block_quant
@@ -667,8 +615,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.intermediate_size_per_partition = intermediate_size_per_partition
-        layer.hidden_size = hidden_size
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
@@ -842,9 +788,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight
@@ -888,9 +831,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
-
-        # Prevent duplicate processing (e.g., during weight reload)
-        layer._already_called_process_weights_after_loading = True
 
     def maybe_make_prepare_finalize(
         self,
@@ -937,7 +877,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -962,7 +902,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1006,84 +946,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.intermediate_size_per_partition = intermediate_size_per_partition
-        layer.hidden_size = hidden_size
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-
-        # We are doing online quantization, patch the weight loaded
-        # to call `process_weights_after_loading` in a streaming fashion
-        # as soon as the last weight chunk is loaded.
-        weight_loader = extra_weight_attrs["weight_loader"]
-        # create a new holder to prevent modifying behavior of any other
-        # objects which might depend on the old one
-        new_extra_weight_attrs = extra_weight_attrs
-
-        def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-            # add a counter to track how many elements we have updated
-            if not hasattr(layer, "_loaded_numel"):
-                layer._loaded_numel = 0
-
-                # save the ids of original w13 and w2 so that we can
-                # distinguish which one `param` should map to further
-                # down in this file
-                layer._w13_weight_orig_id = id(layer.w13_weight)
-                layer._w2_weight_orig_id = id(layer.w2_weight)
-
-                # when the first `loaded_weight` is about to be
-                # loaded to `param`, materialize `param` just-in-time
-
-                w13_weight = torch.nn.Parameter(
-                    torch.empty_like(layer.w13_weight, device=layer._load_device),
-                    requires_grad=False,
-                )
-                set_weight_attrs(w13_weight, extra_weight_attrs)
-                _copy_missing_attrs(layer.w13_weight, w13_weight)
-                layer.register_parameter("w13_weight", w13_weight)
-
-                w2_weight = torch.nn.Parameter(
-                    torch.empty_like(layer.w2_weight, device=layer._load_device),
-                    requires_grad=False,
-                )
-                set_weight_attrs(w2_weight, extra_weight_attrs)
-                _copy_missing_attrs(layer.w2_weight, w2_weight)
-                layer.register_parameter("w2_weight", w2_weight)
-                del layer._load_device
-
-            # refresh the reference to `param` to reflect just-in-time
-            # materialization
-            if id(param) == layer._w13_weight_orig_id:
-                param = layer.w13_weight
-            elif id(param) == layer._w2_weight_orig_id:
-                param = layer.w2_weight
-
-            # load the current weight chunk
-            copy_numel_counter = CopyNumelCounter()
-            with copy_numel_counter:
-                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-            layer._loaded_numel += copy_numel_counter.copied_numel
-
-            # if we have loaded all of the elements, call
-            # process_weights_after_loading
-            target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
-                self.process_weights_after_loading(layer)
-
-                # Prevent the usual `process_weights_after_loading` call
-                # from doing anything
-                layer._already_called_process_weights_after_loading = True
-
-                # Note that we keep `layer._loaded_numel`,
-                # `layer._w13_weight_orig_id` and `layer._w2_weight_orig_id`
-                # around because if EP is on, weight loaders for non-local
-                # experts will run but not actually copy any elements, and we
-                # need to not re-initialize in that case.
-
-            return res
-
-        new_extra_weight_attrs["weight_loader"] = patched_weight_loader
-        extra_weight_attrs = new_extra_weight_attrs
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -1091,7 +956,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size,
-                # materialized just-in-time in `patched_weight_loader`
                 device="meta",
                 dtype=params_dtype,
             ),
@@ -1105,91 +969,56 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
-                # materialized just-in-time in `patched_weight_loader`
-                device="meta",
+                device="meta",  # materialized and processed during loading
                 dtype=params_dtype,
             ),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
-        # stash the correct device for `patched_weight_loader`
-        layer._load_device = torch.get_default_device()
 
         # BIASES (for models like GPT-OSS that have biased MoE)
         if self.moe.has_bias:
-            # Use the original weight_loader (not patched) for biases
-            orig_extra_weight_attrs = dict(extra_weight_attrs)
-            orig_extra_weight_attrs["weight_loader"] = weight_loader
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
                     2 * intermediate_size_per_partition,
+                    device="meta",  # materialized and processed during loading
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
             )
             layer.register_parameter("w13_bias", w13_bias)
-            set_weight_attrs(w13_bias, orig_extra_weight_attrs)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
             w2_bias = torch.nn.Parameter(
-                torch.zeros(num_experts, hidden_size, dtype=layer.orig_dtype),
+                torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    device="meta",  # materialized and processed during loading
+                    dtype=layer.orig_dtype,
+                ),
                 requires_grad=False,
             )
             layer.register_parameter("w2_bias", w2_bias)
-            set_weight_attrs(w2_bias, orig_extra_weight_attrs)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
-        # WEIGHT_SCALES
-        # Allocate 2 scales for w1 and w3 respectively.
-        # They will be combined to a single scale after weight loading.
-        w13_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
-        )
-        w2_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
-        )
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
+        initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        # deferred initialization of randomly initialized weights for the
-        # `--load_format dummy` feature
-        if layer.w13_weight.device == torch.device("meta"):
-            w13_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w13_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w13_weight, w13_weight)
-            layer.register_parameter("w13_weight", w13_weight)
-            initialize_single_dummy_weight(layer.w13_weight)
-        if layer.w2_weight.device == torch.device("meta"):
-            w2_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w2_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w2_weight, w2_weight)
-            layer.register_parameter("w2_weight", w2_weight)
-            initialize_single_dummy_weight(layer.w2_weight)
-
-        # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
+        w13_scale = torch.ones(
+            layer.num_experts, device=w13.device, dtype=torch.float32
+        )
+        w2_scale = torch.ones(layer.num_experts, device=w2.device, dtype=torch.float32)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
 
         for expert in range(layer.local_num_experts):
             w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
@@ -1206,8 +1035,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w2,
             w13_scale,
             w2_scale,
-            layer.w13_input_scale,
-            layer.w2_input_scale,
+            w13_input_scale=layer.w13_input_scale,
+            w2_input_scale=layer.w2_input_scale,
         )
 
         # Prevent duplicate processing (e.g., during weight reload)
