@@ -3,6 +3,17 @@
 from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.models.qwen2 import Qwen2Config
 
+_CHEERS_TEXT_DEFAULTS: dict = {
+    "num_hidden_layers": 28,
+    "num_attention_heads": 28,
+    "num_key_value_heads": 4,
+    "hidden_size": 3584,
+    "intermediate_size": 18944,
+    "rope_theta": 1000000.0,
+    "vocab_size": 152064,
+    "max_position_embeddings": 131072,
+}
+
 
 class CheersConfig(PretrainedConfig):
     """Configuration class for Cheers (UMM) model."""
@@ -20,9 +31,12 @@ class CheersConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
         if isinstance(text_config, dict):
-            self.text_config = Qwen2Config(**text_config)
+            merged = {**_CHEERS_TEXT_DEFAULTS, **text_config}
+            self.text_config = Qwen2Config(**merged)
         else:
-            self.text_config = text_config or Qwen2Config()
+            self.text_config = text_config or Qwen2Config(
+                **_CHEERS_TEXT_DEFAULTS
+            )
 
         if isinstance(vision_representation_config, dict):
             self.vision_representation_config = SiglipVisionConfig(
