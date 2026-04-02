@@ -53,18 +53,6 @@ elif current_platform.is_rocm():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 
-def should_use_system_flash_attn() -> bool:
-    """Check if the system flash-attn library should be used based on config/env."""
-    if not current_platform.is_cuda():
-        return False
-    from vllm.config import get_current_vllm_config_or_none
-
-    vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is not None:
-        return vllm_config.attention_config.use_system_flash_attn
-    return False
-
-
 def get_flash_attn_version(
     requires_alibi: bool = False, head_size: int | None = None
 ) -> int | None:
@@ -166,6 +154,25 @@ def get_flash_attn_version(
         return None
 
 
+def should_use_system_flash_attn() -> bool:
+    """Check if the system flash-attn library should be used based on config/env."""
+    if not current_platform.is_cuda():
+        return False
+    if get_flash_attn_version() != 4:
+        logger.warning_once(
+            f"System Flash Attention is only compatible with Flash Attention 4 "
+            f"but the detected version is {get_flash_attn_version()}. "
+            f"Disabling system flash attention.",
+            scope="local",
+        )
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None:
+        return vllm_config.attention_config.use_system_flash_attn
+    return False
+
+
 def flash_attn_supports_fp8() -> bool:
     return (
         get_flash_attn_version() == 3
@@ -224,10 +231,10 @@ def is_flash_attn_varlen_func_available() -> bool:
         # Currently only supports Flash Attention 4
         import importlib.util
 
-        if not importlib.util.find_spec("flash_attn.cute"):
-            logger.warning(
+        if not importlib.util.find_spec("flash_attn"):
+            logger.warning_once(
                 "attention-config.use_system_flash_attn is set, but "
-                "failed to import system flash-attn. "
+                "failed to import system flash_attn. "
             )
             return False
         return True

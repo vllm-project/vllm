@@ -2205,16 +2205,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             kwargs["return_attn_probs"] = return_softmax_lse
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
-        if should_use_system_flash_attn():
-            if self.vllm_flash_attn_version != 4:
-                logger.warning_once(
-                    f"System Flash Attention is only compatible with Flash Attention 4 "
-                    f"but the detected version is {self.vllm_flash_attn_version}. "
-                    f"Disabling system flash attention.",
-                    scope="local",
-                )
-            else:
-                kwargs["use_system_flash_attn"] = True
+        kwargs["use_system_flash_attn"] = should_use_system_flash_attn()
 
         attn_out = self.flash_attn_varlen_func(
             q=q,

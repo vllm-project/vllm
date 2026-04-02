@@ -629,17 +629,7 @@ class FlashAttentionImpl(AttentionImpl):
             self.vllm_flash_attn_version,
             scope="local",
         )
-        self.use_system_flash_attn = False
-        if should_use_system_flash_attn():
-            if self.vllm_flash_attn_version != 4:
-                logger.warning_once(
-                    f"System Flash Attention is only compatible with Flash Attention 4 "
-                    f"but the detected version is {self.vllm_flash_attn_version}. "
-                    f"Disabling system flash attention.",
-                    scope="local",
-                )
-            else:
-                self.use_system_flash_attn = True
+        self.use_system_flash_attn = should_use_system_flash_attn()
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
