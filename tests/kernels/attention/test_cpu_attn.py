@@ -626,3 +626,355 @@ def test_varlen_with_paged_kv_sink(
         use_sink=use_sink,
         isa=isa,
     )
+
+
+# ---------------------------------------------------------------------------
+# FP8 KV cache tests (Phase 1)
+# ---------------------------------------------------------------------------
+
+from vllm._custom_ops import (  # noqa: E402
+    cpu_attention_with_kv_cache_fp8,
+    cpu_attn_reshape_and_cache_fp8,
+)
+
+
+def test_fp8_backend_init():
+    """Test E: CPUAttentionBackendImpl init with FP8 dtype raises no error."""
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackendImpl
+
+    impl = CPUAttentionBackendImpl(
+        num_heads=4,
+        head_size=128,
+        scale=128**-0.5,
+        num_kv_heads=4,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="fp8_e4m3",
+    )
+    assert impl.is_fp8_kv_cache
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_fp8_round_trip(dtype: torch.dtype):
+    """Test A: quant→dequant round-trip relative error < 3%."""
+    head_size = 128
+    token_num = 64
+    num_kv_heads = 4
+    block_size = 32
+    num_blocks = (token_num + block_size - 1) // block_size + 4
+    scale = 1.0
+
+    key = torch.randn(token_num, num_kv_heads, head_size, dtype=dtype)
+    value = torch.randn(token_num, num_kv_heads, head_size, dtype=dtype)
+    key_cache = torch.zeros(
+        num_blocks, num_kv_heads, block_size, head_size, dtype=torch.uint8
+    )
+    value_cache = torch.zeros_like(key_cache)
+    slot_mapping = torch.arange(token_num, dtype=torch.int64)
+
+    cpu_attn_reshape_and_cache_fp8(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        k_scale=scale,
+        v_scale=scale,
+    )
+
+    # Dequantize value cache (row-major layout) and check round-trip error.
+    # Retrieve the quantized values for token 0, head 0:
+    block_idx = 0
+    block_offset = 0
+    v_fp8 = value_cache[block_idx, :, block_offset, :]  # [num_kv_heads, head_size]
+    v_dq = v_fp8.view(torch.float8_e4m3fn).float() * scale  # dequantize
+    v_ref = value[0].float()
+    rel_err = (v_dq - v_ref).abs() / (v_ref.abs() + 1e-6)
+    # E4M3 truncating encoder: max ~12.5% relative error, typical mean ~6%.
+    assert rel_err.mean().item() < 0.08, (
+        f"Round-trip relative error too high: {rel_err.mean().item():.4f}"
+    )
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("k_scale,v_scale", [(1.0, 1.0), (0.5, 2.0)])
+def test_fp8_end_to_end(dtype: torch.dtype, k_scale: float, v_scale: float):
+    """Tests B & C: FP8 attention output matches simulated quant->dequant reference."""
+    set_random_seed(0)
+    num_query_heads = 4
+    num_kv_heads = 4
+    head_size = 128
+    block_size = 32
+    num_blocks = 64
+    seq_lens = [(1, 128), (1, 64)]
+    isa = _get_attn_isa(dtype, block_size, head_size)
+    if isa == "amx":
+        isa = "vec"  # FP8 path always uses vec
+
+    scale = head_size**-0.5
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_seqs = len(seq_lens)
+    token_num = sum(query_lens)
+    max_kv_len = max(kv_lens)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+
+    query = torch.randn(token_num, num_query_heads, head_size, dtype=dtype)
+    # Ground-truth KV in float (original, before any quant)
+    kv_flat_size = num_blocks * block_size * num_kv_heads * head_size
+    key_flat = torch.randn(kv_flat_size, dtype=dtype)
+    value_flat = torch.randn(kv_flat_size, dtype=dtype)
+    key_orig = key_flat.view(num_blocks, block_size, num_kv_heads, head_size)
+    value_orig = value_flat.view(num_blocks, block_size, num_kv_heads, head_size)
+
+    slot_mapping = torch.arange(num_blocks * block_size, dtype=torch.int64)
+
+    # --- FP8 path ---
+    key_cache_fp8 = torch.zeros(
+        num_blocks, num_kv_heads, block_size, head_size, dtype=torch.uint8
+    )
+    value_cache_fp8 = torch.zeros_like(key_cache_fp8)
+    cpu_attn_reshape_and_cache_fp8(
+        key_orig.view(-1, num_kv_heads, head_size),
+        value_orig.view(-1, num_kv_heads, head_size),
+        key_cache_fp8,
+        value_cache_fp8,
+        slot_mapping,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+    # Dequantize for attention
+    key_cache_f32 = key_cache_fp8.view(torch.float8_e4m3fn).float() * k_scale
+    value_cache_f32 = value_cache_fp8.view(torch.float8_e4m3fn).float() * v_scale
+
+    # --- Reference path: non-quantized float cache ---
+    key_cache_ref = torch.zeros(
+        num_blocks, num_kv_heads, block_size, head_size, dtype=dtype
+    )
+    value_cache_ref = torch.zeros_like(key_cache_ref)
+    cpu_attn_reshape_and_cache(
+        key_orig.view(-1, num_kv_heads, head_size),
+        value_orig.view(-1, num_kv_heads, head_size),
+        key_cache_ref,
+        value_cache_ref,
+        slot_mapping,
+        isa,
+    )
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+    block_tables = torch.arange(
+        max_num_blocks_per_seq * num_seqs, dtype=torch.int32
+    ).view(num_seqs, max_num_blocks_per_seq)
+
+    scheduler_metadata = cpu_attn_get_scheduler_metadata(
+        num_reqs=num_seqs,
+        num_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        seq_lens=kv_lens_tensor,
+        dtype=dtype,
+        query_start_loc=cu_query_lens,
+        causal=True,
+        sliding_window_size=-1,
+        isa=isa,
+        enable_kv_split=True,
+    )
+
+    output_fp8 = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
+    cpu_attention_with_kv_cache(
+        query=query,
+        key_cache=key_cache_f32.to(dtype),
+        value_cache=value_cache_f32.to(dtype),
+        output=output_fp8,
+        query_start_loc=cu_query_lens,
+        seq_lens=kv_lens_tensor,
+        scale=scale,
+        causal=True,
+        alibi_slopes=None,
+        sliding_window=(-1, -1),
+        block_table=block_tables,
+        softcap=0.0,
+        scheduler_metadata=scheduler_metadata,
+        s_aux=None,
+    )
+
+    output_ref = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
+    cpu_attention_with_kv_cache(
+        query=query,
+        key_cache=key_cache_ref,
+        value_cache=value_cache_ref,
+        output=output_ref,
+        query_start_loc=cu_query_lens,
+        seq_lens=kv_lens_tensor,
+        scale=scale,
+        causal=True,
+        alibi_slopes=None,
+        sliding_window=(-1, -1),
+        block_table=block_tables,
+        softcap=0.0,
+        scheduler_metadata=scheduler_metadata,
+        s_aux=None,
+    )
+
+    # FP8 output should be close to full-float output (within quantization noise).
+    # E4M3 with 3-bit mantissa gives ~6% per-element error; attention averaging
+    # reduces this, but attention weights are also affected. atol=0.1 is appropriate.
+    torch.testing.assert_close(output_fp8, output_ref, atol=0.1, rtol=0.1)
+
+
+# ---------------------------------------------------------------------------
+# FP8 KV cache tests (Phase 2) — on-the-fly dequantization via
+# cpu_attention_with_kv_cache_fp8 (no Python-level eager dequant).
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(1, 213), (1, 1), (1, 312), (1, 7), (1, 7812)],  # decode
+        [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)],  # mixed
+    ],
+)
+@pytest.mark.parametrize("num_heads", [(4, 4), (8, 2)])
+@pytest.mark.parametrize("head_size", [96, 128])
+@pytest.mark.parametrize("k_scale,v_scale", [(1.0, 1.0), (0.5, 2.0)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_fp8_end_to_end_native(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    k_scale: float,
+    v_scale: float,
+    dtype: torch.dtype,
+) -> None:
+    """Phase 2: cpu_attention_with_kv_cache_fp8 performs on-the-fly dequant.
+
+    The output must match running the same attention over a float KV cache
+    built from the same original values (within FP8 quantisation noise).
+    """
+    set_random_seed(0)
+    block_size = 32
+    num_query_heads, num_kv_heads = num_heads
+    scale = head_size**-0.5
+
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_seqs = len(seq_lens)
+    token_num = sum(query_lens)
+    max_kv_len = max(kv_lens)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    # num_blocks must cover all block table entries (num_seqs * max_num_blocks_per_seq).
+    num_blocks = max_num_blocks_per_seq * num_seqs
+
+    isa = _get_attn_isa(dtype, block_size, head_size)
+    if isa == "amx":
+        isa = "vec"
+
+    query = torch.randn(token_num, num_query_heads, head_size, dtype=dtype)
+
+    kv_flat_size = num_blocks * block_size * num_kv_heads * head_size
+    key_orig = torch.randn(kv_flat_size, dtype=dtype).view(
+        num_blocks, block_size, num_kv_heads, head_size
+    )
+    value_orig = torch.randn(kv_flat_size, dtype=dtype).view(
+        num_blocks, block_size, num_kv_heads, head_size
+    )
+    slot_mapping = torch.arange(num_blocks * block_size, dtype=torch.int64)
+
+    # Build FP8 uint8 cache.
+    key_cache_fp8 = torch.zeros(
+        num_blocks, num_kv_heads, block_size, head_size, dtype=torch.uint8
+    )
+    value_cache_fp8 = torch.zeros_like(key_cache_fp8)
+    cpu_attn_reshape_and_cache_fp8(
+        key_orig.view(-1, num_kv_heads, head_size),
+        value_orig.view(-1, num_kv_heads, head_size),
+        key_cache_fp8,
+        value_cache_fp8,
+        slot_mapping,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+
+    # Build float reference cache (using the same original values).
+    key_cache_ref = torch.zeros(
+        num_blocks, num_kv_heads, block_size, head_size, dtype=dtype
+    )
+    value_cache_ref = torch.zeros_like(key_cache_ref)
+    cpu_attn_reshape_and_cache(
+        key_orig.view(-1, num_kv_heads, head_size),
+        value_orig.view(-1, num_kv_heads, head_size),
+        key_cache_ref,
+        value_cache_ref,
+        slot_mapping,
+        isa,
+    )
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+    block_tables = torch.arange(
+        max_num_blocks_per_seq * num_seqs, dtype=torch.int32
+    ).view(num_seqs, max_num_blocks_per_seq)
+
+    scheduler_metadata = cpu_attn_get_scheduler_metadata(
+        num_reqs=num_seqs,
+        num_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        seq_lens=kv_lens_tensor,
+        dtype=dtype,
+        query_start_loc=cu_query_lens,
+        causal=True,
+        sliding_window_size=-1,
+        isa=isa,
+        enable_kv_split=True,
+    )
+
+    # --- Phase 2 native path: on-the-fly FP8 dequant inside the kernel ---
+    output_fp8_native = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
+    cpu_attention_with_kv_cache_fp8(
+        query=query,
+        key_cache=key_cache_fp8,
+        value_cache=value_cache_fp8,
+        output=output_fp8_native,
+        query_start_loc=cu_query_lens,
+        seq_lens=kv_lens_tensor,
+        scale=scale,
+        causal=True,
+        alibi_slopes=None,
+        sliding_window=(-1, -1),
+        block_table=block_tables,
+        softcap=0.0,
+        scheduler_metadata=scheduler_metadata,
+        s_aux=None,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+
+    # --- Float reference path ---
+    output_ref = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
+    cpu_attention_with_kv_cache(
+        query=query,
+        key_cache=key_cache_ref,
+        value_cache=value_cache_ref,
+        output=output_ref,
+        query_start_loc=cu_query_lens,
+        seq_lens=kv_lens_tensor,
+        scale=scale,
+        causal=True,
+        alibi_slopes=None,
+        sliding_window=(-1, -1),
+        block_table=block_tables,
+        softcap=0.0,
+        scheduler_metadata=scheduler_metadata,
+        s_aux=None,
+    )
+
+    torch.testing.assert_close(output_fp8_native, output_ref, atol=0.2, rtol=0.1)

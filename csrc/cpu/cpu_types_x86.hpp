@@ -400,6 +400,22 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
       : reg(_mm512_cvt_roundepi32_ps(
             v.reg, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)) {}
 
+  // Decode 16 FP8-E4M3 bytes to float32.
+  // sign=(b&0x80)<<24, payload=(b&0x7F)<<20, reinterpret as float,
+  // multiply by scale_2p120 (= user_scale * 2^120 exponent-bias correction).
+  // The NaN encoding (0x7F) maps to a small finite value; acceptable for KV
+  // cache where NaN values do not appear in practice.
+  explicit FP32Vec16(const uint8_t* ptr, float scale_2p120) {
+    __m128i b8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr));
+    __m512i b32 = _mm512_cvtepu8_epi32(b8);
+    __m512i sign =
+        _mm512_slli_epi32(_mm512_and_epi32(b32, _mm512_set1_epi32(0x80)), 24);
+    __m512i payload =
+        _mm512_slli_epi32(_mm512_and_epi32(b32, _mm512_set1_epi32(0x7F)), 20);
+    reg = _mm512_mul_ps(_mm512_castsi512_ps(_mm512_or_epi32(sign, payload)),
+                        _mm512_set1_ps(scale_2p120));
+  }
+
   FP32Vec16 operator*(const FP32Vec16& b) const {
     return FP32Vec16(_mm512_mul_ps(reg, b.reg));
   }
@@ -519,6 +535,23 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
+
+  // Decode 16 FP8-E4M3 bytes to float32 (AVX2 path: two 8-element halves).
+  explicit FP32Vec16(const uint8_t* ptr, float scale_2p120) {
+    __m128i b16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr));
+    __m128i b16_hi = _mm_srli_si128(b16, 8);
+    auto decode8 = [scale_2p120](__m128i b8) -> __m256 {
+      __m256i b32 = _mm256_cvtepu8_epi32(b8);
+      __m256i sign =
+          _mm256_slli_epi32(_mm256_and_si256(b32, _mm256_set1_epi32(0x80)), 24);
+      __m256i payload =
+          _mm256_slli_epi32(_mm256_and_si256(b32, _mm256_set1_epi32(0x7F)), 20);
+      return _mm256_mul_ps(_mm256_castsi256_ps(_mm256_or_si256(sign, payload)),
+                           _mm256_set1_ps(scale_2p120));
+    };
+    reg_low = decode8(b16);
+    reg_high = decode8(b16_hi);
+  }
 
   FP32Vec16 operator*(const FP32Vec16& b) const {
     return FP32Vec16(_mm256_mul_ps(reg_low, b.reg_low),

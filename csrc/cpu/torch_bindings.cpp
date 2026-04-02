@@ -120,6 +120,18 @@ void cpu_attention_with_kv_cache(
     const torch::Tensor& scheduler_metadata,
     const std::optional<torch::Tensor>& s_aux);
 
+void cpu_attention_with_kv_cache_fp8(
+    const torch::Tensor& query, const torch::Tensor& key_cache,
+    const torch::Tensor& value_cache, torch::Tensor& output,
+    const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
+    const double scale, const bool causal,
+    const std::optional<torch::Tensor>& alibi_slopes,
+    const int64_t sliding_window_left, const int64_t sliding_window_right,
+    const torch::Tensor& block_table, const double softcap,
+    const torch::Tensor& scheduler_metadata,
+    const std::optional<torch::Tensor>& s_aux, const double k_scale,
+    const double v_scale);
+
 // Note: just for avoiding importing errors
 void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
 
@@ -338,6 +350,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
       "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
+  ops.def(
+      "cpu_attention_with_kv_cache_fp8(Tensor query, Tensor key_cache, "
+      "Tensor value_cache, Tensor(a3!) output, Tensor query_start_loc, "
+      "Tensor seq_lens, float scale, bool causal, Tensor? alibi_slopes, "
+      "SymInt sliding_window_left, SymInt sliding_window_right, "
+      "Tensor block_table, float softcap, Tensor scheduler_metadata, "
+      "Tensor? s_aux, float k_scale, float v_scale) -> ()",
+      &cpu_attention_with_kv_cache_fp8);
 
   // placeholders
   ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);

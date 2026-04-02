@@ -225,3 +225,73 @@ void cpu_attention_with_kv_cache(
         });
       });
 }
+
+void cpu_attention_with_kv_cache_fp8(
+    const torch::Tensor& query,  // [num_tokens, num_heads, head_size]
+    const torch::Tensor&
+        key_cache,  // [num_blocks, num_kv_heads, block_size, head_size] uint8
+    const torch::Tensor& value_cache,      // same shape, uint8
+    torch::Tensor& output,                 // [num_tokens, num_heads, head_size]
+    const torch::Tensor& query_start_loc,  // [num_tokens + 1]
+    const torch::Tensor& seq_lens,         // [num_tokens]
+    const double scale, const bool causal,
+    const std::optional<torch::Tensor>& alibi_slopes,  // [num_heads]
+    const int64_t sliding_window_left, const int64_t sliding_window_right,
+    const torch::Tensor& block_table,  // [num_tokens, max_block_num]
+    const double softcap, const torch::Tensor& scheduler_metadata,
+    const std::optional<torch::Tensor>& s_aux,  // [num_heads]
+    const double k_scale, const double v_scale) {
+  TORCH_CHECK_EQ(query.dim(), 3);
+  TORCH_CHECK_EQ(query.stride(2), 1);
+  TORCH_CHECK_EQ(key_cache.dim(), 4);
+  TORCH_CHECK_EQ(value_cache.dim(), 4);
+  TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
+              "key_cache must be uint8 for FP8 path");
+  TORCH_CHECK(value_cache.scalar_type() == at::ScalarType::Byte,
+              "value_cache must be uint8 for FP8 path");
+
+  cpu_attention::AttentionInput input;
+  input.metadata = reinterpret_cast<cpu_attention::AttentionMetadata*>(
+      scheduler_metadata.data_ptr());
+  input.num_tokens = query.size(0);
+  input.num_heads = query.size(1);
+  input.num_kv_heads = key_cache.size(1);
+  input.block_size = key_cache.size(2);
+  input.query = query.data_ptr();
+  input.query_num_tokens_stride = query.stride(0);
+  input.query_num_heads_stride = query.stride(1);
+  input.cache_num_blocks_stride = key_cache.stride(0);
+  input.cache_num_kv_heads_stride = key_cache.stride(1);
+  input.blt_num_tokens_stride = block_table.stride(0);
+  input.key_cache = key_cache.data_ptr();
+  input.value_cache = value_cache.data_ptr();
+  input.output = output.data_ptr();
+  input.query_start_loc = query_start_loc.data_ptr<int32_t>();
+  input.seq_lens = seq_lens.data_ptr<int32_t>();
+  input.block_table = block_table.data_ptr<int32_t>();
+  input.alibi_slopes =
+      alibi_slopes.has_value() ? alibi_slopes->data_ptr<float>() : nullptr;
+  input.s_aux = s_aux.has_value() ? s_aux->data_ptr<c10::BFloat16>() : nullptr;
+  input.scale = scale;
+  input.causal = causal;
+  input.sliding_window_left = sliding_window_left;
+  input.sliding_window_right = sliding_window_right;
+  if (input.causal) {
+    input.sliding_window_right = 0;
+  }
+  input.softcap = static_cast<float>(softcap);
+  input.k_scale_fp8 = static_cast<float>(k_scale);
+  input.v_scale_fp8 = static_cast<float>(v_scale);
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      query.scalar_type(), "cpu_attention_with_kv_cache_fp8", [&]() {
+        // FP8 is only supported on the VEC path for now.
+        CPU_ATTN_DISPATCH(query.size(2), cpu_attention::ISA::VEC, [&]() {
+          using fp8_impl_t =
+              cpu_attention::AttentionImplFP8VEC<scalar_t, attn_impl::HeadDim>;
+          TORCH_CHECK_EQ(input.block_size % fp8_impl_t::BlockSizeAlignment, 0);
+          cpu_attention::AttentionMainLoop<fp8_impl_t> mainloop;
+          mainloop(&input);
+        });
+      });
+}

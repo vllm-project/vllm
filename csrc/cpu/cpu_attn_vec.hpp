@@ -1,6 +1,7 @@
 #ifndef CPU_ATTN_VEC_HPP
 #define CPU_ATTN_VEC_HPP
 
+#include "cpu_attn_fp8.hpp"
 #include "cpu_attn_impl.hpp"
 
 namespace cpu_attention {
@@ -109,6 +110,120 @@ class TileGemm82 {
     });
   }
 };
+// FP8 (E4M3) variant of TileGemm82.  KV cache is stored as uint8_t;
+// dequantization uses vec_op::FP32Vec16(uint8_t*, scale) defined in
+// cpu_types_x86.hpp, following the same pattern as BF16/FP16 widening.
+// k_scale / v_scale are delivered via thread_local storage so that the
+// static gemm interface is preserved and AttentionMainLoop is unchanged.
+class TileGemm82FP8 {
+ public:
+  static thread_local float s_k_scale;
+  static thread_local float s_v_scale;
+  static void set_scales(float k, float v) noexcept {
+    s_k_scale = k;
+    s_v_scale = v;
+  }
+
+  template <AttentionGemmPhase phase, int32_t k_size>
+  FORCE_INLINE static void gemm(const int32_t m_size,
+                                float* __restrict__ a_tile,
+                                uint8_t* __restrict__ b_tile,
+                                float* __restrict__ c_tile, const int64_t lda,
+                                const int64_t ldb, const int64_t ldc,
+                                const int32_t block_size,
+                                const int32_t dynamic_k_size,
+                                const bool accum_c) {
+    const float scale =
+        (phase == AttentionGemmPhase::QK) ? s_k_scale : s_v_scale;
+    switch (m_size) {
+      case 1:
+        gemm_micro<1>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
+                      dynamic_k_size, accum_c, scale);
+        break;
+      case 2:
+        gemm_micro<2>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
+                      dynamic_k_size, accum_c, scale);
+        break;
+      case 3:
+      case 4:
+        gemm_micro<4>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
+                      dynamic_k_size, accum_c, scale);
+        break;
+      case 5:
+      case 6:
+        gemm_micro<6>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
+                      dynamic_k_size, accum_c, scale);
+        break;
+      case 7:
+      case 8:
+        gemm_micro<8>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
+                      dynamic_k_size, accum_c, scale);
+        break;
+    }
+  }
+
+ private:
+  template <int32_t M>
+  static void gemm_micro(float* __restrict__ a_tile,
+                         uint8_t* __restrict__ b_tile,
+                         float* __restrict__ c_tile, const int64_t lda,
+                         const int64_t ldb, const int64_t ldc,
+                         const int32_t block_size, const int32_t dynamic_k_size,
+                         const bool accum_c, const float scale) {
+    static_assert(0 < M && M <= 8);
+
+    uint8_t* __restrict__ curr_b_0 = b_tile;
+    uint8_t* __restrict__ curr_b_1 = b_tile + 16;
+    float* __restrict__ curr_c_0 = c_tile;
+    float* __restrict__ curr_c_1 = c_tile + 16;
+
+    vec_op::FP32Vec16 c_regs[M * 2];
+    if (accum_c) {
+      float* __restrict__ curr_m_c_0 = curr_c_0;
+      float* __restrict__ curr_m_c_1 = curr_c_1;
+      vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
+        c_regs[i * 2] = vec_op::FP32Vec16(curr_m_c_0);
+        c_regs[i * 2 + 1] = vec_op::FP32Vec16(curr_m_c_1);
+        curr_m_c_0 += ldc;
+        curr_m_c_1 += ldc;
+      });
+    }
+
+    float* __restrict__ curr_a = a_tile;
+    // Precompute combined scale (user scale × 2^120 bias correction) so it
+    // is hoisted out of the k-loop regardless of AVX-512 availability.
+    const float scale_2p120 = scale * 0x1p120f;
+    for (int32_t k = 0; k < dynamic_k_size; ++k) {
+      // Dequantize 32 FP8 bytes (two groups of 16) to float32.
+      vec_op::FP32Vec16 fp32_b_0_reg(curr_b_0, scale_2p120);
+      vec_op::FP32Vec16 fp32_b_1_reg(curr_b_1, scale_2p120);
+
+      float* __restrict__ curr_m_a = curr_a;
+      vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
+        float v = *curr_m_a;
+        vec_op::FP32Vec16 a_reg(v);
+        c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
+        c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
+        curr_m_a += lda;
+      });
+
+      curr_a += 1;
+      curr_b_0 += ldb;
+      curr_b_1 += ldb;
+    }
+
+    vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
+      c_regs[i * 2].save(curr_c_0);
+      c_regs[i * 2 + 1].save(curr_c_1);
+      curr_c_0 += ldc;
+      curr_c_1 += ldc;
+    });
+  }
+};
+
+thread_local float TileGemm82FP8::s_k_scale = 1.0f;
+thread_local float TileGemm82FP8::s_v_scale = 1.0f;
+
 }  // namespace
 
 // This is a general but naive implementation based on vector instructions
@@ -243,6 +358,38 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim> {
     }
   }
 };
+// FP8 KV cache specialisation for the VEC (AVX-512) path.
+// Identical to AttentionImpl<ISA::VEC, scalar_t, head_dim> except that
+// kv_cache_t is uint8_t and execute_attention uses TileGemm82FP8.
+template <typename scalar_t, int64_t head_dim>
+class AttentionImplFP8VEC : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
+  using Base = AttentionImpl<ISA::VEC, scalar_t, head_dim>;
+
+ public:
+  using query_t = typename Base::query_t;
+  using q_buffer_t = typename Base::q_buffer_t;
+  using logits_buffer_t = typename Base::logits_buffer_t;
+  using partial_output_buffer_t = typename Base::partial_output_buffer_t;
+  using prob_buffer_t = typename Base::prob_buffer_t;
+  // Override: KV cache is stored as uint8 (FP8 E4M3).
+  using kv_cache_t = uint8_t;
+
+  float k_scale = 1.0f;
+  float v_scale = 1.0f;
+
+  void init_from_input(const AttentionInput* input) {
+    k_scale = input->k_scale_fp8;
+    v_scale = input->v_scale_fp8;
+  }
+
+  template <template <typename tile_gemm_t> typename attention>
+  FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
+    TileGemm82FP8::set_scales(k_scale, v_scale);
+    attention<TileGemm82FP8> attention_iteration;
+    attention_iteration(CPU_ATTENTION_PARAMS);
+  }
+};
+
 }  // namespace cpu_attention
 
 #endif

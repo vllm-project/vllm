@@ -357,33 +357,41 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         if num_actual_tokens > 0:
             if self.is_fp8_kv_cache:
-                # Dequantize FP8 uint8 cache → float32 for the existing kernel.
-                # Phase 2 will move this inline into AttentionMainLoop.
-                key_cache_f = (
-                    key_cache.view(torch.float8_e4m3fn).float() * layer._k_scale_float
-                )
-                value_cache_f = (
-                    value_cache.view(torch.float8_e4m3fn).float() * layer._v_scale_float
+                ops.cpu_attention_with_kv_cache_fp8(
+                    query=query[:num_actual_tokens],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    output=output[:num_actual_tokens],  # type: ignore
+                    query_start_loc=attn_metadata.query_start_loc,
+                    seq_lens=attn_metadata.seq_lens,
+                    scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=self.alibi_slopes,  # type: ignore
+                    sliding_window=self.sliding_window,
+                    block_table=attn_metadata.block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=attn_metadata.scheduler_metadata,
+                    s_aux=self.sinks,
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
                 )
             else:
-                key_cache_f = key_cache
-                value_cache_f = value_cache
-            ops.cpu_attention_with_kv_cache(
-                query=query[:num_actual_tokens],
-                key_cache=key_cache_f,
-                value_cache=value_cache_f,
-                output=output[:num_actual_tokens],  # type: ignore
-                query_start_loc=attn_metadata.query_start_loc,
-                seq_lens=attn_metadata.seq_lens,
-                scale=self.scale,
-                causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,  # type: ignore
-                sliding_window=self.sliding_window,
-                block_table=attn_metadata.block_table,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=attn_metadata.scheduler_metadata,
-                s_aux=self.sinks,
-            )
+                ops.cpu_attention_with_kv_cache(
+                    query=query[:num_actual_tokens],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    output=output[:num_actual_tokens],  # type: ignore
+                    query_start_loc=attn_metadata.query_start_loc,
+                    seq_lens=attn_metadata.seq_lens,
+                    scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=self.alibi_slopes,  # type: ignore
+                    sliding_window=self.sliding_window,
+                    block_table=attn_metadata.block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=attn_metadata.scheduler_metadata,
+                    s_aux=self.sinks,
+                )
 
         return output
 

@@ -3231,6 +3231,45 @@ def cpu_attention_with_kv_cache(
     )
 
 
+def cpu_attention_with_kv_cache_fp8(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    output: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    scale: float,
+    causal: bool,
+    alibi_slopes: torch.Tensor | None,
+    sliding_window: tuple[int, int],
+    block_table: torch.Tensor,
+    softcap: float,
+    scheduler_metadata: torch.Tensor,
+    s_aux: torch.Tensor | None,
+    k_scale: float,
+    v_scale: float,
+) -> None:
+    torch.ops._C.cpu_attention_with_kv_cache_fp8(
+        query,
+        key_cache,
+        value_cache,
+        output,
+        query_start_loc,
+        seq_lens,
+        scale,
+        causal,
+        alibi_slopes,
+        sliding_window[0],
+        sliding_window[1],
+        block_table,
+        softcap,
+        scheduler_metadata,
+        s_aux,
+        k_scale,
+        v_scale,
+    )
+
+
 def cpu_gemm_wna16(
     input: torch.Tensor,
     q_weight: torch.Tensor,

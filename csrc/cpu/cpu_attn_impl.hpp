@@ -777,6 +777,9 @@ struct AttentionInput {
   int32_t sliding_window_left;
   int32_t sliding_window_right;
   float softcap;
+  // FP8 KV cache scales (used by AttentionImplFP8VEC; ignored by other impls)
+  float k_scale_fp8 = 1.0f;
+  float v_scale_fp8 = 1.0f;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \
@@ -844,6 +847,18 @@ void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
   ss << "]\n";
   std::printf("%s", ss.str().c_str());
 }
+
+// SFINAE helper: calls impl.init_from_input(input) if the method exists,
+// otherwise does nothing.  This lets AttentionImplFP8VEC (and future impls)
+// read per-run parameters from AttentionInput without modifying every ISA
+// specialisation.
+template <typename T>
+auto call_init_from_input(T& impl, const AttentionInput* input, int)
+    -> decltype(impl.init_from_input(input), void()) {
+  impl.init_from_input(input);
+}
+template <typename T>
+void call_init_from_input(T&, const AttentionInput*, ...) {}
 
 template <typename attention_impl_t>
 class AttentionMainLoop {
@@ -1347,6 +1362,7 @@ class AttentionMainLoop {
       }
 
       attention_impl_t attn_impl;
+      call_init_from_input(attn_impl, input, 0);
 
       // general information
       const int32_t q_head_num = input->num_heads;
