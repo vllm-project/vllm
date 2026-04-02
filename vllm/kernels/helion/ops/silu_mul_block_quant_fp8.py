@@ -11,7 +11,7 @@ from vllm.utils.import_utils import has_helion
 
 if not has_helion():
     raise ImportError(
-        "fused_silu_mul_block_quant_fp8 Helion kernel requires helion to be installed. "
+        "silu_mul_block_quant_fp8 Helion kernel requires helion to be installed. "
         "Install it with: pip install helion"
     )
 
