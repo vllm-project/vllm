@@ -141,7 +141,7 @@ def _mxfp8_e4m3_quantize_impl(
 def mxfp8_e4m3_quantize(
     x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.flashinfer_mxfp8_quantize(x, is_sf_swizzled_layout)
+    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout)
 
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -199,7 +199,7 @@ def mxfp8_e4m3_quantize_fake(
 
 
 direct_register_custom_op(
-    op_name="mxfp8_e4m3_quantize",
+    op_name="mxfp8_quantize",
     op_func=_mxfp8_e4m3_quantize_impl,
     fake_impl=mxfp8_e4m3_quantize_fake,
 )
