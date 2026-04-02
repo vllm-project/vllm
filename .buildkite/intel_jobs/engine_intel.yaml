@@ -1,0 +1,15 @@
+group: Engine Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Engine (1 GPU)
+  timeout_in_minutes: 30
+  device: intel_gpu
+  no_plugin: true
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/engine/
+    - tests/v1/engine/
+  commands:
+    - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
