@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.utils.request_id import normalize_request_id
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -201,8 +202,22 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
-            request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, False)
+            raw_request_id = request.request_id
+            normalized_request_id = normalize_request_id(raw_request_id)
+            logger.debug(
+                "Request ID normalized: raw=%s normalized=%s",
+                raw_request_id,
+                normalized_request_id,
+            )
+            try:
+                ip, port = self.parse_request_id(normalized_request_id, False)
+            except ValueError:
+                logger.warning(
+                    "Failed to parse request ID for KV load: raw=%s normalized=%s",
+                    raw_request_id,
+                    normalized_request_id,
+                )
+                continue
             remote_address = ip + ":" + str(port + self._rank)
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
@@ -216,16 +231,33 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 layer = kv_cache
 
-                kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name, remote_address
+                tensor_id = normalized_request_id + "#" + layer_name
+                logger.debug(
+                    "Loading KV tensor: raw_request_id=%s normalized_request_id=%s "
+                    "tensor_id=%s layer_name=%s remote_address=%s",
+                    raw_request_id,
+                    normalized_request_id,
+                    tensor_id,
+                    layer_name,
+                    remote_address,
                 )
+                kv_cache = self.p2p_nccl_engine.recv_tensor(tensor_id, remote_address)
 
                 if kv_cache is None:
-                    logger.warning("🚧kv_cache is None, %s", request.request_id)
+                    logger.warning(
+                        "KV cache miss during load: raw_request_id=%s "
+                        "normalized_request_id=%s tensor_id=%s layer_name=%s "
+                        "remote_address=%s",
+                        raw_request_id,
+                        normalized_request_id,
+                        tensor_id,
+                        layer_name,
+                        remote_address,
+                    )
                     continue
 
                 inject_kv_into_layer(
-                    layer, kv_cache, request.block_ids, request.request_id
+                    layer, kv_cache, request.block_ids, raw_request_id
                 )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -297,13 +329,47 @@ class P2pNcclConnector(KVConnectorBase_V1):
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
-            request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, True)
+            raw_request_id = request.request_id
+            normalized_request_id = normalize_request_id(raw_request_id)
+            logger.debug(
+                "Request ID normalized: raw=%s normalized=%s",
+                raw_request_id,
+                normalized_request_id,
+            )
+            try:
+                ip, port = self.parse_request_id(normalized_request_id, True)
+            except ValueError:
+                logger.warning(
+                    "Failed to parse request ID for KV save: raw=%s normalized=%s",
+                    raw_request_id,
+                    normalized_request_id,
+                )
+                continue
             remote_address = ip + ":" + str(port + self._rank)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
+            if kv_cache is None:
+                logger.warning(
+                    "Skipping KV tensor send for unsupported layout: "
+                    "raw_request_id=%s normalized_request_id=%s layer_name=%s",
+                    raw_request_id,
+                    normalized_request_id,
+                    layer_name,
+                )
+                continue
+
+            tensor_id = normalized_request_id + "#" + layer_name
+            logger.debug(
+                "Saving KV tensor: raw_request_id=%s normalized_request_id=%s "
+                "tensor_id=%s layer_name=%s remote_address=%s",
+                raw_request_id,
+                normalized_request_id,
+                tensor_id,
+                layer_name,
+                remote_address,
+            )
             self.p2p_nccl_engine.send_tensor(
-                request_id + "#" + layer_name, kv_cache, remote_address
+                tensor_id, kv_cache, remote_address
             )
 
     def wait_for_save(self):
