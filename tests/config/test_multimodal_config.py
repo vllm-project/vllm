@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.config.model import ModelConfig
@@ -41,3 +43,17 @@ def test_language_model_only_affects_model_hash():
     base_hash = ModelConfig(model).compute_hash()
     lm_only_hash = ModelConfig(model, language_model_only=True).compute_hash()
     assert base_hash != lm_only_hash
+
+
+def test_language_model_only_prefers_text_architecture_for_gemma4():
+    config = object.__new__(ModelConfig)
+    config.model_arch_config = SimpleNamespace(
+        architectures=["Gemma4ForConditionalGeneration"]
+    )
+    config.multimodal_config = MultiModalConfig(language_model_only=True)
+    config.hf_text_config = SimpleNamespace(
+        architectures=None,
+        model_type="gemma4_text",
+    )
+
+    assert config.architectures == ["Gemma4ForCausalLM"]
