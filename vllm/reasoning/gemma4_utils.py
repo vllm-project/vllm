@@ -20,13 +20,12 @@ Usage with vLLM offline inference::
 
     llm = LLM(model="google/gemma-4-it")
     outputs = llm.generate(prompt, SamplingParams(...))
-    text = tokenizer.decode(outputs[0].outputs[0].token_ids,
-                            skip_special_tokens=False)
+    text = tokenizer.decode(outputs[0].outputs[0].token_ids, skip_special_tokens=False)
 
     # Extract thinking / answer (works with or without enable_thinking)
     result = parse_thinking_output(text)
     print(result["thinking"])  # chain-of-thought or None
-    print(result["answer"])    # final answer
+    print(result["answer"])  # final answer
 
 Ported from ``transformers.models.gemma4.utils_gemma4`` so that vLLM users
 do not need a transformers dependency for output parsing.
@@ -104,7 +103,6 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
     return {"thinking": None, "answer": answer}
 
 
-
 def _strip_thought_label(text: str) -> str:
     """Strip the spurious ``thought\\n`` label from the start of text.
 
@@ -112,7 +110,7 @@ def _strip_thought_label(text: str) -> str:
     a newline — preserving the word ``thought`` in any other context.
     """
     if text.startswith("thought\n"):
-        return text[len("thought\n"):]
+        return text[len("thought\n") :]
     return text
 
 

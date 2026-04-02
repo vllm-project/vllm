@@ -33,6 +33,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+)
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -49,6 +52,7 @@ STRING_DELIM = '<|"|>'
 # ---------------------------------------------------------------------------
 # Gemma4 argument parser (used by both streaming and non-streaming paths)
 # ---------------------------------------------------------------------------
+
 
 def _parse_gemma4_value(value_str: str) -> object:
     """Parse a single Gemma4 value (after key:) into a Python object."""
@@ -249,6 +253,7 @@ def _parse_gemma4_array(arr_str: str) -> list:
 # Parser
 # ---------------------------------------------------------------------------
 
+
 class Gemma4ToolParser(ToolParser):
     """
     Tool call parser for Google Gemma4 models.
@@ -321,10 +326,14 @@ class Gemma4ToolParser(ToolParser):
         self.streamed_args_for_tool: list[str] = []
 
     def adjust_request(
-        self, request: ChatCompletionRequest
-    ) -> ChatCompletionRequest:
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
-        if request.tools and request.tool_choice != "none":
+        if (
+            isinstance(request, ChatCompletionRequest)
+            and request.tools
+            and request.tool_choice != "none"
+        ):
             # Don't skip special tokens — <|tool_call> etc. are needed
             request.skip_special_tokens = False
         return request
@@ -346,9 +355,7 @@ class Gemma4ToolParser(ToolParser):
         combined = self.buffered_delta_text + delta_text
 
         # Check if combined ends with a complete special token
-        if combined.endswith(TOOL_CALL_START) or combined.endswith(
-            TOOL_CALL_END
-        ):
+        if combined.endswith(TOOL_CALL_START) or combined.endswith(TOOL_CALL_END):
             self.buffered_delta_text = ""
             return combined
 
@@ -392,20 +399,14 @@ class Gemma4ToolParser(ToolParser):
                         type="function",
                         function=FunctionCall(
                             name=func_name,
-                            arguments=json.dumps(
-                                arguments, ensure_ascii=False
-                            ),
+                            arguments=json.dumps(arguments, ensure_ascii=False),
                         ),
                     )
                 )
 
             # Content = text before first tool call (if any)
             content_end = model_output.find(self.tool_call_start_token)
-            content = (
-                model_output[:content_end].strip()
-                if content_end > 0
-                else None
-            )
+            content = model_output[:content_end].strip() if content_end > 0 else None
 
             return ExtractedToolCallInformation(
                 tools_called=True,
@@ -414,9 +415,7 @@ class Gemma4ToolParser(ToolParser):
             )
 
         except Exception:
-            logger.exception(
-                "Error extracting tool calls from Gemma4 response"
-            )
+            logger.exception("Error extracting tool calls from Gemma4 response")
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
@@ -453,9 +452,7 @@ class Gemma4ToolParser(ToolParser):
                 delta_text=delta_text,
             )
         except Exception:
-            logger.exception(
-                "Error in Gemma4 streaming tool call extraction"
-            )
+            logger.exception("Error in Gemma4 streaming tool call extraction")
             return None
 
     def _extract_streaming(
@@ -516,9 +513,7 @@ class Gemma4ToolParser(ToolParser):
                 return DeltaMessage(content=text)
         return None
 
-    def _extract_partial_call(
-        self, current_text: str
-    ) -> tuple[str | None, str]:
+    def _extract_partial_call(self, current_text: str) -> tuple[str | None, str]:
         """Extract function name and raw argument string from partial text.
 
         Returns (func_name, raw_args_str) or (None, "") if not parseable yet.
@@ -528,9 +523,7 @@ class Gemma4ToolParser(ToolParser):
         if last_start == -1:
             return None, ""
 
-        partial_call = current_text[
-            last_start + len(self.tool_call_start_token) :
-        ]
+        partial_call = current_text[last_start + len(self.tool_call_start_token) :]
 
         # Strip end token if present
         if self.tool_call_end_token in partial_call:
@@ -555,9 +548,7 @@ class Gemma4ToolParser(ToolParser):
 
         return func_name, args_part
 
-    def _handle_tool_call_middle(
-        self, current_text: str
-    ) -> DeltaMessage | None:
+    def _handle_tool_call_middle(self, current_text: str) -> DeltaMessage | None:
         """Handle streaming when we're inside an active tool call.
 
         Accumulates the raw Gemma4 arguments, parses them into JSON, and
@@ -596,9 +587,7 @@ class Gemma4ToolParser(ToolParser):
 
         return None
 
-    def _handle_tool_call_end(
-        self, current_text: str
-    ) -> DeltaMessage | None:
+    def _handle_tool_call_end(self, current_text: str) -> DeltaMessage | None:
         """Handle streaming when a tool call has just completed.
 
         Performs a final parse of the complete tool call and flushes
@@ -608,8 +597,7 @@ class Gemma4ToolParser(ToolParser):
             self.prev_tool_call_arr
         ):
             logger.debug(
-                "Tool call end detected but no active tool call "
-                "(current_tool_id=%d)",
+                "Tool call end detected but no active tool call (current_tool_id=%d)",
                 self.current_tool_id,
             )
             return None
@@ -621,34 +609,26 @@ class Gemma4ToolParser(ToolParser):
             final_args = _parse_gemma4_args(args_str)
             final_args_json = json.dumps(final_args, ensure_ascii=False)
 
-            prev_streamed = self.streamed_args_for_tool[
-                self.current_tool_id
-            ]
+            prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
             if len(final_args_json) > len(prev_streamed):
-                diff = final_args_json[len(prev_streamed):]
-                self.streamed_args_for_tool[
-                    self.current_tool_id
-                ] = final_args_json
-                self.prev_tool_call_arr[self.current_tool_id][
-                    "arguments"
-                ] = final_args
+                diff = final_args_json[len(prev_streamed) :]
+                self.streamed_args_for_tool[self.current_tool_id] = final_args_json
+                self.prev_tool_call_arr[self.current_tool_id]["arguments"] = final_args
 
                 return DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_id,
-                            function=DeltaFunctionCall(
-                                arguments=diff
-                            ).model_dump(exclude_none=True),
+                            function=DeltaFunctionCall(arguments=diff).model_dump(
+                                exclude_none=True
+                            ),
                         )
                     ]
                 )
 
         return None
 
-    def _emit_argument_diff(
-        self, raw_args_str: str
-    ) -> DeltaMessage | None:
+    def _emit_argument_diff(self, raw_args_str: str) -> DeltaMessage | None:
         """Parse raw Gemma4 arguments, convert to JSON, diff, and emit.
 
         This is the core of the accumulate-then-parse-then-diff strategy:
@@ -698,7 +678,7 @@ class Gemma4ToolParser(ToolParser):
         # tokens arrive. Strip trailing '}', '"', and ']' sequences
         # to get the "safe prefix".
         safe_json = current_args_json
-        while safe_json and safe_json[-1] in ('}', '"', ']'):
+        while safe_json and safe_json[-1] in ("}", '"', "]"):
             safe_json = safe_json[:-1]
 
         prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
@@ -717,9 +697,7 @@ class Gemma4ToolParser(ToolParser):
                 # Structure changed — we sent too much. Truncate our
                 # tracking to the common prefix and wait for the final
                 # flush in _handle_tool_call_end.
-                self.streamed_args_for_tool[
-                    self.current_tool_id
-                ] = prefix
+                self.streamed_args_for_tool[self.current_tool_id] = prefix
                 return None
 
             # Stream the new stable portion
@@ -729,20 +707,16 @@ class Gemma4ToolParser(ToolParser):
             diff = safe_json
 
         if diff:
-            self.streamed_args_for_tool[
-                self.current_tool_id
-            ] = safe_json
-            self.prev_tool_call_arr[self.current_tool_id][
-                "arguments"
-            ] = current_args
+            self.streamed_args_for_tool[self.current_tool_id] = safe_json
+            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = current_args
 
             return DeltaMessage(
                 tool_calls=[
                     DeltaToolCall(
                         index=self.current_tool_id,
-                        function=DeltaFunctionCall(
-                            arguments=diff
-                        ).model_dump(exclude_none=True),
+                        function=DeltaFunctionCall(arguments=diff).model_dump(
+                            exclude_none=True
+                        ),
                     )
                 ]
             )

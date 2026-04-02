@@ -17,6 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Gemma 4 model implementation for vLLM."""
+
 from collections.abc import Iterable
 from itertools import islice
 
@@ -66,7 +67,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
 
 
 def _get_text_config(config):
@@ -141,15 +141,13 @@ class Gemma4Router(nn.Module):
         self.hidden_size = config.hidden_size
 
         # RMSNorm without learned weight — pure normalization only
-        self.norm = RMSNorm(
-            self.hidden_size, eps=config.rms_norm_eps, has_weight=False
-        )
+        self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps, has_weight=False)
         # Per-dimension learned scale, applied after norm + root_size
         self.scale = nn.Parameter(torch.ones(self.hidden_size))
         # Constant 1/sqrt(hidden_size) scaling factor
         self.register_buffer(
             "root_size",
-            torch.tensor(self.hidden_size ** -0.5),
+            torch.tensor(self.hidden_size**-0.5),
             persistent=False,
         )
         # Project to expert logits; replicated across TP for consistent routing
@@ -195,9 +193,7 @@ class Gemma4MoE(nn.Module):
 
         # Per-expert output scale folded into routing weights so that
         # FusedMoE's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
-        self.per_expert_scale = nn.Parameter(
-            torch.ones(config.num_experts)
-        )
+        self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
 
         # Gemma4 routing: softmax over ALL experts → top-k → renormalize.
         # FusedMoE's built-in fused_topk scopes softmax differently, so
@@ -210,34 +206,22 @@ class Gemma4MoE(nn.Module):
             topk: int,
             renormalize: bool,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            _, topk_ids = torch.topk(
-                gating_output, k=topk, dim=-1
-            )
-            router_probabilities = torch.nn.functional.softmax(
-                gating_output, dim=-1
-            )
+            _, topk_ids = torch.topk(gating_output, k=topk, dim=-1)
+            router_probabilities = torch.nn.functional.softmax(gating_output, dim=-1)
             indicator = torch.nn.functional.one_hot(
                 topk_ids, num_classes=gating_output.size(-1)
             ).sum(dim=-2)
             gate_weights = indicator * router_probabilities
-            renorm_factor = torch.sum(
-                gate_weights, dim=-1, keepdim=True
-            )
-            renorm_factor = torch.where(
-                renorm_factor > 0.0, renorm_factor, 1.0
-            )
+            renorm_factor = torch.sum(gate_weights, dim=-1, keepdim=True)
+            renorm_factor = torch.where(renorm_factor > 0.0, renorm_factor, 1.0)
             dispatch_weights = gate_weights / renorm_factor
 
             topk_weights = dispatch_weights.gather(1, topk_ids)
 
             # Fold per_expert_scale into routing weights
-            expert_scales = per_expert_scale[topk_ids].to(
-                topk_weights.dtype
-            )
+            expert_scales = per_expert_scale[topk_ids].to(topk_weights.dtype)
             topk_weights = topk_weights * expert_scales
-            return topk_weights.to(torch.float32), topk_ids.to(
-                torch.int32
-            )
+            return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
         # FusedMoE experts with custom Gemma4 routing
         self.experts = FusedMoE(
@@ -245,8 +229,9 @@ class Gemma4MoE(nn.Module):
             top_k=config.top_k_experts,
             hidden_size=config.hidden_size,
             intermediate_size=getattr(
-                config, 'moe_intermediate_size',
-                getattr(config, 'expert_intermediate_size', None)
+                config,
+                "moe_intermediate_size",
+                getattr(config, "expert_intermediate_size", None),
             ),
             reduce_results=True,
             renormalize=True,
@@ -256,9 +241,7 @@ class Gemma4MoE(nn.Module):
             activation="gelu",
         )
 
-    def forward(
-        self, x: torch.Tensor, router_logits: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
         return self.experts(x, router_logits)
 
 
@@ -325,9 +308,7 @@ class Gemma4Attention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         # V norm: no learnable scale (pure normalization only)
-        self.v_norm = RMSNorm(
-            self.head_dim, eps=config.rms_norm_eps, has_weight=False
-        )
+        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
         # Determine layer type and sliding window
         layer_idx = extract_layer_index(prefix)
@@ -359,18 +340,14 @@ class Gemma4Attention(nn.Module):
         self.is_kv_shared_layer = False
         num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
         if num_kv_shared_layers > 0:
-            first_kv_shared_layer_idx = (
-                config.num_hidden_layers - num_kv_shared_layers
-            )
+            first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
             if layer_idx >= first_kv_shared_layer_idx:
                 self.is_kv_shared_layer = True
                 # Find the last non-shared layer of the same attention type
                 prev_layers = config.layer_types[:first_kv_shared_layer_idx]
                 current_layer_type = config.layer_types[layer_idx]
                 kv_shared_layer_index = (
-                    len(prev_layers)
-                    - 1
-                    - prev_layers[::-1].index(current_layer_type)
+                    len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
                 )
                 if kv_shared_layer_index >= 0:
                     if ".layers." in prefix:
@@ -415,9 +392,7 @@ class Gemma4Attention(nn.Module):
         # For k_eq_v, K weights are loaded into both K and V slots of
         # qkv_proj, so V == K automatically.
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split(
-            [self.q_size, self.kv_size, self.kv_size], dim=-1
-        )
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Q norm (always applied)
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
@@ -471,17 +446,15 @@ class Gemma4DecoderLayer(nn.Module):
 
         # Determine if this full-attention layer uses k_eq_v
         # (laptop variant: no v_proj, K reused as V on full attention layers)
-        use_k_eq_v = (
-            self.is_full_attention
-            and getattr(config, "attention_k_eq_v", False)
+        use_k_eq_v = self.is_full_attention and getattr(
+            config, "attention_k_eq_v", False
         )
 
         # For k_eq_v full-attention layers, use num_global_key_value_heads
         # as the KV head count when k_eq_v is enabled.
         if use_k_eq_v:
             num_kv_heads = getattr(
-                config, "num_global_key_value_heads",
-                config.num_key_value_heads
+                config, "num_global_key_value_heads", config.num_key_value_heads
             )
         else:
             num_kv_heads = config.num_key_value_heads
@@ -496,9 +469,7 @@ class Gemma4DecoderLayer(nn.Module):
             use_k_eq_v=use_k_eq_v,
             cache_config=cache_config,
             quant_config=quant_config,
-            attn_logits_soft_cap=getattr(
-                config, "attn_logit_softcapping", None
-            ),
+            attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
             prefix=f"{prefix}.self_attn",
         )
 
@@ -525,9 +496,7 @@ class Gemma4DecoderLayer(nn.Module):
         )
 
         # Layer norms: output = norm(x) * weight
-        self.input_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
@@ -539,9 +508,7 @@ class Gemma4DecoderLayer(nn.Module):
         )
 
         # MoE (Mixture of Experts) — router + expert block parallel to MLP
-        self.enable_moe_block = getattr(
-            config, "enable_moe_block", False
-        ) or getattr(
+        self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
             config, "use_second_mlp_block", False
         )
         if self.enable_moe_block:
@@ -572,8 +539,10 @@ class Gemma4DecoderLayer(nn.Module):
             self.pre_feedforward_layernorm_2 = None
 
         # Per-Layer Embedding (PLE) components — present in each decoder layer
-        if (self.hidden_size_per_layer_input is not None
-                and self.hidden_size_per_layer_input > 0):
+        if (
+            self.hidden_size_per_layer_input is not None
+            and self.hidden_size_per_layer_input > 0
+        ):
             # Gate: projects hidden_states → per-layer dim for gating
             self.per_layer_input_gate = ReplicatedLinear(
                 self.hidden_size,
@@ -634,22 +603,14 @@ class Gemma4DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.enable_moe_block:
-            hidden_states_1 = self.post_feedforward_layernorm_1(
-                hidden_states
-            )
+            hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
             # Router and MoE experts see the residual (pre-MLP state),
             # matching the HF transformers forward path
             router_logits = self.router(residual)
-            hidden_states_2 = self.pre_feedforward_layernorm_2(
-                residual
-            )
-            hidden_states_2 = self.moe(
-                hidden_states_2, router_logits
-            )
-            hidden_states_2 = self.post_feedforward_layernorm_2(
-                hidden_states_2
-            )
+            hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
+            hidden_states_2 = self.moe(hidden_states_2, router_logits)
+            hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 
             # Combine MLP and MoE outputs
             hidden_states = hidden_states_1 + hidden_states_2
@@ -701,11 +662,11 @@ class Gemma4Model(nn.Module):
         )
 
         # Per-Layer Embedding (PLE) components
-        if (self.hidden_size_per_layer_input is not None
-                and self.hidden_size_per_layer_input > 0):
-            total_ple_dim = (
-                self.hidden_size_per_layer_input * config.num_hidden_layers
-            )
+        if (
+            self.hidden_size_per_layer_input is not None
+            and self.hidden_size_per_layer_input > 0
+        ):
+            total_ple_dim = self.hidden_size_per_layer_input * config.num_hidden_layers
             self.embed_tokens_per_layer = VocabParallelEmbedding(
                 self.vocab_size_per_layer_input,
                 total_ple_dim,
@@ -795,17 +756,20 @@ class Gemma4Model(nn.Module):
             tensors: dict[str, torch.Tensor] = {
                 "hidden_states": torch.zeros(
                     (batch_size, hidden_size),
-                    dtype=dtype, device=device,
+                    dtype=dtype,
+                    device=device,
                 ),
                 "residual": torch.zeros(
                     (batch_size, hidden_size),
-                    dtype=dtype, device=device,
+                    dtype=dtype,
+                    device=device,
                 ),
             }
             if ple_dim and ple_dim > 0:
                 tensors["per_layer_inputs"] = torch.zeros(
                     (batch_size, num_layers, ple_dim),
-                    dtype=dtype, device=device,
+                    dtype=dtype,
+                    device=device,
                 )
             return IntermediateTensors(tensors)
 
@@ -878,17 +842,13 @@ class Gemma4Model(nn.Module):
         )
 
         # Normalize
-        per_layer_projection = self.per_layer_projection_norm(
-            per_layer_projection
-        )
+        per_layer_projection = self.per_layer_projection_norm(per_layer_projection)
 
         if per_layer_inputs is None:
             return per_layer_projection
 
         # Combine: (projection + per_layer_inputs) * scale
-        return (
-            per_layer_projection + per_layer_inputs
-        ) * self.per_layer_input_scale
+        return (per_layer_projection + per_layer_inputs) * self.per_layer_input_scale
 
     def forward(
         self,
@@ -941,11 +901,13 @@ class Gemma4Model(nn.Module):
                 **kwargs,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual,
-                "per_layer_inputs": per_layer_inputs,
-            })
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    "per_layer_inputs": per_layer_inputs,
+                }
+            )
         # Gemma4 incorporates residual into hidden_states directly
         # Apply norm without residual fusion when possible.
         if residual is None:
@@ -954,9 +916,7 @@ class Gemma4Model(nn.Module):
             hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -996,22 +956,17 @@ class Gemma4Model(nn.Module):
         params_dict.update(dict(self.named_buffers()))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
                 param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
 
-            if name.endswith(
-                (".k_scale", ".v_scale", ".q_scale", ".prob_scale")
-            ):
+            if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is not None and remapped_name in params_dict:
                     param = params_dict[remapped_name]
@@ -1040,7 +995,10 @@ class Gemma4Model(nn.Module):
                 break
             else:
                 for (
-                    param_name, weight_name, expert_id, shard_id
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    shard_id,
                 ) in expert_params_mapping:
                     if weight_name not in name:
                         continue
@@ -1086,8 +1044,7 @@ class Gemma4Model(nn.Module):
         return loaded_params
 
 
-class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
-                        MixtureOfExperts):
+class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
     # Note: qkv_proj packing applies to non-k_eq_v layers (sliding
     # attention and full attention without k_eq_v). k_eq_v layers use
     # separate q_proj + k_proj without packing.
@@ -1138,9 +1095,7 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         example_moe: Gemma4MoE | None = None
 
         for layer in self.model.layers:
-            if hasattr(layer, "moe") and isinstance(
-                layer.moe, Gemma4MoE
-            ):
+            if hasattr(layer, "moe") and isinstance(layer.moe, Gemma4MoE):
                 example_moe = layer.moe
                 self.moe_layers.append(layer.moe.experts)
 
@@ -1183,9 +1138,7 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Checkpoint weight names use "language_model." prefix (from the
         # Gemma4ForConditionalGeneration wrapper). Strip it to map to our
         # model tree which is just "model.*".
@@ -1210,18 +1163,18 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 # naming: HF moved per_expert_scale to router and
                 # renamed moe → experts in the MoE block.
                 name = name.replace(
-                    '.router.per_expert_scale',
-                    '.moe.per_expert_scale',
+                    ".router.per_expert_scale",
+                    ".moe.per_expert_scale",
                 )
-                if '.experts.gate_up_proj' in name:
+                if ".experts.gate_up_proj" in name:
                     name = name.replace(
-                        '.experts.gate_up_proj',
-                        '.moe.gate_up_proj',
+                        ".experts.gate_up_proj",
+                        ".moe.gate_up_proj",
                     )
-                elif '.experts.down_proj' in name:
+                elif ".experts.down_proj" in name:
                     name = name.replace(
-                        '.experts.down_proj',
-                        '.moe.down_proj',
+                        ".experts.down_proj",
+                        ".moe.down_proj",
                     )
 
                 # MoE expert weights: checkpoint stores as 3D packed
@@ -1245,23 +1198,15 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                     for expert_id in range(num_experts):
                         gate_weight = weight[expert_id, :intermediate_size, :]
                         up_weight = weight[expert_id, intermediate_size:, :]
-                        base = name.replace(
-                            "moe.", f"moe.experts.{expert_id}."
-                        )
-                        yield base.replace(
-                            "gate_up_proj", "gate_proj"
-                        ), gate_weight
-                        yield base.replace(
-                            "gate_up_proj", "up_proj"
-                        ), up_weight
+                        base = name.replace("moe.", f"moe.experts.{expert_id}.")
+                        yield base.replace("gate_up_proj", "gate_proj"), gate_weight
+                        yield base.replace("gate_up_proj", "up_proj"), up_weight
                     continue
 
                 if "moe.down_proj" in name and weight.dim() == 3:
                     num_experts = weight.size(0)
                     for expert_id in range(num_experts):
-                        expert_name = name.replace(
-                            "moe.", f"moe.experts.{expert_id}."
-                        )
+                        expert_name = name.replace("moe.", f"moe.experts.{expert_id}.")
                         yield expert_name, weight[expert_id]
                     continue
 
@@ -1271,7 +1216,6 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 # ONLY for full_attention layers — sliding layers have
                 # their own real v_proj weights.
                 if "self_attn.k_proj" in name and k_eq_v_layer_indices:
-
                     m = re.search(r"layers\.(\d+)\.", name)
                     if m and int(m.group(1)) in k_eq_v_layer_indices:
                         yield name, weight
@@ -1293,4 +1237,3 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
 
         loader = AutoWeightsLoader(self, skip_substrs=skip)
         return loader.load_weights(_weight_iterator())
-

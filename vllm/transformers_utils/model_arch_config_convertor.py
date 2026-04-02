@@ -484,4 +484,3 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4": Gemma4ModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,
 }
-

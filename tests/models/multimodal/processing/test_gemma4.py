@@ -12,8 +12,6 @@ from ...utils import build_model_context
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
 
 
-
-
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_limit_mm_per_prompt(
     image_assets: ImageTestAssets,
@@ -34,9 +32,9 @@ def test_limit_mm_per_prompt(
     images = [asset.pil_image for asset in image_assets][:2]
     if len(images) < 2:
         images = [images[0], images[0]]
-        
+
     mm_data = {"image": images}
-    
+
     # Expect ValueError when exceeding limit
     with pytest.raises(ValueError, match="At most 1 image"):
         processor(

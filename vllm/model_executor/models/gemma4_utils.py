@@ -19,13 +19,12 @@ Usage with vLLM offline inference::
 
     llm = LLM(model="google/gemma-4-it")
     outputs = llm.generate(prompt, SamplingParams(...))
-    text = tokenizer.decode(outputs[0].outputs[0].token_ids,
-                            skip_special_tokens=False)
+    text = tokenizer.decode(outputs[0].outputs[0].token_ids, skip_special_tokens=False)
 
     # Extract thinking / answer (works with or without enable_thinking)
     result = parse_output(text)
     print(result["thinking"])  # chain-of-thought or None
-    print(result["answer"])    # final answer
+    print(result["answer"])  # final answer
 
     # Extract tool calls
     tool_calls = parse_tool_calls(text)
@@ -112,7 +111,6 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
     return {"thinking": None, "answer": answer}
 
 
-
 def _strip_thought_label(text: str) -> str:
     """Strip the spurious ``thought\\n`` label from the start of text.
 
@@ -120,7 +118,7 @@ def _strip_thought_label(text: str) -> str:
     a newline — preserving the word ``thought`` in any other context.
     """
     if text.startswith("thought\n"):
-        return text[len("thought\n"):]
+        return text[len("thought\n") :]
     return text
 
 
@@ -180,8 +178,7 @@ def _parse_tool_arguments(args_str: str) -> dict[str, str]:
     try:
         parsed = json.loads("{" + cleaned + "}")
         # Ensure all values are strings for consistency.
-        return {k: str(v) if not isinstance(v, str) else v
-                for k, v in parsed.items()}
+        return {k: str(v) if not isinstance(v, str) else v for k, v in parsed.items()}
     except (json.JSONDecodeError, ValueError):
         pass
 
@@ -192,10 +189,8 @@ def _parse_tool_arguments(args_str: str) -> dict[str, str]:
 
     if not arguments:
         # Last resort: extract key:value pairs (unquoted).
-        for key, value in re.findall(r'(\w+):\s*([^,}]+)', args_str):
-            arguments[key] = value.strip().strip('"').replace(
-                _ESCAPE_TOKEN, ''
-            )
+        for key, value in re.findall(r"(\w+):\s*([^,}]+)", args_str):
+            arguments[key] = value.strip().strip('"').replace(_ESCAPE_TOKEN, "")
 
     return arguments
 
@@ -241,28 +236,30 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
     # Tier 1: Standard format with special tokens.
     # <|tool_call>call:name{args}<tool_call|>
     # Note: Some Gemma4 models emit <turn|> instead of <tool_call|>.
-    standard_pattern = (
-        r'<\|tool_call\>call:(\w+)\{(.*?)\}(?:<tool_call\|>|<turn\|>)'
-    )
+    standard_pattern = r"<\|tool_call\>call:(\w+)\{(.*?)\}(?:<tool_call\|>|<turn\|>)"
     for match in re.finditer(standard_pattern, text, re.DOTALL):
         name, args_str = match.group(1), match.group(2)
-        results.append({
-            "name": name,
-            "arguments": _parse_tool_arguments(args_str),
-        })
+        results.append(
+            {
+                "name": name,
+                "arguments": _parse_tool_arguments(args_str),
+            }
+        )
 
     if results or strict:
         return results
 
     # Tier 2: Fallback for known Gemma4 output variations.
     # Matches: <call>name{args}, call:name{args}, or bare call:name{args}<eos>
-    fallback_pattern = r'(?:<call>|(?:^|\s)call:)(\w+)\{(.*?)\}'
+    fallback_pattern = r"(?:<call>|(?:^|\s)call:)(\w+)\{(.*?)\}"
     for match in re.finditer(fallback_pattern, text, re.DOTALL):
         name, args_str = match.group(1), match.group(2)
-        results.append({
-            "name": name,
-            "arguments": _parse_tool_arguments(args_str),
-        })
+        results.append(
+            {
+                "name": name,
+                "arguments": _parse_tool_arguments(args_str),
+            }
+        )
 
     return results
 

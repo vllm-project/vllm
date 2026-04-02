@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from vllm.tool_parsers.gemma4_tool_parser import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_tokenizer():
@@ -44,6 +46,7 @@ def mock_request():
 # ---------------------------------------------------------------------------
 # Unit tests for _parse_gemma4_args (shared parser logic)
 # ---------------------------------------------------------------------------
+
 
 class TestParseGemma4Args:
     def test_empty_string(self):
@@ -94,15 +97,11 @@ class TestParseGemma4Args:
         }
 
     def test_nested_object(self):
-        result = _parse_gemma4_args(
-            'nested:{inner:<|"|>value<|"|>}'
-        )
+        result = _parse_gemma4_args('nested:{inner:<|"|>value<|"|>}')
         assert result == {"nested": {"inner": "value"}}
 
     def test_array_of_strings(self):
-        result = _parse_gemma4_args(
-            'items:[<|"|>a<|"|>,<|"|>b<|"|>]'
-        )
+        result = _parse_gemma4_args('items:[<|"|>a<|"|>,<|"|>b<|"|>]')
         assert result == {"items": ["a", "b"]}
 
     def test_unterminated_string(self):
@@ -134,6 +133,7 @@ class TestParseGemma4Array:
 # Non-streaming extraction tests
 # ---------------------------------------------------------------------------
 
+
 class TestExtractToolCalls:
     def test_no_tool_calls(self, parser, mock_request):
         model_output = "Hello, how can I help you today?"
@@ -145,8 +145,7 @@ class TestExtractToolCalls:
 
     def test_single_tool_call(self, parser, mock_request):
         model_output = (
-            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}'
-            '<tool_call|>'
+            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
@@ -240,8 +239,7 @@ class TestExtractToolCalls:
     def test_hyphenated_function_name(self, parser, mock_request):
         """Ensure function names with hyphens are parsed correctly."""
         model_output = (
-            '<|tool_call>call:get-weather{location:<|"|>London<|"|>}'
-            '<tool_call|>'
+            '<|tool_call>call:get-weather{location:<|"|>London<|"|>}<tool_call|>'
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
@@ -251,8 +249,7 @@ class TestExtractToolCalls:
     def test_dotted_function_name(self, parser, mock_request):
         """Ensure function names with dots are parsed correctly."""
         model_output = (
-            '<|tool_call>call:weather.get{location:<|"|>London<|"|>}'
-            '<tool_call|>'
+            '<|tool_call>call:weather.get{location:<|"|>London<|"|>}<tool_call|>'
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
@@ -261,9 +258,7 @@ class TestExtractToolCalls:
 
     def test_no_arguments(self, parser, mock_request):
         """Tool calls with empty arguments."""
-        model_output = (
-            "<|tool_call>call:get_status{}<tool_call|>"
-        )
+        model_output = "<|tool_call>call:get_status{}<tool_call|>"
         result = parser.extract_tool_calls(model_output, mock_request)
 
         assert result.tools_called is True
@@ -276,6 +271,7 @@ class TestExtractToolCalls:
 # Streaming extraction tests
 # ---------------------------------------------------------------------------
 
+
 class TestStreamingExtraction:
     """Tests for the streaming tool call extraction.
 
@@ -284,12 +280,14 @@ class TestStreamingExtraction:
     verifying that the accumulated argument deltas form valid JSON.
     """
 
-    def _simulate_streaming(self, parser, mock_request, chunks):
+    def _simulate_streaming(
+        self, parser: Gemma4ToolParser, mock_request: Any, chunks: list[str]
+    ) -> list[tuple[Any, str]]:
         """Feed chunks through the streaming parser and collect results.
 
         Returns a list of (delta_message, accumulated_text) tuples.
         """
-        results = []
+        results: list[tuple[Any, str]] = []
         previous_text = ""
         previous_token_ids = []
 
@@ -453,9 +451,7 @@ class TestStreamingExtraction:
         results = self._simulate_streaming(parser, mock_request, chunks)
         name = self._collect_function_name(results)
         assert name == "get_weather"
-        assert not name.startswith("call:"), (
-            f"Name has 'call:' prefix: {name!r}"
-        )
+        assert not name.startswith("call:"), f"Name has 'call:' prefix: {name!r}"
 
     def test_streaming_text_before_tool_call(self, parser, mock_request):
         """Text before tool call should be emitted as content."""

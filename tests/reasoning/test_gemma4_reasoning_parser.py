@@ -85,8 +85,7 @@ EMPTY = {
 }
 NEW_LINE_NONSTREAMING = {
     "output": (
-        "Before\n<|channel>This is a reasoning section<channel|>\n"
-        "This is the rest"
+        "Before\n<|channel>This is a reasoning section<channel|>\nThis is the rest"
     ),
     "reasoning": "This is a reasoning section",
     "content": "\nThis is the rest",
@@ -94,8 +93,7 @@ NEW_LINE_NONSTREAMING = {
 }
 NEW_LINE_STREAMING = {
     "output": (
-        "Before\n<|channel>This is a reasoning section<channel|>\n"
-        "This is the rest"
+        "Before\n<|channel>This is a reasoning section<channel|>\nThis is the rest"
     ),
     "reasoning": "This is a reasoning section",
     "content": "Before\n\nThis is the rest",
@@ -113,8 +111,7 @@ TEST_CASES = [
     pytest.param(True, REASONING_WITH_CHANNEL, id="reasoning_streaming"),
     pytest.param(False, COMPLETE_REASONING_WITH_CHANNEL, id="complete_reasoning"),
     pytest.param(
-        True, COMPLETE_REASONING_WITH_CHANNEL,
-        id="complete_reasoning_streaming"
+        True, COMPLETE_REASONING_WITH_CHANNEL, id="complete_reasoning_streaming"
     ),
     pytest.param(False, MULTIPLE_LINES_WITH_CHANNEL, id="multiple_lines"),
     pytest.param(True, MULTIPLE_LINES_WITH_CHANNEL, id="multiple_lines_streaming"),
@@ -145,7 +142,7 @@ def test_gemma4_reasoning(
     len_end = len("<channel|>")
 
     output_tokens = []
-    
+
     def _encode(text: str) -> list[int]:
         if not text:
             return []
@@ -197,4 +194,3 @@ def test_gemma4_reasoning(
     # Test is_reasoning_end
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
     assert is_reasoning_end == param_dict["is_reasoning_end"]
-

@@ -73,8 +73,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         """Extract reasoning, stripping the ``thought\\n`` role label."""
-        if (self.start_token not in model_output
-                and self.end_token not in model_output):
+        if self.start_token not in model_output and self.end_token not in model_output:
             # Default to content history if no tags are present
             # (or if they were stripped)
             return None, model_output
@@ -145,9 +144,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         if self._reasoning_text.startswith(_THOUGHT_PREFIX):
             prefix_len = len(_THOUGHT_PREFIX)
             # How much reasoning was accumulated before this delta?
-            prev_reasoning_len = len(self._reasoning_text) - len(
-                result.reasoning
-            )
+            prev_reasoning_len = len(self._reasoning_text) - len(result.reasoning)
             if prev_reasoning_len >= prefix_len:
                 # Prefix was already consumed by prior deltas; this
                 # delta is entirely real content — pass through.
@@ -192,5 +189,5 @@ def _strip_thought_label(text: str) -> str:
     offline parser.
     """
     if text.startswith(_THOUGHT_PREFIX):
-        return text[len(_THOUGHT_PREFIX):]
+        return text[len(_THOUGHT_PREFIX) :]
     return text
