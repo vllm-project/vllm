@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
@@ -22,12 +23,14 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
 from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -50,7 +53,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
@@ -76,6 +78,54 @@ from .utils import (
 logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
+
+
+class Qwen3NextMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        expert_gate: torch.nn.Linear | None = None,
+        is_sequence_parallel: bool = False,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+        self.expert_gate = expert_gate
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        out = self.act_fn(gate_up)
+        out, _ = self.down_proj(out)
+
+        if self.expert_gate is not None:
+            out = F.sigmoid(self.expert_gate(x)[0]) * out
+
+        return out
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
