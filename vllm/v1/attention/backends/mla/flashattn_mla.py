@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,
     get_flash_attn_version,
+    should_use_system_flash_attn,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
@@ -121,7 +122,19 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             supports_dcp_with_varlen=(interleave_size == 1),
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.fa_aot_schedule = get_flash_attn_version() == 3
+        self.vllm_flash_attn_version = get_flash_attn_version()
+        self.use_system_flash_attn = False
+        if should_use_system_flash_attn():
+            if self.vllm_flash_attn_version != 4:
+                logger.warning_once(
+                    f"System Flash Attention is only compatible with Flash Attention 4 "
+                    f"but the detected version is {self.vllm_flash_attn_version}. "
+                    f"Disabling system flash attention.",
+                    scope="local",
+                )
+            else:
+                self.use_system_flash_attn = True
+        self.fa_aot_schedule = self.vllm_flash_attn_version == 3
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -349,6 +362,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             cp_world_size=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.dcp_tot_seq_lens,
+            use_system_flash_attn=self.use_system_flash_attn,
         )
 
         if self.need_to_return_lse_for_decode:

@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
+    should_use_system_flash_attn,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
@@ -171,7 +172,11 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
-        return head_size % 8 == 0 and head_size <= 256
+        if head_size % 8 != 0:
+            return False
+        if should_use_system_flash_attn():
+            return head_size <= 512
+        return head_size <= 256
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -624,6 +629,17 @@ class FlashAttentionImpl(AttentionImpl):
             self.vllm_flash_attn_version,
             scope="local",
         )
+        self.use_system_flash_attn = False
+        if should_use_system_flash_attn():
+            if self.vllm_flash_attn_version != 4:
+                logger.warning_once(
+                    f"System Flash Attention is only compatible with Flash Attention 4 "
+                    f"but the detected version is {self.vllm_flash_attn_version}. "
+                    f"Disabling system flash attention.",
+                    scope="local",
+                )
+            else:
+                self.use_system_flash_attn = True
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
@@ -790,6 +806,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=v_descale,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
+                    use_system_flash_attn=self.use_system_flash_attn,
                 )
                 return output
 
@@ -1017,6 +1034,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             num_splits=1 if self.batch_invariant_enabled else 0,
+            use_system_flash_attn=self.use_system_flash_attn,
         )
 
         return output
@@ -1125,6 +1143,7 @@ def cascade_attention(
     k_descale: torch.Tensor | None = None,
     v_descale: torch.Tensor | None = None,
     s_aux: torch.Tensor | None = None,
+    use_system_flash_attn: bool = False,
 ) -> torch.Tensor:
     assert alibi_slopes is None, "Cascade attention does not support ALiBi."
     # TODO: Support sliding window.
@@ -1163,6 +1182,7 @@ def cascade_attention(
         # enabling its effect during the final attention merge.
         s_aux=s_aux,
         num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
+        use_system_flash_attn=use_system_flash_attn,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -1188,6 +1208,7 @@ def cascade_attention(
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
         num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
+        use_system_flash_attn=use_system_flash_attn,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.

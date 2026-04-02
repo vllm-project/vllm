@@ -53,6 +53,18 @@ elif current_platform.is_rocm():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 
+def should_use_system_flash_attn() -> bool:
+    """Check if the system flash-attn library should be used based on config/env."""
+    if not current_platform.is_cuda():
+        return False
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None:
+        return vllm_config.attention_config.use_system_flash_attn
+    return False
+
+
 def get_flash_attn_version(
     requires_alibi: bool = False, head_size: int | None = None
 ) -> int | None:
@@ -207,6 +219,18 @@ def is_flash_attn_varlen_func_available() -> bool:
     Returns:
         bool: True if a working flash_attn_varlen_func implementation is available.
     """
+    if should_use_system_flash_attn():
+        # Attempt to import flash_attn_varlen_func from system flash-attn
+        # Currently only supports Flash Attention 4
+        import importlib.util
+
+        if not importlib.util.find_spec("flash_attn.cute"):
+            logger.warning(
+                "attention-config.use_system_flash_attn is set, but "
+                "failed to import system flash-attn. "
+            )
+            return False
+        return True
     if current_platform.is_cuda() or current_platform.is_xpu():
         # CUDA and XPU always have flash_attn_varlen_func available
         return True

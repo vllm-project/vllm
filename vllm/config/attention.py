@@ -20,6 +20,10 @@ class AttentionConfig:
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
 
+    use_system_flash_attn: bool = False
+    """Force vllm to use the Flash Attention library installed in the system instead of
+    the one bundled with vllm. Currently only supports Flash Attention 4"""
+
     use_prefill_decode_attention: bool = False
     """Use separate prefill and decode kernels for attention instead of
     the unified triton kernel."""
