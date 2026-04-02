@@ -98,9 +98,14 @@ GET_META_MSG = b"get_meta_msg"
 
 
 class TransferMode(enum.Enum):
-    """Transfer direction for a KV cache request."""
+    """Transfer direction for a KV cache request.
+
+    PULL: D (decode) reads from P (prefill).  D initiates the handshake.
+    PUSH: P (prefill) writes to D (decode).  P initiates the handshake.
+    """
 
     PULL = "pull"
+    PUSH = "push"
 
 
 logger = init_logger(__name__)
@@ -1188,6 +1193,9 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_metadata: dict[ReqId, ReqMeta] = {}
         self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        # Push mode: track outgoing WRITE transfer handles so P can free
+        # blocks as soon as the RDMA WRITE completes.
+        self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
         # Set of requests that have been part of a batch, regardless of status.
@@ -2301,6 +2309,20 @@ class NixlConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
+        # Push mode: check if outgoing WRITE transfers have completed.
+        # Once the RDMA WRITE is done, P can safely free its blocks
+        # (the data has been written to D's memory).
+        done_pushing = self._pop_done_transfers(self._sending_transfers)
+        for req_id in done_pushing:
+            logger.info(
+                "Push WRITE transfer completed for request %s, freeing blocks on P",
+                req_id,
+            )
+            self._reqs_to_send.pop(req_id, None)
+            self._reqs_to_process.discard(req_id)
+            self.consumer_notification_counts_by_req.pop(req_id, None)
+            done_sending.add(req_id)
+
         # add requests that skipped transfer to done_recving
         done_recving.update(self._failed_recv_reqs)
         self._failed_recv_reqs.clear()
@@ -2373,6 +2395,26 @@ class NixlConnectorWorker:
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
                 req_id, tp_size = notif.decode("utf-8").rsplit(":", 1)
+                # Push mode: D receives notification that P finished writing.
+                # The req_id will be in _recving_metadata (stored by
+                # start_load_kv) but NOT in _reqs_to_send/_reqs_to_process
+                # (those are P-side tracking structures).
+                if req_id in self._recving_metadata and (
+                    req_id not in self._reqs_to_send
+                    and req_id not in self._reqs_to_process
+                ):
+                    meta = self._recving_metadata[req_id]
+                    if meta.mode == TransferMode.PUSH:
+                        logger.info(
+                            "Received push completion notification for request %s",
+                            req_id,
+                        )
+                        # Create empty handle list so _pop_done_transfers
+                        # immediately marks it as done.
+                        _ = self._recving_transfers[req_id]
+                        continue
+
+                # Pull mode: P receives notification that D finished reading.
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -2719,10 +2761,11 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
+        xfer_op = "READ" if mode == TransferMode.PULL else "WRITE"
         handle = None
         try:
             handle = self.nixl_wrapper.make_prepped_xfer(
-                "READ",
+                xfer_op,
                 local_xfer_side_handle,
                 local_block_descs_ids,
                 remote_xfer_side_handle,
@@ -2733,8 +2776,14 @@ class NixlConnectorWorker:
             # Begin async xfer.
             self.nixl_wrapper.transfer(handle)
 
-            # Use handle to check completion in future step().
-            self._recving_transfers[request_id].append(handle)
+            if mode == TransferMode.PULL:
+                # Use handle to check completion in future step().
+                self._recving_transfers[request_id].append(handle)
+            elif mode == TransferMode.PUSH:
+                # Track push WRITE handles so P can free blocks once the
+                # RDMA WRITE completes, rather than waiting for timeout.
+                self._sending_transfers[request_id].append(handle)
+
         except Exception as e:
             # mark all (logical) blocks for this request as invalid
             self._log_failure(
@@ -2745,14 +2794,20 @@ class NixlConnectorWorker:
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
-            if (
-                meta := self._recving_metadata.get(request_id)
-            ) and not self._is_hma_required:
-                self._invalid_block_ids.update(meta.local_block_ids[0])
-            self.xfer_stats.record_failed_transfer()
-            if handle is not None:
-                self.nixl_wrapper.release_xfer_handle(handle)
-            self._failed_recv_reqs.add(request_id)
+            if mode == TransferMode.PULL:
+                if (
+                    meta := self._recving_metadata.get(request_id)
+                ) and not self._is_hma_required:
+                    self._invalid_block_ids.update(meta.local_block_ids[0])
+                self.xfer_stats.record_failed_transfer()
+                if handle is not None:
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                self._failed_recv_reqs.add(request_id)
+            elif mode == TransferMode.PUSH:
+                # Push failed — let the timeout path free the blocks.
+                self.xfer_stats.record_failed_transfer()
+                if handle is not None:
+                    self.nixl_wrapper.release_xfer_handle(handle)
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int
