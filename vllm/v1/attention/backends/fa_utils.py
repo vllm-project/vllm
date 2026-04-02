@@ -165,6 +165,7 @@ def should_use_system_flash_attn() -> bool:
             f"Disabling system flash attention.",
             scope="local",
         )
+        return False
     from vllm.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
