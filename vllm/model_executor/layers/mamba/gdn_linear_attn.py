@@ -776,7 +776,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
         if attn_metadata.num_prefills > 0:
-            assert mixed_qkv_non_spec is not None
+            assert mixed_qkv_non_spec is not None, (
+                "mixed_qkv_non_spec must be provided for prefill path"
+            )
             if spec_sequence_masks is not None:
                 a_non_spec = a.index_select(0, non_spec_token_indx)
                 b_non_spec = b.index_select(0, non_spec_token_indx)

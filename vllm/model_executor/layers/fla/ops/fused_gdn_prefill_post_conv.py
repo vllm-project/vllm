@@ -135,7 +135,8 @@ def _fused_post_conv_kernel(
 
         # g = -exp(A_log) * softplus(a + dt_bias)
         x = a_vals + dt_bias_val
-        sp = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
+        sp = tl.where(x > 0, x + tl.log(1.0 + tl.exp(-x)), tl.log(1.0 + tl.exp(x)))
+        sp = tl.where(x <= SOFTPLUS_THRESHOLD, sp, x)
         g_vals = -tl.exp(A_log_val) * sp
 
         if OUTPUT_G_EXP:
