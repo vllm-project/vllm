@@ -152,6 +152,7 @@ def test_models_with_multiple_audios(
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
+        trust_remote_code=True,
         **vllm_kwargs,
     )
 

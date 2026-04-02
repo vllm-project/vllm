@@ -29,6 +29,7 @@ RESPONSE_SUFFIX_WITHOUT_LORA = "Certainly! Here is the transcription of the audi
 
 VLLM_RUNNER_BASE_KWARGS = {
     "model_name": MODEL_PATH,
+    "trust)_remote_code": True,
     "dtype": "half",
     "enable_lora": "True",
     "max_num_seqs": 2,

@@ -42,6 +42,7 @@ MODELS = [
     # So only test one (the most widely used) model
     EmbedModelInfo(
         "Alibaba-NLP/gte-multilingual-base",
+        trust_remote_code=True,
         architecture="GteNewModel",
         mteb_score=0.775074696,
         hf_overrides={"architectures": ["GteNewModel"]},
@@ -53,12 +54,14 @@ MODELS = [
     ),
     EmbedModelInfo(
         "Alibaba-NLP/gte-base-en-v1.5",
+        trust_remote_code=True,
         architecture="GteNewModel",
         hf_overrides={"architectures": ["GteNewModel"]},
         enable_test=False,
     ),
     EmbedModelInfo(
         "Alibaba-NLP/gte-large-en-v1.5",
+        trust_remote_code=True,
         architecture="GteNewModel",
         hf_overrides={"architectures": ["GteNewModel"]},
         enable_test=False,
@@ -66,6 +69,7 @@ MODELS = [
     ########### Qwen2ForCausalLM
     EmbedModelInfo(
         "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+        trust_remote_code=True,
         mteb_score=0.758473459018872,
         architecture="Qwen2ForCausalLM",
         seq_pooling_type="LAST",
@@ -77,6 +81,7 @@ MODELS = [
     ########## ModernBertModel
     EmbedModelInfo(
         "Alibaba-NLP/gte-modernbert-base",
+        trust_remote_code=True,
         mteb_score=0.748193353,
         architecture="ModernBertModel",
         seq_pooling_type="CLS",
@@ -129,19 +134,21 @@ RERANK_MODELS = [
 ]
 
 
-@pytest.mark.parametrize("model_info", MODELS)
+@pytest.mark.parametrize("model_info", MODELS, ids=lambda model_info: model_info.name)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
 
-@pytest.mark.parametrize("model_info", MODELS)
+@pytest.mark.parametrize("model_info", MODELS, ids=lambda model_info: model_info.name)
 def test_embed_models_correctness(
     hf_runner, vllm_runner, model_info: EmbedModelInfo, example_prompts
 ) -> None:
     correctness_test_embed_models(hf_runner, vllm_runner, model_info, example_prompts)
 
 
-@pytest.mark.parametrize("model_info", RERANK_MODELS)
+@pytest.mark.parametrize(
+    "model_info", RERANK_MODELS, ids=lambda model_info: model_info.name
+)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     vllm_extra_kwargs = {}
     if current_platform.is_rocm():

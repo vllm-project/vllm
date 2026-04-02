@@ -34,7 +34,7 @@ MODELS = [
 ]
 
 
-@pytest.mark.parametrize("model_info", MODELS)
+@pytest.mark.parametrize("model_info", MODELS, ids=lambda model_info: model_info.name)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     # Encoder-only attention models need enforce_eager=True to avoid
     # CUDA graph capture issues with piecewise compilation
@@ -43,7 +43,7 @@ def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -
     )
 
 
-@pytest.mark.parametrize("model_info", MODELS)
+@pytest.mark.parametrize("model_info", MODELS, ids=lambda model_info: model_info.name)
 def test_embed_models_correctness(
     hf_runner, vllm_runner, model_info: EmbedModelInfo, example_prompts
 ) -> None:
