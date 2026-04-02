@@ -13,6 +13,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -695,6 +696,53 @@ if hasattr(torch.ops._C, "awq_gemm"):
             dtype=input.dtype,
             device=input.device,
         ).sum(0)
+
+
+def awq_linear(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    pack_factor: int,
+) -> torch.Tensor:
+    """AWQ linear with runtime kernel dispatch.
+
+    Dispatches to fused awq_gemm for small batch sizes (num_tokens < 256)
+    and to awq_dequantize + matmul for large batch sizes. Registered as a
+    custom op so that the branch is evaluated at runtime (including during
+    CUDAGraph capture) rather than being baked in at torch.compile trace
+    time.
+    """
+    num_tokens = input.shape[0]
+    if num_tokens >= 256:
+        weight = awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+        return torch.matmul(input, weight)
+    else:
+        return awq_gemm(input, qweight, scales, qzeros, pack_factor)
+
+
+def _awq_linear_fake(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    pack_factor: int,
+) -> torch.Tensor:
+    num_in_feats = input.size(0)
+    out_features = qweight.size(1) * 8
+    return torch.empty(
+        (num_in_feats, out_features),
+        dtype=input.dtype,
+        device=input.device,
+    )
+
+
+direct_register_custom_op(
+    op_name="awq_linear",
+    op_func=awq_linear,
+    mutates_args=[],
+    fake_impl=_awq_linear_fake,
+)
 
 
 # gptq
