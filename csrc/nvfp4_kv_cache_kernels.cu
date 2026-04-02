@@ -155,16 +155,23 @@ __global__ void reshape_and_cache_nvfp4_kernel(
       }
 #endif
 
-      // Write swizzled block scale to scale cache (only one thread per group)
+      // Write block scale to scale cache.
+      // K (kv==0): linear layout (no swizzle).
+      // V (kv==1): swizzled layout for SM100 trtllm-gen MHA kernel.
       if (sf_out_ptr != nullptr) {
         int scale_idx = group_in_head;
-        int swizzled_offset =
-            swizzle_scale_offset(block_offset, scale_idx, scale_dim);
-        int swizzled_t = swizzled_offset / scale_dim;
-        int swizzled_s = swizzled_offset % scale_dim;
-        uint8_t* __restrict__ scale_dst =
-            scale_block + head * scale_head_stride +
-            swizzled_t * scale_block_offset_stride + swizzled_s;
+        uint8_t* __restrict__ scale_dst;
+        if (kv == 0) {
+          scale_dst = scale_block + head * scale_head_stride +
+                      block_offset * scale_block_offset_stride + scale_idx;
+        } else {
+          int swizzled_offset =
+              swizzle_scale_offset(block_offset, scale_idx, scale_dim);
+          int swizzled_t = swizzled_offset / scale_dim;
+          int swizzled_s = swizzled_offset % scale_dim;
+          scale_dst = scale_block + head * scale_head_stride +
+                      swizzled_t * scale_block_offset_stride + swizzled_s;
+        }
         *scale_dst = sf_val;
       }
     }

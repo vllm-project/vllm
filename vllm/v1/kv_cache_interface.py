@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 
 logger = init_logger(__name__)
 
@@ -38,11 +38,20 @@ class KVQuantMode(IntEnum):
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
     INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
+    NVFP4 = 4  # packed fp4 data + fp8 block scales
 
     @property
     def is_per_token_head(self) -> bool:
         """True for any per-token-head quantization mode."""
-        return self >= 2
+        return self in (
+            KVQuantMode.INT8_PER_TOKEN_HEAD,
+            KVQuantMode.FP8_PER_TOKEN_HEAD,
+        )
+
+    @property
+    def is_nvfp4(self) -> bool:
+        """True for NVFP4 packed quantization mode."""
+        return self == KVQuantMode.NVFP4
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
@@ -51,6 +60,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
+    if kv_cache_dtype == "nvfp4":
+        return KVQuantMode.NVFP4
     if kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -156,7 +167,6 @@ class FullAttentionSpec(AttentionSpec):
     """
 
     head_size_v: int = None  # type: ignore[assignment]
-    cache_dtype_str: str | None = None
 
     sliding_window: int | None = None
     """
@@ -219,7 +229,6 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            cache_dtype_str=specs[0].cache_dtype_str,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -239,16 +248,13 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        if self.cache_dtype_str == "nvfp4":
+        if self.kv_quant_mode.is_nvfp4:
             # Packed layout per head: fp4 data + fp8 block scales.
             # fp4 data: head_size//2 bytes (2 fp4 values per byte)
             # fp8 block scale: head_size//16 bytes (1 scale per 16 elements)
-            last_dim = (
-                self.head_size // 2
-                + self.head_size // 16
-                + self.head_size_v // 2
-                + self.head_size_v // 16
-            )
+            last_dim = nvfp4_kv_cache_full_dim(
+                self.head_size
+            ) + nvfp4_kv_cache_full_dim(self.head_size_v)
             return (
                 self.block_size
                 * self.num_kv_heads
