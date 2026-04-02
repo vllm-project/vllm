@@ -45,6 +45,7 @@ from .partition_rules import (
     should_split,
 )
 from .passes.inductor_pass import InductorPass, pass_context
+from .passes.ir.inplace_functionalization import VllmIRInplaceFunctionalizationPass
 from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -907,6 +908,24 @@ class VllmBackend:
         return standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map
 
     def configure_post_pass(self) -> None:
+        # TODO proper PassManager?
+        pre_grad_pass_key = "pre_grad_custom_pass"
+        assert self.pass_key != pre_grad_pass_key
+        assert self.pass_key not in self.inductor_config
+        self.inductor_config[pre_grad_pass_key] = VllmIRInplaceFunctionalizationPass(
+            self.vllm_config
+        )
+
+        # Make sure pre_grad_custom_pass is not pickled
+        # as part of AOTAutograd built-in cache key
+        # TODO(luka) is there a cleaner way to do this
+        import torch._inductor.config as inductor_config
+
+        ignore = inductor_config._cache_config_ignore_prefix + [pre_grad_pass_key]
+        assert "_cache_config_ignore_prefix" not in self.inductor_config
+        self.inductor_config["_cache_config_ignore_prefix"] = ignore
+
+        # Configure the (nominally post-grad) pass manager
         self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass

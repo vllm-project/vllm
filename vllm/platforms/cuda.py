@@ -575,7 +575,9 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + rms_norm
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+        )
 
 
 # NVML utils

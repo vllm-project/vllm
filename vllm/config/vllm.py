@@ -155,10 +155,9 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-    from vllm._aiter_ops import rocm_aiter_ops
 
     return (
-        rocm_aiter_ops.is_rmsnorm_enabled()
+        cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
