@@ -91,12 +91,18 @@ def pick_silu_mul_block_quant_fp8_config(
     return f"intermediate_{best_isize}_numtokens_{best_ntokens}"
 
 
-@register_kernel
+@register_kernel(
+    config_picker=pick_silu_mul_block_quant_fp8_config,
+    input_generator=generate_silu_mul_block_quant_fp8_inputs,
+)
 def silu_mul_block_quant_fp8(
     input: torch.Tensor,
     scale_ub: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
 ) -> torch.Tensor:
+    """
+    Helion kernel for blockwise quantized SiLU + mul fused kernel.
+    """
     original_shape = input.shape
     two_d = hl.specialize(original_shape[-1])
     d = two_d // 2
@@ -105,9 +111,11 @@ def silu_mul_block_quant_fp8(
     input_2d = input.view(-1, original_shape[-1])
     m = input_2d.shape[0]
 
+    # block sizes
     block_m = hl.register_block_size(m)
     block_d = hl.register_block_size(d)
 
+    # scale_out tensor sizes
     scale_m = hl.cdiv(m, block_m)
     scale_d = hl.cdiv(d, block_d)
 
