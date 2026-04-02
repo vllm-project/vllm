@@ -7,7 +7,6 @@ and MooncakeDistributedStore integration.
 """
 
 import json
-import math
 import os
 import queue
 import threading
@@ -510,23 +509,16 @@ class MooncakeStoreWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV cache tensors and start transfer threads."""
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
-        first_kv_cache = first_kv_cache_tuple[0]
+        # TODO(yifan): we haven't supported hybrid HMA yet.
+        first_kv_cache = next(iter(kv_caches.values()))
 
         self.num_blocks = first_kv_cache.shape[0]
         logger.info("num_blocks: %s", self.num_blocks)
 
-        block_rank = 3
-        self.block_len: list[int] = []
-        if self.use_mla:
-            for i in range(len(first_kv_cache_tuple)):
-                block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
-                self.block_len.append(
-                    first_kv_cache_tuple[i].element_size() * math.prod(block_shape)
-                )
-        else:
-            block_shape = first_kv_cache.shape[-block_rank:]
-            self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
+        # Per-block byte size: total tensor bytes / number of blocks.
+        # Works for both MLA (3D: num_blocks, block_size, head_size) and
+        # non-MLA (5D: num_blocks, 2, block_size, num_kv_heads, head_size).
+        self.block_len: list[int] = [first_kv_cache.nbytes // self.num_blocks]
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, shape %s",
@@ -535,19 +527,11 @@ class MooncakeStoreWorker:
         )
 
         self.kv_caches_base_addr: list[int] = []
-        ptrs: list[int] = []
-        lengths: list[int] = []
-        length = len(self.block_len)
-        for cache_or_caches in kv_caches.values():
-            for i, cache in enumerate(cache_or_caches, 0):
-                base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len[i % length]
-                self.kv_caches_base_addr.append(base_addr)
-                ptrs.append(base_addr)
-                lengths.append(region_len)
-
-        # Register buffers
-        self.store.register_buffer(ptrs, lengths)
+        for cache in kv_caches.values():
+            base_addr = cache.data_ptr()
+            region_len = cache.nbytes
+            self.kv_caches_base_addr.append(base_addr)
+            self.store.register_buffer(base_addr, region_len)
 
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
