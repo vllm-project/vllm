@@ -448,6 +448,16 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
 
 
+class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_head_size(self) -> int:
+        # Gemma4 uses dual head dimensions: head_dim (sliding attention)
+        # and global_head_dim (full attention).  Return the largest so
+        # that attention backends allocate buffers large enough for both.
+        head_dim = getattr(self.hf_text_config, "head_dim", 0)
+        global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
+        return max(head_dim, global_head_dim) or super().get_head_size()
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
@@ -471,4 +481,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "gemma4": Gemma4ModelArchConfigConvertor,
+    "gemma4_text": Gemma4ModelArchConfigConvertor,
 }
