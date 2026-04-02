@@ -508,6 +508,9 @@ class MPClient(EngineCoreClient):
             # identity. The client input ROUTER needs handover to allow the new
             # engine to replace the dead connection.
             enable_input_socket_handover = parallel_config.enable_elastic_ep
+            self.enable_fault_tolerance = (
+                parallel_config.fault_tolerance_config.enable_fault_tolerance
+            )
 
             self.stats_update_address: str | None = None
             tensor_queue: Queue | None = None
@@ -551,7 +554,7 @@ class MPClient(EngineCoreClient):
 
                 self.addresses = addresses
                 self.stats_update_address = addresses.frontend_stats_publish_address
-                if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+                if self.enable_fault_tolerance:
                     assert client_addresses is not None
                     assert addresses.fault_tolerance_addresses is not None
                     client_addresses["fault_tolerance_addresses"] = (
@@ -889,7 +892,7 @@ class AsyncMPClient(MPClient):
         client_count: int = 1,
         client_index: int = 0,
     ):
-        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+        if vllm_config.parallel_config.fault_tolerance_config.enable_fault_tolerance:
             client_addresses = client_addresses or {}
         super().__init__(
             asyncio_mode=True,
@@ -903,14 +906,14 @@ class AsyncMPClient(MPClient):
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
 
-        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+        if self.enable_fault_tolerance:
             assert client_addresses is not None
             ft_addr = FaultToleranceZmqAddresses.from_str(
                 client_addresses["fault_tolerance_addresses"]
             )
             if self.client_index == 0:
                 self.client_sentinel = ClientSentinel(
-                    vllm_config=vllm_config,
+                    parallel_config=vllm_config.parallel_config,
                     fault_tolerance_addresses=ft_addr,
                     shutdown_callback=self.shutdown,
                 )
@@ -931,7 +934,7 @@ class AsyncMPClient(MPClient):
             )
             self.fault_state_sub_socket.setsockopt(
                 zmq.SUBSCRIBE,
-                self.vllm_config.fault_tolerance_config.fault_state_pub_topic.encode(),
+                self.vllm_config.parallel_config.fault_tolerance_config.fault_state_pub_topic.encode(),
             )
             self.resources.fault_state_sub_socket = self.fault_state_sub_socket
             threading.Thread(
@@ -1548,7 +1551,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             await self._scale_down_elastic_ep(
                 cur_data_parallel_size, new_data_parallel_size
             )
-        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+        if self.enable_fault_tolerance:
             await self.client_sentinel.scale_elastic_ep(new_data_parallel_size)
 
     async def _eep_wait_for_setup_switch_complete(self) -> None:

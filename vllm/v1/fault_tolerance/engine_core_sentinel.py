@@ -4,11 +4,13 @@ import queue
 import threading
 import time
 import traceback
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import msgspec.msgpack
 import zmq
 
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
@@ -24,20 +26,19 @@ class EngineCoreSentinel(BaseSentinel):
 
     def __init__(
         self,
+        parallel_config: ParallelConfig,
         engine_index: int,
-        fault_signal_q: queue.Queue,
         engine_fault_socket_addr: str,
         sentinel_identity: bytes,
-        vllm_config: VllmConfig,
     ):
         self.engine_index = engine_index
         super().__init__(
-            sentinel_tag=f"DP_{engine_index}",
-            vllm_config=vllm_config,
-            identity=sentinel_identity,
+            parallel_config,
+            f"DP_{engine_index}",
+            sentinel_identity,
         )
 
-        self.fault_signal_q = fault_signal_q
+        self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
 
         # Client <-> EngineCoreSentinel sockets
         self.engine_fault_socket = make_zmq_socket(
@@ -81,13 +82,17 @@ class EngineCoreSentinel(BaseSentinel):
         super().shutdown()
 
 
-def busy_loop_wrapper(busy_loop_func):
+if TYPE_CHECKING:
+    from vllm.v1.engine.core import EngineCoreProc
+
+
+def fault_tolerant_wrapper(busy_loop_func: Callable):
     """
     Wrap the busy loop function to perform fault tolerance.
     """
     from vllm.v1.engine.core import logger
 
-    def run_with_fault_tolerance(self):
+    def run_with_fault_tolerance(self: "EngineCoreProc"):
         while True:
             try:
                 busy_loop_func(self)
@@ -95,7 +100,7 @@ def busy_loop_wrapper(busy_loop_func):
                 raise
             except Exception as original_exc:
                 if self.enable_fault_tolerance:
-                    self.fault_signal_q.put(original_exc)
+                    self.engine_core_sentinel.fault_signal_q.put(original_exc)
                     logger.warning(
                         "[BusyLoopWrapper] EngineCore busy loop raised a %s exception.",
                         type(original_exc).__name__,

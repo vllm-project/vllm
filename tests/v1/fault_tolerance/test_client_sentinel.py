@@ -6,26 +6,11 @@ import msgspec.msgpack
 import pytest
 import zmq
 
-from vllm.config import FaultToleranceConfig, VllmConfig
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.client_sentinel import ClientSentinel
 from vllm.v1.fault_tolerance.utils import FaultInfo
 
 pytestmark = pytest.mark.skip_global_cleanup
-
-
-@pytest.fixture
-def mock_vllm_config():
-    """Create mock VllmConfig object"""
-    config = Mock(spec=VllmConfig)
-    config.parallel_config = Mock(
-        data_parallel_index=0,
-        data_parallel_size=2,
-        data_parallel_size_local=2,
-        local_engines_only=False,
-    )
-    config.fault_tolerance_config = FaultToleranceConfig(engine_recovery_timeout_sec=10)
-    return config
 
 
 @pytest.fixture
@@ -38,7 +23,7 @@ def mock_ft_addresses():
 
 
 @pytest.fixture
-def client_sentinel(mock_vllm_config, mock_ft_addresses):
+def client_sentinel(mock_parallel_config, mock_ft_addresses):
     """Create ClientSentinel fixture with mocked sockets."""
     fault_receiver_socket = AsyncMock()
     fault_state_pub_socket = AsyncMock()
@@ -62,7 +47,7 @@ def client_sentinel(mock_vllm_config, mock_ft_addresses):
         mock_create_task.side_effect = _capture_task
         shutdown_callback = AsyncMock()
         sentinel = ClientSentinel(
-            vllm_config=mock_vllm_config,
+            parallel_config=mock_parallel_config,
             fault_tolerance_addresses=mock_ft_addresses,
             shutdown_callback=shutdown_callback,
         )

@@ -106,7 +106,7 @@ def make_engine_down_report_socket(vllm_config):
     zmq_addr = get_engine_client_zmq_addr(
         local_only=False,
         host=vllm_config.parallel_config.data_parallel_master_ip,
-        port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+        port=vllm_config.parallel_config.fault_tolerance_config.internal_fault_report_port,
     )
     engine_down_socket = make_zmq_socket(
         ctx=zmq_ctx,
