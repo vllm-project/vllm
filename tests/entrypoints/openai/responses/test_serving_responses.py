@@ -34,8 +34,10 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
+    ResponseRawMessageAndToken,
     ResponsesRequest,
     ResponsesResponse,
+    serialize_message,
 )
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
@@ -79,6 +81,16 @@ class MockConversationContext(ConversationContext):
 
     async def cleanup_session(self) -> None:
         pass
+
+
+def test_serialize_message_pydantic_model_returns_dict() -> None:
+    msg = ResponseRawMessageAndToken(message="hello", tokens=[1, 2, 3])
+
+    serialized = serialize_message(msg)
+
+    assert isinstance(serialized, dict)
+    assert serialized["type"] == "raw_message_tokens"
+    assert serialized["message"] == "hello"
 
 
 @pytest.fixture
