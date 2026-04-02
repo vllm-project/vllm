@@ -499,9 +499,7 @@ class CheersMultiModalProcessor(BaseMultiModalProcessor[CheersProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        return super()._call_hf_processor(
-            prompt, mm_data, mm_kwargs, tok_kwargs
-        )
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     def _hf_processor_applies_updates(
         self,
