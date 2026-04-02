@@ -27,9 +27,7 @@ class WorkerSentinel(BaseSentinel):
         tp_rank = get_tp_group().rank_in_group
         pp_rank = get_pp_group().rank_in_group
         identity_str = f"PP{pp_rank}_TP{tp_rank}"
-        super().__init__(
-            parallel_config, f"{dp_rank}_{identity_str}", identity_str.encode()
-        )
+        super().__init__(f"{dp_rank}_{identity_str}", identity_str.encode())
         self.device = device
         torch.accelerator.set_device_index(self.device)
 

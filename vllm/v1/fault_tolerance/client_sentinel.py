@@ -10,7 +10,11 @@ from vllm.config import ParallelConfig
 from vllm.utils.network_utils import close_sockets, make_zmq_socket
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
-from vllm.v1.fault_tolerance.utils import FaultInfo, FaultToleranceZmqAddresses
+from vllm.v1.fault_tolerance.utils import (
+    FAULT_STATE_PUB_TOPIC,
+    FaultInfo,
+    FaultToleranceZmqAddresses,
+)
 
 
 class ClientSentinel(BaseSentinel):
@@ -31,7 +35,8 @@ class ClientSentinel(BaseSentinel):
         fault_tolerance_addresses: FaultToleranceZmqAddresses,
         shutdown_callback: Callable,
     ):
-        super().__init__(parallel_config, None, b"client_sentinel")
+        super().__init__(None, b"client_sentinel")
+        self.ft_config = parallel_config.fault_tolerance_config
         self.ctx_async = zmq.asyncio.Context()
         self.instance_shutdown_callback = shutdown_callback
         self.sentinel_dead = False
@@ -56,11 +61,11 @@ class ClientSentinel(BaseSentinel):
             bind=True,
         )
 
-        self.start_rank = self.parallel_config.data_parallel_index
-        dp_size = self.parallel_config.data_parallel_size
-        dp_local_size = self.parallel_config.data_parallel_size_local
+        self.start_rank = parallel_config.data_parallel_index
+        dp_size = parallel_config.data_parallel_size
+        dp_local_size = parallel_config.data_parallel_size_local
         num_dp_managed = (
-            dp_local_size if self.parallel_config.local_engines_only else dp_size
+            dp_local_size if parallel_config.local_engines_only else dp_size
         )
         self.engine_status_dict: dict[int, dict[str, str]] = {
             engine_index: {"status": "healthy"}
@@ -77,7 +82,7 @@ class ClientSentinel(BaseSentinel):
                 for i, status in engine_status.items()
             ],
         }
-        topic = self.ft_config.fault_state_pub_topic.encode()
+        topic = FAULT_STATE_PUB_TOPIC.encode()
         await self.fault_state_pub_socket.send_multipart(
             (topic, msgspec.msgpack.encode(pub_msg))
         )
