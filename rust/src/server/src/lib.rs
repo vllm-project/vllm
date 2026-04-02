@@ -18,6 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use futures::FutureExt as _;
+use socket2::Socket;
 use tokio::net::TcpListener;
 use tracing::info;
 use vllm_chat::{ChatLlm, load_model_backends};
@@ -87,7 +88,7 @@ where
         result = build_state(&config) => result?,
         _ = shutdown.clone() => return Ok(()),
     };
-    let listener = bind_listener(&config.listener_mode)?;
+    let listener = bind_listener(&config.listener_mode).await?;
     let bind_address = listener.local_addr()?;
     let model = state.model_id.clone();
     let app = build_router(state.clone());
@@ -102,20 +103,23 @@ where
 }
 
 /// Construct the Tokio listener that matches the configured listener acquisition strategy.
-fn bind_listener(mode: &HttpListenerMode) -> Result<TcpListener> {
+async fn bind_listener(mode: &HttpListenerMode) -> Result<TcpListener> {
     match mode {
         HttpListenerMode::Bind { host, port } => {
-            let listener = StdTcpListener::bind((host.as_str(), *port))?;
-            listener.set_nonblocking(true)?;
-            Ok(TcpListener::from_std(listener)?)
+            Ok(TcpListener::bind((host.as_str(), *port)).await?)
         }
         HttpListenerMode::InheritedFd { fd } => {
             // SAFETY: We trust the caller to only pass valid listener fds, and we only use this fd
             // once to create a single `TcpListener`.
             let owned_fd = unsafe { OwnedFd::from_raw_fd(*fd) };
-            let listener = StdTcpListener::from(owned_fd);
-            listener.set_nonblocking(true)?;
-            Ok(TcpListener::from_std(listener)?)
+            let socket = Socket::from(owned_fd);
+            // The Python supervisor pre-binds the socket to reserve the port early, but Rust is
+            // responsible for transitioning inherited TCP sockets into the listening state before
+            // accepting connections.
+            socket.listen(libc::SOMAXCONN)?;
+            socket.set_nonblocking(true)?;
+            let std_listener = StdTcpListener::from(socket);
+            Ok(TcpListener::from_std(std_listener)?)
         }
     }
 }
