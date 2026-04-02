@@ -20,7 +20,6 @@ from vllm.beam_search import (
     _check_early_stop_heuristic,
     _flatten_beam_dim,
     _get_running_beams_for_next_iteration,
-    _get_token_prompts,
     _get_top_k_continuations,
     _unflatten_beam_dim,
     _update_finished_beams,
@@ -724,7 +723,8 @@ class LLM:
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
             use_tqdm: Whether to use tqdm to display the progress bar.
-            concurrency_limit: Not used
+            concurrency_limit: The maximum number of concurrent requests.
+                If None, the number of concurrent requests is unlimited.
         """
         tokenizer = self.get_tokenizer()
 
@@ -753,9 +753,17 @@ class LLM:
         )
         device = "cpu"  # use tensor on cpu
         batch_size = len(prompts)
-        beam_lora_requests = self._get_beam_search_lora_requests(
-            lora_request, prompts, num_beams
-        )
+        lora_requests = self._lora_request_to_seq(lora_request, len(prompts) * num_beams)
+
+        if use_tqdm and concurrency_limit is not None:
+            logger.warning(
+                "Progress bar is not supported when using concurrency_limit. "
+                "Disabling progress bar."
+            )
+            use_tqdm = False
+
+        if concurrency_limit is None:
+            concurrency_limit = len(prompts) * num_beams
 
         # At each beam search step, we want to keep top K
         # [K = (number of EOS tokens + 1) * `num_beams`] candidates # with the
@@ -860,6 +868,12 @@ class LLM:
         beam_indices = running_beam_indices.detach().clone()
 
         # 4. run the generation loop
+        sampling_params = SamplingParams(
+            logprobs=max_logprobs_size,
+            max_tokens=1,
+            temperature=temperature,
+            skip_clone=True,  # Internal beam search, safe to skip clone
+        )
         token_iter = range(cur_len, max_length)
         if not early_stopping and use_tqdm:
             token_iter = tqdm(
@@ -881,14 +895,13 @@ class LLM:
                 if is_first_step
                 else _flatten_beam_dim(running_sequences[:, :, :cur_len])
             )
-            model_inputs = _get_token_prompts(flat_running_sequences, pad_token_id)
-            model_outputs = self.generate(
-                prompts=model_inputs,
-                sampling_params=SamplingParams(
-                    logprobs=max_logprobs_size, max_tokens=1, temperature=temperature
-                ),
+            engine_inputs = self._preprocess_cmpl(flat_running_sequences.tolist())
+            model_outputs = self._render_and_run_requests(
+                prompts=engine_inputs,
+                params=self._params_to_seq(sampling_params, len(engine_inputs)),
+                output_type=RequestOutput,
+                lora_requests=lora_request if is_first_step else lora_requests,
                 use_tqdm=False,
-                lora_request=lora_request if is_first_step else beam_lora_requests,
             )
 
             # b. Compute log probs. Not needed
@@ -994,6 +1007,7 @@ class LLM:
                 score = beam_scores[idx].item() if idx < len(beam_scores) else 0.0
                 batch_outputs.append(
                     BeamSearchSequence(
+                        orig_prompt=prompts[i],
                         text=decoded_texts[idx],
                         logprobs=[],
                         tokens=seq_tokens,
@@ -1001,6 +1015,7 @@ class LLM:
                     )
                 )
             outputs.append(BeamSearchOutput(sequences=batch_outputs))
+
         return outputs
 
     def _preprocess_cmpl(

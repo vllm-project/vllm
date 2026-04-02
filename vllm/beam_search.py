@@ -165,30 +165,6 @@ def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
     return sort_beams_key
 
 
-def _get_token_prompts(tensor: torch.Tensor, pad_token_id: int) -> list[TokensPrompt]:
-    """
-    Vectorized removal of leading padding and returns TokensPrompt list.
-    tensor: [batch*num_beams, seq_len] on the model device (torch.Tensor)
-    """
-    mask = tensor.ne(pad_token_id)
-    any_nonpad = mask.any(dim=1)
-    first_nonpad = torch.where(
-        any_nonpad,
-        mask.float().argmax(dim=1),
-        torch.full(
-            (tensor.size(0),), tensor.size(1), device=tensor.device, dtype=torch.long
-        ),
-    )
-
-    result_prompts = []
-    for i in range(tensor.size(0)):
-        start = int(first_nonpad[i].item())
-        # all-pads -> empty sequence
-        processed = [] if start >= tensor.size(1) else tensor[i, start:].tolist()
-        result_prompts.append(TokensPrompt(prompt_token_ids=processed))
-    return result_prompts
-
-
 def _flatten_beam_dim(tensor: torch.Tensor) -> torch.Tensor:
     """[batch_size, num_beams, ...] -> [batch_size * num_beams, ...]"""
     shape = list(tensor.shape)
