@@ -139,7 +139,7 @@ steps:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
   commands:
-    - pip install helion
+    - pip install helion==0.3.3
     - pytest -v -s kernels/helion/
 
  
