@@ -16,8 +16,13 @@ anyhow.workspace = true
 clap.workspace = true
 educe.workspace = true
 futures.workspace = true
+itertools.workspace = true
 libc.workspace = true
 native-tls-vendored = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+thiserror-ext.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["process", "signal"] }
 tracing.workspace = true

@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use educe::Educe;
+use serde::Deserialize;
+use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, CoordinatorMode, HttpListenerMode};
 
@@ -70,21 +72,22 @@ pub enum Command {
 }
 
 /// Runtime arguments shared by the external-engine and managed-engine paths.
-#[derive(Educe, Clone, Args, PartialEq, Eq)]
+#[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
+    #[serde(rename = "model_tag")]
     /// Hugging Face model identifier used both for backend loading and public model ID.
     pub model: String,
-    /// Total number of data-parallel engines expected for this frontend.
-    #[arg(long, visible_alias = "data-parallel-size", default_value_t = 1)]
-    pub engine_count: usize,
+
     /// Maximum time to wait for the expected engines to register on the frontend transport.
     #[arg(
         long = "engine-ready-timeout-secs",
         env = "VLLM_ENGINE_READY_TIMEOUT_S",
-        default_value_t = 300
+        default_value_t = default_engine_ready_timeout_secs()
     )]
+    #[serde(default = "default_engine_ready_timeout_secs")]
     pub engine_ready_timeout_secs: u64,
+
     /// Select the tool call parser depending on the model that you're using.
     /// When not specified, the parser is auto-detected from the model.
     #[arg(long)]
@@ -97,9 +100,11 @@ pub struct SharedRuntimeArgs {
     /// instead of the model's `max_position_embeddings` from `config.json`.
     #[arg(long)]
     pub max_model_len: Option<u32>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet implemented in Rust.
     #[educe(Debug(ignore))]
     #[command(flatten)]
+    #[serde(default, flatten)]
     pub unsupported: UnsupportedArgs,
 }
 
@@ -118,12 +123,13 @@ impl SharedRuntimeArgs {
         listen_fd: i32,
         input_address: String,
         output_address: String,
+        engine_count: usize,
     ) -> Config {
         Config {
             transport_mode: TransportMode::Bootstrapped {
                 input_address,
                 output_address,
-                engine_count: self.engine_count,
+                engine_count,
                 ready_timeout: self.ready_timeout(),
             },
             // TODO: this might be an external Python process once we support it.
@@ -144,12 +150,13 @@ impl SharedRuntimeArgs {
         port: u16,
         handshake_address: String,
         advertised_host: String,
+        engine_count: usize,
     ) -> Config {
         Config {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
-                engine_count: self.engine_count,
+                engine_count,
                 ready_timeout: self.ready_timeout(),
                 local_input_address: None,
                 local_output_address: None,
@@ -162,6 +169,17 @@ impl SharedRuntimeArgs {
             max_model_len: self.max_model_len,
         }
     }
+}
+
+fn default_engine_ready_timeout_secs() -> u64 {
+    300
+}
+
+fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
+    let args: SharedRuntimeArgs = serde_json::from_str(value)
+        .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
+    args.unsupported.check()?;
+    Ok(args)
 }
 
 /// Arguments for running the Rust frontend as a Python-bootstrapped worker.
@@ -177,9 +195,12 @@ pub struct FrontendArgs {
     /// Frontend output PULL socket address that the Python engines will push responses to.
     #[arg(long)]
     pub output_address: String,
+    /// Total number of data-parallel engines expected for this frontend.
+    #[arg(long, default_value_t = 1)]
+    pub engine_count: usize,
 
-    /// Shared frontend arguments.
-    #[command(flatten)]
+    /// Shared frontend arguments as one JSON object.
+    #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
     pub runtime: SharedRuntimeArgs,
 }
 
@@ -190,6 +211,7 @@ impl FrontendArgs {
             self.listen_fd,
             self.input_address,
             self.output_address,
+            self.engine_count,
         )
     }
 }
@@ -228,6 +250,9 @@ pub struct ServeArgs {
         value_parser = clap::value_parser!(u16).range(1..)
     )]
     pub handshake_port: Option<u16>,
+    /// Total number of data-parallel engines to launch.
+    #[arg(long, visible_alias = "data-parallel-size", default_value_t = 1)]
+    pub engine_count: usize,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -259,6 +284,7 @@ impl ServeArgs {
             self.port,
             handshake_address,
             self.handshake_host.clone(),
+            self.engine_count,
         )
     }
 
@@ -275,7 +301,7 @@ impl ServeArgs {
             model: self.runtime.model,
             handshake_host: self.handshake_host,
             handshake_port,
-            engine_count: self.runtime.engine_count,
+            engine_count: self.engine_count,
             python_args,
         }
     }
