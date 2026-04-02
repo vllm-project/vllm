@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from tests.utils import create_new_process_for_each_test
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
@@ -31,7 +33,7 @@ class SimpleMLP(nn.Module):
         self.fc1 = nn.Linear(10, 10)
         self.fc2 = nn.Linear(10, 10)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(self.fc1(x))
 
 
@@ -272,10 +274,17 @@ class TestCUDAGraphWrapper:
         self.model = SimpleMLP().to("cuda")
         self.persistent_input_buffer = torch.zeros(1, 10, device="cuda")
         self.input_tensor = torch.randn(1, 10, device="cuda")
+        # Use a fresh isolated pool per test to avoid stale pool handles
+        # across test runs (pool is freed when all its graphs are released).
+        self.graph_pool = torch.cuda.graph_pool_handle()
 
     def test_capture_and_replay(self):
+        """Graph is captured exactly once and subsequent calls replay it."""
         wrapper = CUDAGraphWrapper(
-            self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+            self.model,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            graph_pool=self.graph_pool,
         )
         batch_descriptor = BatchDescriptor(num_tokens=10)
 
@@ -306,6 +315,7 @@ class TestCUDAGraphWrapper:
         assert batch_descriptor in wrapper.concrete_cudagraph_entries
         entry = wrapper.concrete_cudagraph_entries[batch_descriptor]
         assert entry.cudagraph is not None
+        assert entry.input_addresses == [self.input_tensor.data_ptr()]
 
         # 2. Replay
         with (
@@ -326,47 +336,240 @@ class TestCUDAGraphWrapper:
         eager_output = self.model(self.input_tensor)
         torch.testing.assert_close(eager_output, output2)
 
-    def test_bypass_on_mode_mismatch(self):
+    @pytest.mark.parametrize(
+        "bypass_mode",
+        [
+            pytest.param(CUDAGraphMode.PIECEWISE, id="mode_mismatch"),
+            pytest.param(CUDAGraphMode.NONE, id="mode_none"),
+            pytest.param(None, id="no_forward_context"),
+        ],
+    )
+    def test_bypass(self, bypass_mode):
+        """Wrapper falls back to eager execution without capture when bypassed."""
         wrapper = CUDAGraphWrapper(
-            self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+            self.model,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            graph_pool=self.graph_pool,
         )
         batch_descriptor = BatchDescriptor(num_tokens=10)
-
-        with (
+        fwd_ctx = (
             set_forward_context(
                 attn_metadata=None,
                 vllm_config=self.vllm_config,
-                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                cudagraph_runtime_mode=bypass_mode,
                 batch_descriptor=batch_descriptor,
-            ),
+            )
+            if bypass_mode is not None
+            else contextlib.nullcontext()
+        )
+        with (
+            fwd_ctx,
             patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
             patch.object(
                 self.model, "forward", wraps=self.model.forward
             ) as mock_forward,
         ):
-            wrapper(self.input_tensor)
+            output = wrapper(self.input_tensor)
             mock_cuda_graph.assert_not_called()
             mock_forward.assert_called_once()
         assert not wrapper.concrete_cudagraph_entries
+        # Output should match eager execution
+        torch.testing.assert_close(self.model(self.input_tensor), output)
 
-    def test_bypass_on_mode_none(self):
+    def test_compilation_counter_incremented_on_capture_only(self):
+        """compilation_counter increments exactly once on capture,
+        not on warmup/replay/bypass."""
         wrapper = CUDAGraphWrapper(
-            self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+            self.model,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            graph_pool=self.graph_pool,
         )
         batch_descriptor = BatchDescriptor(num_tokens=10)
 
+        # 0. Warmup (NONE mode) — counter must not change
+        before = compilation_counter.num_cudagraph_captured
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ):
+            wrapper(self.input_tensor)
+        assert compilation_counter.num_cudagraph_captured == before
+
+        # 1. Capture — counter must increase by 1
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=batch_descriptor,
+        ):
+            wrapper(self.input_tensor)
+        assert compilation_counter.num_cudagraph_captured == before + 1
+
+        # 2. Replay — counter must NOT change
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=batch_descriptor,
+        ):
+            wrapper(self.input_tensor)
+        assert compilation_counter.num_cudagraph_captured == before + 1
+
+        # 3. Bypass (NONE mode again) — counter must NOT change
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=batch_descriptor,
+        ):
+            wrapper(self.input_tensor)
+        assert compilation_counter.num_cudagraph_captured == before + 1
+
+    def test_recapture_after_clear_graphs(self):
+        """After clear_graphs(), the same batch descriptor triggers a fresh capture."""
+        wrapper = CUDAGraphWrapper(
+            self.model,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            graph_pool=self.graph_pool,
+        )
+        batch_descriptor = BatchDescriptor(num_tokens=10)
+
+        # 0. Warmup + capture
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ):
+            wrapper(self.input_tensor)
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=batch_descriptor,
+        ):
+            wrapper(self.input_tensor)
+        original_graph = wrapper.concrete_cudagraph_entries[batch_descriptor].cudagraph
+
+        # 1. Clear graphs
+        wrapper.clear_graphs()
+        assert not wrapper.concrete_cudagraph_entries
+
+        # 2. Recapture — must create a brand-new cudagraph object
         with (
             set_forward_context(
                 attn_metadata=None,
                 vllm_config=self.vllm_config,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
                 batch_descriptor=batch_descriptor,
             ),
             patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
         ):
             wrapper(self.input_tensor)
-            mock_cuda_graph.assert_not_called()
-        assert not wrapper.concrete_cudagraph_entries
+            mock_cuda_graph.assert_called_once()
+        assert (
+            wrapper.concrete_cudagraph_entries[batch_descriptor].cudagraph
+            is not original_graph
+        )
+
+    def test_clear_all_graphs_across_instances(self):
+        """clear_all_graphs() clears graphs from all CUDAGraphWrapper instances."""
+        model_a = SimpleMLP().to("cuda")
+        model_b = SimpleMLP().to("cuda")
+        wrapper_a = CUDAGraphWrapper(
+            model_a,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            graph_pool=self.graph_pool,
+        )
+        wrapper_b = CUDAGraphWrapper(
+            model_b,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            graph_pool=self.graph_pool,
+        )
+        desc_a = BatchDescriptor(num_tokens=4)
+        desc_b = BatchDescriptor(num_tokens=8)
+        input_a = torch.randn(4, 10, device="cuda")
+        input_b = torch.randn(8, 10, device="cuda")
+
+        # Warmup and capture one graph per wrapper
+        for wrapper, inp, desc in [
+            (wrapper_a, input_a, desc_a),
+            (wrapper_b, input_b, desc_b),
+        ]:
+            with set_forward_context(
+                attn_metadata=None,
+                vllm_config=self.vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                batch_descriptor=None,
+            ):
+                wrapper(inp)
+            with set_forward_context(
+                attn_metadata=None,
+                vllm_config=self.vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                batch_descriptor=desc,
+            ):
+                wrapper(inp)
+        assert desc_a in wrapper_a.concrete_cudagraph_entries
+        assert desc_b in wrapper_b.concrete_cudagraph_entries
+
+        # Clear all graphs using the class method and verify both wrappers are cleared
+        CUDAGraphWrapper.clear_all_graphs()
+        assert not wrapper_a.concrete_cudagraph_entries
+        assert not wrapper_b.concrete_cudagraph_entries
+
+    def test_debug_mode_replay_address_mismatch(self):
+        """Debug mode raises AssertionError on input address mismatch during replay."""
+        wrapper = CUDAGraphWrapper(
+            self.model,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            graph_pool=self.graph_pool,
+        )
+        wrapper.is_debugging_mode = True
+        batch_descriptor = BatchDescriptor(num_tokens=10)
+
+        # 0. Warmup
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ):
+            wrapper(self.input_tensor)
+
+        # 1. Capture — records self.input_tensor's data_ptr()
+        with set_forward_context(
+            attn_metadata=None,
+            vllm_config=self.vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=batch_descriptor,
+        ):
+            wrapper(self.input_tensor)
+
+        # 2. Replay with a different tensor (different address) → AssertionError
+        different_tensor = torch.randn(1, 10, device="cuda")
+        assert different_tensor.data_ptr() != self.input_tensor.data_ptr()
+
+        with (
+            pytest.raises(
+                AssertionError, match="Input addresses for cudagraphs are different"
+            ),
+            set_forward_context(
+                attn_metadata=None,
+                vllm_config=self.vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                batch_descriptor=batch_descriptor,
+            ),
+        ):
+            wrapper(different_tensor)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
