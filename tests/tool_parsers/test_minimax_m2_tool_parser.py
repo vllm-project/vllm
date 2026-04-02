@@ -198,6 +198,17 @@ class TestToolCallNonStreaming:
                 "template_processor",
                 {"template_content": "<div>content</div>"},
             ),
+            pytest.param(
+                (
+                    "<minimax:tool_call>\n"
+                    '<invoke name="whitespace_test">\n'
+                    '<parameter name = "city">Seattle</parameter>\n'
+                    '<parameter name="date" >2000-01-01</parameter>\n'
+                    "</invoke>\n</minimax:tool_call>"
+                ),
+                "whitespace_test",
+                {"city": "Seattle", "date": "2000-01-01"},
+            ),
         ],
     )
     def test_tool_call(self, parser, model_output, expected_name, expected_args):

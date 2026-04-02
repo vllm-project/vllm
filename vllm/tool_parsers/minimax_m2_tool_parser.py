@@ -50,6 +50,13 @@ class MinimaxM2ToolParser(ToolParser):
         self.invoke_complete_regex = re.compile(
             r"<invoke name=(.*?)</invoke>", re.DOTALL
         )
+        self.parameter_tag_pattern = re.compile(
+            r"<parameter\s+name\s*=\s*"  # Allow whitespace around =
+            r'(?:"([^"]*)"|'  # double quotes (group 1)
+            r"'([^']*)'|"  # single quotes (group 2)
+            r"([^\s>]+))"  # unquoted (group 3)
+            r"\s*>"
+        )
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -99,14 +106,18 @@ class MinimaxM2ToolParser(ToolParser):
         """
         results: list[tuple[str, str]] = []
 
-        param_tag_pattern = re.compile(r"<parameter\s+name=([\"'])(.*?)\1>")
-        param_tag_matches = list(param_tag_pattern.finditer(invoke_str))
+        param_tag_matches = list(self.parameter_tag_pattern.finditer(invoke_str))
 
         if not param_tag_matches:
             return results
 
         for current_param_idx, current_match in enumerate(param_tag_matches):
-            param_name = current_match.group(2)
+            # Extract name from one of the three capture groups
+            param_name = (
+                current_match.group(1)
+                or current_match.group(2)
+                or current_match.group(3)
+            )
             param_value_start_pos = current_match.end()
 
             if current_param_idx + 1 < len(param_tag_matches):
@@ -114,8 +125,11 @@ class MinimaxM2ToolParser(ToolParser):
             else:
                 next_param_start_pos = len(invoke_str)
 
-            text_before_next_param = invoke_str[:next_param_start_pos]
-            closing_tag_pos = text_before_next_param.rfind("</parameter>")
+            # Search for </parameter> only within the current parameter's range
+            # to avoid incorrectly matching a previous parameter's closing tag
+            closing_tag_pos = invoke_str.rfind(
+                "</parameter>", param_value_start_pos, next_param_start_pos
+            )
 
             if closing_tag_pos == -1:
                 continue
