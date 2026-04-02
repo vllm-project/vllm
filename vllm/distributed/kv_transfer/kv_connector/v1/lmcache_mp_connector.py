@@ -29,8 +29,10 @@ try:
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
     )
+    from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
 except ImportError:
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+        RequestAllocationRecord,
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
@@ -1019,7 +1021,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         For new requests: all allocated_block_ids and token_ids are new.
         For cached requests: only newly appended block_ids and token_ids.
         """
-        records: list[dict] = []
+        records: list[RequestAllocationRecord] = []
 
         # New requests: full allocation is the delta
         for new_request in scheduler_output.scheduled_new_reqs:
@@ -1029,13 +1031,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             num_new_tokens = scheduler_output.num_scheduled_tokens[
                 new_request.req_id
             ]
-            records.append({
-                "req_id": new_request.req_id,
-                "new_block_ids": list(tracker.allocated_block_ids),
-                "new_token_ids": list(
+            records.append(RequestAllocationRecord(
+                req_id=new_request.req_id,
+                new_block_ids=list(tracker.allocated_block_ids),
+                new_token_ids=list(
                     tracker.all_token_ids[:num_new_tokens]
                 ),
-            })
+            ))
 
         # Cached requests: only the newly added blocks and tokens
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -1056,11 +1058,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                     total_tokens - num_new_tokens : total_tokens
                 ]
             ) if num_new_tokens > 0 else []
-            records.append({
-                "req_id": request_id,
-                "new_block_ids": new_block_ids,
-                "new_token_ids": new_token_ids,
-            })
+            records.append(RequestAllocationRecord(
+                req_id=request_id,
+                new_block_ids=new_block_ids,
+                new_token_ids=new_token_ids,
+            ))
 
         if records:
             self.scheduler_adapter.report_block_allocations(records)
