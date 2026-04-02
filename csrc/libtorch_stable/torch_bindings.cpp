@@ -275,9 +275,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                 Tensor cos_sin_cache, bool is_neox, int "
       "rope_dim_offset=0, bool inverse=False) -> ()");
 
+  // Function for fused QK Norm and RoPE
+  ops.def(
+      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
+      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
+      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
+      "bool is_neox, Tensor position_ids, "
+      "int forced_token_heads_per_warp=-1) -> ()");
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
 
   // SwiGLU activation with input clamping.
@@ -426,6 +435,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
+  ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));

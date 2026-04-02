@@ -107,15 +107,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
-  // Function for fused QK Norm and RoPE
-  ops.def(
-      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
-      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
-      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
-      "bool is_neox, Tensor position_ids, "
-      "int forced_token_heads_per_warp=-1) -> ()");
-  ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
-
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
   // kernel launch.
