@@ -457,7 +457,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "Param2MoEForCausalLM": _HfExamplesInfo(
-        "bharatgenai/Param2-17B-A2.4B-Thinking",  
+        "bharatgenai/Param2-17B-A2.4B-Thinking",
         trust_remote_code=True,
     ),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
