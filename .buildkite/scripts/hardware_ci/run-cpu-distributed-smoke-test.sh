@@ -3,9 +3,10 @@ set -euox pipefail
 export VLLM_CPU_CI_ENV=0
 export VLLM_CPU_KVCACHE_SPACE=1 # avoid OOM
 
-echo "--- PP+TP"
 NUMA_COUNT=$(find /sys/devices/system/node -maxdepth 1 -name "node[0-9]*" 2>/dev/null | wc -l || true)
 echo "System Check: Found $NUMA_COUNT NUMA node(s)."
+
+echo "--- PP+TP"
 
 if [ "$NUMA_COUNT" -lt 4 ]; then
     echo "Warning: NUMA count ($NUMA_COUNT) is less than 4. Skipping vLLM server startup."
@@ -30,8 +31,6 @@ else
     fi
 fi
 echo "--- DP+TP"
-NUMA_COUNT=$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l)
-echo "System Check: Found $NUMA_COUNT NUMA node(s)."
 
 if [ "$NUMA_COUNT" -lt 4 ]; then
     echo "Warning: NUMA count ($NUMA_COUNT) is less than 4. Skipping vLLM server startup."
