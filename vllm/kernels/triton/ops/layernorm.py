@@ -75,12 +75,12 @@ direct_register_custom_op(
 def rms_norm_gated(
     x: Tensor,
     weight: Tensor,
-    bias: Tensor,
+    bias: Tensor | None,
     z: Tensor | None,
     epsilon: float,
     group_size: int | None = None,
     norm_before_gate: bool = False,
-    activation: str = "",
+    activation: str = "swish",
 ) -> Tensor:
     return torch.ops.vllm.rms_norm_gated_triton(
         x, weight, bias, z, epsilon, group_size, norm_before_gate, activation

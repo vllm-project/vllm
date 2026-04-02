@@ -27,21 +27,29 @@ def rms_norm(
 def rms_norm_gated(
     x: torch.Tensor,
     weight: Tensor,
-    bias: Tensor,
+    bias: Tensor | None,
     z: torch.Tensor | None,
     epsilon: float,
     group_size: int | None = None,
     norm_before_gate: bool = False,
-    activation: str = "",
+    activation: str = "swish",
 ) -> Tensor:
     orig_dtype = x.dtype
     x = x.float()
     weight = weight.float()
+    bias = bias.float() if bias is not None else None
     z = z.float() if z is not None else None
+
+    def apply_gate(input_tensor: Tensor, gate_tensor: Tensor) -> Tensor:
+        if activation in ("swish", "silu"):
+            return input_tensor * F.silu(gate_tensor)
+        if activation == "sigmoid":
+            return input_tensor * torch.sigmoid(gate_tensor)
+        return input_tensor
 
     # Apply gating before normalization if needed
     if z is not None and not norm_before_gate:
-        x = x * F.silu(z)
+        x = apply_gate(x, z)
 
     # RMS Normalization
     if group_size is None:
@@ -59,8 +67,11 @@ def rms_norm_gated(
         x_normed = x_group * torch.rsqrt(variance + epsilon)
         out = rearrange(x_normed, "... g d -> ... (g d)") * weight
 
+    if bias is not None:
+        out = out + bias
+
     # Apply gating after normalization if needed
     if z is not None and norm_before_gate:
-        out = out * F.silu(z)
+        out = apply_gate(out, z)
 
     return out.to(orig_dtype)
