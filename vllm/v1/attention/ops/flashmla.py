@@ -151,16 +151,3 @@ def flash_mla_with_kvcache_fp8(
         descale_k,
     )
     return out, softmax_lse
-
-
-#
-# TODO: Add fake functions
-#
-# @register_fake("_flashmla_C::get_mla_metadata")
-# def _get_mla_metadata_fake(....) -> Tuple[torch.Tensor, torch.Tensor]:
-#     return ....
-#
-# @register_fake("_flashmla_C::fwd_kvcache_mla")
-# def _fwd_kvcache_mla_fake(....) -> Tuple[torch.Tensor, torch.Tensor]:
-#     return ....
-#
