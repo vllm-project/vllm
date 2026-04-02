@@ -1793,16 +1793,16 @@ class NixlConnectorWorker:
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
 
-    def _register_mamba_local(
+    def _build_mamba_local(
         self,
-        blocks_data: list[tuple[int, int, int]],
         base_addresses: list[int],
         block_size_ratio: int,
-    ):
-        """Register 4 desc regions (x, B, C, ssm) per layer for local mamba
+    ) -> list[tuple[int, int, int]]:
+        """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
         blocks, enabling the 3-read transfer with DS conv layout."""
         assert block_size_ratio == 1, (
-            f"HMA does not support block_size_ratio != 1; got {block_size_ratio}"
+            "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
+            f"Got block_size_ratio={block_size_ratio}."
         )
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets
@@ -1810,39 +1810,45 @@ class NixlConnectorWorker:
         num_blocks = self._logical_num_blocks * block_size_ratio
         phys_ratio = self._physical_blocks_per_logical_kv_block
 
+        result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
             page_stride = self.block_len_per_layer[i] // block_size_ratio * phys_ratio
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
-                    blocks_data.append(
+                    result.append(
                         (base_addr + blk * page_stride + off, sz, self.device_id)
                     )
             # SSM temporal state follows the conv state.
             for blk in range(num_blocks):
-                blocks_data.append(
+                result.append(
                     (
                         base_addr + blk * page_stride + conv_size,
                         ssm_size,
                         self.device_id,
                     )
                 )
+        return result
 
-    def _register_fa_remote_for_mamba(
+    def _build_fa_remote_for_mamba(
         self,
-        blocks_data: list[tuple[int, int, int]],
         nixl_agent_meta: NixlAgentMetadata,
         transfer_cfg: HeteroTPTransferConfig,
         block_size_ratio: int,
         kv_topo: TpKVTopology,
-    ):
-        """Register remote FA descriptors for mamba models.
+    ) -> list[tuple[int, int, int]]:
+        """Build remote FA descriptors for mamba models.
 
         Uses transfer_cfg for GQA-aware FA divisor and head-based rank offset
         instead of the standard uniform tp_ratio split.
         """
+        assert block_size_ratio == 1, (
+            "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
+            f"Got block_size_ratio={block_size_ratio}."
+        )
         # TODO (ZhanqiuHu): unify with register_remote_blocks when Mamba-HMA
         # hetero-TP logic stabilizes.
         tp_ratio = transfer_cfg.tp_ratio
+        result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             local_block_len = self.get_backend_aware_kv_block_len(
                 layer_idx=i, first_split=True, mamba_view=False
@@ -1861,7 +1867,7 @@ class NixlConnectorWorker:
             for block_id in range(num_blocks):
                 block_offset = block_id * page_size
                 addr = base_addr + block_offset + rank_offset
-                blocks_data.append((addr, local_block_len, nixl_agent_meta.device_id))
+                result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
             if kv_topo.is_kv_layout_blocks_first:
                 second_split = self.get_backend_aware_kv_block_len(
@@ -1873,17 +1879,15 @@ class NixlConnectorWorker:
                     block_offset = block_id * page_size
                     addr = base_addr + block_offset + rank_offset
                     v_addr = addr + nixl_agent_meta.block_lens[i] // 2
-                    blocks_data.append(
-                        (v_addr, second_split, nixl_agent_meta.device_id)
-                    )
+                    result.append((v_addr, second_split, nixl_agent_meta.device_id))
+        return result
 
-    def _register_mamba_remote(
+    def _build_mamba_remote(
         self,
-        blocks_data: list[tuple[int, int, int]],
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
-    ):
-        """Register 4 remote desc regions (x, B, C, ssm) per layer for
+    ) -> list[tuple[int, int, int]]:
+        """Build 4 remote desc regions (x, B, C, ssm) per layer for
         the 3-read transfer.  For hetero-TP, each D rank reads only its
         sub-projection slice from the P rank."""
         assert self._conv_decomp is not None
@@ -1913,15 +1917,14 @@ class NixlConnectorWorker:
         num_blocks = nixl_agent_meta.num_blocks // remote_ratio
         device_id = nixl_agent_meta.device_id
 
+        result: list[tuple[int, int, int]] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             page_stride = nixl_agent_meta.block_lens[i] * remote_ratio
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
-                    blocks_data.append(
-                        (base_addr + blk * page_stride + off, sz, device_id)
-                    )
+                    result.append((base_addr + blk * page_stride + off, sz, device_id))
             # SSM temporal state is also TP-sharded on the heads dimension.
             for blk in range(num_blocks):
                 ssm_addr = (
@@ -1930,7 +1933,8 @@ class NixlConnectorWorker:
                     + conv_size_remote
                     + local_offset * ssm_read_size
                 )
-                blocks_data.append((ssm_addr, ssm_read_size, device_id))
+                result.append((ssm_addr, ssm_read_size, device_id))
+        return result
 
     def register_local_xfer_handler(
         self,
@@ -2001,7 +2005,7 @@ class NixlConnectorWorker:
             )
 
         # NOTE (ZhanqiuHu): mamba=True path in register_blocks is not used
-        # right now — we use _register_mamba_local instead for the 3-read
+        # right now — we use _build_mamba_local instead for the 3-read
         # approach. However, we might still need this as a fallback for homogeneous TP.
         register_blocks(blocks_data, mamba=False)
         if self._has_mamba:
@@ -2013,8 +2017,8 @@ class NixlConnectorWorker:
             # remote has been seen.  Currently we always register 4 regions
             # because local descs are created before knowing the remote TP.
             logger.debug("Registering local Mamba descriptors (4 regions/layer)")
-            self._register_mamba_local(
-                blocks_data, local_base_addresses, block_size_ratio
+            blocks_data.extend(
+                self._build_mamba_local(local_base_addresses, block_size_ratio)
             )
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -2200,6 +2204,8 @@ class NixlConnectorWorker:
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
 
         # Register all remote blocks, but only the corresponding kv heads.
+        # TODO (ZhanqiuHu): Refactor to return a list like _build_*_remote
+        # instead of mutating blocks_data in-place.
         def register_remote_blocks(
             blocks_data: list[tuple[int, int, int]], mamba: bool
         ):
@@ -2278,17 +2284,19 @@ class NixlConnectorWorker:
             # plus mamba 3-read registration.
             transfer_cfg = self._transfer_configs.get(engine_id)
             assert transfer_cfg is not None
-            self._register_fa_remote_for_mamba(
-                blocks_data,
-                nixl_agent_meta,
-                transfer_cfg,
-                block_size_ratio,
-                kv_topo,
+            blocks_data.extend(
+                self._build_fa_remote_for_mamba(
+                    nixl_agent_meta,
+                    transfer_cfg,
+                    block_size_ratio,
+                    kv_topo,
+                )
             )
-            self._register_mamba_remote(
-                blocks_data,
-                nixl_agent_meta,
-                tp_ratio,
+            blocks_data.extend(
+                self._build_mamba_remote(
+                    nixl_agent_meta,
+                    tp_ratio,
+                )
             )
         else:
             register_remote_blocks(blocks_data, mamba=False)
