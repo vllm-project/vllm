@@ -466,6 +466,15 @@ class CompilationConfig:
     disabled when running with Inductor: mode>CompilationMode.NONE and
     backend="inductor".
     Inductor generates (fused) Triton kernels for disabled custom ops."""
+
+    ir_enable_torch_wrap: bool = None  # type: ignore[assignment]
+    """If True, enable vllm_ir torch custom op wrapping during the forward pass.
+    When False, torch custom op wrapping is disabled, allowing Dynamo to trace the
+    selected implementation directly or avoiding torch custom op overhead in eager mode.
+    Defaults to True when using Inductor with vllm-compile
+    (backend=="inductor" and mode == VLLM_COMPILE), False otherwise.
+    """
+
     splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
@@ -486,9 +495,10 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models
-    on selected platforms. Disabled by default until more models
-    are supported/tested to work."""
+    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models on selected
+    platforms. It may also work for models loaded with the Transformers modeling backend
+    if the encoder is compilable. Disabled by default until more models are
+    supported/tested to work."""
 
     # Vision encoder CUDA graph
     cudagraph_mm_encoder: bool = False
@@ -830,6 +840,7 @@ class CompilationConfig:
         "cudagraph_mode",
         "max_cudagraph_capture_size",
         "use_inductor_graph_partition",
+        "ir_enable_torch_wrap",
         mode="wrap",
     )
     @classmethod
