@@ -129,16 +129,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         from aiter import dtypes, get_mla_metadata_info_v1
 
+        _cache_dtype_str = getattr(
+            vllm_config.cache_config, "cache_dtype", "auto"
+        )
+        if is_quantized_kv_cache(_cache_dtype_str):
+            self._metadata_kv_dtype = dtypes.fp8
+        else:
+            self._metadata_kv_dtype = dtypes.bf16
+        self._metadata_q_dtype = self._metadata_kv_dtype
+
         self._num_attention_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        q_dtype = self.decode_attn_out_dtype
-        kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
-        if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
-            kv_cache_dtype_str = "fp8"
-        else:
-            kv_cache_dtype_str = "bf16"
-        kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
         (
             (work_meta_data_size, work_meta_data_type),
             (work_indptr_size, work_indptr_type),
@@ -150,8 +152,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_num_reqs,
             1,
             self._num_attention_heads,
-            q_dtype,
-            kv_dtype,
+            self._metadata_q_dtype,
+            self._metadata_kv_dtype,
             is_sparse=False,
             fast_mode=True,
         )
@@ -264,6 +266,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_seqlen_qo=max_qo_len,
             uni_seqlen_qo=max_qo_len,
             fast_mode=True,
+            dtype_q=self._metadata_q_dtype,
+            dtype_kv=self._metadata_kv_dtype,
+            max_split_per_batch=16,
         )
 
         attn_metadata = AiterMLADecodeMetadata(

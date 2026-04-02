@@ -5355,6 +5355,15 @@ class GPUModelRunner(
             ubatch_slices=ubatch_slices_padded,
         )
 
+        # During dummy runs, slot_mapping contains uninitialized values
+        # (zeros from buffer creation) because no real requests have been
+        # scheduled. Writing FP8 KV data to those slot positions corrupts
+        # the KV cache. Fill the entire slot_mapping with PAD_SLOT_ID (-1)
+        # so that concat_and_cache_mla skips the writes.
+        if slot_mappings_by_group is not None:
+            for sm in slot_mappings_by_group.values():
+                sm.fill_(-1)
+
         # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
         # etc.) with execute_model.  It must participate in the same event
         # protocol so that back-to-back dummy/real steps don't overwrite
