@@ -172,15 +172,9 @@ async fn connect_async_llm_with_ipc(
     ipc: &IpcNamespace,
 ) -> Llm {
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: model_name.to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name(model_name)
+            .with_client_index(client_index),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )

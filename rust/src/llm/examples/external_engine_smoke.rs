@@ -6,7 +6,7 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::{FinishReason, GenerateOutputStream, GenerateRequest, Llm};
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
@@ -106,13 +106,17 @@ async fn main() -> Result<()> {
     let output_timeout = Duration::from_secs(args.output_timeout_secs);
     let request_id = unique_request_id();
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address: args.handshake_address.clone(),
-        engine_count: args.engine_count,
+        transport_mode: TransportMode::HandshakeOwner {
+            handshake_address: args.handshake_address.clone(),
+            advertised_host: args.host.clone(),
+            engine_count: args.engine_count,
+            ready_timeout,
+            local_input_address: None,
+            local_output_address: None,
+        },
+        coordinator_mode: None,
         model_name: args.model.clone(),
-        local_host: args.host.clone(),
-        ready_timeout,
         client_index: args.client_index,
-        enable_inproc_coordinator: false,
     })
     .await
     .context("failed to connect to external vLLM engine")?;

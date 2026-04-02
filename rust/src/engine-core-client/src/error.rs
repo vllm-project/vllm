@@ -49,6 +49,8 @@ pub enum Error {
     UnsupportedCoordinatorEngineId { engine_id: Vec<u8> },
     #[error("unsupported auxiliary frame(s): expected 1 frame, got {frame_count}")]
     UnsupportedAuxFrames { frame_count: usize },
+    #[error("external coordinator mode is not implemented yet")]
+    UnsupportedExternalCoordinator,
     #[error("unsupported field `{field}` in {context}")]
     UnsupportedField {
         context: &'static str,

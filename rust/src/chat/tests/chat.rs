@@ -368,15 +368,7 @@ async fn chat_streams_text_events() {
 
     let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         &ipc,
         backend,
     )

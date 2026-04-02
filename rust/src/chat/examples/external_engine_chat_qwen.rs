@@ -8,7 +8,7 @@ use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatLlm, ChatMessage, ChatOptions,
     ChatRequest, ChatRole, ChatToolChoice, SamplingParams, load_model_backends,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
@@ -56,13 +56,17 @@ async fn main() -> Result<()> {
     let output_timeout = Duration::from_secs(OUTPUT_TIMEOUT_SECS);
     let request_id = unique_request_id();
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address: args.handshake_address.clone(),
-        engine_count: args.engine_count,
+        transport_mode: TransportMode::HandshakeOwner {
+            handshake_address: args.handshake_address.clone(),
+            advertised_host: args.host.clone(),
+            engine_count: args.engine_count,
+            ready_timeout,
+            local_input_address: None,
+            local_output_address: None,
+        },
+        coordinator_mode: None,
         model_name: args.model.clone(),
-        local_host: args.host.clone(),
-        ready_timeout,
         client_index: CLIENT_INDEX,
-        enable_inproc_coordinator: false,
     })
     .await
     .context("failed to connect to external vLLM engine")?;

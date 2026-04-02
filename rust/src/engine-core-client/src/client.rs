@@ -19,24 +19,65 @@ mod stream;
 
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 
+/// How the frontend acquires its request/response transport with Python `EngineCoreProc`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportMode {
+    /// The Rust process owns the startup handshake and allocates or binds the frontend transport
+    /// addresses itself before replying to engine `HELLO` messages.
+    HandshakeOwner {
+        /// Shared handshake endpoint that engines dial during startup.
+        handshake_address: String,
+        /// Host/IP that engines should use to connect back to the frontend transport sockets.
+        advertised_host: String,
+        /// Total number of engines expected to join this transport.
+        engine_count: usize,
+        /// Maximum time to wait for each startup phase to complete.
+        ready_timeout: Duration,
+        /// Optional explicit bind address for the input ROUTER socket.
+        local_input_address: Option<String>,
+        /// Optional explicit bind address for the output PULL socket.
+        local_output_address: Option<String>,
+    },
+
+    /// The Python supervisor has already chosen the frontend transport addresses, and the Rust
+    /// process only needs to bind them and wait for engine registration frames.
+    Bootstrapped {
+        /// Input ROUTER socket address that engines will connect to for requests.
+        input_address: String,
+        /// Output PULL socket address that engines will connect to for responses.
+        output_address: String,
+        /// Total number of engines expected to register on this transport.
+        engine_count: usize,
+        /// Maximum time to wait for all expected engines to register.
+        ready_timeout: Duration,
+    },
+}
+
+/// Which coordinator implementation should be active when one is present for a frontend client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorMode {
+    /// Run the Rust in-process coordinator for managed `serve` deployments.
+    InProc,
+    /// Connect to an external coordinator owned by another process.
+    ///
+    /// This mode is defined now so the transport/config split is explicit, but it is rejected in
+    /// phase 1 until the external control-plane protocol is implemented.
+    External { stats_update_address: String },
+}
+
 /// Configuration for connecting a Rust frontend client to an already running Python
 /// `EngineCoreProc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineCoreClientConfig {
-    /// Startup handshake address used to bootstrap one or more Python engines.
-    pub handshake_address: String,
-    /// Number of engines expected to connect on the shared handshake socket.
-    pub engine_count: usize,
+    /// Frontend-to-engine transport setup.
+    pub transport_mode: TransportMode,
+    /// Frontend-side coordinator behavior, or `None` when requests should flow directly to engines
+    /// without any coordinator involvement.
+    pub coordinator_mode: Option<CoordinatorMode>,
     /// Model name used for frontend-side metrics labels.
     pub model_name: String,
-    /// Local host/interface used when allocating the frontend input/output addresses.
-    pub local_host: String,
-    /// Timeout while waiting for each step of the startup handshake.
-    pub ready_timeout: Duration,
     /// Frontend client index stamped onto every request.
     pub client_index: u32,
-    /// Enable the in-process wave coordinator for single-frontend deployments.
-    pub enable_inproc_coordinator: bool,
 }
 
 impl EngineCoreClientConfig {
@@ -44,14 +85,58 @@ impl EngineCoreClientConfig {
     /// default values for all other fields.
     pub fn new_single(handshake_address: impl Into<String>) -> Self {
         Self {
-            handshake_address: handshake_address.into(),
-            engine_count: 1,
+            transport_mode: TransportMode::HandshakeOwner {
+                handshake_address: handshake_address.into(),
+                advertised_host: "127.0.0.1".to_string(),
+                engine_count: 1,
+                ready_timeout: Duration::from_secs(30),
+                local_input_address: None,
+                local_output_address: None,
+            },
+            coordinator_mode: None,
             model_name: String::new(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(30),
             client_index: 0,
-            enable_inproc_coordinator: false,
         }
+    }
+
+    /// Set the model name used by frontend-side metrics and diagnostics.
+    pub fn with_model_name(mut self, model_name: impl Into<String>) -> Self {
+        self.model_name = model_name.into();
+        self
+    }
+
+    /// Override the client index stamped onto every outgoing request.
+    pub fn with_client_index(mut self, client_index: u32) -> Self {
+        self.client_index = client_index;
+        self
+    }
+
+    /// Override the optional coordinator mode for this client config.
+    pub fn with_coordinator_mode(mut self, coordinator_mode: Option<CoordinatorMode>) -> Self {
+        self.coordinator_mode = coordinator_mode;
+        self
+    }
+
+    /// Override the locally bound input/output addresses for handshake-owned transport mode.
+    ///
+    /// This is primarily used by tests that want deterministic IPC endpoints while still exercising
+    /// the handshake-owned startup path.
+    pub fn with_local_input_output_addresses(
+        mut self,
+        local_input_address: Option<String>,
+        local_output_address: Option<String>,
+    ) -> Self {
+        let TransportMode::HandshakeOwner {
+            local_input_address: current_input,
+            local_output_address: current_output,
+            ..
+        } = &mut self.transport_mode
+        else {
+            panic!("local input/output overrides are only valid in handshake-owned mode");
+        };
+        *current_input = local_input_address;
+        *current_output = local_output_address;
+        self
     }
 }
 
@@ -74,31 +159,84 @@ pub struct EngineCoreClient {
 }
 
 impl EngineCoreClient {
-    /// Connect to an already running Python engine and complete the startup handshake.
+    /// Connect to Python `EngineCoreProc`s using the configured transport/coordinator modes.
+    ///
+    /// In handshake-owned mode this method drives the full engine startup handshake. In
+    /// bootstrapped mode it binds the provided frontend sockets and waits for the expected engine
+    /// registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
-        Self::connect_with_input_output_addresses(config, None, None).await
+        let connected = match &config.transport_mode {
+            TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host,
+                engine_count,
+                ready_timeout,
+                local_input_address,
+                local_output_address,
+            } => {
+                let enable_inproc_coordinator = match config.coordinator_mode {
+                    None => false,
+                    Some(CoordinatorMode::InProc) => true,
+                    Some(CoordinatorMode::External { .. }) => {
+                        return Err(Error::UnsupportedExternalCoordinator);
+                    }
+                };
+
+                transport::connect_handshake(
+                    handshake_address,
+                    *engine_count,
+                    advertised_host,
+                    local_input_address.as_deref(),
+                    local_output_address.as_deref(),
+                    enable_inproc_coordinator,
+                    *ready_timeout,
+                )
+                .await?
+            }
+
+            TransportMode::Bootstrapped {
+                input_address,
+                output_address,
+                engine_count,
+                ready_timeout,
+            } => {
+                match config.coordinator_mode {
+                    None => {}
+                    Some(CoordinatorMode::External { .. }) => {
+                        return Err(Error::UnsupportedExternalCoordinator);
+                    }
+                    Some(CoordinatorMode::InProc) => {
+                        panic!("cannot use in-process coordinator with bootstrapped transport mode")
+                    }
+                }
+
+                transport::connect_bootstrapped(
+                    input_address,
+                    output_address,
+                    *engine_count,
+                    *ready_timeout,
+                )
+                .await?
+            }
+        };
+
+        Self::from_connected(config, connected)
     }
 
-    /// Connect to an already running Python engine and complete the startup handshake, while
-    /// allowing the caller to specify explicit local input/output addresses instead of allocating
-    /// TCP ports on `local_host`.
+    /// Connect using handshake-owned transport mode while overriding the frontend input/output bind
+    /// addresses.
+    ///
+    /// This helper preserves the previous test-facing API shape. It is only valid when
+    /// `config.transport_mode` is `TransportMode::HandshakeOwner`.
+    // TODO: inline this
     pub async fn connect_with_input_output_addresses(
         config: EngineCoreClientConfig,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
     ) -> Result<Self> {
-        let connected = transport::connect(
-            &config.handshake_address,
-            config.engine_count,
-            &config.local_host,
-            local_input_address.as_deref(),
-            local_output_address.as_deref(),
-            config.enable_inproc_coordinator,
-            config.ready_timeout,
-        )
-        .await?;
-
-        Self::from_connected(config, connected)
+        let config =
+            config.with_local_input_output_addresses(local_input_address, local_output_address);
+        Self::connect(config).await
     }
 
     /// Create a new client instance from the connected transport state after the startup handshake

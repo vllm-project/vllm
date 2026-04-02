@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 
 #[derive(Debug, Parser)]
 #[command(about = "Smoke-test EngineCoreClient utility calls against an external vLLM engine.")]
@@ -53,13 +53,17 @@ async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address: args.handshake_address.clone(),
-        engine_count: args.engine_count,
+        transport_mode: TransportMode::HandshakeOwner {
+            handshake_address: args.handshake_address.clone(),
+            advertised_host: args.host.clone(),
+            engine_count: args.engine_count,
+            ready_timeout: Duration::from_secs(args.ready_timeout_secs),
+            local_input_address: None,
+            local_output_address: None,
+        },
+        coordinator_mode: None,
         model_name: args.model.clone(),
-        local_host: args.host.clone(),
-        ready_timeout: Duration::from_secs(args.ready_timeout_secs),
         client_index: args.client_index,
-        enable_inproc_coordinator: false,
     })
     .await
     .context("failed to connect to external vLLM engine")?;

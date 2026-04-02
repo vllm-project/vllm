@@ -24,14 +24,14 @@ fn serve_args_forward_python_flags_with_separator() {
                     ServeArgs {
                         headless: false,
                         python: "../vllm/.venv/bin/python",
+                        host: "127.0.0.1",
+                        port: 8000,
                         handshake_host: "127.0.0.1",
                         handshake_port: None,
                         runtime: SharedRuntimeArgs {
                             model: "Qwen/Qwen3-0.6B",
-                            host: "127.0.0.1",
-                            port: 8000,
                             engine_count: 1,
-                            ready_timeout_secs: 300,
+                            engine_ready_timeout_secs: 300,
                             tool_call_parser: None,
                             reasoning_parser: None,
                             max_model_len: Some(
@@ -175,8 +175,12 @@ fn frontend_args_accept_engine_count() {
         "vllm-rs",
         "frontend",
         "Qwen/Qwen3-0.6B",
-        "--handshake-address",
-        "tcp://127.0.0.1:62100",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
         "--engine-count",
         "2",
     ])
@@ -186,14 +190,13 @@ fn frontend_args_accept_engine_count() {
         Cli {
             command: Frontend(
                 FrontendArgs {
-                    advertised_host: "127.0.0.1",
-                    handshake_address: "tcp://127.0.0.1:62100",
+                    listen_fd: 3,
+                    input_address: "ipc:///tmp/input.sock",
+                    output_address: "ipc:///tmp/output.sock",
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
-                        host: "127.0.0.1",
-                        port: 8000,
                         engine_count: 2,
-                        ready_timeout_secs: 300,
+                        engine_ready_timeout_secs: 300,
                         tool_call_parser: None,
                         reasoning_parser: None,
                         max_model_len: None,
@@ -359,16 +362,16 @@ fn serve_args_accept_handshake_aliases() {
                     ServeArgs {
                         headless: false,
                         python: "python3",
+                        host: "127.0.0.1",
+                        port: 8000,
                         handshake_host: "10.99.48.128",
                         handshake_port: Some(
                             13345,
                         ),
                         runtime: SharedRuntimeArgs {
                             model: "Qwen/Qwen3-0.6B",
-                            host: "127.0.0.1",
-                            port: 8000,
                             engine_count: 4,
-                            ready_timeout_secs: 300,
+                            engine_ready_timeout_secs: 300,
                             tool_call_parser: None,
                             reasoning_parser: None,
                             max_model_len: None,
@@ -406,7 +409,7 @@ fn serve_args_accept_data_parallel_primary_flags() {
 }
 
 #[test]
-fn serve_frontend_config_uses_dp_address_for_both_handshake_and_transport_host() {
+fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
@@ -424,18 +427,39 @@ fn serve_frontend_config_uses_dp_address_for_both_handshake_and_transport_host()
     let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
 
     expect![[r#"
-            Config {
+        Config {
+            transport_mode: HandshakeOwner {
                 handshake_address: "tcp://10.99.48.128:29550",
+                advertised_host: "10.99.48.128",
                 engine_count: 4,
-                model: "Qwen/Qwen3-0.6B",
+                ready_timeout: 300s,
+                local_input_address: None,
+                local_output_address: None,
+            },
+            coordinator_mode: MaybeInProc,
+            model: "Qwen/Qwen3-0.6B",
+            listener_mode: Bind {
                 host: "127.0.0.1",
                 port: 8000,
-                advertised_host: "10.99.48.128",
-                ready_timeout: 300s,
-                tool_call_parser: None,
-                reasoning_parser: None,
-                max_model_len: None,
-            }
-        "#]]
+            },
+            tool_call_parser: None,
+            reasoning_parser: None,
+            max_model_len: None,
+        }
+    "#]]
     .assert_debug_eq(&config);
+}
+
+#[test]
+fn frontend_args_reject_legacy_handshake_flags() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "Qwen/Qwen3-0.6B",
+        "--handshake-address",
+        "tcp://127.0.0.1:62100",
+    ])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("--handshake-address"));
 }

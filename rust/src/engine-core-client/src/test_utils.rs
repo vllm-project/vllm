@@ -196,6 +196,44 @@ pub async fn setup_mock_engine_connections(
     }
 }
 
+/// Connect one mock engine directly to already-bootstrapped frontend input/output sockets.
+pub async fn setup_bootstrapped_mock_engine(
+    input_address: String,
+    output_address: String,
+    engine_id: impl Into<EngineId>,
+) -> (DealerSocket, PushSocket) {
+    for endpoint in [&input_address, &output_address] {
+        if let Some(socket_path) = endpoint.strip_prefix("ipc://") {
+            for _ in 0..100 {
+                if Path::new(socket_path).exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    let peer_identity = PeerIdentity::try_from(engine_id.into()).expect("peer id");
+    let mut input_options = SocketOptions::default();
+    input_options.peer_identity(peer_identity);
+    let mut dealer = DealerSocket::with_options(input_options);
+    dealer
+        .connect(&input_address)
+        .await
+        .expect("connect mock engine input socket");
+    dealer
+        .send(ZmqMessage::from(Vec::<u8>::new()))
+        .await
+        .expect("send mock engine input ready frame");
+
+    let mut push = PushSocket::new();
+    push.connect(&output_address)
+        .await
+        .expect("connect mock engine output socket");
+
+    (dealer, push)
+}
+
 /// Complete the engine-core handshake and connect mock input/output sockets.
 ///
 /// This returns the decoded handshake init message plus the `DealerSocket` used to receive client

@@ -497,15 +497,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -565,15 +557,7 @@ where
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -600,15 +584,7 @@ where
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -958,15 +934,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -1644,15 +1612,7 @@ async fn non_stream_completions_include_logprobs() {
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -1753,15 +1713,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -1846,15 +1798,7 @@ async fn non_stream_chat_completions_still_succeed() {
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -1911,15 +1855,7 @@ async fn non_stream_completions_still_succeed() {
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -2355,15 +2291,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
     ));
 
     let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
-            handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )

@@ -124,7 +124,7 @@ enum EngineStartupState {
 
 /// Connect to one or more engines through the startup handshake protocol, returning the shared
 /// data-plane transport plus the registered engines.
-pub async fn connect(
+pub async fn connect_handshake(
     handshake_address: &str,
     engine_count: usize,
     local_host: &str,
@@ -315,6 +315,54 @@ pub async fn connect(
         output_socket,
         engines,
         coordinator,
+    })
+}
+
+/// Bind to Python-supplied frontend transport addresses and wait for already-initialized engines
+/// to register themselves on the input socket.
+///
+/// This path mirrors Python's externally managed `AsyncMPClient` bootstrap model: the addresses
+/// are already fixed by the supervisor, and engine identities are synthesized from contiguous
+/// rank order instead of being discovered through a Rust-owned handshake.
+pub async fn connect_bootstrapped(
+    input_address: &str,
+    output_address: &str,
+    engine_count: usize,
+    ready_timeout: Duration,
+) -> Result<ConnectedTransport> {
+    if engine_count == 0 {
+        bail_unexpected_handshake_message!("expected engine_count >= 1");
+    }
+
+    let mut input_socket = RouterSocket::new();
+    let input_address = input_socket.bind(input_address).await?.to_string();
+
+    let mut output_socket = PullSocket::new();
+    let output_address = output_socket.bind(output_address).await?.to_string();
+
+    // TODO: follow start rank
+    let engines = (0..engine_count)
+        .map(|index| ConnectedEngine {
+            engine_id: EngineId::from((index as u16).to_le_bytes().to_vec()),
+            ready_message: ReadyMessage::default(), // TODO: is this actually used?
+        })
+        .collect::<Vec<_>>();
+
+    wait_for_input_registrations(&mut input_socket, &engines, ready_timeout).await?;
+    info!(
+        engine_count = engines.len(),
+        "bootstrapped engines connected"
+    );
+
+    let (input_send, _) = input_socket.split();
+
+    Ok(ConnectedTransport {
+        input_address,
+        output_address,
+        engines,
+        coordinator: None,
+        input_send,
+        output_socket,
     })
 }
 

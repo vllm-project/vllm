@@ -12,7 +12,8 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio::sync::oneshot;
 use tracing_subscriber::EnvFilter;
-use vllm_server::{Config, serve};
+use vllm_engine_core_client::TransportMode;
+use vllm_server::{Config, CoordinatorMode, HttpListenerMode, serve};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -42,19 +43,26 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let port = unique_local_port()?;
     let config = Config {
-        handshake_address: args.handshake_address,
-        engine_count: args.engine_count,
+        transport_mode: TransportMode::HandshakeOwner {
+            handshake_address: args.handshake_address,
+            advertised_host: args.host,
+            engine_count: args.engine_count,
+            ready_timeout: Duration::from_secs(args.ready_timeout_secs),
+            local_input_address: None,
+            local_output_address: None,
+        },
+        coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
-        host: "127.0.0.1".to_string(),
-        port,
-        advertised_host: args.host,
-        ready_timeout: Duration::from_secs(args.ready_timeout_secs),
+        listener_mode: HttpListenerMode::Bind {
+            host: "127.0.0.1".to_string(),
+            port,
+        },
         tool_call_parser: None,
         reasoning_parser: None,
         max_model_len: None,
     };
 
-    let bind_address = config.bind_address();
+    let bind_address = format!("127.0.0.1:{port}");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_config = config.clone();
     let server_task = tokio::spawn(async move {

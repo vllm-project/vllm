@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use educe::Educe;
-use vllm_server::Config;
+use vllm_engine_core_client::TransportMode;
+use vllm_server::{Config, CoordinatorMode, HttpListenerMode};
 
 use crate::cli::unsupported::UnsupportedArgs;
 use crate::managed_engine::ManagedEngineConfig;
@@ -62,7 +63,7 @@ impl Cli {
 /// Supported top-level CLI commands.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
-    /// Run the Rust OpenAI frontend against an already running headless Python engine.
+    /// Run the Rust OpenAI frontend as a Python-supervised worker.
     Frontend(FrontendArgs),
     /// Launch a managed Python headless engine, then run the Rust OpenAI frontend.
     Serve(ServeArgs),
@@ -74,18 +75,16 @@ pub enum Command {
 pub struct SharedRuntimeArgs {
     /// Hugging Face model identifier used both for backend loading and public model ID.
     pub model: String,
-    /// HTTP bind host for the OpenAI-compatible server.
-    #[arg(long, default_value = "127.0.0.1")]
-    pub host: String,
-    /// HTTP bind port for the OpenAI-compatible server.
-    #[arg(long, default_value_t = 8000)]
-    pub port: u16,
-    /// Total number of data-parallel engines expected to join the shared handshake socket.
+    /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, visible_alias = "data-parallel-size", default_value_t = 1)]
     pub engine_count: usize,
-    /// Maximum time to wait for the engine handshake to complete.
-    #[arg(long, env = "VLLM_ENGINE_READY_TIMEOUT_S", default_value_t = 300)]
-    pub ready_timeout_secs: u64,
+    /// Maximum time to wait for the expected engines to register on the frontend transport.
+    #[arg(
+        long = "engine-ready-timeout-secs",
+        env = "VLLM_ENGINE_READY_TIMEOUT_S",
+        default_value_t = 300
+    )]
+    pub engine_ready_timeout_secs: u64,
     /// Select the tool call parser depending on the model that you're using.
     /// When not specified, the parser is auto-detected from the model.
     #[arg(long)]
@@ -105,16 +104,59 @@ pub struct SharedRuntimeArgs {
 }
 
 impl SharedRuntimeArgs {
-    /// Build one OpenAI-server runtime config for the resolved handshake address.
-    fn into_config(self, handshake_address: String, advertised_host: String) -> Config {
+    /// Maximum time to wait for the expected engines to register on the frontend transport.
+    fn ready_timeout(&self) -> Duration {
+        Duration::from_secs(self.engine_ready_timeout_secs)
+    }
+
+    /// Build the OpenAI-server config for the Python-bootstrap worker contract.
+    ///
+    /// The resulting config binds the Python-supplied transport addresses and inherits an already
+    /// open HTTP listener from the supervisor process.
+    fn into_bootstrapped_config(
+        self,
+        listen_fd: i32,
+        input_address: String,
+        output_address: String,
+    ) -> Config {
         Config {
-            handshake_address,
-            engine_count: self.engine_count,
+            transport_mode: TransportMode::Bootstrapped {
+                input_address,
+                output_address,
+                engine_count: self.engine_count,
+                ready_timeout: self.ready_timeout(),
+            },
+            // TODO: this might be an external Python process once we support it.
+            coordinator_mode: CoordinatorMode::None,
             model: self.model,
-            host: self.host,
-            port: self.port,
-            advertised_host,
-            ready_timeout: Duration::from_secs(self.ready_timeout_secs),
+            listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+            tool_call_parser: self.tool_call_parser,
+            reasoning_parser: self.reasoning_parser,
+            max_model_len: self.max_model_len,
+        }
+    }
+
+    /// Build the OpenAI-server config for the managed `serve` path that still owns the startup
+    /// handshake and binds its own HTTP listener.
+    fn into_managed_config(
+        self,
+        host: String,
+        port: u16,
+        handshake_address: String,
+        advertised_host: String,
+    ) -> Config {
+        Config {
+            transport_mode: TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host,
+                engine_count: self.engine_count,
+                ready_timeout: self.ready_timeout(),
+                local_input_address: None,
+                local_output_address: None,
+            },
+            coordinator_mode: CoordinatorMode::MaybeInProc,
+            model: self.model,
+            listener_mode: HttpListenerMode::Bind { host, port },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             max_model_len: self.max_model_len,
@@ -122,16 +164,19 @@ impl SharedRuntimeArgs {
     }
 }
 
-/// Arguments for connecting the Rust frontend to an already running headless engine.
+/// Arguments for running the Rust frontend as a Python-bootstrapped worker.
 #[derive(Educe, Clone, Args, PartialEq, Eq)]
 #[educe(Debug)]
 pub struct FrontendArgs {
-    /// Host/IP advertised by the frontend to headless engines for shared input/output ZMQ sockets.
-    #[arg(long, env = "VLLM_HOST_IP", default_value = "127.0.0.1")]
-    pub advertised_host: String,
-    /// Headless vLLM engine handshake endpoint, for example `tcp://127.0.0.1:62100`.
+    /// Inherited listening socket file descriptor passed by the Python supervisor.
     #[arg(long)]
-    pub handshake_address: String,
+    pub listen_fd: i32,
+    /// Frontend input ROUTER socket address that the Python engines will connect to.
+    #[arg(long)]
+    pub input_address: String,
+    /// Frontend output PULL socket address that the Python engines will push responses to.
+    #[arg(long)]
+    pub output_address: String,
 
     /// Shared frontend arguments.
     #[command(flatten)]
@@ -141,8 +186,11 @@ pub struct FrontendArgs {
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
     pub fn into_config(self) -> Config {
-        self.runtime
-            .into_config(self.handshake_address, self.advertised_host)
+        self.runtime.into_bootstrapped_config(
+            self.listen_fd,
+            self.input_address,
+            self.output_address,
+        )
     }
 }
 
@@ -157,6 +205,12 @@ pub struct ServeArgs {
     /// Python executable used to launch the managed headless vLLM engine.
     #[arg(long, env = "VLLM_RS_PYTHON", default_value = "python3")]
     pub python: String,
+    /// HTTP bind host for the OpenAI-compatible server.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    /// HTTP bind port for the OpenAI-compatible server.
+    #[arg(long, default_value_t = 8000)]
+    pub port: u16,
     /// Host/IP used both for the managed-engine handshake endpoint and the frontend-advertised
     /// input/output ZMQ socket addresses.
     #[arg(
@@ -198,11 +252,14 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Build the OpenAI-server runtime config that should connect to the managed engine.
+    /// Build the OpenAI-server runtime config used after the managed Python engine starts.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
-        self.runtime
-            .clone()
-            .into_config(handshake_address, self.handshake_host.clone())
+        self.runtime.clone().into_managed_config(
+            self.host.clone(),
+            self.port,
+            handshake_address,
+            self.handshake_host.clone(),
+        )
     }
 
     /// Build the managed Python-engine spawn configuration for one resolved handshake port.

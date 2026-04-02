@@ -11,7 +11,8 @@ pub mod test_utils;
 mod transport;
 
 pub use client::{
-    EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream, EngineCoreStreamOutput,
+    CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
+    EngineCoreStreamOutput, TransportMode,
 };
 pub use error::{Error, Result};
 pub use transport::{ENGINE_CORE_DEAD_SENTINEL, EngineId};

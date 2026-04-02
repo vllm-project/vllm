@@ -24,10 +24,13 @@ use crate::protocol::{
     UtilityResultEnvelope, decode_engine_core_outputs,
 };
 use crate::test_utils::{
-    IpcNamespace, setup_mock_engine_connections, setup_mock_engine_with_init,
-    spawn_mock_engine_task,
+    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_connections,
+    setup_mock_engine_with_init, spawn_mock_engine_task,
 };
-use crate::{ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId, Error};
+use crate::{
+    CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
+    Error, TransportMode,
+};
 
 static TRACING: Once = Once::new();
 
@@ -236,6 +239,49 @@ async fn connect_client_with_ipc(
     .unwrap()
 }
 
+fn handshake_test_config(
+    handshake_address: String,
+    engine_count: usize,
+    model_name: &str,
+    ready_timeout: Duration,
+    client_index: u32,
+    coordinator_mode: Option<CoordinatorMode>,
+) -> EngineCoreClientConfig {
+    EngineCoreClientConfig {
+        transport_mode: TransportMode::HandshakeOwner {
+            handshake_address,
+            advertised_host: "127.0.0.1".to_string(),
+            engine_count,
+            ready_timeout,
+            local_input_address: None,
+            local_output_address: None,
+        },
+        coordinator_mode,
+        model_name: model_name.to_string(),
+        client_index,
+    }
+}
+
+fn bootstrapped_test_config(
+    input_address: String,
+    output_address: String,
+    engine_count: usize,
+    ready_timeout: Duration,
+    client_index: u32,
+) -> EngineCoreClientConfig {
+    EngineCoreClientConfig {
+        transport_mode: TransportMode::Bootstrapped {
+            input_address,
+            output_address,
+            engine_count,
+            ready_timeout,
+        },
+        coordinator_mode: None,
+        model_name: "test-model".to_string(),
+        client_index,
+    }
+}
+
 fn spawn_mock_engine_task_with_init<F>(
     engine_handshake: String,
     engine_id: impl Into<EngineId>,
@@ -385,15 +431,14 @@ async fn coordinator_handshake_includes_engine_control_addresses() {
     });
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
-            handshake_address: ipc.handshake_endpoint(),
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: true,
-        },
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
         &ipc,
     )
     .await;
@@ -555,15 +600,14 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     });
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 2,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: true,
-        },
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
         &ipc,
     )
     .await;
@@ -676,15 +720,14 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     });
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 2,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: true,
-        },
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
         &ipc,
     )
     .await;
@@ -753,15 +796,14 @@ async fn coordinator_accepts_stats_only_outputs() {
     });
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
-            handshake_address: ipc.handshake_endpoint(),
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: true,
-        },
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
         &ipc,
     )
     .await;
@@ -846,15 +888,14 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 7,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            7,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -932,15 +973,14 @@ async fn client_fail_closes_when_main_output_path_receives_mixed_shape_output() 
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 7,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            7,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1015,15 +1055,14 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1093,15 +1132,14 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1162,15 +1200,14 @@ async fn dropping_a_live_stream_triggers_abort() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1210,15 +1247,14 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1302,15 +1338,14 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 5,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1360,15 +1395,14 @@ async fn call_utility_failure_message_surfaces_as_error() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1412,15 +1446,14 @@ async fn dispatcher_failure_propagates_to_waiting_utility_calls() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1466,15 +1499,14 @@ async fn connect_times_out_without_ready_message() {
     });
 
     let result = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_millis(100),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_millis(100),
+            0,
+            None,
+        ),
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
     )
@@ -1511,15 +1543,14 @@ async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1581,15 +1612,14 @@ async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1639,15 +1669,14 @@ async fn client_decodes_multipart_logprob_outputs() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 1,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1765,15 +1794,14 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
-            handshake_address: handshake_address.clone(),
-            engine_count: 2,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 0,
-            enable_inproc_coordinator: false,
-        },
+        handshake_test_config(
+            handshake_address.clone(),
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -1998,15 +2026,14 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     );
 
     let client = connect_client_with_ipc(
-        EngineCoreClientConfig {
+        handshake_test_config(
             handshake_address,
-            engine_count: 2,
-            model_name: "test-model".to_string(),
-            local_host: "127.0.0.1".to_string(),
-            ready_timeout: Duration::from_secs(2),
-            client_index: 5,
-            enable_inproc_coordinator: false,
-        },
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
         &ipc,
     )
     .await;
@@ -2166,4 +2193,106 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .as_ref()
             .expect("multipart prompt logprobs decoded"),
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_connects_after_single_engine_registration() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config(
+                input_address,
+                output_address,
+                1,
+                Duration::from_secs(2),
+                0,
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (_dealer, _push) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
+    let client = client_task.await.unwrap();
+
+    assert_eq!(client.engine_count(), 1);
+    let engine_ids = client
+        .engine_identities()
+        .into_iter()
+        .map(|id| id.to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(engine_ids, vec![vec![0x00, 0x00]]);
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_connects_with_contiguous_engine_ids() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config(
+                input_address,
+                output_address,
+                2,
+                Duration::from_secs(2),
+                0,
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (_dealer0, _push0) = setup_bootstrapped_mock_engine(
+        input_address.clone(),
+        output_address.clone(),
+        &[0x00, 0x00],
+    )
+    .await;
+    let (_dealer1, _push1) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x01, 0x00]).await;
+    let client = client_task.await.unwrap();
+
+    assert_eq!(client.engine_count(), 2);
+    let engine_ids = client
+        .engine_identities()
+        .into_iter()
+        .map(|id| id.to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(engine_ids, vec![vec![0x00, 0x00], vec![0x01, 0x00]]);
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_connect_times_out_without_registration() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let result = EngineCoreClient::connect(bootstrapped_test_config(
+        ipc.input_endpoint(),
+        ipc.output_endpoint(),
+        1,
+        Duration::from_millis(100),
+        0,
+    ))
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("bootstrapped connect should time out"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, Error::InputRegistrationTimeout { .. }));
 }
