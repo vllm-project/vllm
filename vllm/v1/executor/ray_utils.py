@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Union
 
 import vllm.platforms
+from vllm.v1.executor import pp_trace
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -56,6 +57,9 @@ try:
             # tokens.  At the start of the NEXT step, non-last ranks will call
             # _pp_receive_prev_sampled_token_ids_to_input_batch() to receive them.
             self._pp_need_prev_token_sync: bool = False
+            # Number of execute_model_ray calls; used for trace flushing and
+            # lazy process-name registration.
+            self._pp_trace_step_count: int = 0
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
             """
@@ -152,79 +156,108 @@ try:
                 and pp_world_size > 1
             )
             is_last_rank = get_pp_group().is_last_rank
-            start_ns = time.monotonic_ns()
-            # --- PP async: receive prev sampled token ids from last rank ---
-            # In the Ray compiled DAG, each PP stage runs independently.
-            # The last rank posts non-blocking isend()s right after sampling.
-            # Non-last ranks must post matching recv()s at the start of the
-            # NEXT step (before execute_model updates the input batch) so that
-            # _prepare_input_ids can use prev_sampled_token_ids instead of the
-            # placeholder -1 values that async scheduling puts in input_ids_cpu.
-            if use_async_pp and not is_last_rank and self._pp_need_prev_token_sync:
-                self.worker.model_runner \
-                    ._pp_receive_prev_sampled_token_ids_to_input_batch()
-                self._pp_need_prev_token_sync = False
+            num_tokens = scheduler_output.total_num_scheduled_tokens
 
-            # Best-effort debug context for model-runner level PP logs.
-            # This helps correlate broadcast/receive logs with Ray DAG step ids.
-            setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
-            output = self.worker.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
+            # Lazy one-time registration of this process's name in the trace.
+            if self._pp_trace_step_count == 0 and pp_trace.is_enabled():
+                pp_trace.set_process_name(f"pp_rank_{pp_rank}")
 
-            # After this step's execute_model completes, schedule a receive for
-            # the NEXT step: the last rank will isend() sampled tokens after its
-            # sample_tokens() call, and we need to recv() them before the next
-            # execute_model() updates the batch.
-            if use_async_pp and not is_last_rank \
-                    and scheduler_output.total_num_scheduled_tokens > 0:
-                self._pp_need_prev_token_sync = True
+            # Capture overall start time for the total span (see finally block).
+            _ray_t0 = time.perf_counter() * 1_000_000.0
 
-            if self._is_intermediate_tensors(output):
-                if (
-                    self.worker.model_runner.supports_mm_inputs
-                    and get_pp_group().is_first_rank
-                ):
-                    # Strip mm_features before Ray forwards it to the next PP Stage.
-                    # PP Stage>0 only needs the intermediate tensors,
-                    # not preprocessed multimodal data.
+            try:
+                start_ns = time.monotonic_ns()
+                # --- PP async: receive prev sampled token ids from last rank ---
+                # In the Ray compiled DAG, each PP stage runs independently.
+                # The last rank posts non-blocking isend()s right after sampling.
+                # Non-last ranks must post matching recv()s at the start of the
+                # NEXT step (before execute_model updates the input batch) so that
+                # _prepare_input_ids can use prev_sampled_token_ids instead of the
+                # placeholder -1 values that async scheduling puts in input_ids_cpu.
+                if use_async_pp and not is_last_rank and self._pp_need_prev_token_sync:
+                    with pp_trace.span("pp_recv",
+                                       pp_rank=pp_rank, step=step_id,
+                                       tokens=num_tokens):
+                        self.worker.model_runner \
+                            ._pp_receive_prev_sampled_token_ids_to_input_batch()
+                    self._pp_need_prev_token_sync = False
 
-                    # scheduled_new_reqs is a required field of SchedulerOutput,
-                    # so accessing it directly will raise AttributeError if missing.
-                    for req in scheduler_output.scheduled_new_reqs:
-                        req.mm_features = []
-                if step_id is None:
-                    return scheduler_output, grammar_output, output
-                return scheduler_output, grammar_output, step_id, output
-
-            if not self._is_last_rank():
-                # Case where there are no scheduled requests
-                # but may still be finished requests.
-                assert not output or not output.req_ids
-                if step_id is None:
-                    output = scheduler_output, grammar_output, None
-                else:
-                    output = scheduler_output, grammar_output, step_id, None
-            elif output is None:
+                # Best-effort debug context for model-runner level PP logs.
+                # This helps correlate broadcast/receive logs with Ray DAG step ids.
                 setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
-                sample_start_ns = time.monotonic_ns()
-                output = self.worker.model_runner.sample_tokens(grammar_output)
-            assert self.vllm_config is not None
-            if (
-                self.vllm_config.scheduler_config.async_scheduling
-                and self._is_last_rank()
-            ):
-                # For PP async scheduling, buffer by step_id and return a
-                # lightweight marker (step_id, output_rank) in-band via DAG.
-                # The executor then fetches from the exact producing actor.
-                if get_pp_group().world_size > 1:
-                    assert step_id is not None, "PP async scheduling requires step_id"
-                    self._pp_execute_model_outputs[step_id] = output
-                    return step_id, get_pp_group().rank
-                self._execute_model_outputs.append(output)
-                return None
+                with pp_trace.span("execute_model_forward",
+                                   pp_rank=pp_rank, step=step_id,
+                                   tokens=num_tokens):
+                    output = self.worker.model_runner.execute_model(
+                        scheduler_output, intermediate_tensors
+                    )
 
-            return output
+                # After this step's execute_model completes, schedule a receive
+                # for the NEXT step: the last rank will isend() sampled tokens
+                # after its sample_tokens() call, and we need to recv() them
+                # before the next execute_model() updates the batch.
+                if use_async_pp and not is_last_rank and num_tokens > 0:
+                    self._pp_need_prev_token_sync = True
+
+                if self._is_intermediate_tensors(output):
+                    if (
+                        self.worker.model_runner.supports_mm_inputs
+                        and get_pp_group().is_first_rank
+                    ):
+                        # Strip mm_features before Ray forwards it to the next PP
+                        # Stage.  PP Stage>0 only needs the intermediate tensors,
+                        # not preprocessed multimodal data.
+
+                        # scheduled_new_reqs is a required field of
+                        # SchedulerOutput, so accessing it directly will raise
+                        # AttributeError if missing.
+                        for req in scheduler_output.scheduled_new_reqs:
+                            req.mm_features = []
+                    if step_id is None:
+                        return scheduler_output, grammar_output, output
+                    return scheduler_output, grammar_output, step_id, output
+
+                if not self._is_last_rank():
+                    # Case where there are no scheduled requests
+                    # but may still be finished requests.
+                    assert not output or not output.req_ids
+                    if step_id is None:
+                        output = scheduler_output, grammar_output, None
+                    else:
+                        output = scheduler_output, grammar_output, step_id, None
+                elif output is None:
+                    setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
+                    with pp_trace.span("sample_tokens",
+                                       pp_rank=pp_rank, step=step_id,
+                                       tokens=num_tokens):
+                        output = self.worker.model_runner.sample_tokens(
+                            grammar_output
+                        )
+                assert self.vllm_config is not None
+                if (
+                    self.vllm_config.scheduler_config.async_scheduling
+                    and self._is_last_rank()
+                ):
+                    if get_pp_group().world_size > 1:
+                        # PP async: return ModelRunnerOutput directly through the
+                        # compiled DAG channel.
+                        if isinstance(output, AsyncModelRunnerOutput):
+                            output = output.get_output()
+                        return output
+                    # Non-PP async: buffer so the driver can schedule the next
+                    # batch without blocking on this step's output transfer.
+                    self._execute_model_outputs.append(output)
+                    return None
+
+                return output
+            finally:
+                pp_trace.record_complete(
+                    "execute_model_ray", _ray_t0,
+                    pp_rank=pp_rank, step=step_id, tokens=num_tokens,
+                    is_last_rank=is_last_rank,
+                )
+                self._pp_trace_step_count += 1
+                pp_trace.maybe_flush_worker(self._pp_trace_step_count)
 
         def get_execute_model_output(
             self,
@@ -329,7 +362,8 @@ class FutureWrapper(Future):
         return self.ref_or_refs
 
     def result(self, timeout=None):
-        outputs = ray.get(self.get_refs(timeout), timeout=timeout)
+        with pp_trace.span("dag_wait"):
+            outputs = ray.get(self.get_refs(timeout), timeout=timeout)
         if self.aggregator is None:
             return outputs
 

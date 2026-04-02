@@ -497,16 +497,13 @@ class RayDistributedExecutor(Executor):
         if self.scheduler_config.async_scheduling:
             assert non_block
 
-            if use_async_pp:
-                refs = [
-                    partial(
-                        RayDistributedExecutor._get_async_refs_with_rank, ref, self.workers
-                    )
-                    for ref in refs
-                ]
-            else:
-                # Delay getting the model runner output until next step
-                # execute_model returns.
+            if not use_async_pp:
+                # Non-PP async: delay output retrieval so the driver can
+                # schedule the next batch before blocking on this step's
+                # ModelRunnerOutput transfer.
+                # For PP async, the last rank now returns ModelRunnerOutput
+                # directly through the compiled DAG channel (same as
+                # non-async PP), so no extra wrapping is needed here.
                 output_workers = self.workers
                 assert len(refs) == len(output_workers), (
                     "Ray compiled DAG outputs must match the output worker group."

@@ -67,7 +67,7 @@ from vllm.v1.engine.utils import (
     SignalCallback,
     get_device_indices,
 )
-from vllm.v1.executor import Executor
+from vllm.v1.executor import Executor, pp_trace
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -213,6 +213,12 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+
+        # Step counter used by pp_trace to flush the driver-side trace
+        # periodically (same cadence as worker-side flushing).
+        self._pp_trace_step_count: int = 0
+        if pp_trace.is_enabled():
+            pp_trace.set_process_name("driver")
 
         self._idle_state_callbacks: list[Callable] = []
 
@@ -446,11 +452,14 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule()
+            with pp_trace.span("schedule"):
+                scheduler_output = self.scheduler.schedule()
             with self.log_error_detail(scheduler_output):
-                exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
-                )
+                with pp_trace.span("execute_model_submit",
+                                   tokens=scheduler_output.total_num_scheduled_tokens):
+                    exec_future = self.model_executor.execute_model(
+                        scheduler_output, non_block=True
+                    )
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -461,12 +470,15 @@ class EngineCore:
                 if not scheduler_output.pending_structured_output_tokens:
                     # We aren't waiting for any tokens, get any grammar output
                     # and sample immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
-                    )
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
+                    with pp_trace.span("get_grammar_bitmask"):
+                        grammar_output = self.scheduler.get_grammar_bitmask(
+                            scheduler_output
+                        )
+                    with pp_trace.span("sample_tokens_submit",
+                                       tokens=scheduler_output.total_num_scheduled_tokens):
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
                 else:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
@@ -506,9 +518,18 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
+        with pp_trace.span("update_from_output",
+                           tokens=scheduler_output.total_num_scheduled_tokens):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output
+            )
+
+        # Periodic driver-side trace flush — same cadence as workers.
+        # Events accumulate across flushes (non-destructive), so every flush
+        # writes the complete history.  The atexit handler in pp_trace catches
+        # any remaining events on process exit.
+        self._pp_trace_step_count += 1
+        pp_trace.maybe_flush(self._pp_trace_step_count)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
