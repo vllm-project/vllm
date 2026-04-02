@@ -11,14 +11,11 @@ from torch import nn
 
 import vllm._custom_ops  # noqa: F401 — registers fake-tensor impls for torch.compile
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.lightning_attn import (
     lightning_attention,
     linear_decode_forward_triton,
@@ -29,122 +26,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.minimax_rms_norm.rms_norm_tp import (
+    MiniMaxText01RMSNormTP,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
-
-
-class MiniMaxText01RMSNormTP(CustomOp):
-    name = "MiniMaxText01RMSNormTP"
-
-    def __init__(
-        self, hidden_size: int, eps: float = 1e-6, max_tokens: int = 196608
-    ) -> None:
-        super().__init__()
-        self.tp_world = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(int(hidden_size / self.tp_world)))
-
-        self.weight.weight_loader = self.weight_loader
-        self.variance_epsilon = eps
-        self.max_tokens = max_tokens
-        self._ar_workspace: torch.Tensor | None = None
-        self._lamport_max_seq: int = 0
-        if current_platform.is_cuda() and self.tp_world > 1:
-            from .lamport_workspace import get_allreduce_workspace
-
-            self._ar_workspace = get_allreduce_workspace(
-                self.tp_rank,
-                self.tp_world,
-                max_tokens=max_tokens,
-                process_group=get_tp_group().cpu_group,
-            )
-
-            self._lamport_max_seq = 2048
-
-    @staticmethod
-    def weight_loader(
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-    ) -> None:
-        tp_world = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-
-        shard_size = loaded_weight.shape[0] // tp_world
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard])
-
-    def _forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
-        if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(variance) / self.tp_world
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = (x * self.weight).to(orig_dtype)
-        return x
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert residual is None, "RMSNorm does not support residual connection."
-        return self._forward(x)
-
-    @staticmethod
-    def forward_qk(
-        q_norm: "MiniMaxText01RMSNormTP",
-        k_norm: "MiniMaxText01RMSNormTP",
-        qkv: torch.Tensor,
-        q_size: int,
-        kv_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """RMS-norm q and k in *qkv* in-place and return (q, k, v) views."""
-        input_seq = qkv.size(0)
-        if (
-            current_platform.is_cuda()
-            and q_norm.tp_world > 1
-            and q_norm._ar_workspace is not None
-            and input_seq <= q_norm.max_tokens
-            and input_seq <= q_norm._lamport_max_seq
-        ):
-            assert q_norm.variance_epsilon == k_norm.variance_epsilon
-            torch.ops._C.minimax_allreduce_rms_qk(
-                qkv,
-                q_norm.weight,
-                k_norm.weight,
-                q_norm._ar_workspace,
-                q_size,
-                kv_size,
-                q_norm.tp_rank,
-                q_norm.tp_world,
-                q_norm.variance_epsilon,
-            )
-            return qkv.split([q_size, kv_size, kv_size], dim=-1)
-
-        q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
-        q = q.contiguous()
-        k = k.contiguous()
-        orig_dtype = q.dtype
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        q_var = q.pow(2).mean(dim=-1, keepdim=True)
-        k_var = k.pow(2).mean(dim=-1, keepdim=True)
-        if q_norm.tp_world > 1:
-            qk_var = torch.cat([q_var, k_var], dim=-1)
-            qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
-            q_var, k_var = qk_var.chunk(2, dim=-1)
-        q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
-        k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
-        q = q.to(orig_dtype)
-        k = k.to(orig_dtype)
-        return q, k, v
 
 
 def clear_linear_attention_cache_for_new_sequences(
