@@ -273,6 +273,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
 
+    def set_fused_kv_cache_layout(self):
+        pass
+
     def do_rope_and_kv_cache_update(
         self,
         layer: AttentionLayer,

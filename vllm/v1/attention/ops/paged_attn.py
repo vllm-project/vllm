@@ -18,14 +18,31 @@ class PagedAttention:
         kv_cache: torch.Tensor,
         num_kv_heads: int,
         head_size: int,
+        need_kv_flash_permute: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         x = 16 // kv_cache.element_size()
         num_blocks = kv_cache.shape[1]
 
-        key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
-        value_cache = kv_cache[1]
-        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        if need_kv_flash_permute:
+            # Data written by AITER fused kernel in flash layout:
+            #   [num_blocks, block_size, num_heads, head_size]
+            # Use permute (zero-cost stride change, no data copy) to
+            # present the same logical shape the Triton attention kernel
+            # expects while indexing into flash-layout memory.
+            block_size = kv_cache.shape[2]
+
+            key_cache = kv_cache[0].view(num_blocks, block_size, num_kv_heads, head_size // x, x)
+            key_cache = key_cache.permute(0, 2, 3, 1, 4)
+
+            value_cache = kv_cache[1].view(num_blocks, block_size, num_kv_heads, head_size)
+            value_cache = value_cache.permute(0, 2, 3, 1)
+        else:
+            # Old logic, no changes needed
+            key_cache = kv_cache[0]
+            key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
+            value_cache = kv_cache[1]
+            value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+
         return key_cache, value_cache
 
     @staticmethod

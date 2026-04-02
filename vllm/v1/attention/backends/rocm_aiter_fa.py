@@ -1372,10 +1372,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
         
     def fused_qk_norm_rope_kvcache_supported(self):
         # Fusion is supported in both shuffle and non-shuffle KV cache layouts.
-        return (
-            rocm_aiter_ops.is_enabled()
-        )
-        
+        return rocm_aiter_ops.is_enabled()
+
+    def set_fused_kv_cache_layout(self):
+        pass
+
     def do_qk_norm_rope_kvcache_update(self,
         layer: AttentionLayer,
         qkv: torch.Tensor,
