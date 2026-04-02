@@ -33,7 +33,7 @@ class TokenPoolingMethod(nn.Module, ABC):
 
 
 class AllPool(TokenPoolingMethod):
-    def __init__(self, requires_token_ids: bool=False):
+    def __init__(self, requires_token_ids: bool = False):
         super().__init__()
 
         vllm_config = get_current_vllm_config()
