@@ -16,18 +16,6 @@ def rms_norm(
     x_var = x if variance_size is None else x[..., :variance_size]
     variance = x_var.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + epsilon)
-    x = x.to(orig_dtype)
     if weight is not None:
-        x = x * weight
-    return x
-
-
-@register_op
-def gemma_rms_norm(x: Tensor, weight: Tensor, epsilon: float) -> Tensor:
-    """Gemma RMS normalization: x * (1 + weight), cast after multiply"""
-    orig_dtype = x.dtype
-    x = x.float()
-    variance = x.pow(2).mean(dim=-1, keepdim=True)
-    x = x * torch.rsqrt(variance + epsilon)
-    x = x * (1.0 + weight.float())
+        x = x * weight.to(torch.float32)
     return x.to(orig_dtype)
