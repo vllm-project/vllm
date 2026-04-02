@@ -7,11 +7,6 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fla.ops.index import (
-    prepare_chunk_indices,
-    prepare_chunk_offsets,
-)
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -320,6 +315,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # Only prefill batches use FLA chunk ops.
             # Pre-compute on CPU and async-copy to GPU to avoid
             # GPU→CPU sync (.tolist()) in prepare_chunk_indices.
+            from vllm.model_executor.layers.fla.ops.index import (
+                prepare_chunk_indices,
+                prepare_chunk_offsets,
+            )
+            from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
+
             gpu_device = query_start_loc.device
             chunk_indices = prepare_chunk_indices(
                 non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
