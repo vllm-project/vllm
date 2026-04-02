@@ -7,13 +7,17 @@ edition.workspace = true
 name = "vllm-rs"
 path = "src/main.rs"
 
+[features]
+default = []
+native-tls-vendored = ["dep:native-tls-vendored"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 educe.workspace = true
 futures.workspace = true
-itertools.workspace = true
 libc.workspace = true
+native-tls-vendored = { workspace = true, optional = true }
 time.workspace = true
 tokio = { workspace = true, features = ["process", "signal"] }
 tracing.workspace = true

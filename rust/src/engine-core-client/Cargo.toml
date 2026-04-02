@@ -13,7 +13,6 @@ bytes.workspace = true
 enum-as-inner.workspace = true
 futures.workspace = true
 hex.workspace = true
-itertools.workspace = true
 parking_lot.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true

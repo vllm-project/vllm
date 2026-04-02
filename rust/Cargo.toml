@@ -36,6 +36,7 @@ hf-hub = { version = "0.5.0", features = ["tokio"] }
 http-body = "1.0.1"
 itertools = "0.14.0"
 libc = "0.2.177"
+native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.16.1", features = ["serde"] }
 openai-protocol = { version = "1.4.0", features = ["axum"] }
 parking_lot = "0.12.5"
