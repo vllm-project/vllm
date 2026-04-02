@@ -5,6 +5,7 @@ import inspect
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar, Literal, overload
+from typing import Any, ClassVar, Protocol, overload
 
 import torch
 from torch.library import Library, infer_schema
@@ -114,6 +115,35 @@ def register_op(
     return decorator
 
 
+class CallableOpImpl(Protocol):
+    """
+    Protocol for callable op implementations.
+
+    Both IrOpImpl and IrOpImplCompiledWrapper implement this protocol,
+    allowing them to be used interchangeably in priority lists.
+    """
+
+    impl_fn: Callable
+    """The implementation function to call."""
+
+    uncompiled_impl_fn: Callable
+    """The uncompiled version of the implementation function."""
+
+    supported: bool
+    """Is this implementation supported? Asserted during dispatch"""
+
+    provider: str
+    """Implementation provider"""
+
+    def supports_args(self, *args, **kwargs) -> bool:
+        """Check if this implementation supports the given args."""
+        ...
+
+    def func_impl_fn(self, *args, **kwargs) -> Any:
+        """Call impl_fn with functional semantics (copying for inplace impls)."""
+        ...
+
+
 class IrOp:
     registry: ClassVar[dict[str, "IrOp"]] = {}
 
@@ -146,14 +176,14 @@ class IrOp:
             ]
 
         self.name = name
-        self.impls: dict[str, IrOpImpl] = {}
         self.activations = activations
         self.activation_indices = [
             i
             for i, p in enumerate(self._py_signature.parameters.values())
             if p.name in activations
         ]
-        self._priority_impls: list[IrOpImpl] = []
+        self.impls: dict[str, IrOpImpl] = {}
+        self._priority_impls: list[CallableOpImpl] = []
         self._schema_str = infer_schema(native_impl, mutates_args=[])
         self._input_generator: InputGenerator | None = None
         self._tolerance_overrides: ToleranceSpec = {}
@@ -166,6 +196,8 @@ class IrOp:
             # always supported
             supported=True,
             supports_args=None,
+            # Native can be compiled
+            compiled=True,
         )
 
         # By default, fake routes directly to native,
@@ -206,13 +238,15 @@ class IrOp:
         supported: bool = True,
         supports_args: Callable[..., bool] | None = None,
         inplace: bool = False,
+        compiled: bool = False,
     ):
         """
         Register an implementation for this custom op.
         :param provider: The name of the provider, must be unique.
         :param supported: Static support check, use this to check platform support.
         :param supports_args: Dynamic arg support check, used for types and shapes.
-        :param inplace: Does this op reuse activation input memory for outputs
+        :param inplace: Does this impl reuse activation input memory for outputs
+        :param compiled: Does this impl get compiled if set_priority(..., compile=True)
         :return: A decorator that registers the implementation.
 
         The decorated function must have the same semantics and signature as
@@ -227,6 +261,9 @@ class IrOp:
         compatible with the implementation.
         For custom enablement logic, set op impl priority.
 
+        If compiled is True, that means that eager-mode dispatch will dispatch to a
+        torch.compile-decorated version of this implementation (with
+
         Example:
         ```python
         @my_op.register_impl("my_provider", supported=torch.cuda.is_available())
@@ -239,7 +276,7 @@ class IrOp:
         )
 
         def _register_impl(f: Callable):
-            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace)
+            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace, compiled)
             self.impls[provider] = impl
 
             if self.get_priority():
@@ -276,10 +313,10 @@ class IrOp:
         bound_args.apply_defaults()
         return bound_args.args
 
-    def dispatch(self, *args, **kwargs) -> "IrOpImpl":
+    def dispatch(self, *args, **kwargs) -> CallableOpImpl:
         """
         Dispatch to the appropriate implementation based on current priority
-        and argument support checks. Returns the selected IrOpImpl.
+        and argument support checks. Returns the selected CallableOpImpl.
 
         THIS FUNCTION IS ON THE HOT PATH (OP DISPATCH), MUST BE FAST.
         """
@@ -328,23 +365,31 @@ class IrOp:
         return [p.provider for p in self._priority_impls]
 
     @contextlib.contextmanager
-    def set_priority(self, priority: list[str]):
+    def set_priority(self, priority: list[str], *, compile: bool = False):
         """
         Context manager to set the dispatch priority for implementations for this op.
+
+        :param priority: List of provider names in priority order
+        :param compile: Wrap implementations with torch.compile for better performance
+                       when called inside opaque custom ops.
         """
         assert all(p in self.impls for p in priority), (
             "All providers in priority must be registered implementations."
         )
 
-        def filter_priority_impls(p_list: list[str]) -> list[IrOpImpl]:
-            filtered_impls = []
+        # If compile=True and impl allows compilation, use compiled wrapper
+        def maybe_compile(impl: IrOpImpl) -> CallableOpImpl:
+            return impl.compile() if compile and impl.compiled else impl
+
+        def filter_priority_impls(p_list: list[str]) -> list[CallableOpImpl]:
+            filtered_impls: list[CallableOpImpl] = []
             for p in p_list:
                 impl = self.impls[p]
                 if not impl.supported:
                     # Skip unsupported implementations
                     continue
 
-                filtered_impls.append(impl)
+                filtered_impls.append(maybe_compile(impl))
 
                 # If all args are supported, skip other implementations
                 if impl.supports_all_args:
@@ -356,7 +401,7 @@ class IrOp:
                 "explicitly add 'native' to the end of the priority list",
                 self.name,
             )
-            filtered_impls.append(self.impls["native"])
+            filtered_impls.append(maybe_compile(self.impls["native"]))
             return filtered_impls
 
         # Temporarily set priority
@@ -364,9 +409,10 @@ class IrOp:
         try:
             self._priority_impls = filter_priority_impls(priority)
             logger.debug(
-                "Priority for vllm.ir.%s set to %s",
+                "Priority for vllm.ir.%s set to %s%s",
                 self.name,
                 lazy(lambda: [p.provider for p in self._priority_impls]),
+                " (compiled)" if compile else "",
             )
             yield
         finally:
@@ -477,6 +523,7 @@ class IrOpImpl:
         supported: bool,
         supports_args: Callable[..., bool] | None,
         inplace: bool = False,
+        compiled: bool = False,
     ):
         assert provider not in op.impls, (
             f"Implementation for provider {provider} already registered."
@@ -544,9 +591,12 @@ class IrOpImpl:
         self.op = op
         self.provider = provider
         self.impl_fn = impl_fn
+        self.uncompiled_impl_fn = impl_fn  # Always the uncompiled version
         self.supported = supported
         self._supports_args = supports_args
         self.inplace = inplace
+        self.compiled = compiled  # Whether this impl can be compiled
+        self._compiled_wrapper: IrOpImplCompiledWrapper | None = None
 
     @property
     def supports_all_args(self) -> bool:
@@ -558,6 +608,30 @@ class IrOpImpl:
             return True
 
         return self._supports_args(*args, **kwargs)
+
+    def compile(self) -> "IrOpImplCompiledWrapper":
+        """
+        Get a compiled wrapper for this implementation.
+
+        This helps when the IR op is either called inside an opaque torch custom op and
+        hence invisible to model-level compilation, or outside any compilation context.
+        By pre-compiling the implementation, we can still get performance benefits even
+        when the op is not compiled externally.
+
+        The wrapper also marks activation tensors with dynamic batch dimensions
+        using torch._dynamo.mark_dynamic(t, 0) to ensure proper dynamic shapes.
+
+        The compiled wrapper is cached, so multiple calls return the same wrapper.
+
+        :return: Compiled wrapper following the CallableOpImpl protocol
+        """
+        if self._compiled_wrapper is None:
+            self._compiled_wrapper = IrOpImplCompiledWrapper(self)
+        return self._compiled_wrapper
+
+    def compile_clear(self):
+        """Clear the cached compile wrapper for the implementation."""
+        self._compiled_wrapper = None
 
     @weak_cache
     def uuid(self):
@@ -587,3 +661,46 @@ class IrOpImpl:
             new_args[i] = args[i].clone()
 
         return self.impl_fn(*new_args, **kwargs)
+
+
+class IrOpImplCompiledWrapper:
+    """
+    Wrapper for IrOpImpl that provides a torch.compile-wrapped implementation.
+
+    This wrapper implements CallableOpImpl protocol so it can be used in
+    priority lists, but wraps the implementation with torch.compile and
+    marks dynamic dimensions on activations.
+    """
+
+    def __init__(self, base_impl: IrOpImpl, **compile_kwargs):
+        self.base_impl = base_impl
+        self.supported = base_impl.supported
+        self.provider = f"{base_impl.provider} (compiled)"
+        self.activation_indices = base_impl.op.activation_indices
+        self.uncompiled_impl_fn = base_impl.impl_fn
+
+        # Compile the implementation
+        self.compiled_impl_fn = torch.compile(base_impl.impl_fn, **compile_kwargs)
+
+        # Create impl_fn that marks dynamic dims and calls compiled implementation
+        def impl_fn(*args, **kwargs) -> Any:
+            # Mark batch dimension (dim 0) as dynamic for activation inputs
+            for idx in self.activation_indices:
+                if idx < len(args) and isinstance(args[idx], torch.Tensor):
+                    torch._dynamo.mark_dynamic(args[idx], 0)
+
+            return self.compiled_impl_fn(*args, **kwargs)
+
+        self.impl_fn = impl_fn
+
+    def supports_args(self, *args, **kwargs) -> bool:
+        return self.base_impl.supports_args(*args, **kwargs)
+
+    def func_impl_fn(self, *args, **kwargs) -> Any:
+        """
+        Call impl_fn with functional semantics.
+
+        TODO: Implement compiled version that handles inplace impls correctly.
+        For now, delegate to the base implementation's func_impl_fn.
+        """
+        return self.base_impl.func_impl_fn(*args, **kwargs)
