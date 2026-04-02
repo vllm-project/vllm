@@ -88,7 +88,7 @@ class Qwen3NextMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
-        expert_gate: torch.nn.Linear | None = None,
+        expert_gate: nn.Module | None = None,
         is_sequence_parallel: bool = False,
         prefix: str = "",
     ) -> None:
