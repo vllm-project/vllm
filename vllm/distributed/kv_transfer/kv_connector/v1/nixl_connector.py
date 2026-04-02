@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
+import regex as re
 import torch
 import zmq
 
@@ -106,6 +107,23 @@ class TransferMode(enum.Enum):
 
     PULL = "pull"
     PUSH = "push"
+
+
+REGISTER_BLOCKS_MSG = b"register_blocks_msg"
+
+# Compiled regex to extract a standard UUID from vLLM request IDs.
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
+def _get_base_request_id(request_id: str) -> str:
+    """Extract the core UUID from a vLLM request ID.
+    If the ID is already a bare UUID, it is returned as-is.
+    """
+    m = _UUID_RE.search(request_id)
+    return m.group(0) if m else request_id
 
 
 logger = init_logger(__name__)
@@ -279,6 +297,8 @@ class ReqMeta:
     tp_size: int
     mode: TransferMode = TransferMode.PULL
     remote: RemoteMeta | None = None
+    # Remote block size, populated from REGISTER_BLOCKS_MSG ACK in push mode.
+    remote_block_size: int | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -299,6 +319,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            remote_block_size=kv_transfer_params.get("remote_block_size"),
         )
 
     def add_new_req_to_save(
@@ -613,6 +634,11 @@ class NixlConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
 
+        # Storage for registered blocks from D nodes (for push-based transfer)
+        # Maps remote_request_id -> registration_data
+        self._registered_blocks: dict[str, dict[str, Any]] = {}
+        self._registered_blocks_lock = threading.Lock()
+
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
@@ -633,6 +659,33 @@ class NixlConnectorScheduler:
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+
+    def pop_registered_blocks(self, request_id: str) -> dict[str, Any] | None:
+        """Get and remove registered block data for a specific request.
+
+        Returns:
+            Registration data dict if found, None otherwise.
+        """
+        with self._registered_blocks_lock:
+            # Exact match first
+            data = self._registered_blocks.pop(request_id, None)
+            if data is not None:
+                return data
+
+            # Fuzzy match by base request ID
+            base_id = _get_base_request_id(request_id)
+            for reg_id in list(self._registered_blocks.keys()):
+                if _get_base_request_id(reg_id) == base_id:
+                    logger.info(
+                        "Fuzzy-matched registered blocks: "
+                        "request_finished ID %s matched registration ID %s "
+                        "(base: %s)",
+                        request_id,
+                        reg_id,
+                        base_id,
+                    )
+                    return self._registered_blocks.pop(reg_id)
+            return None
 
     def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
@@ -695,6 +748,9 @@ class NixlConnectorScheduler:
                     ready_event,
                     self._stop_event,
                     self.side_channel_port,
+                    self._registered_blocks,
+                    self._registered_blocks_lock,
+                    self,
                 ),
                 daemon=True,
                 name="nixl_handshake_listener",
@@ -708,8 +764,15 @@ class NixlConnectorScheduler:
         ready_event: threading.Event,
         stop_event: threading.Event,
         port: int,
+        registered_blocks: dict[str, dict[str, Any]],
+        registered_blocks_lock: threading.Lock,
+        scheduler_instance: "NixlConnectorScheduler",
     ):
-        """Background thread for getting new NIXL handshakes."""
+        """Background thread for getting new NIXL handshakes.
+
+        Handles both GET_META_MSG (pull mode handshake) and
+        REGISTER_BLOCKS_MSG (push mode block registration from D nodes).
+        """
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach via HTTP endpoint soon.
 
@@ -727,15 +790,108 @@ class NixlConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode the message which contains (GET_META_MSG, rank)
-                msg, target_tp_rank = msgspec.msgpack.decode(msg)
-                logger.debug(
-                    "Received message for tp rank %s",
-                    target_tp_rank,
-                )
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+
+                try:
+                    decoded_msg = msgspec.msgpack.decode(msg)
+                except Exception as e:
+                    logger.warning("Failed to decode message: %s", e)
+                    continue
+
+                if not isinstance(decoded_msg, (tuple, list)) or len(decoded_msg) < 2:
+                    logger.warning(
+                        "Connection listener got malformed message: "
+                        "type=%s, content=%s",
+                        type(decoded_msg),
+                        decoded_msg,
+                    )
+                    continue
+
+                msg_type = decoded_msg[0]
+
+                if msg_type == GET_META_MSG:
+                    target_tp_rank = decoded_msg[1]
+                    logger.debug(
+                        "Received GET_META_MSG for tp rank %s",
+                        target_tp_rank,
+                    )
+                    if target_tp_rank not in encoded_data:
+                        logger.error(
+                            "No metadata available for tp rank %s. Available ranks: %s",
+                            target_tp_rank,
+                            list(encoded_data.keys()),
+                        )
+                        continue
+                    sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+
+                elif msg_type == REGISTER_BLOCKS_MSG:
+                    # Handle block registration from D node
+                    registration_data = decoded_msg[1] if len(decoded_msg) > 1 else {}
+
+                    # Validate required fields
+                    request_id = registration_data.get("request_id")
+                    missing = [
+                        k
+                        for k in (
+                            "request_id",
+                            "decode_engine_id",
+                            "decode_tp_size",
+                            "local_block_ids",
+                            "remote_host",
+                            "remote_port",
+                        )
+                        if not registration_data.get(k)
+                    ]
+                    if missing:
+                        logger.warning(
+                            "Rejecting REGISTER_BLOCKS_MSG: missing fields %s",
+                            missing,
+                        )
+                        ack_msg = {
+                            "status": "error",
+                            "error": f"Missing required fields: {missing}",
+                        }
+                        sock.send_multipart(
+                            (identity, b"", msgspec.msgpack.encode(ack_msg))
+                        )
+                        continue
+
+                    assert isinstance(request_id, str)
+
+                    logger.info(
+                        "Received REGISTER_BLOCKS_MSG from D node "
+                        "for request %s, decode_engine_id: %s, "
+                        "num_blocks: %s",
+                        request_id,
+                        registration_data.get("decode_engine_id"),
+                        registration_data.get("num_blocks"),
+                    )
+
+                    # Send ACK with P's block_size and tp_size
+                    ack_msg = {
+                        "status": "success",
+                        "block_size": scheduler_instance.block_size,
+                        "tp_size": (
+                            scheduler_instance.vllm_config.parallel_config.tensor_parallel_size
+                        ),
+                    }
+                    sock.send_multipart(
+                        (identity, b"", msgspec.msgpack.encode(ack_msg))
+                    )
+
+                    # Store the registration data
+                    with registered_blocks_lock:
+                        registered_blocks[request_id] = registration_data
+                    logger.info(
+                        "Stored registration data for request %s with %s blocks",
+                        request_id,
+                        registration_data.get("num_blocks"),
+                    )
+
+                else:
+                    logger.warning(
+                        "Connection listener got unexpected message type: %s",
+                        msg_type,
+                    )
 
     def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
