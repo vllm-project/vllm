@@ -158,19 +158,20 @@ def should_use_system_flash_attn() -> bool:
     """Check if the system flash-attn library should be used based on config/env."""
     if not current_platform.is_cuda():
         return False
-    if get_flash_attn_version() != 4:
-        logger.warning_once(
-            f"System Flash Attention is only compatible with Flash Attention 4 "
-            f"but the detected version is {get_flash_attn_version()}. "
-            f"Disabling system flash attention.",
-            scope="local",
-        )
-        return False
     from vllm.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is not None:
-        return vllm_config.attention_config.use_system_flash_attn
+    if vllm_config is not None and vllm_config.attention_config.use_system_flash_attn:
+        if get_flash_attn_version() != 4:
+            logger.warning_once(
+                f"System Flash Attention is only compatible with Flash Attention 4 "
+                f"but the detected version is {get_flash_attn_version()}. "
+                f"Disabling system flash attention.",
+                scope="local",
+            )
+            return False
+        else:
+            return True
     return False
 
 
