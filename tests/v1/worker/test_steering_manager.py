@@ -1331,3 +1331,68 @@ class TestPendingSteeringRegistrations:
         # The other two must NOT be registered
         assert (10, "decode") not in mgr.config_to_row
         assert (20, "prefill") not in mgr.config_to_row
+
+
+# ---------------------------------------------------------------------------
+# TestDeviceMismatch
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceMismatch:
+    """Regression tests for GPU+CPU device mismatch in populate_steering_tables.
+
+    Per-request vectors are created on CPU (via ``register_config``), while
+    global vectors live on GPU (cloned from model ``register_buffer`` tensors
+    via ``update_global_vectors``).  The combined path
+    ``phase_global + per_req.squeeze(0)`` must handle cross-device operands.
+    """
+
+    def test_combined_global_gpu_per_request_cpu_does_not_crash(self):
+        """When global vectors are on CUDA and per-request vectors are on
+        CPU, ``populate_steering_tables`` must not raise a RuntimeError
+        and must produce the correct combined values."""
+        mgr = _make_manager()
+
+        # Global vectors on CUDA (simulates real model behaviour)
+        base_vec = torch.ones(HIDDEN_SIZE, device="cuda") * 2.0
+        prefill_vec = torch.ones(HIDDEN_SIZE, device="cuda") * 3.0
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=base_vec, phase="base"
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=prefill_vec, phase="prefill"
+        )
+
+        # Per-request vectors registered as float lists -> CPU tensors
+        per_req_list = [5.0] * HIDDEN_SIZE
+        vectors = {_HP: {0: per_req_list}}
+        row = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
+
+        # Create layers with CUDA steering table buffers
+        num_rows = mgr.max_steering_configs + 3
+        layers: dict[int, torch.nn.Module] = {}
+        layer = torch.nn.Module()
+        layer.register_buffer(
+            _TABLE_ATTR,
+            torch.zeros(num_rows, HIDDEN_SIZE, device="cuda"),
+        )
+        layers[0] = layer
+
+        # This must not crash with "RuntimeError: expected ... on cuda"
+        mgr.populate_steering_tables(layers)
+
+        table = getattr(layers[0], _TABLE_ATTR)
+
+        # Row 1: global prefill effective = base + prefill = 2+3 = 5
+        expected_global = (base_vec + prefill_vec).cpu()
+        assert torch.allclose(table[1].cpu(), expected_global), (
+            f"Row 1 mismatch: expected {expected_global}, got {table[1].cpu()}"
+        )
+
+        # Per-request combined row: (base+prefill) + per_req = 5+5 = 10
+        per_req_cpu = torch.tensor(per_req_list, dtype=torch.float32)
+        expected_combined = expected_global + per_req_cpu
+        assert torch.allclose(table[row].cpu(), expected_combined), (
+            f"Combined row {row} mismatch: "
+            f"expected {expected_combined}, got {table[row].cpu()}"
+        )
