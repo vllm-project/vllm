@@ -7,7 +7,8 @@ This file implements NVFP4 emulation for NVFP4 MOE in case the hardware used doe
 natively support NVFP4 MOE.
 
 Weights are dequantized on the fly during each forward, we fall back to calling
-`TritonExperts` using BF16, and fake NVFP4 quantize-dequantize is applied on `a13`, `a2`.
+`TritonExperts` using BF16, and fake NVFP4 quantize-dequantize
+is applied on `a13`, `a2`.
 """
 
 import torch
