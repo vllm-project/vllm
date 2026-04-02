@@ -172,6 +172,9 @@ class EncoderCudaGraphManager:
             output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
             output_buffer.copy_(output)
 
+        # Since the image and video modalities share the same per-patch shape,
+        # so we can use the image dummy inputs to capture CUDA graph for both
+        # image and video.
         input_key = self.config.input_key_by_modality["image"]
         self.budget_graphs[token_budget] = BudgetGraphMetadata(
             token_budget=token_budget,
