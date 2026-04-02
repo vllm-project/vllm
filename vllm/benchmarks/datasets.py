@@ -61,10 +61,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_NUM_PROMPTS = 1000
 
-# -----------------------------------------------------------------------------
-# Data Classes
-# -----------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class SampleRequest:
@@ -506,24 +502,34 @@ def gen_prompt_decode_to_target_len(
 def get_sampling_params(
     rng: np.random.Generator,
     num_requests: int,
-    range_ratio: float,
+    input_range_ratio: float,
+    output_range_ratio: float,
     input_len: int,
     output_len: int,
     tokenizer: TokenizerLike,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Get the sampling parameters for the dataset.
+    Sample per-request input/output token lengths and vocab offsets.
+
+    Lengths are drawn uniformly from integer ranges around the configured
+    means, controlled by ``input_range_ratio`` and ``output_range_ratio``.
+    Tokenizer special tokens are subtracted from ``input_len`` before
+    computing the sampling interval.
+
+    Returns:
+        (input_lens, output_lens, offsets) – three 1-D ``np.ndarray`` of
+        shape ``(num_requests,)``.
     """
-    # Enforce range_ratio < 1
-    if not (0.0 <= range_ratio < 1.0):
-        raise ValueError("range_ratio must be in [0, 1).")
+    if not (0.0 <= input_range_ratio < 1.0):
+        raise ValueError("input_range_ratio must be in [0, 1).")
+    if not (0.0 <= output_range_ratio < 1.0):
+        raise ValueError("output_range_ratio must be in [0, 1).")
     num_special_tokens = int(tokenizer.num_special_tokens_to_add())
     real_input_len = max(0, int(input_len) - num_special_tokens)
-    # Bounds use floor for low and ceil for high
-    input_low = math.floor(real_input_len * (1 - range_ratio))
-    input_high = math.ceil(real_input_len * (1 + range_ratio))
-    output_low = math.floor(output_len * (1 - range_ratio))
-    output_high = math.ceil(output_len * (1 + range_ratio))
+    input_low = math.floor(real_input_len * (1 - input_range_ratio))
+    input_high = math.ceil(real_input_len * (1 + input_range_ratio))
+    output_low = math.floor(output_len * (1 - output_range_ratio))
+    output_high = math.ceil(output_len * (1 + output_range_ratio))
     # Ensure the lower bound for output length is at least 1 to
     # prevent sampling 0 tokens.
     output_low = max(output_low, 1)
@@ -587,6 +593,8 @@ class RandomDataset(BenchmarkDataset):
         no_oversample: bool = False,
         prefix_len: int = DEFAULT_PREFIX_LEN,
         range_ratio: float = DEFAULT_RANGE_RATIO,
+        input_range_ratio: float | None = None,
+        output_range_ratio: float | None = None,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
@@ -595,24 +603,39 @@ class RandomDataset(BenchmarkDataset):
         lora_assignment: str = "random",
         **kwargs,
     ) -> list[SampleRequest]:
-        # validate total input tokens (prefix + sampled) is at least 1.
+        resolved_input_rr = (
+            input_range_ratio if input_range_ratio is not None else range_ratio
+        )
+        resolved_output_rr = (
+            output_range_ratio if output_range_ratio is not None else range_ratio
+        )
+
         num_special = int(tokenizer.num_special_tokens_to_add())
         real_input_len = max(0, int(input_len) - num_special)
-        min_sampled_input = math.floor(real_input_len * (1.0 - float(range_ratio)))
+        min_sampled_input = math.floor(
+            real_input_len * (1.0 - float(resolved_input_rr))
+        )
         min_total_input = int(prefix_len) + min_sampled_input
         if min_total_input < 1:
             raise ValueError(
                 "--random-input-len is too small: with tokenizer special "
-                f"tokens {num_special} and --random-range-ratio {range_ratio}, "
+                f"tokens {num_special} and "
+                f"--random-input-range-ratio {resolved_input_rr}, "
                 "the minimum possible total input tokens (prefix + sampled) is "
                 f"{min_total_input}. Increase --random-input-len and/or "
-                "--random-prefix-len, or decrease --random-range-ratio so that "
-                "prefix_len + floor(max(0, random_input_len - num_special)) "
-                "* (1 - range_ratio) >= 1."
+                "--random-prefix-len, or decrease --random-input-range-ratio "
+                "so that prefix_len + floor(max(0, random_input_len - "
+                "num_special)) * (1 - input_range_ratio) >= 1."
             )
 
         input_lens, output_lens, offsets = get_sampling_params(
-            self._rng, num_requests, range_ratio, input_len, output_len, tokenizer
+            self._rng,
+            num_requests,
+            resolved_input_rr,
+            resolved_output_rr,
+            input_len,
+            output_len,
+            tokenizer,
         )
 
         vocab_size = tokenizer.vocab_size
@@ -623,7 +646,7 @@ class RandomDataset(BenchmarkDataset):
         # Generate prefix once
         prefix_token_ids = self.get_prefix(tokenizer, allowed_tokens, prefix_len)
 
-        requests: list[SampleRequest] = []
+        requests = []
         token_mismatch_total = 0
         for i in range(num_requests):
             prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
@@ -783,18 +806,33 @@ class RandomDatasetForReranking(RandomDataset):
         no_oversample: bool = False,
         prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
+        input_range_ratio: float | None = None,
+        output_range_ratio: float | None = None,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
         is_reranker: bool = True,
         **kwargs,
     ) -> list[SampleRequest]:
+        resolved_input_rr = (
+            input_range_ratio if input_range_ratio is not None else range_ratio
+        )
+        resolved_output_rr = (
+            output_range_ratio if output_range_ratio is not None else range_ratio
+        )
+
         n_sep_tokens = int(is_reranker)
 
         query_len_param = (input_len // 2) - n_sep_tokens if is_reranker else input_len
 
         query_lens, _, query_offsets = get_sampling_params(
-            self._rng, 1, range_ratio, query_len_param, 0, tokenizer
+            self._rng,
+            1,
+            resolved_input_rr,
+            resolved_output_rr,
+            query_len_param,
+            0,
+            tokenizer,
         )
 
         query_len = int(query_lens[0])
@@ -808,7 +846,13 @@ class RandomDatasetForReranking(RandomDataset):
             doc_len_param = input_len - query_len - n_sep_tokens
 
         doc_lens, _, doc_offsets = get_sampling_params(
-            self._rng, num_requests, range_ratio, doc_len_param, 0, tokenizer
+            self._rng,
+            num_requests,
+            resolved_input_rr,
+            resolved_output_rr,
+            doc_len_param,
+            0,
+            tokenizer,
         )
 
         vocab_size = tokenizer.vocab_size
@@ -880,7 +924,7 @@ class RandomDatasetForReranking(RandomDataset):
 # -----------------------------------------------------------------------------
 
 
-class TxtSlicesDataset(RandomDataset):
+class TxtSlicesDataset(BenchmarkDataset):
     """
     Implements the TxtSlices dataset. Takes a URL or file path to a text file,
     tokenizes the entire content, and generates sample requests by randomly
@@ -902,6 +946,7 @@ class TxtSlicesDataset(RandomDataset):
             raise ValueError("The text file is empty and cannot be sampled from.")
 
         self._rng = np.random.default_rng(self.random_seed)
+        self.rng = random.Random(self.random_seed)
 
     @staticmethod
     def load_data(dataset_path: str) -> str:
@@ -924,10 +969,11 @@ class TxtSlicesDataset(RandomDataset):
         tokenizer: TokenizerLike,
         token_ids: tuple[int, ...],
         input_len: int,
-        start_pos: int,
-        output_len: int,
     ) -> str:
         num_available_tokens = len(token_ids)
+
+        # Randomly select a start position
+        start_pos = self.rng.randint(0, num_available_tokens - 1)
 
         # Extract tokens with cycling if necessary
         prompt_token_ids = tuple(
@@ -945,36 +991,35 @@ class TxtSlicesDataset(RandomDataset):
         no_oversample: bool = False,
         input_len: int = 1024,
         output_len: int = 128,
-        range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
+        range_ratio: float = 0.0,
+        input_range_ratio: float | None = None,
+        output_range_ratio: float | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
-        # Tokenize the entire text content
-        token_ids = self.get_token_ids(tokenizer)
+        resolved_input_rr = (
+            input_range_ratio if input_range_ratio is not None else range_ratio
+        )
+        resolved_output_rr = (
+            output_range_ratio if output_range_ratio is not None else range_ratio
+        )
 
-        # Get the sampling parameters for input length and output length.
-        # We don't need the offsets.
+        token_ids = self.get_token_ids(tokenizer)
+        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+
         input_lens, output_lens, _ = get_sampling_params(
             self._rng,
             num_requests,
-            range_ratio,
+            resolved_input_rr,
+            resolved_output_rr,
             input_len,
             output_len,
             tokenizer,
         )
-        # Additionally, get the starting positions in the input text.
-        start_positions = self._rng.integers(0, len(token_ids), size=num_requests)
 
-        # Put it all together.
         return [
             SampleRequest(
-                prompt=self.generate_prompt(
-                    tokenizer,
-                    token_ids,
-                    int(input_lens[i]),
-                    int(start_positions[i]),
-                    int(output_lens[i]),
-                ),
-                prompt_len=int(input_lens[i]),
+                prompt=self.generate_prompt(tokenizer, token_ids, int(input_lens[i])),
+                prompt_len=int(input_lens[i]) + num_special_tokens,
                 expected_output_len=int(output_lens[i]),
                 request_id=request_id_prefix + str(i),
             )
@@ -1290,6 +1335,8 @@ class RandomMultiModalDataset(RandomDataset):
         no_oversample: bool = False,
         prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
+        input_range_ratio: float | None = None,
+        output_range_ratio: float | None = None,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
@@ -1306,9 +1353,21 @@ class RandomMultiModalDataset(RandomDataset):
             raise NotImplementedError(
                 "batchsize > 1 is not supported for RandomMultiModalDataset."
             )
-        # Get the sampling parameters for the dataset
+        resolved_input_rr = (
+            input_range_ratio if input_range_ratio is not None else range_ratio
+        )
+        resolved_output_rr = (
+            output_range_ratio if output_range_ratio is not None else range_ratio
+        )
+
         input_lens, output_lens, offsets = get_sampling_params(
-            self._rng, num_requests, range_ratio, input_len, output_len, tokenizer
+            self._rng,
+            num_requests,
+            resolved_input_rr,
+            resolved_output_rr,
+            input_len,
+            output_len,
+            tokenizer,
         )
 
         (
@@ -1772,9 +1831,27 @@ def add_random_dataset_base_args(
         type=float,
         default=0.0,
         help="Range ratio for sampling input/output length, "
-        "used only for random sampling. Must be in the range [0, 1) to define "
-        "a symmetric sampling range"
-        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
+        "used only for random sampling. Sets both input and output range "
+        "ratios unless overridden by --random-input-range-ratio or "
+        "--random-output-range-ratio. Must be in [0, 1).",
+    )
+    parser_or_group.add_argument(
+        "--random-input-range-ratio",
+        type=float,
+        default=None,
+        help="Range ratio for sampling input length, used only for random "
+        "sampling. Overrides --random-range-ratio for input lengths. "
+        "Must be in [0, 1). Defines the sampling range "
+        "[input_len * (1 - ratio), input_len * (1 + ratio)].",
+    )
+    parser_or_group.add_argument(
+        "--random-output-range-ratio",
+        type=float,
+        default=None,
+        help="Range ratio for sampling output length, used only for random "
+        "sampling. Overrides --random-range-ratio for output lengths. "
+        "Must be in [0, 1). Defines the sampling range "
+        "[output_len * (1 - ratio), output_len * (1 + ratio)].",
     )
     parser_or_group.add_argument(
         "--random-prefix-len",
@@ -2144,6 +2221,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
+                input_range_ratio=args.random_input_range_ratio,
+                output_range_ratio=args.random_output_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
@@ -2157,6 +2236,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
                 range_ratio=args.random_range_ratio,
+                input_range_ratio=args.random_input_range_ratio,
+                output_range_ratio=args.random_output_range_ratio,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 base_items_per_request=args.random_mm_base_items_per_request,
@@ -2176,6 +2257,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 input_len=args.random_input_len,
                 range_ratio=args.random_range_ratio,
+                input_range_ratio=args.random_input_range_ratio,
+                output_range_ratio=args.random_output_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 is_reranker=not args.no_reranker,
@@ -2204,6 +2287,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
+                input_range_ratio=args.random_input_range_ratio,
+                output_range_ratio=args.random_output_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
