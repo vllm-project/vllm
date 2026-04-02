@@ -340,7 +340,8 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     extern __shared__ char smem_storage[];
     // Shared memory layout:
     //   [0, cos_sin_bytes)           : cos/sin for each warp  (warpsPerBlock *
-    //   rotary_dim * sizeof(T_cache)) [cos_sin_bytes, ...)         : QKV tiles
+    //   rotary_dim * sizeof(T_cache)) 
+    // [cos_sin_bytes, ...)         : QKV tiles
     //   per warp     (warpsPerBlock * HEADS_PER_WARP * 32 * elemSizeBytes)
     T_cache* const smem = reinterpret_cast<T_cache*>(smem_storage);
 
@@ -880,7 +881,8 @@ void fused_qk_norm_rope(
       qkv.size(1) == total_heads * head_dim,
       "QKV tensor size must match total number of heads and head dimension");
 
-  auto stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
+  auto device_id= qkv.get_device();
+  auto stream = at::cuda::getCurrentCUDAStream(device_id);
 
   // Select token_heads_per_warp: forced value if >0, else auto-select.
   // Auto thresholds are calibrated on SM 9.0 (H100). On other architectures,
@@ -890,7 +892,7 @@ void fused_qk_norm_rope(
     token_heads_per_warp = static_cast<int>(forced_token_heads_per_warp);
   } else {
     token_heads_per_warp = 1;
-    auto* dev_prop = at::cuda::getCurrentDeviceProperties();
+    auto* dev_prop = at::cuda::getDeviceProperties(device_id);
     int sm_version = dev_prop->major * 10 + dev_prop->minor;
     int64_t total_qk_units = num_tokens * (num_heads_q + num_heads_k);
     if (sm_version == 90) {
