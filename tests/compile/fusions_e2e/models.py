@@ -150,9 +150,8 @@ deepseek_v3_fp8 = ModelFusionInfo(
         # - post_attn_layernorm + MLP
         # 2 per MoE layer (remaining) due to MoE wrapping
         rms_quant_fusion=n_layers * 2 + min(3, n_layers),  # add for 3 dense layers
-        # TODO silu+block quant
-        #  act_quant_fusion=min(3, n_layers), # dense layers only
-        act_quant_fusion=0,
+        # silu+block quant
+        act_quant_fusion=min(3, n_layers),  # dense layers only
         # MLA attn + quant not supported yet:
         # https://github.com/vllm-project/vllm/issues/35792
         attn_quant_fusion=0,
@@ -160,5 +159,14 @@ deepseek_v3_fp8 = ModelFusionInfo(
         # TODO
         # sequence_parallel= n_layers * 2 + 1,
         # async_tp=n_layers * 2,
+    ),
+)
+
+gpt_oss_20b = ModelFusionInfo(
+    model_name="openai/gpt-oss-20b",
+    matches=lambda n_layers: Matches(
+        ar_rms_fusion=n_layers * 2 + 1,
+        sequence_parallel=n_layers * 2 + 1,
+        async_tp=n_layers * 2,
     ),
 )
