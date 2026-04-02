@@ -192,9 +192,7 @@ cython_debug/
 .claude/
 
 # Codex
-.codex
 .codex/
-=4.5.1
 
 # Cursor
 .cursor/
