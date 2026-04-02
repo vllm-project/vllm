@@ -1122,7 +1122,7 @@ class EngineCoreProc(EngineCore):
             # Use os._exit() to terminate this subprocess immediately
             # after cleanup. This skips Python's threading._shutdown()
             # which can hang indefinitely when third-party libraries
-            # (e.g., httpx from huggingface-hub >= 1.7) create
+            # (e.g., httpx from huggingface-hub >= 1.0.0) create
             # non-daemon background threads that block interpreter exit.
             os._exit(exitcode)
 
