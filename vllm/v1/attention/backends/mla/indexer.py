@@ -437,6 +437,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             if use_native and next_n > 1:
                 offsets = self.offsets_buffer
+                seq_lens = (seq_lens.unsqueeze(1) - next_n + 1 + offsets).flatten()
                 batch_size = num_decodes
             elif max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
@@ -543,6 +544,4 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             decode=decode_metadata,
         )
 
-        # if get_tensor_model_parallel_rank() == 0:
-        #     logger.info(f"attn_metadata: {attn_metadata}")
         return attn_metadata
