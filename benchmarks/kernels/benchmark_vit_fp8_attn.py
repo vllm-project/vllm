@@ -15,7 +15,6 @@
 # Custom seq_lens:
 #   python3 benchmark_vit_fp8_attn.py --seq-lens 4096 8192 16384
 
-import os
 from functools import partial
 
 import numpy as np
@@ -32,49 +31,39 @@ DEFAULT_SEQ_LENS = [2304, 4096, 8192, 16384]
 
 def _setup_fp8_attention(num_heads: int, head_dim: int) -> tuple:
     """Create FP8 and BF16 attention modules + workspace."""
+    from types import SimpleNamespace
     from unittest.mock import patch
 
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.envs import disable_envs_cache
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-    ctx = set_current_vllm_config(VllmConfig())
-    ctx.__enter__()
-
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(torch.bfloat16)
-
-    # FP8 attention
-    os.environ["VLLM_MM_ENCODER_FP8_ATTN"] = "1"
-    os.environ.pop("VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH", None)
-    os.environ.pop("VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING", None)
-    disable_envs_cache()
-
+    from vllm.config.multimodal import MultiModalConfig
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,
         _get_flashinfer_workspace_buffer,
     )
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    with patch(
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+
+    backend_patch = patch(
         "vllm.model_executor.layers.attention.mm_encoder_attention"
         ".get_vit_attn_backend",
         return_value=AttentionBackendEnum.FLASHINFER,
-    ):
+    )
+
+    # FP8 attention
+    mm_config_fp8 = MultiModalConfig(mm_encoder_attn_dtype="fp8")
+    vllm_config_fp8 = VllmConfig()
+    vllm_config_fp8.model_config = SimpleNamespace(multimodal_config=mm_config_fp8)
+    with set_current_vllm_config(vllm_config_fp8), backend_patch:
         attn_fp8 = MMEncoderAttention(
             num_heads=num_heads,
             head_size=head_dim,
             prefix="visual.blocks.0.attn",
         ).to("cuda")
 
-    # BF16 attention (non-FP8)
-    os.environ.pop("VLLM_MM_ENCODER_FP8_ATTN", None)
-    disable_envs_cache()
-
-    with patch(
-        "vllm.model_executor.layers.attention.mm_encoder_attention"
-        ".get_vit_attn_backend",
-        return_value=AttentionBackendEnum.FLASHINFER,
-    ):
+    # BF16 attention (no FP8)
+    with set_current_vllm_config(VllmConfig()), backend_patch:
         attn_bf16 = MMEncoderAttention(
             num_heads=num_heads,
             head_size=head_dim,
@@ -84,7 +73,7 @@ def _setup_fp8_attention(num_heads: int, head_dim: int) -> tuple:
     torch.set_default_dtype(old_dtype)
 
     workspace = _get_flashinfer_workspace_buffer()
-    return attn_fp8, attn_bf16, workspace, ctx
+    return attn_fp8, attn_bf16, workspace
 
 
 def _build_meta(
@@ -145,7 +134,7 @@ def run_benchmark(
     else:
         raise ValueError(f"Invalid method: {method}")
 
-    attn_fp8, attn_bf16, workspace, ctx = _setup_fp8_attention(num_heads, head_dim)
+    attn_fp8, attn_bf16, workspace = _setup_fp8_attention(num_heads, head_dim)
 
     print(f"Timing method: {method}")
     print(f"{'seq_len':>8} {'BF16 (us)':>12} {'FP8 (us)':>12} {'Speedup':>10}")
@@ -206,7 +195,7 @@ def run_profile(
     output_dir: str,
 ):
     """Profile FP8 vs BF16 attention with PyTorch profiler."""
-    attn_fp8, attn_bf16, workspace, ctx = _setup_fp8_attention(num_heads, head_dim)
+    attn_fp8, attn_bf16, workspace = _setup_fp8_attention(num_heads, head_dim)
 
     torch.manual_seed(42)
     q = torch.randn(

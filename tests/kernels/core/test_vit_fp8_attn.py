@@ -7,10 +7,10 @@ import contextlib
 import pytest
 import torch
 
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
+from vllm.triton_utils import HAS_TRITON
+from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
-from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -32,35 +32,38 @@ NUM_HEADS = [16]
 
 
 @pytest.fixture
-def _fp8_attention(monkeypatch, default_vllm_config):
-    """Create FP8-enabled MMEncoderAttention via monkeypatch."""
+def _fp8_attention():
+    """Create FP8-enabled MMEncoderAttention via config."""
+    from types import SimpleNamespace
     from unittest.mock import patch
 
-    from vllm.envs import disable_envs_cache
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.multimodal import MultiModalConfig
 
     if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
         yield
         return
 
-    monkeypatch.setenv("VLLM_MM_ENCODER_FP8_ATTN", "1")
-    monkeypatch.delenv("VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH", raising=False)
-    disable_envs_cache()
+    mm_config = MultiModalConfig(mm_encoder_attn_dtype="fp8")
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
 
     # MMEncoderAttention reads torch.get_default_dtype() during init
     # to determine the output dtype. In real model loading this is bf16.
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
 
-    with patch(
-        "vllm.model_executor.layers.attention.mm_encoder_attention"
-        ".get_vit_attn_backend",
-        return_value=AttentionBackendEnum.FLASHINFER,
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.model_executor.layers.attention.mm_encoder_attention"
+            ".get_vit_attn_backend",
+            return_value=AttentionBackendEnum.FLASHINFER,
+        ),
     ):
         yield
 
     torch.set_default_dtype(old_dtype)
-    disable_envs_cache()
 
 
 def _build_cu_seqlens_and_meta(

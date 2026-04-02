@@ -10,26 +10,30 @@ import torch
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     _FP8_AMAX_HISTORY_LEN,
     _FP8_MAX,
+)
+from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
 
 
 @pytest.fixture
-def _make_attention(monkeypatch, default_vllm_config):
+def _make_attention():
     """Create an MMEncoderAttention with dynamic FP8 scaling."""
+    from types import SimpleNamespace
     from unittest.mock import patch
 
-    from vllm.envs import disable_envs_cache
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.multimodal import MultiModalConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
         yield None
         return
 
-    monkeypatch.setenv("VLLM_MM_ENCODER_FP8_ATTN", "1")
-    monkeypatch.setenv("VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING", "1")
-    monkeypatch.delenv("VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH", raising=False)
-    disable_envs_cache()
+    # Dynamic scaling is the default when no scale file is provided.
+    mm_config = MultiModalConfig(mm_encoder_attn_dtype="fp8")
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
 
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,
@@ -39,6 +43,7 @@ def _make_attention(monkeypatch, default_vllm_config):
     # select it by default).
     attn = None
     with (
+        set_current_vllm_config(vllm_config),
         contextlib.suppress(ValueError, ImportError),
         patch(
             "vllm.model_executor.layers.attention.mm_encoder_attention"
@@ -53,8 +58,6 @@ def _make_attention(monkeypatch, default_vllm_config):
         )
 
     yield attn
-
-    disable_envs_cache()
 
 
 def test_dynamic_scaling_updates_scales(_make_attention) -> None:

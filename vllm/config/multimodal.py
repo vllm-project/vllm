@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict, final
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -158,6 +159,15 @@ class MultiModalConfig:
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
     `vllm.v1.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
+    mm_encoder_attn_dtype: str | None = None
+    """Optional dtype override for ViT encoder attention. Set to ``"fp8"`` to
+    enable FP8 quantization via the FlashInfer cuDNN backend (requires
+    cuDNN >= 9.17.1). When set to ``"fp8"`` without a scale file, dynamic
+    scaling is used automatically."""
+    mm_encoder_fp8_scale_path: str | None = None
+    """Path to a JSON file containing per-layer FP8 Q/K/V scales for ViT
+    encoder attention. When provided (with ``mm_encoder_attn_dtype="fp8"``),
+    static scaling is used. When omitted, dynamic scaling is used."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -223,6 +233,18 @@ class MultiModalConfig:
         )
         return AttentionBackendEnum[value.upper()]
 
+    @field_validator("mm_encoder_attn_dtype", mode="before")
+    @classmethod
+    def _validate_mm_encoder_attn_dtype(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.lower()
+        if value not in ("fp8",):
+            raise ValueError(
+                f"mm_encoder_attn_dtype must be 'fp8' or None, got '{value}'"
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_multimodal_config(self):
         if self.mm_processor_cache_type != "shm" and (
@@ -233,6 +255,15 @@ class MultiModalConfig:
                 "'mm_shm_cache_max_object_size_mb' should only be set when "
                 "'mm_processor_cache_type' is 'shm'."
             )
+        if self.mm_encoder_fp8_scale_path is not None:
+            if self.mm_encoder_attn_dtype != "fp8":
+                raise ValueError(
+                    "'mm_encoder_fp8_scale_path' requires "
+                    "'mm_encoder_attn_dtype' to be 'fp8'."
+                )
+            p = Path(self.mm_encoder_fp8_scale_path).expanduser()
+            if not p.is_file():
+                raise FileNotFoundError(f"FP8 scale file not found: {p}")
         return self
 
     def compute_hash(self) -> str:
@@ -252,6 +283,8 @@ class MultiModalConfig:
             if self.mm_encoder_attn_backend is not None
             else None,
             self.mm_encoder_tp_mode,
+            self.mm_encoder_attn_dtype,
+            self.mm_encoder_fp8_scale_path,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

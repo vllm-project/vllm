@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, maybe_get_oot_by_class
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
@@ -21,6 +21,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    is_flashinfer_cudnn_fp8_prefill_attn_supported,
+)
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -83,30 +86,18 @@ def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     return scales
 
 
-_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+def _get_mm_encoder_fp8_config() -> tuple[str | None, str | None]:
+    """Read FP8 encoder config from multimodal_config, if available.
 
-
-def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
-    """Check if FP8 ViT attention is supported on this platform.
-
-    Requires FlashInfer cuDNN backend and cuDNN >= 9.17.1.
+    Returns (mm_encoder_attn_dtype, mm_encoder_fp8_scale_path).
     """
-    try:
-        supported = current_platform.get_supported_vit_attn_backends()
-        if AttentionBackendEnum.FLASHINFER not in supported:
-            return False
-    except (ImportError, AttributeError):
-        return False
-
-    try:
-        import torch.backends.cudnn as cudnn
-
-        if cudnn.is_available() and cudnn.version() < _MIN_CUDNN_FP8:
-            return False
-    except (ImportError, AttributeError):
-        pass
-
-    return True
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.model_config is None:
+        return None, None
+    mm_config = vllm_config.model_config.multimodal_config
+    if mm_config is None:
+        return None, None
+    return mm_config.mm_encoder_attn_dtype, mm_config.mm_encoder_fp8_scale_path
 
 
 # Batch buckets for cuDNN graph caching.
@@ -346,41 +337,29 @@ class MMEncoderAttention(CustomOp):
         self._fp8_dynamic_scale = False
         self.fp8_quant: QuantFP8 | None = None
 
-        if envs.VLLM_MM_ENCODER_FP8_ATTN:
+        attn_dtype, fp8_scale_path = _get_mm_encoder_fp8_config()
+        if attn_dtype == "fp8":
             if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
                 raise ValueError(
-                    "VLLM_MM_ENCODER_FP8_ATTN requires the FlashInfer "
+                    "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
                     "cuDNN backend with cuDNN >= 9.17.1. "
                     "Try upgrading cuDNN (nvidia-cudnn-cu1x) via pip, "
                     "e.g.: pip install -U nvidia-cudnn-cu13==9.18.1"
                 )
-            self._init_fp8_attention(prefix)
+            self._init_fp8_attention(prefix, fp8_scale_path)
 
-    def _init_fp8_attention(self, layer_name: str) -> None:
-        """Initialize FP8 quantization state for this layer."""
-        scale_path = envs.VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH
+    def _init_fp8_attention(self, layer_name: str, scale_path: str | None) -> None:
+        """Initialize FP8 quantization state for this layer.
+
+        If *scale_path* is provided, static per-layer scales are loaded from
+        the JSON file. Otherwise, dynamic scaling is used: a circular buffer
+        of the last 16 observed Q/K/V amax values is maintained and scales
+        are recomputed each forward pass.
+        """
         all_scales = _load_fp8_scales_file(scale_path)
 
-        if scale_path is None:
-            init_scales = {"q": 1.0, "k": 1.0, "v": 1.0}
-            if envs.VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING:
-                self._fp8_dynamic_scale = True
-                logger.info_once(
-                    "FP8 attention enabled with dynamic scaling "
-                    "(no scale file provided). Scales will adapt from "
-                    "observed Q/K/V amax values (history_len=%d).",
-                    _FP8_AMAX_HISTORY_LEN,
-                )
-            else:
-                logger.warning_once(
-                    "FP8 attention enabled with static scale=1.0 "
-                    "(cast-only, no scaling). For better accuracy, "
-                    "provide a scale file via "
-                    "VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH or enable "
-                    "dynamic scaling via "
-                    "VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING=1."
-                )
-        else:
+        if scale_path is not None:
+            # Static scaling from calibration file.
             layer_scales = all_scales.get(layer_name)
             if layer_scales is None:
                 raise ValueError(
@@ -389,6 +368,16 @@ class MMEncoderAttention(CustomOp):
                     f"Available layers: {list(all_scales.keys())}"
                 )
             init_scales = layer_scales
+        else:
+            # Dynamic scaling (auto when no scale file provided).
+            init_scales = {"q": 1.0, "k": 1.0, "v": 1.0}
+            self._fp8_dynamic_scale = True
+            logger.info_once(
+                "FP8 attention enabled with dynamic scaling "
+                "(no scale file provided). Scales will adapt from "
+                "observed Q/K/V amax values (history_len=%d).",
+                _FP8_AMAX_HISTORY_LEN,
+            )
 
         # Shape (1, 1, 1, 1) as required by cuDNN.
         for attr, key in (
@@ -593,8 +582,7 @@ class MMEncoderAttention(CustomOp):
         history position counter is mutated, so this method must NOT be
         called inside CUDA graph capture/replay. When CUDA graphs are
         used for the encoder, dynamic scaling should be disabled by
-        providing a static scale file via VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH,
-        or using the default scales.
+        providing a static scale file via --mm-encoder-fp8-scale-path.
         """
         pos = self._fp8_amax_pos
         self._fp8_amax_pos = (pos + 1) % _FP8_AMAX_HISTORY_LEN
