@@ -1041,17 +1041,20 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
             new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
-            num_new_tokens = cached_reqs.num_computed_tokens[idx]
+            num_new_tokens = scheduler_output.num_scheduled_tokens.get(request_id, 0)
             if not new_block_ids and num_new_tokens == 0:
                 continue
             tracker = self.request_trackers.get(request_id)
             if tracker is None:
                 continue
-            # Get the newly scheduled token_ids from the end
-            total_tokens = len(tracker.all_token_ids)
+            # Slice the tokens scheduled this step: they end at the
+            # total-computed position and span num_new_tokens back.
+            total_computed = cached_reqs.num_computed_tokens[idx]
             new_token_ids = (
                 list(
-                    tracker.all_token_ids[total_tokens - num_new_tokens : total_tokens]
+                    tracker.all_token_ids[
+                        total_computed - num_new_tokens : total_computed
+                    ]
                 )
                 if num_new_tokens > 0
                 else []
