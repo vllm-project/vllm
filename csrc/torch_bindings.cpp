@@ -131,23 +131,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "row_starts_opt) -> ()");
   ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
 
-  // Layernorm-quant
-  // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def(
-      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
-      "Tensor scale, float epsilon) -> "
-      "()");
-  ops.impl("rms_norm_static_fp8_quant", torch::kCUDA,
-           &rms_norm_static_fp8_quant);
-
-  // In-place fused Add and RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
-      "Tensor! residual, Tensor weight, "
-      "Tensor scale, float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
-           &fused_add_rms_norm_static_fp8_quant);
-
   // Fused Layernorm + Quant kernels
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "

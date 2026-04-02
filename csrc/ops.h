@@ -111,16 +111,6 @@ void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
                         const torch::Tensor& lengths,
                         std::optional<torch::Tensor> row_starts_opt);
 
-void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
-                               torch::Tensor& weight, torch::Tensor& scale,
-                               double epsilon);
-
-void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
-                                         torch::Tensor& input,
-                                         torch::Tensor& residual,
-                                         torch::Tensor& weight,
-                                         torch::Tensor& scale, double epsilon);
-
 void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor const& input,
                                       torch::Tensor const& weight,

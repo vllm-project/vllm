@@ -258,6 +258,19 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
 
+  // Layernorm-quant
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  ops.def(
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor scale, float epsilon) -> "
+      "()");
+
+  // In-place fused Add and RMS Normalization.
+  ops.def(
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! residual, Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -421,6 +434,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Layernorm kernels (shared CUDA/ROCm)
   ops.impl("rms_norm", TORCH_BOX(&rms_norm));
   ops.impl("fused_add_rms_norm", TORCH_BOX(&fused_add_rms_norm));
+
+  // Layernorm-quant kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm_static_fp8_quant", TORCH_BOX(&rms_norm_static_fp8_quant));
+  ops.impl("fused_add_rms_norm_static_fp8_quant",
+           TORCH_BOX(&fused_add_rms_norm_static_fp8_quant));
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
