@@ -126,6 +126,29 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
+def _truncate_prompt_if_auto(
+    prompt_token_ids: list[int],
+    truncation: str | None,
+    max_model_len: int,
+    max_output_tokens: int | None,
+) -> list[int]:
+    """Truncate prompt tokens from the left when truncation is "auto".
+
+    Per the OpenAI spec, when truncation is "auto" and the prompt exceeds
+    the model's context window, tokens are dropped from the beginning of
+    the conversation to fit.
+    """
+    if truncation != "auto":
+        return prompt_token_ids
+
+    max_output = max(max_output_tokens or 0, 1)
+    max_input = max_model_len - max_output
+    if len(prompt_token_ids) > max_input and max_input > 0:
+        return prompt_token_ids[-max_input:]
+
+    return prompt_token_ids
+
+
 def _extract_allowed_tools_from_mcp_requests(
     tools: list[Tool],
 ) -> dict[str, list[str] | None]:
@@ -714,15 +737,12 @@ class OpenAIServingResponses(OpenAIServing):
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
 
-        # Apply truncation when truncation="auto" and the prompt exceeds
-        # the model's context window. Per the OpenAI spec, we drop tokens
-        # from the beginning of the conversation to fit.
-        if request.truncation == "auto":
-            max_model_len = self.model_config.max_model_len
-            max_output = max(request.max_output_tokens or 0, 1)
-            max_input = max_model_len - max_output
-            if len(prompt_token_ids) > max_input and max_input > 0:
-                prompt_token_ids = prompt_token_ids[-max_input:]
+        prompt_token_ids = _truncate_prompt_if_auto(
+            prompt_token_ids,
+            truncation=request.truncation,
+            max_model_len=self.model_config.max_model_len,
+            max_output_tokens=request.max_output_tokens,
+        )
 
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
         engine_input["arrival_time"] = arrival_time

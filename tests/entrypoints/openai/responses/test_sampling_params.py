@@ -163,6 +163,59 @@ class _FakeModelConfig:
         self.max_model_len = max_model_len
 
 
+class TestTruncatePromptIfAuto:
+    """Test the harmony-path truncation helper."""
+
+    def _call(self, tokens, truncation, max_model_len, max_output_tokens=None):
+        from vllm.entrypoints.openai.responses.serving import (
+            _truncate_prompt_if_auto,
+        )
+
+        return _truncate_prompt_if_auto(
+            tokens,
+            truncation,
+            max_model_len,
+            max_output_tokens,
+        )
+
+    def test_disabled_returns_unchanged(self):
+        tokens = list(range(200))
+        result = self._call(tokens, "disabled", max_model_len=100)
+        assert result == tokens
+
+    def test_auto_truncates_from_left(self):
+        tokens = list(range(200))
+        result = self._call(tokens, "auto", max_model_len=100, max_output_tokens=10)
+        # max_input = 100 - 10 = 90, keep last 90 tokens
+        assert len(result) == 90
+        assert result == tokens[-90:]
+
+    def test_auto_no_truncation_when_fits(self):
+        tokens = list(range(50))
+        result = self._call(tokens, "auto", max_model_len=100, max_output_tokens=10)
+        assert result == tokens
+
+    def test_auto_reserves_at_least_one_output_token(self):
+        tokens = list(range(200))
+        result = self._call(tokens, "auto", max_model_len=100, max_output_tokens=None)
+        # max_output defaults to max(0, 1) = 1, so max_input = 99
+        assert len(result) == 99
+        assert result == tokens[-99:]
+
+    def test_auto_with_large_max_output(self):
+        tokens = list(range(200))
+        result = self._call(tokens, "auto", max_model_len=100, max_output_tokens=90)
+        # max_input = 100 - 90 = 10
+        assert len(result) == 10
+        assert result == tokens[-10:]
+
+    def test_auto_max_output_exceeds_model_len(self):
+        tokens = list(range(200))
+        result = self._call(tokens, "auto", max_model_len=100, max_output_tokens=150)
+        # max_input = 100 - 150 = -50, negative so no truncation (max_input <= 0)
+        assert result == tokens
+
+
 class TestResponsesRequestTruncation:
     """Test that truncation='auto' produces the right TokenizeParams."""
 
