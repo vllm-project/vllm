@@ -49,15 +49,15 @@ The base `WeightTransferUpdateInfo` includes backend-agnostic fields that contro
 @dataclass
 class WeightTransferUpdateInfo(ABC):
     is_checkpoint_format: bool = True
-    run_initialize_layerwise_reload: bool = True
-    run_finalize_layerwise_reload: bool = True
+    first_chunk: bool = True
+    last_chunk: bool = True
 ```
 
 - **`is_checkpoint_format`**: When `True` (default), vLLM applies layerwise weight processing on the received weights before loading them. Set to `False` if the trainer has already converted weights to the kernel format expected by the model.
-- **`run_initialize_layerwise_reload`**: When `True` (default), calls `initialize_layerwise_reload` before loading weights. Set to `False` for middle or last chunks in a multi-call streaming transfer, since initialization should only happen once at the start.
-- **`run_finalize_layerwise_reload`**: When `True` (default), calls `finalize_layerwise_reload` after loading weights. Set to `False` for first or middle chunks in a multi-call streaming transfer, since finalization should only happen once at the end.
+- **`first_chunk`**: When `True` (default), calls `initialize_layerwise_reload` before loading weights. Set to `False` for middle or last chunks in a multi-call streaming transfer, since initialization should only happen once at the start.
+- **`last_chunk`**: When `True` (default), calls `finalize_layerwise_reload` after loading weights. Set to `False` for first or middle chunks in a multi-call streaming transfer, since finalization should only happen once at the end.
 
-For a single-shot weight transfer (all weights in one call), both flags default to `True` and the behavior is unchanged. For chunked/streaming transfers, the first call sets `run_finalize_layerwise_reload=False`, intermediate calls set both to `False`, and the last call sets `run_initialize_layerwise_reload=False`.
+For a single-shot weight transfer (all weights in one call), both flags default to `True` and the behavior is unchanged. For chunked/streaming transfers, the first call sets `last_chunk=False`, intermediate calls set both to `False`, and the last call sets `first_chunk=False`.
 
 !!! note "Layerwise Reloading"
     By default, vLLM uses [layerwise reloading](https://docs.vllm.ai/en/stable/api/vllm/model_executor/model_loader/reload/layerwise/) to process received weights. This defers weight processing (quantization, repacking, renaming) until all weights for a given layer have been loaded, then materializes and processes the layer in one pass.

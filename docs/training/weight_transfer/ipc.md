@@ -20,7 +20,7 @@ The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) h
 By default, all weights are sent in a single API call. For large models, this requires the full model to reside in GPU memory on both sides simultaneously. Setting `packed=True` enables **chunked transfer** with bounded GPU memory:
 
 - Weights are concatenated into fixed-size packed buffers (controlled by `packed_buffer_size_bytes`).
-- Each chunk is sent as a separate API call with `run_initialize_layerwise_reload` and `run_finalize_layerwise_reload` flags so that vLLM only initializes/finalizes the reload pass on the first/last chunk.
+- Each chunk is sent as a separate API call with `first_chunk` and `last_chunk` flags so that vLLM only initializes/finalizes the reload pass on the first/last chunk.
 - After each chunk is consumed, the GPU memory for that chunk can be reclaimed.
 
 ```python

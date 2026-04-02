@@ -623,6 +623,12 @@ def inference_receive_ipc_tensor(
     mode: str = "ray",
 ) -> dict:
     """Inference task that receives tensor via IPCWeightTransferEngine."""
+    import os
+
+    # Worker-side: ipc_handles_pickled is deserialized via pickle.
+    if mode == "http":
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
     from unittest.mock import MagicMock
 
     import torch

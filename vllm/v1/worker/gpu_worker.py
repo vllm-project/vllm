@@ -976,13 +976,13 @@ class Worker(WorkerBase):
 
             # Use layerwise reload pattern for checkpoint format weights
             with torch.device(self.device):
-                if typed_update_info.run_initialize_layerwise_reload:
+                if typed_update_info.first_chunk:
                     initialize_layerwise_reload(model)
                 self.weight_transfer_engine.receive_weights(
                     typed_update_info,
                     load_weights=model.load_weights,
                 )
-                if typed_update_info.run_finalize_layerwise_reload:
+                if typed_update_info.last_chunk:
                     finalize_layerwise_reload(model, self.model_config)
         else:
             # Weights are already in kernel format, copy directly
