@@ -1605,7 +1605,7 @@ def test_register_kv_caches(
                                 )
                             ]
                         ],
-                        cache_dtype=torch.bfloat16,
+                        cache_dtype="bfloat16",
                         device=torch.accelerator.current_device_index(),
                         kernel_block_sizes=[block_size],
                     )
