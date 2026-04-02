@@ -75,13 +75,19 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         self.device = device
         self.vllm_config = vllm_config
 
-        # Create kv_b_proj (ColumnParallelLinear) on device
+        # Create kv_b_proj (ColumnParallelLinear) on device.
+        # Reuse weights from prior model instance when available, because
+        # ColumnParallelLinear may get NaN from recycled CUDA memory after
+        # torch.compile runs in the same process.
         kv_b_proj = ColumnParallelLinear(
             input_size=kv_lora_rank,
             output_size=num_heads * (qk_nope_head_dim + v_head_dim),
             bias=False,
             prefix="model.layers.0.self_attn.kv_b_proj",
         ).to(device)
+        kv_b_proj_weight = kwargs.get("kv_b_proj_weight")
+        if kv_b_proj_weight is not None:
+            kv_b_proj.weight.data.copy_(kv_b_proj_weight)
 
         # Create MLAAttention
         self.mla_attn = MLAAttention(
@@ -102,6 +108,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
 
         # Initialize W_UK_T and W_UV from kv_b_proj weights
         self.mla_attn.process_weights_after_loading(torch.get_default_dtype())
+        self.kv_b_proj_weight = kv_b_proj.weight.data.clone()
 
         self.block_size = 16
 
@@ -157,7 +164,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         )
         kv_cache = raw_tensor.permute(*inv_order)
 
-        self.mla_attn.kv_cache = [kv_cache]
+        self.mla_attn.kv_cache = kv_cache
 
         self.attn_metadata = self.builder.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
@@ -413,6 +420,7 @@ def test_mla_attention_quant_pattern(
             device=device,
             vllm_config=vllm_config,
             w=model_unfused.w,
+            kv_b_proj_weight=model_unfused.kv_b_proj_weight,
         )
         model_fused = model_fused.to(device)
 

@@ -84,10 +84,14 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         rocm_aiter_ops.refresh_env_variables()
 
         # Filter here to reduce code duplication
+        backend_name = attn_backend.backend.name.lower()
         requires_mla = "deepseek" in model_name.lower()
-        is_mla = "mla" in attn_backend.backend.name.lower()
+        is_mla = "mla" in backend_name
+        # DeepSeek V3.2 uses sparse MLA
+        requires_sparse = "v3.2" in model_name.lower()
+        is_sparse = "sparse" in backend_name
 
-        if requires_mla != is_mla:
+        if requires_mla != is_mla or requires_sparse != is_sparse:
             pytest.skip(
                 f"Incompatible model '{model_name}' and "
                 f"attention backend '{attn_backend.backend.name}'"
