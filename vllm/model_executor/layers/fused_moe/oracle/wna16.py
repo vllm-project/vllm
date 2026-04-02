@@ -15,7 +15,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_permute_scales,
     marlin_permute_bias,
 )
-from vllm.platforms import current_platform
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class GptqMarlinMoeBackend(Enum):
+class WNA16MoEBackend(Enum):
     # No modular-kernel support (e.g. 8-bit weights).
     NONE = "None"
     # Standard (TP / no EP) path – uses MarlinExperts.
@@ -33,38 +35,44 @@ class GptqMarlinMoeBackend(Enum):
 
 
 def backend_to_kernel_cls(
-    backend: GptqMarlinMoeBackend,
-) -> type[mk.FusedMoEExperts] | None:
+    backend: WNA16MoEBackend,
+) -> type[mk.FusedMoEExperts]:
     """Return the experts class for the given backend, or None for NONE."""
-    if backend == GptqMarlinMoeBackend.MARLIN:
+    if backend == WNA16MoEBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             MarlinExperts,
         )
 
         return MarlinExperts
 
-    elif backend == GptqMarlinMoeBackend.BATCHED_MARLIN:
+    elif backend == WNA16MoEBackend.BATCHED_MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             BatchedMarlinExperts,
         )
 
         return BatchedMarlinExperts
 
-    elif backend == GptqMarlinMoeBackend.NONE:
-        return None
-
     else:
-        raise ValueError(f"Unknown GPTQ-Marlin MoE backend: {backend.value}")
+        raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
 
-def select_gptq_marlin_moe_backend(
+def _get_priority_backends() -> list[WNA16MoEBackend]:
+    """
+    Get available backends in priority order based on platform and config.
+    """
+    _AVAILABLE_BACKENDS = [
+        WNA16MoEBackend.MARLIN,
+        WNA16MoEBackend.BATCHED_MARLIN,
+    ]
+    return _AVAILABLE_BACKENDS
+
+
+def select_wna16_moe_backend(
     config: FusedMoEConfig,
+    weight_key: QuantKey,
     weight_bits: int,
-) -> tuple[GptqMarlinMoeBackend, type[mk.FusedMoEExperts] | None]:
-    """Select the GPTQ-Marlin MoE backend.
-
-    Returns a ``(backend, experts_cls)`` pair analogous to
-    ``select_mxfp4_moe_backend()``.
+) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts] | None]:
+    """Select the WNA16 MoE backend.
 
     Args:
         config: the shared ``FusedMoEConfig`` for this layer.
@@ -72,35 +80,63 @@ def select_gptq_marlin_moe_backend(
             supported by the modular Marlin kernel, so ``NONE`` is returned.
 
     Returns:
-        A tuple of (``GptqMarlinMoeBackend``, experts class or ``None``).
+        A tuple of (``WNA16MoEBackend``, experts class or ``None``).
     """
-    # 8-bit GPTQ is not supported by the modular Marlin kernel.
-    if weight_bits == 8:
-        logger.debug_once(
-            "GPTQ-Marlin 8-bit MoE modular kernel is not supported. "
-            "Falling back to legacy fused_marlin_moe().",
-            scope="local",
-        )
-        return GptqMarlinMoeBackend.NONE, None
 
-    if not current_platform.is_cuda():
-        logger.debug_once(
-            "GPTQ-Marlin MoE modular kernel is only supported on CUDA. "
-            "Falling back to legacy fused_marlin_moe().",
-            scope="local",
-        )
-        return GptqMarlinMoeBackend.NONE, None
+    activation_format = (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if config.moe_parallel_config.use_batched_activation_format
+        else mk.FusedMoEActivationFormat.Standard
+    )
 
-    # Choose BATCHED vs standard based on activation format (Expert Parallel).
-    if config.moe_parallel_config.use_batched_activation_format:
-        backend = GptqMarlinMoeBackend.BATCHED_MARLIN
-    else:
-        backend = GptqMarlinMoeBackend.MARLIN
+    def _make_log_backend(backend: WNA16MoEBackend):
+        return f"Using '{backend.value}' WNA16 MoE backend."
+
+    def _make_log_unsupported(backend: WNA16MoEBackend, reason: str | None) -> str:
+        if reason:
+            return (
+                f"WNA16 MoE backend '{backend.value}' does not support the "
+                f"deployment configuration since {reason}."
+            )
+        return (
+            f"WNA16 MoE backend '{backend.value}' does not support the "
+            "deployment configuration."
+        )
+
+    def _return_or_raise(
+        backend: WNA16MoEBackend,
+        config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
+        reason: str | None = None
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend), scope="local")
+                return backend, k_cls
+        raise ValueError(_make_log_unsupported(backend, reason))
+
+    # Select kernels in order of backend.
+    AVAILABLE_BACKENDS = _get_priority_backends()
+
+    for backend in AVAILABLE_BACKENDS:
+        activation_key = None  # always BF16 activation for WNA16 MoE
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend), scope="local")
+                return backend, k_cls
+            else:
+                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     experts_cls = backend_to_kernel_cls(backend)
-    logger.info_once(
-        "Using '%s' GPTQ-Marlin MoE backend.", backend.value, scope="local"
-    )
+    logger.info_once("Using '%s' WNA16 MoE backend.", backend.value, scope="local")
     return backend, experts_cls
 
 
@@ -243,8 +279,8 @@ def _process_weights_marlin(
         layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
 
 
-def process_weights_for_marlin_backend(
-    backend: GptqMarlinMoeBackend,
+def process_weights_for_wna16_backend(
+    backend: WNA16MoEBackend,
     layer: torch.nn.Module,
     quant_config: "GPTQMarlinConfig",
     input_dtype: torch.dtype | None,
@@ -255,20 +291,20 @@ def process_weights_for_marlin_backend(
     add a branch here.
 
     Args:
-        backend: the selected ``GptqMarlinMoeBackend``.
+        backend: the selected ``WNA16MoEBackend``.
         layer: the ``FusedMoE`` layer whose parameters are being prepared.
         quant_config: the ``GPTQMarlinConfig`` for this layer.
         input_dtype: optional activation dtype (e.g. ``torch.int8``,
             ``torch.float8_e4m3fn``).
     """
-    if backend == GptqMarlinMoeBackend.NONE:
+    if backend == WNA16MoEBackend.NONE:
         # No modular-kernel support; weights are used as-is by the legacy
         # fused_marlin_moe() path, which handles all transforms internally.
         return
 
     elif backend in (
-        GptqMarlinMoeBackend.MARLIN,
-        GptqMarlinMoeBackend.BATCHED_MARLIN,
+        WNA16MoEBackend.MARLIN,
+        WNA16MoEBackend.BATCHED_MARLIN,
     ):
         _process_weights_marlin(layer, quant_config, input_dtype)
 
