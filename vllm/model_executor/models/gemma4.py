@@ -1053,7 +1053,14 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
             # and adapter naming for the text-only Gemma4ForCausalLM path,
             # so LoRA keys from the conditional wrapper map onto `model.*`.
             "model.language_model.": "model.",
-        }
+        },
+        orig_to_new_substr={
+            # Gemma4ForConditionalGeneration names MoE adapter targets under
+            # `...moe.experts.*`, while the text-only model exposes them
+            # under `...moe.*`.
+            ".moe.experts.gate_up_proj": ".moe.gate_up_proj",
+            ".moe.experts.down_proj": ".moe.down_proj",
+        },
     )
     # Note: qkv_proj packing applies to non-k_eq_v layers (sliding
     # attention and full attention without k_eq_v). k_eq_v layers use
