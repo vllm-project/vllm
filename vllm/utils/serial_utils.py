@@ -50,8 +50,7 @@ MM_METADATA_DTYPES: Mapping[MmMetadataDType, DTypeInfo] = {
     "bool": DTypeInfo(torch.bool, torch.uint8, np.uint8),
 }
 _ALL_SERIAL_DTYPES: Mapping[str, DTypeInfo] = {
-    **EMBED_DTYPES,
-    **MM_METADATA_DTYPES,
+    k: v for d in (EMBED_DTYPES, MM_METADATA_DTYPES) for k, v in d.items()
 }
 ENDIANNESS: tuple[Endianness, ...] = get_args(Endianness)
 

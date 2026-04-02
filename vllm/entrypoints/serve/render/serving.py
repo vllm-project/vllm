@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 from openai_harmony import Message as OpenAIMessage
 
@@ -38,6 +38,7 @@ from vllm.entrypoints.utils import (
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
+    MultiModalInput,
     MultiModalPlaceholders,
     PromptType,
     SingletonPrompt,
@@ -351,9 +352,10 @@ class OpenAIServingRender:
         if engine_input.get("type") != "multimodal":
             return None
 
-        # At this point engine_input is a MultiModalInputs TypedDict.
-        mm_hashes: MultiModalHashes = engine_input["mm_hashes"]  # type: ignore[typeddict-item]
-        raw_placeholders: MultiModalPlaceholders = engine_input["mm_placeholders"]  # type: ignore[typeddict-item]
+        # At this point engine_input is a MultiModalInput TypedDict.
+        mm_engine_input = cast(MultiModalInput, engine_input)
+        mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
+        raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
 
         mm_placeholders = {
             modality: [
@@ -364,7 +366,7 @@ class OpenAIServingRender:
 
         # Serialize tensor data per modality.
         kwargs_data: dict[str, list[str | None]] | None = None
-        if raw_mm_kwargs := engine_input.get("mm_kwargs"):
+        if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
             kwargs_data = {}
             for modality, items in raw_mm_kwargs.items():
                 kwargs_data[modality] = [

@@ -31,7 +31,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponseChoice,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.inputs import mm_input
+from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
@@ -39,7 +39,6 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     PlaceholderRange,
 )
-from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils.collection_utils import as_list
@@ -107,7 +106,7 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        engine_input: ProcessorInputs
+        engine_input: EngineInput
         if features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
