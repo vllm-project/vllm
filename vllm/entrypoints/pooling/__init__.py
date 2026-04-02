@@ -5,6 +5,10 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from vllm.config import ModelConfig
+from vllm.entrypoints.pooling.utils import enable_scoring_api
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from argparse import Namespace
 
@@ -17,13 +21,23 @@ else:
     RequestLogger = object
     SupportedTask = object
 
+logger = init_logger(__name__)
+
 
 def register_pooling_api_routers(
-    app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
+    app: FastAPI,
+    supported_tasks: tuple["SupportedTask", ...],
+    model_config: ModelConfig | None = None,
 ):
-    from vllm.entrypoints.pooling.pooling.api_router import router as pooling_router
+    if model_config is None:
+        return
 
-    app.include_router(pooling_router)
+    pooling_task = model_config.get_pooling_task(supported_tasks)
+
+    if pooling_task is not None:
+        from vllm.entrypoints.pooling.pooling.api_router import router as pooling_router
+
+        app.include_router(pooling_router)
 
     if "classify" in supported_tasks:
         from vllm.entrypoints.pooling.classify.api_router import (
@@ -37,12 +51,8 @@ def register_pooling_api_routers(
 
         app.include_router(embed_router)
 
-    # Score API handles score/rerank for:
-    # - "score" task (score_type: cross-encoder models)
-    # - "embed" task (score_type: bi-encoder models)
-    # - "token_embed" task (score_type: late interaction models)
-    if any(t in supported_tasks for t in ("score", "embed", "token_embed")):
-        from vllm.entrypoints.pooling.score.api_router import router as score_router
+    if enable_scoring_api(supported_tasks, model_config):
+        from vllm.entrypoints.pooling.scoring.api_router import router as score_router
 
         app.include_router(score_router)
 
@@ -58,8 +68,10 @@ def init_pooling_state(
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
-    from vllm.entrypoints.pooling.score.serving import ServingScores
+    from vllm.entrypoints.pooling.scoring.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
+
+    model_config = engine_client.model_config
 
     resolved_chat_template = load_chat_template(args.chat_template)
 
@@ -69,6 +81,7 @@ def init_pooling_state(
                 engine_client,
                 state.openai_serving_models,
                 state.openai_serving_render,
+                supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
@@ -102,18 +115,18 @@ def init_pooling_state(
         if "classify" in supported_tasks
         else None
     )
-    # Score API handles score/rerank for:
-    # - "score" task (score_type: cross-encoder models)
-    # - "embed" task (score_type: bi-encoder models)
-    # - "token_embed" task (score_type: late interaction models)
     state.serving_scores = (
         ServingScores(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            score_template=resolved_chat_template,
-            log_error_stack=args.log_error_stack,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
+            enable_flash_late_interaction=getattr(
+                args, "enable_flash_late_interaction", True
+            ),
         )
-        if any(t in supported_tasks for t in ("embed", "score", "token_embed"))
+        if enable_scoring_api(supported_tasks, model_config)
         else None
     )

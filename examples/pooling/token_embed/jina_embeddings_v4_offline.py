@@ -4,7 +4,7 @@
 import torch
 
 from vllm import LLM
-from vllm.inputs.data import TextPrompt
+from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import fetch_image
 
 # Initialize model

@@ -21,6 +21,7 @@ vocos # required for minicpmo_26 test
 peft>=0.15.0 # required for phi-4-mm test
 pqdm
 ray[cgraph,default]>=2.48.0 # Ray Compiled Graph, required by pipeline parallelism tests
+resampy # required for audio tests
 sentence-transformers>=5.2.0 # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
@@ -60,7 +61,7 @@ runai-model-streamer[s3,gcs,azure]==0.15.7
 fastsafetensors>=0.2.2 # 0.2.2 contains important fixes for multi-GPU mem usage
 instanttensor>=0.1.5
 pydantic>=2.12 # 2.11 leads to error on python 3.13
-decord==0.6.0
+decord==0.6.0; platform_machine == "x86_64"
 terratorch >= 1.2.2 # Required for Prithvi tests
 imagehash # Required for Prithvi tests
 segmentation-models-pytorch > 0.4.0 # Required for Prithvi tests

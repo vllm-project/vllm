@@ -111,6 +111,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
+    "Gemma4ForCausalLM": ("gemma4", "Gemma4ForCausalLM"),
     "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
@@ -269,6 +270,7 @@ _LATE_INTERACTION_MODELS = {
     "HF_ColBERT": ("colbert", "ColBERTModel"),
     "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    "ColBERTLfm2Model": ("colbert", "ColBERTLfm2Model"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
@@ -290,6 +292,10 @@ _TOKEN_CLASSIFICATION_MODELS = {
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",
+    ),
+    "Qwen3ASRForcedAlignerForTokenClassification": (
+        "qwen3_asr_forced_aligner",
+        "Qwen3ASRForcedAlignerForTokenClassification",
     ),
 }
 
@@ -345,6 +351,8 @@ _MULTIMODAL_MODELS = {
         "chameleon",
         "ChameleonForConditionalGeneration",
     ),
+    "Cheers": ("cheers", "CheersForConditionalGeneration"),
+    "CheersForConditionalGeneration": ("cheers", "CheersForConditionalGeneration"),
     "Cohere2VisionForConditionalGeneration": (
         "cohere2_vision",
         "Cohere2VisionForConditionalGeneration",
@@ -376,6 +384,7 @@ _MULTIMODAL_MODELS = {
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
     "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
@@ -524,9 +533,9 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": (
+    "CohereAsrForConditionalGeneration": (
         "cohere_asr",
-        "CohereASRForConditionalGeneration",
+        "CohereAsrForConditionalGeneration",
     ),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
@@ -541,6 +550,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
+    "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
