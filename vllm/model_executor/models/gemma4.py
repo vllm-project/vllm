@@ -1048,10 +1048,10 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                         MixtureOfExperts):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            # Gemma4 PEFT adapters are often produced from the text submodule
-            # inside Gemma4ForConditionalGeneration and therefore use
-            # `model.language_model.*` keys. The vLLM text-only model lives
-            # directly under `model.*`.
+            # Gemma4ForConditionalGeneration already loads the text stack
+            # from `model.language_model.*`. We reuse that same checkpoint
+            # and adapter naming for the text-only Gemma4ForCausalLM path,
+            # so LoRA keys from the conditional wrapper map onto `model.*`.
             "model.language_model.": "model.",
         }
     )

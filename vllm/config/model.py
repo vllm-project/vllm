@@ -764,22 +764,7 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
-        architectures = self.model_arch_config.architectures
-        mm_config = self.multimodal_config
-        if mm_config is None or not mm_config.language_model_only:
-            return architectures
-
-        text_architectures = getattr(self.hf_text_config, "architectures", None)
-        if text_architectures:
-            return text_architectures
-
-        if (
-            architectures == ["Gemma4ForConditionalGeneration"]
-            and getattr(self.hf_text_config, "model_type", None) == "gemma4_text"
-        ):
-            return ["Gemma4ForCausalLM"]
-
-        return architectures
+        return self.model_arch_config.architectures
 
     @property
     def architecture(self) -> str:
