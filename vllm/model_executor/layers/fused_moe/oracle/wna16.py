@@ -36,21 +36,21 @@ class WNA16MoEBackend(Enum):
 
 def backend_to_kernel_cls(
     backend: WNA16MoEBackend,
-) -> type[mk.FusedMoEExperts]:
+) -> list[type[mk.FusedMoEExperts]]:
     """Return the experts class for the given backend, or None for NONE."""
     if backend == WNA16MoEBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             MarlinExperts,
         )
 
-        return MarlinExperts
+        return [MarlinExperts]
 
     elif backend == WNA16MoEBackend.BATCHED_MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             BatchedMarlinExperts,
         )
 
-        return BatchedMarlinExperts
+        return [BatchedMarlinExperts]
 
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
@@ -135,9 +135,7 @@ def select_wna16_moe_backend(
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
-    experts_cls = backend_to_kernel_cls(backend)
-    logger.info_once("Using '%s' WNA16 MoE backend.", backend.value, scope="local")
-    return backend, experts_cls
+    return WNA16MoEBackend.NONE, None
 
 
 # ---------------------------------------------------------------------------
