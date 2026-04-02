@@ -68,10 +68,13 @@ class IrOpPriorityConfig:
     def set_priority(self):
         """
         Context manager to set the IR op priority for all op members.
-        Kernel implementations must already be registered before calling this
-        (via KernelConfig.set_platform_defaults).
+        It also imports IR kernel implementations for the current platform
+        to ensure all implementations are made available.
         """
         from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
 
         with contextlib.ExitStack() as stack:
             for field in fields(self):
@@ -173,10 +176,6 @@ class KernelConfig:
     def set_platform_defaults(self, vllm_config: "VllmConfig") -> None:
         """Set platform-specific defaults for the kernel config."""
         from vllm.platforms import current_platform
-
-        # Import IR kernels here so that IrOp.registry is fully populated
-        # before compute_hash() or set_priority() are called.
-        current_platform.import_ir_kernels()
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
         logger.debug(
