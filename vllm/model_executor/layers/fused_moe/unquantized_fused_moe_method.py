@@ -250,6 +250,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
+            torch.accelerator.empty_cache()
             # Update moe_config so rocm_aiter_fused_experts computes the
             # correct intermediate_pad = padded - unpadded.
             padded_inter = w2.shape[-1]  # (E, hidden, padded_inter)
