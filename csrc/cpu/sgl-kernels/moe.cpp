@@ -1083,41 +1083,7 @@ at::Tensor fused_experts_cpu(
     scalar_t* __restrict__ intermediate_cache1 = (scalar_t*)((void*)(buffer2.data_ptr<int8_t>()));
     scalar_t* __restrict__ intermediate_cache2 = intermediate_cache1 + M * topk * N;
 
-    if (use_int8_w8a8) {
-      uint8_t* __restrict__ A_tmp = (uint8_t*)((void*)(intermediate_cache2 + M * topk * K));
-      float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
-      uint8_t* __restrict__ Aq_tmp = (uint8_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
-      float* __restrict__ As_tmp = (float*)((void*)(Aq_tmp + std::max(M * K, M * topk * N)));
-
-      auto w1s = w1_scale.value();
-      auto w2s = w2_scale.value();
-      TORCH_CHECK(w1s.numel() == E * 2 * N);
-      TORCH_CHECK(w2s.numel() == E * K);
-
-      fused_experts_int8_kernel_impl<scalar_t>(
-          out_hidden_states.data_ptr<scalar_t>(),
-          intermediate_cache1,
-          intermediate_cache2,
-          A_tmp,
-          C_tmp,
-          Aq_tmp,
-          As_tmp,
-          hidden_states.data_ptr<scalar_t>(),
-          packed_w1.data_ptr<int8_t>(),
-          packed_w2.data_ptr<int8_t>(),
-          w1s.data_ptr<float>(),
-          w2s.data_ptr<float>(),
-          topk_weights.data_ptr<float>(),
-          sorted_ids,
-          expert_ids,
-          offsets,
-          M,
-          N,
-          K,
-          E,
-          topk,
-          num_tokens_post_pad);
-    } else if (use_fp8_w8a16) {
+    if (use_fp8_w8a16) {
       // here we just ignore C_tmp as it is not used
       scalar_t* __restrict__ A_tmp = (scalar_t*)((void*)(intermediate_cache2 + M * topk * K));
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
@@ -1263,32 +1229,7 @@ at::Tensor shared_expert_cpu(
     scalar_t* __restrict__ intermediate_cache1 = (scalar_t*)((void*)(buffer.data_ptr<int8_t>()));
     float* __restrict__ C_tmp = (float*)((void*)(intermediate_cache1 + M * N));
 
-    if (use_int8_w8a8) {
-      uint8_t* __restrict__ Aq_tmp = (uint8_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
-      float* __restrict__ As_tmp = (float*)((void*)(Aq_tmp + std::max(M * K, M * N)));
-
-      auto w1s = w1_scale.value();
-      auto w2s = w2_scale.value();
-      TORCH_CHECK(w1s.numel() == 2 * N);
-      TORCH_CHECK(w2s.numel() == K);
-
-      shared_expert_int8_kernel_impl<scalar_t>(
-          out_hidden_states.data_ptr<scalar_t>(),
-          intermediate_cache1,
-          C_tmp,
-          Aq_tmp,
-          As_tmp,
-          hidden_states.data_ptr<scalar_t>(),
-          packed_w1.data_ptr<int8_t>(),
-          packed_w2.data_ptr<int8_t>(),
-          w1s.data_ptr<float>(),
-          w2s.data_ptr<float>(),
-          fused_experts_out.data_ptr<scalar_t>(),
-          routed_scaling_factor,
-          M,
-          N,
-          K);
-    } else if (use_fp8_w8a16) {
+    if (use_fp8_w8a16) {
       scalar_t* __restrict__ intermediate_cache0 = (scalar_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
       scalar_t* __restrict__ B_tmp = (scalar_t*)((void*)(intermediate_cache0 + M * 2 * N));
 

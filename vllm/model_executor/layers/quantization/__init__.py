@@ -24,7 +24,6 @@ QuantizationMethods = Literal[
     "gptq",
     "compressed-tensors",
     "bitsandbytes",
-    "experts_int8",
     "quark",
     "moe_wna16",
     "torchao",
@@ -40,7 +39,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
     "fbgemm_fp8",
     "fp_quant",
-    "experts_int8",
     "petit_nvfp4",
 ]
 
@@ -112,7 +110,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         CompressedTensorsConfig,
     )
     from .cpu_wna16 import CPUAWQConfig
-    from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
@@ -147,7 +144,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
-        "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
