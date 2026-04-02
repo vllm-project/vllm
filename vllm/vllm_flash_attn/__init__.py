@@ -1,33 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
-import importlib.abc
-import importlib.util
 import os
 import sys
+import types
 
-# When developing with VLLM_FLASH_ATTN_SRC_DIR, the cute/ directory is
-# symlinked rather than copied, so its source files contain unmodified
-# `flash_attn.cute.*` imports. This finder redirects those imports to
-# `vllm.vllm_flash_attn.cute.*`, ensuring a single set of module objects
-# (important for JIT cache correctness).
+# Set up a virtual `flash_attn` package so that `flash_attn.cute.*` imports
+# resolve without requiring the flash-attn pip package to be installed.
+# In symlink mode (VLLM_FLASH_ATTN_SRC_DIR), __path__ points at the real
+# source tree; in copy mode, it points at this package's directory.
 _cute_dir = os.path.join(os.path.dirname(__file__), "cute")
-if os.path.islink(_cute_dir):
-
-    class _CuteImportRedirector(importlib.abc.MetaPathFinder):
-        _PREFIX = "flash_attn.cute"
-        _TARGET = "vllm.vllm_flash_attn.cute"
-
-        def find_spec(self, fullname, path, target=None):
-            if fullname != self._PREFIX and not fullname.startswith(self._PREFIX + "."):
-                return None
-            actual = self._TARGET + fullname[len(self._PREFIX) :]
-            mod = importlib.import_module(actual)
-            sys.modules[fullname] = mod
-            return importlib.util.find_spec(fullname)
-
-    sys.meta_path.insert(0, _CuteImportRedirector())
+if os.path.isdir(_cute_dir) and "flash_attn" not in sys.modules:
+    _fa_mod = types.ModuleType("flash_attn")
+    if os.path.islink(_cute_dir):
+        _fa_mod.__path__ = [os.path.dirname(os.path.realpath(_cute_dir))]
+    else:
+        _fa_mod.__path__ = [os.path.dirname(__file__)]
+    _fa_mod.__package__ = "flash_attn"
+    sys.modules["flash_attn"] = _fa_mod
 
 from vllm.vllm_flash_attn.flash_attn_interface import (  # noqa: E402
     FA2_AVAILABLE,

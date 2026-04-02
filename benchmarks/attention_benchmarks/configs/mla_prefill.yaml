@@ -115,7 +115,7 @@ decode_backends:
 
 prefill_backends:
   - fa2
-  - fa3
+  # - fa3
   - fa4
   - flashinfer
   - cudnn
