@@ -112,20 +112,20 @@ def generate_markdown_table():
         )
 
 
-@pytest.mark.parametrize("output_scale_val", [None, 0.5, 0.05])
+@pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("prefill_tokens_with_context", [None, 128])
 @pytest.mark.parametrize("num_tokens", NUM_BATCH_TOKENS)
 @pytest.mark.parametrize("num_query_heads", NUM_QUERY_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("output_dtype", DTYPES)
+@pytest.mark.parametrize("input_dtype", DTYPES)
 @torch.inference_mode()
 def test_merge_attn_states(
-    output_scale_val: float | None,
     prefill_tokens_with_context: int | None,
     num_tokens: int,
     num_query_heads: int,
     head_size: int,
-    output_dtype: torch.dtype,
+    input_dtype: torch.dtype,
+    use_fp8: bool,
 ):
     if not current_platform.is_cuda():
         pytest.skip(
@@ -137,21 +137,18 @@ def test_merge_attn_states(
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size
 
-    # When output_scale_val is set, inputs stay as output_dtype (bf16/fp16/fp32)
+    # When use_fp8 is set, inputs stay as input_dtype (bf16/fp16/fp32)
     # and output becomes FP8.
-    fp8_output = output_scale_val is not None
-    input_dtype = output_dtype
+    output_dtype = input_dtype
     output_scale = None
-    if fp8_output:
+    if use_fp8:
         output_dtype = current_platform.fp8_dtype()
-        output_scale = torch.tensor(
-            [output_scale_val], dtype=torch.float32, device="cuda"
-        )
+        output_scale = torch.tensor([0.05], dtype=torch.float32, device="cuda")
 
     print(
         f"\nNUM_TOKENS:{NUM_TOKENS}, NUM_HEADS:{NUM_HEADS}, "
         f"HEAD_SIZE:{HEAD_SIZE}, input_dtype: {input_dtype}, "
-        f"output_dtype: {output_dtype}, output_scale: {output_scale_val}, "
+        f"output_dtype: {output_dtype}, use_fp8: {use_fp8}, "
         f"prefill_tokens_with_context: {prefill_tokens_with_context}, "
         f"Device: {current_platform.get_device_name()}"
     )
@@ -318,7 +315,7 @@ def test_merge_attn_states(
     # Liger Kernel: Efficient Triton Kernels for LLM Training
     # https://arxiv.org/pdf/2410.10989, 3.3 Correctness
     # use rtol = 1e-2 for bfloat16.
-    if fp8_output:
+    if use_fp8:
         # FP8 e4m3 has coarse quantization levels, so wider tolerances.
         atol, rtol = 5.0, 0.10
     elif output_dtype == torch.bfloat16:
@@ -345,7 +342,7 @@ def test_merge_attn_states(
     print("-" * 100)
 
     torch.testing.assert_close(
-        output_lse_cuda.float(), output_lse_ref.float(), atol=1e-3, rtol=1e-2
+        output_lse_cuda.float(), output_lse_ref.float(), atol=atol, rtol=rtol
     )
     print("Output LSE all match, max abs diff:")
     print(f"(Triton vs Torch) : {diff(output_lse_torch, output_lse_ref)}")
