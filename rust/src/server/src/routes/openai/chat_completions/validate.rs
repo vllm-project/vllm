@@ -99,6 +99,67 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    // ---- Reject parameters that are accepted for deserialization but not yet implemented ----
+
+    if request.parallel_tool_calls.is_some() {
+        bail_invalid_request!(
+            param = "parallel_tool_calls",
+            "parallel_tool_calls is not supported."
+        );
+    }
+
+    reject_non_default(
+        request.length_penalty.as_ref(),
+        "length_penalty",
+        "length_penalty is not supported.",
+    )?;
+    if !request.spaces_between_special_tokens {
+        bail_invalid_request!(
+            param = "spaces_between_special_tokens",
+            "spaces_between_special_tokens is not supported."
+        );
+    }
+    reject_non_default(
+        request.truncate_prompt_tokens.as_ref(),
+        "truncate_prompt_tokens",
+        "truncate_prompt_tokens is not supported.",
+    )?;
+    reject_non_default(
+        request.thinking_token_budget.as_ref(),
+        "thinking_token_budget",
+        "thinking_token_budget is not supported.",
+    )?;
+    if !request.include_reasoning {
+        bail_invalid_request!(
+            param = "include_reasoning",
+            "include_reasoning is not supported."
+        );
+    }
+    reject_non_default(
+        request.media_io_kwargs.as_ref(),
+        "media_io_kwargs",
+        "media_io_kwargs is not supported.",
+    )?;
+    reject_non_default(
+        request.mm_processor_kwargs.as_ref(),
+        "mm_processor_kwargs",
+        "mm_processor_kwargs is not supported.",
+    )?;
+    reject_non_default(
+        request.repetition_detection.as_ref(),
+        "repetition_detection",
+        "repetition_detection is not supported.",
+    )?;
+
+    if let Some(options) = &request.stream_options
+        && options.continuous_usage_stats.is_some()
+    {
+        bail_invalid_request!(
+            param = "stream_options",
+            "continuous_usage_stats is not supported."
+        );
+    }
+
     Ok(())
 }
 

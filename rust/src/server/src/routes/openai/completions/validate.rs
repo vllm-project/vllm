@@ -72,6 +72,33 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    // ---- Reject parameters that are accepted for deserialization but not yet implemented ----
+
+    if request.length_penalty.is_some() {
+        bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
+    }
+    if !request.spaces_between_special_tokens {
+        bail_invalid_request!(
+            param = "spaces_between_special_tokens",
+            "spaces_between_special_tokens is not supported."
+        );
+    }
+    if request.truncate_prompt_tokens.is_some() {
+        bail_invalid_request!(
+            param = "truncate_prompt_tokens",
+            "truncate_prompt_tokens is not supported."
+        );
+    }
+
+    if let Some(options) = &request.stream_options
+        && options.continuous_usage_stats.is_some()
+    {
+        bail_invalid_request!(
+            param = "stream_options",
+            "continuous_usage_stats is not supported."
+        );
+    }
+
     Ok(())
 }
 
