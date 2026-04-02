@@ -1449,14 +1449,14 @@ class LLM:
 
         pooling_task = io_processor.pooling_task
         scoring_data = io_processor.valid_inputs(data_1, data_2)
-        offset = len(scoring_data.data_1)
+        n_queries = len(scoring_data.data_1)
 
         ctx = OfflineInputsContext(
             prompts=scoring_data,
             pooling_params=pooling_params,
             tokenization_kwargs=tokenization_kwargs,
             chat_template=chat_template,
-            offset=offset,
+            n_queries=n_queries,
         )
 
         processor_inputs = io_processor.pre_process_offline(ctx)
@@ -1487,7 +1487,7 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs, offset=offset),
+            ctx=OfflineOutputsContext(outputs=outputs, n_queries=n_queries),
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]
