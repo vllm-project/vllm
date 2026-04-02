@@ -346,6 +346,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
         )
+        # Detect push mode: proxy signals it with empty remote_block_ids.
+        if not req.remote.block_ids:
+            req.mode = TransferMode.PUSH
         self.reqs_to_recv[request_id] = req
 
 
@@ -926,6 +929,102 @@ class NixlConnectorScheduler:
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
+    def _register_blocks_with_prefill(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+    ) -> tuple[bool, int | None, int | None]:
+        """Register D node's allocated block IDs with P node for push-based
+        transfer.
+
+        Args:
+            req_id: Local request ID
+            meta: Request metadata containing remote info and local block IDs
+
+        Returns:
+            (success, p_block_size, p_tp_size) tuple
+        """
+        assert meta.remote is not None
+        remote_request_id = meta.remote.request_id
+        remote_host = meta.remote.host
+        remote_port = meta.remote.port
+
+        try:
+            path = make_zmq_path("tcp", remote_host, remote_port)
+            logger.debug(
+                "Registering blocks with P node at %s "
+                "for request %s (remote_request_id: %s)",
+                path,
+                req_id,
+                remote_request_id,
+            )
+
+            num_blocks = sum(len(group) for group in meta.local_physical_block_ids)
+            if num_blocks == 0:
+                logger.warning(
+                    "No blocks to register with P node for request %s",
+                    req_id,
+                )
+                return False, None, None
+
+            registration_data = {
+                "request_id": remote_request_id,
+                "decode_request_id": req_id,
+                "decode_engine_id": self.engine_id,
+                "decode_tp_size": meta.tp_size,
+                "local_block_ids": meta.local_physical_block_ids,
+                "num_blocks": num_blocks,
+                # D node's actual IP for P to handshake and send
+                "remote_host": self.side_channel_host,
+                "remote_port": self.side_channel_port,
+            }
+
+            with zmq_ctx(zmq.REQ, path) as sock:
+                # Send registration request
+                msg = msgspec.msgpack.encode((REGISTER_BLOCKS_MSG, registration_data))
+                sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5 second timeout
+                sock.send(msg)
+
+                # Wait for acknowledgment
+                ack_bytes = sock.recv()
+                ack_msg = msgspec.msgpack.decode(ack_bytes)
+
+                if ack_msg.get("status") == "success":
+                    # P returns its block_size and tp_size in the ACK
+                    p_block_size = ack_msg.get("block_size")
+                    p_tp_size = ack_msg.get("tp_size")
+                    logger.info(
+                        "Successfully registered %s blocks with P node "
+                        "for request %s (P block_size=%s, P tp_size=%s)",
+                        registration_data["num_blocks"],
+                        req_id,
+                        p_block_size,
+                        p_tp_size,
+                    )
+                    return True, p_block_size, p_tp_size
+                else:
+                    logger.error(
+                        "P node rejected block registration for request %s: %s",
+                        req_id,
+                        ack_msg.get("error", "Unknown error"),
+                    )
+                    return False, None, None
+
+        except zmq.Again:
+            logger.error(
+                "Timeout registering blocks with P node for "
+                "request %s. P node may not be responding.",
+                req_id,
+            )
+            return False, None, None
+        except Exception as e:
+            logger.exception(
+                "Failed to register blocks with P node for request %s: %s",
+                req_id,
+                e,
+            )
+            return False, None, None
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -1023,8 +1122,58 @@ class NixlConnectorScheduler:
                         "request will not utilize KVTransfer",
                         params,
                     )
-            else:
-                assert num_external_tokens == 0
+            elif num_external_tokens > 0:
+                # There are external tokens but the remote block ids
+                # are not provided. This is a KV push mode where D node
+                # registers blocks with P node
+                logger.info(
+                    "KV PUSH mode: D node registering blocks for request %s",
+                    request.request_id,
+                )
+                local_block_ids = blocks.get_unhashed_block_ids_all_groups()
+                local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
+
+                # Create ReqMeta for registration.
+                meta = ReqMeta(
+                    local_block_ids=local_block_ids,
+                    local_physical_block_ids=local_block_ids,
+                    tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+                )
+                meta.remote = RemoteMeta(
+                    block_ids=(),  # Not used for push mode
+                    engine_id=params["remote_engine_id"],
+                    request_id=params["remote_request_id"],
+                    host=params["remote_host"],
+                    port=params["remote_port"],
+                )
+
+                # Register blocks with P node.
+                # ACK returns P's block_size and tp_size so D can
+                # populate kv_topo without a full handshake.
+                success, p_block_size, p_tp_size = self._register_blocks_with_prefill(
+                    request.request_id,
+                    meta,
+                )
+
+                if not success:
+                    logger.error(
+                        "Failed to register blocks with P node for request %s",
+                        request.request_id,
+                    )
+                else:
+                    # Store P's info so it flows to the worker via
+                    # kv_transfer_params -> ReqMeta.
+                    if p_block_size is not None:
+                        params["remote_block_size"] = p_block_size
+                    if p_tp_size is not None:
+                        params["remote_tp_size"] = p_tp_size
+
+                # Still add to reqs_need_recv to track the request
+                self._reqs_need_recv[request.request_id] = (
+                    request,
+                    (),  # Empty because we're waiting for push
+                )
+
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
 
