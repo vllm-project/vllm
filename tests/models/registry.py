@@ -1334,12 +1334,17 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForCausalLM": _HfExamplesInfo(
+        "BAAI/Emu3-Chat-hf",
+        extras={"gemma4-31b-it": "google/gemma-4-31B-it"},
+    ),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
         "allenai/OLMoE-1B-7B-0924", min_transformers_version="5.0.0"
     ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="5.0.0"
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        extras={"gemma4-26b-a4b-it": "google/gemma-4-26B-A4B-it"},
+        min_transformers_version="5.0.0",
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
         "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0"
