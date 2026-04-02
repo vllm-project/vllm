@@ -79,6 +79,27 @@ def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]
         supported = has_fbgemm_gpu()
         if not supported:
             reason = "fbgemm_gpu is required"
+    elif backend == NvFp4LinearBackend.EMULATION:
+        # e.g. AMD Instinct does not support native NVFP4.
+        unsupported_reasons = {}
+        for other_backend in NVFP4_LINEAR_BACKENDS:
+            if other_backend == NvFp4LinearBackend.EMULATION:
+                continue
+            other_supported, other_reason = is_backend_supported(other_backend)
+            if not other_supported:
+                unsupported_reasons[other_backend] = other_reason
+
+        if unsupported_reasons:
+            unsupported_reasons_str = "\n - ".join(
+                [f"{b.value}: {r}" for b, r in unsupported_reasons.items()]
+            )
+            logger.warning_once(
+                f"NVFP4 linear falling back to the slow and unoptimized "
+                f"backend=NvFp4LinearBackend.EMULATION as no optimized backend is "
+                f"available (unavailable reasons:\n - {unsupported_reasons_str}\n). "
+                "In case you expect one of these backend to be used, "
+                "please verify your environment."
+            )
 
     return supported, reason
 
@@ -102,30 +123,11 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
         selected_backend = NvFp4LinearBackend.EMULATION
     elif envs.VLLM_NVFP4_GEMM_BACKEND is None:
-        unsupported_reasons = {}
         for backend in NVFP4_LINEAR_BACKENDS:
             supported, reason = is_backend_supported(backend)
             if supported:
                 selected_backend = backend
                 break
-            else:
-                unsupported_reasons[backend] = reason
-
-        if selected_backend == NvFp4LinearBackend.EMULATION:
-            # e.g. AMD Instinct does not support native NVFP4.
-            unsupported_reasons_str = "\n - ".join(
-                [
-                    f"{backend.value}: {reason}"
-                    for backend, reason in unsupported_reasons.items()
-                ]
-            )
-            logger.warning_once(
-                f"NVFP4 linear falling back to the slow and unoptimized "
-                f"backend=NvFp4LinearBackend.EMULATION as no optimized backend is "
-                f"available (unavailable reasons:\n - {unsupported_reasons_str}\n). "
-                "In case you expect one of these backend to be used, "
-                "please verify your environment."
-            )
     else:
         selected_backend = NvFp4LinearBackend(envs.VLLM_NVFP4_GEMM_BACKEND)
 
