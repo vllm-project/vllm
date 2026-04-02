@@ -107,6 +107,7 @@ RUN apt-get update -y \
         sudo \
         python3-pip \
         libibverbs-dev \
+        protobuf-compiler libprotobuf-dev \
         # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
         # as it was causing spam when compiling the CUTLASS kernels
         gcc-10 \
@@ -128,6 +129,11 @@ RUN apt-get update -y \
 # Activate virtual environment and add uv to PATH
 ENV PATH="/opt/venv/bin:/root/.local/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
+
+# Compiler and linker environment
+ENV CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc-10
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc-10
 
 # Environment for uv
 ENV UV_HTTP_TIMEOUT=500
@@ -380,11 +386,28 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
+# Install Rust toolchain for building Rust extensions.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 WORKDIR /workspace
 
 # Copy pre-built csrc wheel directly
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 COPY . .
+
+# Fail loudly if the rust submodule was not initialized on the host before
+# `docker build`. The rust frontend source is brought in via `COPY . .`, so an
+# uninitialized submodule would otherwise produce a confusing cargo failure.
+RUN if [ ! -f rust/Cargo.toml ]; then \
+        echo "ERROR: rust/ submodule is not initialized."; \
+        echo "Run 'git submodule update --init --recursive' on the host before building."; \
+        exit 1; \
+    fi
+
+# Require the Rust frontend to be successfully built into the final wheel.
+ENV VLLM_REQUIRE_RUST_FRONTEND=1
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
@@ -406,6 +429,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     if [ "${vllm_target_device}" = "cuda" ]; then \
+        export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38

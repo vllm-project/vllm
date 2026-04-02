@@ -33,10 +33,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
     gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
+    protobuf-compiler libprotobuf-dev \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# Compiler and linker environment
 ENV CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc-12
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc-12
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -112,7 +116,24 @@ COPY requirements/build/cpu.txt requirements/build/cpu.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/build/cpu.txt
 
+# Install Rust toolchain for building Rust extensions.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Require Rust frontend to be successfully built into the wheel
+ENV VLLM_REQUIRE_RUST_FRONTEND=1
+
 COPY . .
+
+# Fail loudly if the rust submodule was not initialized on the host before
+# `docker build`. The rust frontend source is brought in via `COPY . .`, so an
+# uninitialized submodule would otherwise produce a confusing cargo failure.
+RUN if [ ! -f rust/Cargo.toml ]; then \
+        echo "ERROR: rust/ submodule is not initialized."; \
+        echo "Run 'git submodule update --init --recursive' on the host before building."; \
+        exit 1; \
+    fi
 
 RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
