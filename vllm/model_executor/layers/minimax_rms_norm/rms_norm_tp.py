@@ -109,7 +109,7 @@ class MiniMaxQKNormWrapper(nn.Module):
         self._lamport_max_token: int = 0
 
         if current_platform.is_cuda() and self.tp_world > 1:
-            self._lamport_max_token = min(2048, max_tokens)
+            self._lamport_max_token = min(64, max_tokens)
             from .lamport_workspace import get_allreduce_workspace
 
             self._ar_workspace = get_allreduce_workspace(
@@ -146,28 +146,38 @@ class MiniMaxQKNormWrapper(nn.Module):
             self.tp_world,
             self.q_norm.variance_epsilon,
         )
-        return qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        return q, k, v
 
+    @torch.compile()
     def _native_ops(
         self, qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.contiguous()
-        k = k.contiguous()
         orig_dtype = q.dtype
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        q_var = q.pow(2).mean(dim=-1, keepdim=True)
-        k_var = k.pow(2).mean(dim=-1, keepdim=True)
+        q_fp32 = q.to(torch.float32)
+        k_fp32 = k.to(torch.float32)
+        q_var = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+        k_var = k_fp32.pow(2).mean(dim=-1, keepdim=True)
         if self.tp_world > 1:
             qk_var = torch.cat([q_var, k_var], dim=-1)
             qk_var = tensor_model_parallel_all_reduce(qk_var) / self.tp_world
             q_var, k_var = qk_var.chunk(2, dim=-1)
-        q = q * torch.rsqrt(q_var + self.q_norm.variance_epsilon) * self.q_norm.weight
-        k = k * torch.rsqrt(k_var + self.k_norm.variance_epsilon) * self.k_norm.weight
-        q = q.to(orig_dtype)
-        k = k.to(orig_dtype)
-        return q, k, v
+        q.copy_(
+            (
+                q_fp32
+                * torch.rsqrt(q_var + self.q_norm.variance_epsilon)
+                * self.q_norm.weight
+            ).to(orig_dtype)
+        )
+        k.copy_(
+            (
+                k_fp32
+                * torch.rsqrt(k_var + self.k_norm.variance_epsilon)
+                * self.k_norm.weight
+            ).to(orig_dtype)
+        )
+        return qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
 
 def minimax_rms_norm(
@@ -203,4 +213,5 @@ direct_register_custom_op(
     op_name="minimax_rms_norm",
     op_func=minimax_rms_norm,
     fake_impl=minimax_rms_norm_fake,
+    mutates_args=[],
 )
