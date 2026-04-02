@@ -28,9 +28,6 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -45,7 +42,7 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import is_strictly_contiguous
+from vllm.utils.torch_utils import is_quantized_kv_cache, is_strictly_contiguous
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -96,8 +93,13 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     mock_kv_cache_ptr,
     k_scale_ptr,
     v_scale_ptr,
-    K_CACHE_STRIDE: tl.constexpr,
-    KV_CACHE_STRIDE: tl.constexpr,
+    src_stride_page,
+    src_stride_kv,
+    src_stride_head,
+    DST_K_CACHE_STRIDE: tl.constexpr,
+    DST_KV_CACHE_STRIDE: tl.constexpr,
+    HEAD_STRIDE: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     mock_block_table_idx = tl.program_id(1).to(tl.int64)
@@ -108,31 +110,42 @@ def _trtllm_prefill_attn_kvfp8_dequant(
         return
     dequant_dtype = mock_kv_cache_ptr.dtype.element_ty
 
-    # Dequantize K
     k_scale_val = tl.load(k_scale_ptr)
-    offset = orig_page_num * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    fp8_vals = tl.load(kv_cache_ptr + offset)
-    dequantized_vals = fp8_vals.to(tl.float32) * k_scale_val
-    mock_cache_offset = (
-        batch_idx * block_table_stride + mock_block_table_idx + 1
-    ) * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    dequantized_vals = dequantized_vals.to(dequant_dtype)
-    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
-
-    # Dequantize V
     v_scale_val = tl.load(v_scale_ptr)
-    offset = (
-        orig_page_num * KV_CACHE_STRIDE + K_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    )
-    fp8_vals = tl.load(kv_cache_ptr + offset)
-    dequantized_vals = fp8_vals.to(tl.float32) * v_scale_val
-    mock_cache_offset = (
-        (batch_idx * block_table_stride + mock_block_table_idx + 1) * KV_CACHE_STRIDE
-        + K_CACHE_STRIDE
-        + tl.arange(0, K_CACHE_STRIDE)
-    )
-    dequantized_vals = dequantized_vals.to(dequant_dtype)
-    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
+
+    mock_page_idx = batch_idx * block_table_stride + mock_block_table_idx + 1
+    head_offsets = tl.arange(0, HEAD_STRIDE)
+
+    for h in range(NUM_KV_HEADS):
+        h_off = tl.cast(h, tl.int64)
+
+        # Read K from source (supports non-contiguous page/kv/head strides)
+        src_k = orig_page_num * src_stride_page + h_off * src_stride_head + head_offsets
+        fp8_k = tl.load(kv_cache_ptr + src_k)
+        dequant_k = (fp8_k.to(tl.float32) * k_scale_val).to(dequant_dtype)
+
+        # Write K to contiguous mock cache
+        dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + head_offsets
+        tl.store(mock_kv_cache_ptr + dst_k, dequant_k)
+
+        # Read V from source (offset by src_stride_kv for the V half)
+        src_v = (
+            orig_page_num * src_stride_page
+            + src_stride_kv
+            + h_off * src_stride_head
+            + head_offsets
+        )
+        fp8_v = tl.load(kv_cache_ptr + src_v)
+        dequant_v = (fp8_v.to(tl.float32) * v_scale_val).to(dequant_dtype)
+
+        # Write V to contiguous mock cache
+        dst_v = (
+            mock_page_idx * DST_KV_CACHE_STRIDE
+            + DST_K_CACHE_STRIDE
+            + h * HEAD_STRIDE
+            + head_offsets
+        )
+        tl.store(mock_kv_cache_ptr + dst_v, dequant_v)
 
 
 def trtllm_prefill_attn_kvfp8_dequant(
@@ -146,8 +159,18 @@ def trtllm_prefill_attn_kvfp8_dequant(
     s = kv_cache.shape
     assert s[1] == 2
     assert dequant_dtype in (torch.bfloat16, torch.float16)
-    k_cache_stride = s[2] * s[3] * s[4]
+
+    num_kv_heads, block_size, head_size = s[2], s[3], s[4]
+    head_stride = block_size * head_size
+    k_cache_stride = num_kv_heads * head_stride
     kv_cache_stride = k_cache_stride * s[1]
+
+    strides = kv_cache.stride()
+    assert strides[3] == head_size and strides[4] == 1, (
+        "For kv cache layouts, (block_size, head_size) "
+        f"dimensions must be contiguous, got strides {strides}"
+    )
+
     new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
     # mock kv cache contains just the pages needed by this prefill
     mock_kv_cache = torch.empty(new_s, dtype=dequant_dtype, device=kv_cache.device)
@@ -166,8 +189,13 @@ def trtllm_prefill_attn_kvfp8_dequant(
         mock_kv_cache,
         k_scale,
         v_scale,
+        strides[0],
+        strides[1],
+        strides[2],
         k_cache_stride,
         kv_cache_stride,
+        head_stride,
+        num_kv_heads,
     )
     return mock_kv_cache, mock_block_table
 
@@ -513,7 +541,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
             self.prefill_fixed_split_size = 4096
             self.disable_split_kv = True
@@ -574,7 +602,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.page_size = self.kv_cache_spec.block_size
 
         self.cache_dtype = self.cache_config.cache_dtype
-        if self.cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.cache_dtype):
             self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.cache_dtype
             )
@@ -688,7 +716,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if vllm_is_batch_invariant():
+            if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
@@ -1241,7 +1269,7 @@ class FlashInferImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
             self.support_trtllm_attn
-            and self.kv_cache_dtype.startswith("fp8")
+            and is_quantized_kv_cache(self.kv_cache_dtype)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
 
@@ -1288,10 +1316,14 @@ class FlashInferImpl(AttentionImpl):
         )
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         if self.bmm2_scale is None:
-            self.bmm2_scale = layer._v_scale_float
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._v_scale_float
 
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
         decode_use_trtllm = isinstance(attn_metadata.decode, TRTLLMDecode)
@@ -1343,8 +1375,8 @@ class FlashInferImpl(AttentionImpl):
 
         # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
         # to process the cache when the kv_cache_dtype is fp8
-        if self.kv_sharing_target_layer_name is None and self.kv_cache_dtype.startswith(
-            "fp8"
+        if self.kv_sharing_target_layer_name is None and is_quantized_kv_cache(
+            self.kv_cache_dtype
         ):
             torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.kv_cache_dtype
@@ -1454,9 +1486,8 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
-                if (
-                    attn_metadata.q_data_type != FP8_DTYPE
-                    and self.kv_cache_dtype.startswith("fp8")
+                if attn_metadata.q_data_type != FP8_DTYPE and is_quantized_kv_cache(
+                    self.kv_cache_dtype
                 ):
                     # TRTLLM prefill attention does not support BF16 Q
                     # and fp8 kv cache. So to enable prefill attention

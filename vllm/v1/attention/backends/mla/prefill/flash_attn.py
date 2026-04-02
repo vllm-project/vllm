@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
@@ -128,7 +128,7 @@ class FlashAttnPrefillImpl(MLAPrefillImpl):
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
         attn_out = self.flash_attn_varlen_func(

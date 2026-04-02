@@ -34,7 +34,7 @@ class AttentionConfig:
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""
 
-    use_trtllm_ragged_deepseek_prefill: bool = False
+    use_trtllm_ragged_deepseek_prefill: bool = True
     """Whether to use TRTLLM ragged deepseek prefill."""
 
     use_trtllm_attention: bool | None = None
@@ -66,7 +66,7 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        ignored_factors: list[str] = []
+        ignored_factors: set[str] = set()
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 

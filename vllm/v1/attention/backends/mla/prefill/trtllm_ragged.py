@@ -178,14 +178,13 @@ class TrtllmRaggedPrefillImpl(MLAPrefillImpl):
         assert prefill_metadata.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill_metadata.workspace_buffer is not None
 
-        out = torch.zeros(
+        out = torch.empty(
             q.shape[0],
             q.shape[1],
             v.shape[2],
             device=q.device,
             dtype=prefill_metadata.output_dtype,
         )
-        prefill_metadata.workspace_buffer.fill_(0)
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,

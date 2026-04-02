@@ -239,10 +239,11 @@ def _resolve_import_to_file(
 
 
 def _find_cc_in_function(tree: ast.AST, func_name: str) -> str | None:
-    """Find a compute capability from is_device_capability_family() calls in a function.
+    """Find a compute capability from is_device_capability*() calls in a function.
 
-    Looks for the pattern: current_platform.is_device_capability_family(N)
-    and converts N (e.g. 100) to a CC string (e.g. "10.x").
+    Handles two patterns:
+    - is_device_capability_family(N): "M.x" (e.g. 100 -> "10.x")
+    - is_device_capability(N): "M.m" (e.g. 100 -> "10.0")
     """
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name != func_name:
@@ -251,12 +252,15 @@ def _find_cc_in_function(tree: ast.AST, func_name: str) -> str | None:
             if (
                 isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Attribute)
-                and n.func.attr == "is_device_capability_family"
                 and n.args
                 and isinstance(n.args[0], ast.Constant)
                 and isinstance(n.args[0].value, int)
             ):
-                return f"{n.args[0].value // 10}.x"
+                val = n.args[0].value
+                if n.func.attr == "is_device_capability_family":
+                    return f"{val // 10}.x"
+                elif n.func.attr == "is_device_capability":
+                    return f"{val // 10}.{val % 10}"
     return None
 
 
@@ -689,7 +693,7 @@ def parse_attention_types(node: ast.ClassDef) -> str:
 
     if not types:
         return "Decoder"
-    return "All" if len(types) >= 3 else ", ".join(sorted(types))
+    return "All" if types >= set(type_map.values()) else ", ".join(sorted(types))
 
 
 def parse_impl_bool_attr(
@@ -1425,14 +1429,23 @@ When no backend is specified (the default):
 """
 
 
-def _priority_table(title: str, backends: list[str]) -> list[str]:
+def _priority_table(
+    title: str,
+    backends: list[str],
+    annotations: dict[str, str] | None = None,
+) -> list[str]:
     """Generate a priority table for a list of backends."""
+
+    def _fmt(b: str) -> str:
+        suffix = annotations.get(b, "") if annotations else ""
+        return f"`{b}`{suffix}"
+
     return [
         f"**{title}:**",
         "",
         "| Priority | Backend |",
         "| -------- | ------- |",
-        *[f"| {i} | `{b}` |" for i, b in enumerate(backends, 1)],
+        *[f"| {i} | {_fmt(b)} |" for i, b in enumerate(backends, 1)],
         "",
     ]
 
@@ -1461,10 +1474,24 @@ def generate_priority_section(priorities: dict[str, list[str]]) -> str:
 
     lines.extend(["### MLA Attention (DeepSeek-style)", ""])
 
+    mla_sm100_annotations = {
+        "FLASHINFER_MLA_SPARSE": "**\\***",
+    }
     if "mla_sm100" in priorities:
-        lines.extend(_priority_table(sm100, priorities["mla_sm100"]))
+        lines.extend(
+            _priority_table(sm100, priorities["mla_sm100"], mla_sm100_annotations)
+        )
     if "mla_default" in priorities:
         lines.extend(_priority_table(ampere, priorities["mla_default"]))
+
+    if "mla_sm100" in priorities:
+        lines.append(
+            "> **\\*** For sparse MLA, FP8 KV cache always prefers "
+            "`FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` "
+            "is preferred for low query-head counts (<= 16), while "
+            "`FLASHMLA_SPARSE` is preferred otherwise."
+        )
+        lines.append(">")
 
     lines.append(
         "> **Note:** ROCm and CPU platforms have their own selection logic. "

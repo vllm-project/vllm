@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -12,15 +13,13 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
 )
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import triton
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
@@ -117,6 +116,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             self.supports_quant_query_input = False
 
+        self._sm_count = torch.cuda.get_device_properties(0).multi_processor_count
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -139,7 +140,24 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
-        num_kv_splits = 1 if vllm_is_batch_invariant() else 4
+        if envs.VLLM_BATCH_INVARIANT:
+            num_kv_splits = 1
+        else:
+            # Minimum work per split
+            # hardware dependent
+            min_work_per_split = 512
+
+            ideal_splits = max(1, attn_metadata.max_seq_len // min_work_per_split)
+
+            # use power of 2 to avoid excessive kernel instantiations
+            ideal_splits = triton.next_power_of_2(ideal_splits)
+
+            # Calculate SM-based maximum splits with occupancy multiplier
+            # 2-4x allows multiple blocks per SM for latency hiding
+            # hardware dependent
+            occupancy_multiplier = 2
+            max_splits = self._sm_count * occupancy_multiplier
+            num_kv_splits = min(ideal_splits, max_splits)
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
@@ -175,7 +193,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.scale,
             PAGE_SIZE,
             k_scale=layer._k_scale,
-            v_scale=layer._v_scale,
+            v_scale=layer._k_scale,
+            is_mla=True,
         )
 
         return o, lse

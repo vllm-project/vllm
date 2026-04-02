@@ -107,6 +107,27 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 !!! note
     When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
+## Constrained Decoding Behavior
+
+Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode:
+
+| `tool_choice` value | Schema-constrained decoding | Behavior |
+| --- | --- | --- |
+| Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
+| `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
+| `"auto"` | No | The model generates freely. A tool-call parser extracts tool calls from the raw text. Arguments may be malformed or not match the schema. |
+| `"none"` | N/A | No tool calls are produced. |
+
+When schema conformance matters, prefer `tool_choice="required"` or named function calling over `"auto"`.
+
+### Strict Mode (`strict` parameter)
+
+The [OpenAI API](https://platform.openai.com/docs/guides/function-calling#strict-mode) supports a `strict` field on function definitions. When set to `true`, OpenAI uses constrained decoding to guarantee that tool-call arguments match the function schema, even in `tool_choice="auto"` mode.
+
+vLLM **does not implement** `strict` mode today. The `strict` field is accepted in requests (to avoid breaking clients that set it), but it has no effect on decoding behavior. In auto mode, argument validity depends entirely on the model's output quality and the parser's extraction logic.
+
+Tracking issues: [#15526](https://github.com/vllm-project/vllm/issues/15526), [#16313](https://github.com/vllm-project/vllm/issues/16313).
+
 ## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
@@ -123,6 +144,9 @@ template configured in the `tokenizer_config.json`. In this case, it will be use
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json).
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
+
+!!! note
+    With `tool_choice="auto"`, tool-call arguments are extracted from the model's raw text output by the selected parser. No schema-level constraint is applied during decoding, so arguments may occasionally be malformed or violate the function's parameter schema. See [Constrained Decoding Behavior](#constrained-decoding-behavior) for details.
 
 ### Hermes Models (`hermes`)
 
@@ -481,7 +505,7 @@ Here is a summary of a plugin file:
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
-        def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        def adjust_request(self, request: ChatCompletionRequest | ResponsesRequest) -> ChatCompletionRequest | ResponsesRequest:
             return request
 
         # implement the tool call parse for stream call
