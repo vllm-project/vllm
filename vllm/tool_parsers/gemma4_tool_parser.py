@@ -38,7 +38,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import find_common_prefix
 
 logger = init_logger(__name__)
@@ -281,8 +281,8 @@ class Gemma4ToolParser(ToolParser):
     tool parsers.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         if not self.model_tokenizer:
             raise ValueError(
