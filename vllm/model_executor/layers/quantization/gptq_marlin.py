@@ -27,10 +27,10 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.oracle.marlin import (
-    GptqMarlinMoeBackend,
-    process_weights_for_marlin_backend,
-    select_gptq_marlin_moe_backend,
+from vllm.model_executor.layers.fused_moe.oracle.wna16 import (
+    WNA16MoEBackend,
+    process_weights_for_wna16_backend,
+    select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -50,6 +50,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt4Static,
+    kInt8Static,
 )
 from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
@@ -509,9 +513,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
         self.input_dtype = None
         self.use_marlin = True
+        weight_key = (
+            kInt4Static if self.quant_type == scalar_types.uint4b8 else kInt8Static
+        )
 
-        self.gptq_marlin_backend, self.experts_cls = select_gptq_marlin_moe_backend(
-            moe, quant_config.weight_bits
+        self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
+            moe, weight_key, quant_config.weight_bits
         )
 
     def create_weights(
@@ -678,8 +685,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
-        process_weights_for_marlin_backend(
-            backend=self.gptq_marlin_backend,
+        process_weights_for_wna16_backend(
+            backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
             input_dtype=self.input_dtype,
@@ -695,7 +702,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         ``self.moe_kernel`` stays ``None`` and the legacy
         ``fused_marlin_moe()`` path is used in ``apply()``.
         """
-        if self.gptq_marlin_backend == GptqMarlinMoeBackend.NONE:
+        if self.wna16_moe_backend == WNA16MoEBackend.NONE:
             return
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -770,7 +777,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor :
+    ) -> torch.Tensor:
         # Use modular kernel
         assert not self.is_monolithic
         assert self.moe_kernel is not None
