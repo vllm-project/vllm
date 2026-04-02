@@ -23,7 +23,7 @@ from tests.quantization.utils import is_quant_method_supported
 from ..utils import check_logprobs_close
 
 # A small MoE model that fits on a single GPU and has both linear + MoE layers.
-MOE_MODEL = "Qwen/Qwen3-30B-A3B"
+MOE_MODEL = "allenai/OLMoE-1B-7B-0125-Instruct"
 # A small dense model (no MoE) to validate the linear-only path.
 DENSE_MODEL = "Qwen/Qwen3-0.6B"
 
