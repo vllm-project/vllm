@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -45,7 +46,6 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -171,7 +171,15 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
-        return head_size % 8 == 0 and head_size <= 256
+        if head_size % 8 != 0:
+            return False
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+            and get_flash_attn_version() == 4
+        ):
+            return head_size <= 512
+        return head_size <= 256
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
