@@ -66,9 +66,10 @@ class AsyncEplbLayerResult:
     """Metadata describing what was received during transfer_layer."""
     consumed_event: CpuGpuEvent
     """
-    Created by the async worker before publishing this result. The main thread
-    calls consumed_event.record() after move_from_buffer() completes, which
-    unblocks the async worker's consumed_event.wait() call.
+    Event used to synchronize access to the intermediate buffer. The async worker calls
+    wait() after it finishes transferring weights to the intermediate buffer. The main
+    thread calls record() after it finishes transferring weights out of the intermediate
+    buffer in _move_to_workspace()
     """
 
 
