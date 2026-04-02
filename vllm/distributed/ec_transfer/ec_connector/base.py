@@ -69,12 +69,6 @@ class ECConnectorBase(ABC):
         is_producer = ec_cfg.is_ec_producer
         is_consumer = ec_cfg.is_ec_consumer
 
-        # If ec_role is "ec_both", enable both producer and consumer capabilities.
-        # This allows a single instance to both save and load encoder caches,
-        # useful for testing connector logic without needing separate encoder/PD instances.
-        if ec_cfg.ec_role == "ec_both":
-            is_producer, is_consumer = True, True
- 
         self._is_producer = is_producer
         self._is_consumer = is_consumer
 
