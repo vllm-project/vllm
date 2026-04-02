@@ -89,8 +89,8 @@ class QKRoPEKVCacheMLATestModel(torch.nn.Module):
 
         if use_deepseek_scaling_rope:
             self.rotary_emb = DeepseekScalingRotaryEmbedding(
-                self.head_size,
-                rotary_dim=self.head_size,
+                qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
                 max_position_embeddings=4096,
                 base=10000,
                 is_neox_style=is_neox,
@@ -104,8 +104,8 @@ class QKRoPEKVCacheMLATestModel(torch.nn.Module):
                 self.rotary_op = ROTARY_OP
 
             self.rotary_emb = RotaryEmbedding(
-                self.head_size,
-                rotary_dim=self.head_size,
+                qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
                 max_position_embeddings=4096,
                 base=10000,
                 is_neox_style=is_neox,
@@ -125,16 +125,13 @@ class QKRoPEKVCacheMLATestModel(torch.nn.Module):
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
             prefix=prefix,
-            # attn_backend=attn_backend.get_class(),
         )
         self.attn_backend: type[AttentionBackend] = attn_backend.get_class()
         self.attn._k_scale = self.attn._k_scale.to(device)
         self.attn._v_scale = self.attn._v_scale.to(device)
 
         self.kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
-        self.kv_cache_dtype = (
-            FP8_DTYPE if self.kv_cache_dtype_str.startswith("fp8") else self.dtype
-        )
+        self.kv_cache_dtype = self.dtype
 
         # Initialize attn MetadataBuilder
         self.builder = self.attn.attn_backend.get_builder_cls()(
@@ -212,31 +209,20 @@ class QKRoPEKVCacheMLATestModel(torch.nn.Module):
         k_scale = k_scale.clone()
 
         if self.use_deepseek_scaling_rope:
-            _ATEN_SLICE_TO_END: int = 9223372036854775807
             h = self.qk_nope_head_dim + self.qk_rope_head_dim
-            v1 = mm.reshape(-1, self.num_heads, h)
-            v2 = mm.reshape(-1, self.num_heads, h)
-            s_r = torch.ops.aten.slice.Tensor(
-                v2, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
-            )
-            s_w = torch.ops.aten.slice.Tensor(
-                v2, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
-            )
             self.rotary_emb.cos_sin_cache = cos_sin_cache
-            q, k = self.rotary_emb(positions, s_r, k_pe)
-            query_rope = q[..., : self.qk_rope_head_dim]
-            copy_out = torch.ops.aten.copy.default(s_w, query_rope)
-            q_full = torch.ops.aten.slice_scatter.default(
-                v1, copy_out, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
+            q = mm.view(-1, self.num_heads, h)
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
             )
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
-                k,
+                k_pe,
                 self.layer_name,
                 self.kv_cache_dtype_str,
                 k_scale,
             )
-            return dummy, q_full, k, kv_c_normed
+            return dummy, q, k_pe, kv_c_normed
         else:
             self.rotary_op(
                 positions, q, k_pe, self.qk_rope_head_dim, cos_sin_cache, self.is_neox
