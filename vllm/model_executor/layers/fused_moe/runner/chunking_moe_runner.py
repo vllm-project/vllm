@@ -100,6 +100,7 @@ class ChunkingMoERunner(MoERunnerBase):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         # Assert the inputs are of the proper type and shape.
         assert self.batched_hidden_states is not None
@@ -118,7 +119,10 @@ class ChunkingMoERunner(MoERunnerBase):
 
         final_fused_hidden_states = torch.empty_like(hidden_states)
         if self.shared_experts is not None:
-            final_shared_hidden_states = torch.empty_like(hidden_states)
+            if shared_experts_input is not None:
+                final_shared_hidden_states = torch.empty_like(shared_experts_input)
+            else:
+                final_shared_hidden_states = torch.empty_like(hidden_states)
         else:
             final_shared_hidden_states = None
 
@@ -152,7 +156,9 @@ class ChunkingMoERunner(MoERunnerBase):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         final_shared_hidden_states, final_fused_hidden_states = (
-            self._allocate_dp_chunking_outputs(hidden_states, router_logits)
+            self._allocate_dp_chunking_outputs(
+                hidden_states, router_logits, shared_experts_input
+            )
         )
 
         ctx = get_forward_context()
