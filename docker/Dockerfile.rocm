@@ -90,9 +90,13 @@ WORKDIR ${COMMON_WORKDIR}
 # Ensure core build tools are installed (idempotent if base image already has them)
 RUN uv pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
 
-# ROCm PyTorch stack + SDK from genesis gfx1250 index, then init CLI
+# ROCm PyTorch stack + SDK from genesis gfx1250 index, then init CLI.
+# Uninstall first (no-op if missing) then install without --upgrade so torch/torchvision/torchaudio
+# stay on the same genesis build (avoids torchvision::nms / partial upgrade skew).
 ARG PIP_EXTRA_INDEX_URL=https://rocm.genesis.amd.com/whl/gfx1250/
-RUN uv pip install --upgrade --index-url ${PIP_EXTRA_INDEX_URL} \
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+RUN uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
     torch torchvision torchaudio "rocm[libraries,devel]" \
     && rocm-sdk init
 
@@ -162,7 +166,9 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 FROM fetch_vllm AS build_vllm
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
-    && python3 -m pip install -r requirements/rocm.txt \
+    && uv pip install -r requirements/rocm.txt \
+    && uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && python3 setup.py clean --all  \
     && python3 setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
@@ -389,6 +395,8 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip install --system -r requirements/rocm-test.txt \
+    && uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --system --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
@@ -500,6 +508,8 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
     && uv pip install --system -r requirements/rocm.txt \
+    && uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --system --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
