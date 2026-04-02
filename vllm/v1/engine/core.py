@@ -1665,6 +1665,12 @@ class DPEngineCoreProc(EngineCoreProc):
                 (-1, EngineCoreOutputs(start_wave=self.current_wave))
             )
 
+    def barrier(self):
+        """Blocking barrier on the DP process group (test-only utility)."""
+        import torch.distributed as dist
+
+        dist.barrier(group=self.dp_group)
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
