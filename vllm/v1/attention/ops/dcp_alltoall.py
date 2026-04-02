@@ -286,6 +286,7 @@ def dcp_a2a_lse_reduce(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
+    empty_req_mask: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Combine partial attention outputs across DCP ranks using All-to-All.
@@ -323,6 +324,9 @@ def dcp_a2a_lse_reduce(
 
     local_output = cp_attn_out.contiguous()
     local_lse = cp_attn_lse.contiguous()
+    if empty_req_mask is not None:
+        local_lse.masked_fill_(empty_req_mask[:, None], -float("inf"))
+        local_output.masked_fill_(empty_req_mask[:, None, None], 0)
 
     B, H, D = local_output.shape
     H_per_rank = H // world_size
