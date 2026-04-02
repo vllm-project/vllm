@@ -92,16 +92,6 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
                      int64_t max_seq_len);
 
-void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
-                               torch::Tensor& weight, torch::Tensor& scale,
-                               double epsilon);
-
-void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
-                                         torch::Tensor& input,
-                                         torch::Tensor& residual,
-                                         torch::Tensor& weight,
-                                         torch::Tensor& scale, double epsilon);
-
 void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor const& input,
                                       torch::Tensor const& weight,
