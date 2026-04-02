@@ -288,13 +288,13 @@ class TestStreamingExtraction:
         Returns a list of (delta_message, accumulated_text) tuples.
         """
         results: list[tuple[Any, str]] = []
-        previous_text = ""
-        previous_token_ids = []
+        previous_text: str = ""
+        previous_token_ids: list[int] = []
 
         for chunk in chunks:
             current_text = previous_text + chunk
             # Use token ID 48 for tool_call start, 49 for end, 0 otherwise
-            delta_token_ids = []
+            delta_token_ids: list[int] = []
             if TOOL_CALL_START in chunk:
                 delta_token_ids.append(48)
             elif TOOL_CALL_END in chunk:
