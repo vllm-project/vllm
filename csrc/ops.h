@@ -111,21 +111,6 @@ void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
                         const torch::Tensor& lengths,
                         std::optional<torch::Tensor> row_starts_opt);
 
-void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
-                                      torch::Tensor const& input,
-                                      torch::Tensor const& weight,
-                                      torch::Tensor& scales,
-                                      double const epsilon,
-                                      std::optional<torch::Tensor> scale_ub,
-                                      std::optional<torch::Tensor> residual);
-
-void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& weight,
-                              torch::Tensor& scales, double const epsilon,
-                              std::optional<torch::Tensor> scale_ub,
-                              std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed);
-
 #ifndef USE_ROCM
 void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   torch::Tensor const& input,
