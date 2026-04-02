@@ -317,7 +317,7 @@ def test_merge_attn_states(
     # use rtol = 1e-2 for bfloat16.
     if use_fp8:
         # FP8 e4m3 has coarse quantization levels, so wider tolerances.
-        atol, rtol = 5.0, 0.10
+        atol, rtol = 1e-1, 1e-1
     elif output_dtype == torch.bfloat16:
         atol, rtol = 1e-3, 1e-2
     else:
