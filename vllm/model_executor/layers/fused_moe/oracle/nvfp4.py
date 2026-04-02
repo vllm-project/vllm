@@ -107,7 +107,7 @@ def backend_to_kernel_cls(
 
         return [MarlinExperts]
     elif backend == NvFp4MoeBackend.EMULATION:
-        from vllm.model_executor.layers.fused_moe.quantization_emulation_moe import (
+        from vllm.model_executor.layers.fused_moe.nvfp4_simulation_moe import (
             Nvfp4QuantizationEmulationTritonExperts,
         )
 
@@ -354,18 +354,16 @@ def convert_to_nvfp4_moe_kernel_format(
                 " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
             )
 
-        # moe_kernel_quantize_input -> ref_nvfp4_quant_dequant use the inverse scale.
-        # Similar to model_executor/layers/quantization/utils/flashinfer_fp4_moe.py.
-        # NOTE: at this point `a13_scale` and `a2_scale` are the inverses such that:
-        # `x_fp8_range = x * 1 / global_scale`, and `global_scale` is small.
-        # We take the max following e.g. flashinfer_fp4_moe.py, which results in likely
-        # overflow of the fp8 range, and scale clamping!
-        # It may be better to use min here.
-        a13_scale = a13_scale.max().to(torch.float32)
-        a2_scale = a2_scale.max().to(torch.float32)
-
-        a13_scale = 1.0 / a13_scale
-        a2_scale = 1.0 / a2_scale
+        # 1. We take the max following e.g. quantization/utils/flashinfer_fp4_moe.py.
+        # 2. moe_kernel_quantize_input -> ref_nvfp4_quant_dequant
+        # use the inverse scale directly (large global scale).
+        # NOTE: Before this point, `a13_scale` and `a2_scale` are such that:
+        # `FP8_MAX = activation[expert_id].abs().max() * global_scale[expert_id]`,
+        # and `global_scale[expert_id]` are small (~1e-4).
+        # Taking the largest global scale likely results in overflowing the FP8 range
+        # for other experts - other selection strategies may be used.
+        a13_scale = 1.0 / a13_scale.max().to(torch.float32)
+        a2_scale = 1.0 / a2_scale.max().to(torch.float32)
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
