@@ -888,11 +888,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 
 
 class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
-    """Sparse MLA attention implementation with only forward_mqa method.
-
-    Sparse MLA implementations only support decode (MQA-style) attention.
-    They do not support prefill (MHA-style) attention.
-    """
+    """Sparse MLA attention. Subclass SparseMLACommonImpl for forward_mha."""
 
     @abstractmethod
     def __init__(
@@ -920,6 +916,19 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> None:
         raise NotImplementedError
 
+    def forward_mha(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """MHA-style forward pass."""
+        raise NotImplementedError
+
     @abstractmethod
     def forward_mqa(
         self,
@@ -928,7 +937,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         attn_metadata: T,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """MQA-style decode forward pass."""
+        """MQA-style forward pass."""
         raise NotImplementedError
 
     def do_kv_cache_update(

@@ -62,7 +62,11 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     from mla_runner import run_mla_benchmark as run_mla
 
     return run_mla(
-        config.backend, config, prefill_backend=config.prefill_backend, **kwargs
+        config.backend,
+        config,
+        prefill_backend=config.prefill_backend,
+        sparse_mla_force_mqa=config.sparse_mla_force_mqa,
+        **kwargs,
     )
 
 
@@ -851,6 +855,71 @@ def main():
                 console.print(
                     f"\n  [yellow]Prefill always faster for batch_size={bs}[/]"
                 )
+
+    # Handle MHA vs MQA comparison mode for sparse MLA
+    elif hasattr(args, "mode") and args.mode == "mha_vs_mqa":
+        console.print("[yellow]Mode: MHA vs MQA comparison for sparse MLA[/]")
+
+        # Two variants: MHA (default) and MQA (forced)
+        variants = [
+            ("mha", False),
+            ("mqa", True),
+        ]
+        total = len(backends) * len(args.batch_specs) * len(variants)
+
+        with tqdm(total=total, desc="Benchmarking") as pbar:
+            for spec in args.batch_specs:
+                for backend in backends:
+                    for variant_label, force_mqa in variants:
+                        config = BenchmarkConfig(
+                            backend=f"{backend}_{variant_label}",
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            repeats=args.repeats,
+                            warmup_iters=args.warmup_iters,
+                            profile_memory=args.profile_memory,
+                            sparse_mla_force_mqa=force_mqa,
+                        )
+
+                        # run_mla_benchmark needs the real backend name
+                        from mla_runner import run_mla_benchmark as run_mla
+
+                        try:
+                            result = run_mla(
+                                backend,
+                                config,
+                                sparse_mla_force_mqa=force_mqa,
+                            )
+                        except Exception as e:
+                            result = BenchmarkResult(
+                                config=config,
+                                mean_time=float("inf"),
+                                std_time=0,
+                                min_time=float("inf"),
+                                max_time=float("inf"),
+                                error=str(e),
+                            )
+
+                        all_results.append(result)
+
+                        if not result.success:
+                            console.print(
+                                f"[red]Error {backend}_{variant_label} "
+                                f"{spec}: {result.error}[/]"
+                            )
+
+                        pbar.update(1)
+
+        # Display results with variant labels as separate "backends"
+        console.print("\n[bold green]MHA vs MQA Results:[/]")
+        formatter = ResultsFormatter(console)
+        variant_backends = [f"{b}_{v}" for b in backends for v, _ in variants]
+        formatter.print_table(all_results, variant_backends)
 
     # Handle model parameter sweep mode
     elif hasattr(args, "model_parameter_sweep") and args.model_parameter_sweep:
