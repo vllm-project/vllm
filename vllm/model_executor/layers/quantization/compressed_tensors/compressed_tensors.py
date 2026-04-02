@@ -406,8 +406,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @staticmethod
     def _is_mxfp8(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
-        return True
-        
         if weight_quant is None or input_quant is None:
             return False
 

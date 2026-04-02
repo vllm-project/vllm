@@ -212,12 +212,6 @@ def xpu_mxfp8_quantize(
 
 
 class Mxfp8LinearOp:
-    def __init__(self, backend: Mxfp8LinearBackend):
-        if backend not in Mxfp8LinearBackend:
-            raise ValueError(f"Unsupported backend: {backend}")
-
-
-class Mxfp8LinearOp:
     def __init__(self):
         self.backend = select_mxfp8_linear_backend()
         logger.info_once("Using %s backend for MXFP8 GEMM", self.backend)
