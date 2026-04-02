@@ -55,7 +55,10 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance import ClientSentinel
-from vllm.v1.fault_tolerance.utils import FaultToleranceZmqAddresses
+from vllm.v1.fault_tolerance.utils import (
+    FAULT_STATE_PUB_TOPIC,
+    FaultToleranceZmqAddresses,
+)
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -508,9 +511,7 @@ class MPClient(EngineCoreClient):
             # identity. The client input ROUTER needs handover to allow the new
             # engine to replace the dead connection.
             enable_input_socket_handover = parallel_config.enable_elastic_ep
-            self.enable_fault_tolerance = (
-                parallel_config.fault_tolerance_config.enable_fault_tolerance
-            )
+            self.enable_fault_tolerance = parallel_config.enable_fault_tolerance
 
             self.stats_update_address: str | None = None
             tensor_queue: Queue | None = None
@@ -892,7 +893,7 @@ class AsyncMPClient(MPClient):
         client_count: int = 1,
         client_index: int = 0,
     ):
-        if vllm_config.parallel_config.fault_tolerance_config.enable_fault_tolerance:
+        if vllm_config.parallel_config.enable_fault_tolerance:
             client_addresses = client_addresses or {}
         super().__init__(
             asyncio_mode=True,
@@ -934,7 +935,7 @@ class AsyncMPClient(MPClient):
             )
             self.fault_state_sub_socket.setsockopt(
                 zmq.SUBSCRIBE,
-                self.vllm_config.parallel_config.fault_tolerance_config.fault_state_pub_topic.encode(),
+                FAULT_STATE_PUB_TOPIC.encode(),
             )
             self.resources.fault_state_sub_socket = self.fault_state_sub_socket
             threading.Thread(

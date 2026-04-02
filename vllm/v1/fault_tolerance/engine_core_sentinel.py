@@ -33,7 +33,6 @@ class EngineCoreSentinel(BaseSentinel):
     ):
         self.engine_index = engine_index
         super().__init__(
-            parallel_config,
             f"DP_{engine_index}",
             sentinel_identity,
         )

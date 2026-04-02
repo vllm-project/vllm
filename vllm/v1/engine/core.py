@@ -850,9 +850,11 @@ class EngineCoreProc(EngineCore):
             self._init_data_parallel(vllm_config)
 
             # Initialize fault tolerance settings.
-            ft_config = vllm_config.parallel_config.fault_tolerance_config
-            self.enable_fault_tolerance = ft_config.enable_fault_tolerance
+            self.enable_fault_tolerance = (
+                vllm_config.parallel_config.enable_fault_tolerance
+            )
             if self.enable_fault_tolerance:
+                ft_config = vllm_config.parallel_config.fault_tolerance_config
                 self.engine_recovery_timeout_sec = ft_config.engine_recovery_timeout_sec
                 assert addresses.fault_tolerance_addresses is not None
                 ft_addresses = addresses.fault_tolerance_addresses

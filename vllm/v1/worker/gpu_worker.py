@@ -314,7 +314,7 @@ class Worker(WorkerBase):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
-        if self.parallel_config.fault_tolerance_config.enable_fault_tolerance:
+        if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(
                 self.parallel_config,
                 self.device,

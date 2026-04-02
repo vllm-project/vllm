@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
-from typing import Any
 
 from vllm.config.utils import config
 
@@ -10,11 +8,6 @@ from vllm.config.utils import config
 @config
 class FaultToleranceConfig:
     """Configuration for fault tolerance."""
-
-    enable_fault_tolerance: bool = False
-    """Enable fault tolerance for detailed error recovery,
-    such as scaling down fault DPEngineCore.
-    """
 
     engine_recovery_timeout_sec: int = 60
     """Timeout (in seconds) to wait for error handling instructions
@@ -33,15 +26,3 @@ class FaultToleranceConfig:
     """
     Port used to publish engine fault and status change notifications.
     """
-
-    fault_state_pub_topic: str = "vllm_fault"
-    """
-    The topic string to use for publishing fault state messages via ZMQ.
-    """
-
-    def compute_hash(self) -> str:
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str

@@ -340,6 +340,11 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    enable_fault_tolerance: bool = False
+    """Enable fault tolerance for detailed error recovery,
+    such as scaling down fault DPEngineCore.
+    """
+
     fault_tolerance_config: FaultToleranceConfig = Field(
         default_factory=FaultToleranceConfig
     )

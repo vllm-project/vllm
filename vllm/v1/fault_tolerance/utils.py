@@ -14,6 +14,8 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.utils import get_engine_client_zmq_addr
 
+FAULT_STATE_PUB_TOPIC = "vllm_fault"
+
 
 class FaultInfo(msgspec.Struct):
     type: str

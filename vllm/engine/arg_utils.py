@@ -630,10 +630,10 @@ class EngineArgs:
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
     # fault tolerance fields
-    enable_fault_tolerance: bool = FaultToleranceConfig.enable_fault_tolerance
-    engine_recovery_timeout_sec: int = FaultToleranceConfig.engine_recovery_timeout_sec
-    internal_fault_report_port: int = FaultToleranceConfig.internal_fault_report_port
-    external_fault_notify_port: int = FaultToleranceConfig.external_fault_notify_port
+    fault_tolerance_config: FaultToleranceConfig = get_field(
+        ParallelConfig, "fault_tolerance_config"
+    )
+    enable_fault_tolerance: bool = ParallelConfig.enable_fault_tolerance
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
@@ -664,6 +664,10 @@ class EngineArgs:
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
+            )
+        if isinstance(self.fault_tolerance_config, dict):
+            self.fault_tolerance_config = FaultToleranceConfig(
+                **self.fault_tolerance_config
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
@@ -989,6 +993,12 @@ class EngineArgs:
         parallel_group.add_argument("--worker-cls", **parallel_kwargs["worker_cls"])
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
+        )
+        parallel_group.add_argument(
+            "--enable-fault-tolerance", **parallel_kwargs["enable_fault_tolerance"]
+        )
+        parallel_group.add_argument(
+            "--fault-tolerance-config", **parallel_kwargs["fault_tolerance_config"]
         )
 
         # KV cache arguments
@@ -1354,29 +1364,6 @@ class EngineArgs:
         vllm_group.add_argument("--performance-mode", **vllm_kwargs["performance_mode"])
         vllm_group.add_argument(
             "--weight-transfer-config", **vllm_kwargs["weight_transfer_config"]
-        )
-
-        # fault tolerance arguments
-        fault_tolerance_kwargs = get_kwargs(FaultToleranceConfig)
-        fault_tolerance_group = parser.add_argument_group(
-            title="FaultToleranceConfig",
-            description=FaultToleranceConfig.__doc__,
-        )
-        fault_tolerance_group.add_argument(
-            "--enable-fault-tolerance",
-            **fault_tolerance_kwargs["enable_fault_tolerance"],
-        )
-        fault_tolerance_group.add_argument(
-            "--engine-recovery-timeout-sec",
-            **fault_tolerance_kwargs["engine_recovery_timeout_sec"],
-        )
-        fault_tolerance_group.add_argument(
-            "--internal-fault-report-port",
-            **fault_tolerance_kwargs["internal_fault_report_port"],
-        )
-        fault_tolerance_group.add_argument(
-            "--external-fault-notify-port",
-            **fault_tolerance_kwargs["external_fault_notify_port"],
         )
 
         # Other arguments
@@ -1803,13 +1790,6 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
-        fault_tolerance_config = FaultToleranceConfig(
-            enable_fault_tolerance=self.enable_fault_tolerance,
-            engine_recovery_timeout_sec=self.engine_recovery_timeout_sec,
-            internal_fault_report_port=self.internal_fault_report_port,
-            external_fault_notify_port=self.external_fault_notify_port,
-        )
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1854,7 +1834,8 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
-            fault_tolerance_config=fault_tolerance_config,
+            enable_fault_tolerance=self.enable_fault_tolerance,
+            fault_tolerance_config=self.fault_tolerance_config,
         )
 
         speculative_config = self.create_speculative_config(

@@ -17,7 +17,5 @@ def mock_parallel_config():
     config.data_parallel_size_local = 2
     config.local_engines_only = False
 
-    config.fault_tolerance_config = FaultToleranceConfig(
-        enable_fault_tolerance=True, engine_recovery_timeout_sec=10
-    )
+    config.fault_tolerance_config = FaultToleranceConfig(engine_recovery_timeout_sec=10)
     return config
