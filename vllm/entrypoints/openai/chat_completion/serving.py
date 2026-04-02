@@ -84,6 +84,22 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _get_reasoning_parser_input_text(
+    output: CompletionOutput,
+    tokenizer: TokenizerLike,
+    reasoning_parser: ReasoningParser,
+) -> str:
+    """Build non-streaming parser input without losing reasoning markers."""
+    start_token_id = getattr(reasoning_parser, "start_token_id", None)
+    end_token_id = getattr(reasoning_parser, "end_token_id", None)
+    if output.token_ids and (
+        (start_token_id is not None and start_token_id in output.token_ids)
+        or (end_token_id is not None and end_token_id in output.token_ids)
+    ):
+        return tokenizer.decode(output.token_ids, skip_special_tokens=False)
+    return output.text
+
+
 class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
@@ -1375,8 +1391,13 @@ class OpenAIServingChat(OpenAIServing):
             if reasoning_parser:
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
+                parser_input_text = _get_reasoning_parser_input_text(
+                    output,
+                    tokenizer,
+                    reasoning_parser,
+                )
                 reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+                    parser_input_text, request=request
                 )
                 if not request.include_reasoning:
                     reasoning = None

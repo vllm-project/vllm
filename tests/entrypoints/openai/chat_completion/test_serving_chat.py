@@ -23,7 +23,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _get_reasoning_parser_input_text,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
@@ -38,6 +41,7 @@ from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.reasoning.gemma4_reasoning_parser import Gemma4ReasoningParser
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer
 from vllm.tokenizers import get_tokenizer
@@ -2094,3 +2098,43 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+
+class _Gemma4ReasoningTokenizer:
+    def get_vocab(self) -> dict[str, int]:
+        return {
+            "<|channel>": 100,
+            "<channel|>": 101,
+        }
+
+    def decode(self, ids, skip_special_tokens: bool = False) -> str:
+        if ids != [100, 200, 101, 300]:
+            raise AssertionError(f"unexpected ids: {ids!r}")
+        if skip_special_tokens:
+            return "thought\nThe user is asking...\n2 + 2 = 4"
+        return "<|channel>thought\nThe user is asking...\n<channel|>2 + 2 = 4"
+
+
+def test_gemma4_non_streaming_reasoning_uses_token_ids():
+    tokenizer = _Gemma4ReasoningTokenizer()
+    parser = Gemma4ReasoningParser(tokenizer)
+    output = CompletionOutput(
+        index=0,
+        text="thought\nThe user is asking...\n2 + 2 = 4",
+        token_ids=[100, 200, 101, 300],
+        cumulative_logprob=0.0,
+        logprobs=None,
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What is 2+2?"}],
+    )
+
+    parser_input = _get_reasoning_parser_input_text(output, tokenizer, parser)
+    reasoning, content = parser.extract_reasoning(parser_input, request=request)
+
+    assert parser_input == (
+        "<|channel>thought\nThe user is asking...\n<channel|>2 + 2 = 4"
+    )
+    assert reasoning == "The user is asking...\n"
+    assert content == "2 + 2 = 4"
