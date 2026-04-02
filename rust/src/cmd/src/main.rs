@@ -19,13 +19,25 @@ enum ShutdownReason {
     EngineExited(ExitStatus),
 }
 
-/// Shutdown signal from Ctrl-C.
-async fn ctrl_c() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install Ctrl-C signal handler");
+/// Shutdown signal from Ctrl-C or SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl-C signal handler");
+    };
 
-    info!("received shutdown signal (Ctrl-C), shutting down...");
+    let sigterm = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM signal handler")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = ctrl_c => info!("received shutdown signal (Ctrl-C), shutting down..."),
+        _ = sigterm => info!("received shutdown signal (SIGTERM), shutting down..."),
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -34,7 +46,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Frontend(args) => vllm_server::serve(args.into_config(), ctrl_c()).await,
+        Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
         Command::Serve(args) => {
             let handshake_port = match args.handshake_port {
                 Some(port) => port,
@@ -53,7 +65,7 @@ async fn main() -> Result<()> {
                 // Drive the frontend shutdown from either Ctrl-C or unexpected
                 // Python-engine termination, whichever happens first.
                 let reason = tokio::select! {
-                    _ = ctrl_c() => ShutdownReason::Signal,
+                    _ = shutdown_signal() => ShutdownReason::Signal,
 
                     status = shutdown_engine.wait_for_exit() => {
                         warn!(%status, "managed Python headless engine exited");

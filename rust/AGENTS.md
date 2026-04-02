@@ -18,6 +18,7 @@ This project aims to implement an alternative frontend to the vLLM Engine in Rus
     - Use `bail_foo!(...)` only in statement positions where you want to exit the current `Result`-returning function immediately. Prefer it over `return Err(foo!(...))` in those cases.
     - If a variant has extra structured fields, prefer the generated macro form `foo!(field = value, "message")` rather than manually writing `Error::Foo { ... }`.
 - Since the project is still in early stage, it's fine to break API and make non-backwards-compatible changes as needed.
+- Currently the project is only targeting Unix-like platforms, so it's fine to use Unix-specific APIs without extra compatibility layers like `cfg(unix)`
 
 # Testing
 

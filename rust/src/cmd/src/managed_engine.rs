@@ -156,7 +156,6 @@ impl ManagedEngineHandle {
 mod process_group {
     use super::*;
 
-    #[cfg(unix)]
     /// Place the Python child into its own process group so `serve` can tear down
     /// the whole subtree rather than just the immediate shell process.
     pub fn configure(command: &mut Command) {
@@ -170,32 +169,16 @@ mod process_group {
         }
     }
 
-    #[cfg(not(unix))]
-    pub fn configure(_: &mut Command) {}
-
-    #[cfg(unix)]
     /// Send SIGTERM to the managed Python process group.
     pub fn terminate(pid: u32) -> Result<()> {
         signal(pid, libc::SIGTERM)
     }
 
-    #[cfg(not(unix))]
-    pub fn terminate(_: u32) -> Result<()> {
-        Ok(())
-    }
-
-    #[cfg(unix)]
     /// Send SIGKILL to the managed Python process group.
     pub fn kill(pid: u32) -> Result<()> {
         signal(pid, libc::SIGKILL)
     }
 
-    #[cfg(not(unix))]
-    pub fn kill(_: u32) -> Result<()> {
-        Ok(())
-    }
-
-    #[cfg(unix)]
     /// Deliver one signal to the managed Python process group.
     fn signal(pid: u32, signal: i32) -> Result<()> {
         let rc = unsafe { libc::kill(-(pid as i32), signal) };
@@ -218,7 +201,6 @@ mod tests {
     use super::{ManagedEngineConfig, allocate_handshake_port};
 
     #[test]
-    #[cfg(unix)]
     fn command_snapshot() {
         let config = ManagedEngineConfig {
             python: "python3".to_string(),
