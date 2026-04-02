@@ -350,6 +350,8 @@ _MULTIMODAL_MODELS = {
         "chameleon",
         "ChameleonForConditionalGeneration",
     ),
+    "Cheers": ("cheers", "CheersForConditionalGeneration"),
+    "CheersForConditionalGeneration": ("cheers", "CheersForConditionalGeneration"),
     "Cohere2VisionForConditionalGeneration": (
         "cohere2_vision",
         "Cohere2VisionForConditionalGeneration",
