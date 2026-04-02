@@ -363,9 +363,8 @@ class OpenAIServingRender:
         }
 
         # Serialize tensor data per modality.
-        raw_mm_kwargs = engine_input.get("mm_kwargs")
         kwargs_data: dict[str, list[str | None]] | None = None
-        if raw_mm_kwargs is not None:
+        if raw_mm_kwargs := engine_input.get("mm_kwargs"):
             kwargs_data = {}
             for modality, items in raw_mm_kwargs.items():
                 kwargs_data[modality] = [

@@ -108,9 +108,7 @@ class ServingTokens(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         engine_input: ProcessorInputs
-        if request.features is not None:
-            features = request.features
-
+        if features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [
