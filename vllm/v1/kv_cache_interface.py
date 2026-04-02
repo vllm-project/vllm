@@ -38,6 +38,7 @@ class KVQuantMode(IntEnum):
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
     INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
+    INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, asymmetric zp in scale bits
 
     @property
     def is_per_token_head(self) -> bool:
@@ -47,6 +48,8 @@ class KVQuantMode(IntEnum):
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    if kv_cache_dtype == "int4_per_token_head":
+        return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
@@ -133,13 +136,19 @@ class AttentionSpec(KVCacheSpec):
             return self.page_size_padded
         return real_page_size
 
+    def _effective_head_size(self, hs: int) -> int:
+        """Return the storage head size: halved for INT4 packed."""
+        if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            return hs // 2
+        return hs
+
     @property
     def real_page_size_bytes(self) -> int:
         return (
             2
             * self.block_size
             * self.num_kv_heads
-            * self.head_size
+            * self._effective_head_size(self.head_size)
             * get_dtype_size(self.dtype)
         )
 
@@ -240,7 +249,10 @@ class FullAttentionSpec(AttentionSpec):
         return (
             self.block_size
             * self.num_kv_heads
-            * (self.head_size + self.head_size_v)
+            * (
+                self._effective_head_size(self.head_size)
+                + self._effective_head_size(self.head_size_v)
+            )
             * get_dtype_size(self.dtype)
         )
 
@@ -259,7 +271,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         return (
             self.block_size
             * self.num_kv_heads
-            * self.head_size
+            * self._effective_head_size(self.head_size)
             * get_dtype_size(self.dtype)
         )
 
