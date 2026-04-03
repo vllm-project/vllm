@@ -136,22 +136,6 @@ void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales,
                                std::optional<torch::Tensor> const& azp);
 
-void selective_scan_fwd(
-    const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
-    const torch::Tensor& B, const torch::Tensor& C,
-    const std::optional<torch::Tensor>& D_,
-    const std::optional<torch::Tensor>& z_,
-    const std::optional<torch::Tensor>& delta_bias_, bool delta_softplus,
-    const std::optional<torch::Tensor>& query_start_loc,
-    const std::optional<torch::Tensor>& cache_indices,
-    const std::optional<torch::Tensor>& has_initial_state,
-    const torch::Tensor& ssm_states, int64_t null_block_id, int64_t block_size,
-    const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
-    const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
-    const std::optional<torch::Tensor>& initial_state_idx,
-    const std::optional<torch::Tensor>& cu_chunk_seqlen,
-    const std::optional<torch::Tensor>& last_chunk_indices);
-
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
     torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,
