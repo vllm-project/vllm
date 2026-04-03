@@ -265,6 +265,7 @@ def merge_attn_states(
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
     prefill_tokens_with_context: int | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.merge_attn_states(
         output,
@@ -274,6 +275,7 @@ def merge_attn_states(
         suffix_output,
         suffix_lse,
         prefill_tokens_with_context,
+        output_scale,
     )
 
 
@@ -576,6 +578,56 @@ def rms_norm_per_block_quant(
         group_size[1],
         is_scale_transposed,
     )
+    return output, scales
+
+
+# fused silu_and_mul + block quant
+def silu_and_mul_per_block_quant(
+    input: torch.Tensor,
+    group_size: int,  # Changed from list[int]
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
+    assert input.shape[-1] % 2 == 0, (
+        f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
+    )
+
+    # Output is half the width of input (after silu_and_mul)
+    num_tokens = input.shape[0]
+    hidden_size = input.shape[-1] // 2  # Divide by 2 because input is [gate || up]
+
+    # Allocate output tensor (FP8 or INT8)
+    output = torch.empty(
+        (num_tokens, hidden_size), device=input.device, dtype=quant_dtype
+    )
+
+    # Allocate scales tensor
+    num_groups = hidden_size // group_size  # Directly use group_size
+    if is_scale_transposed:
+        scales = torch.empty(
+            (num_groups, num_tokens),
+            device=input.device,
+            dtype=torch.float32,
+        ).t()
+    else:
+        scales = torch.empty(
+            (num_tokens, num_groups),
+            device=input.device,
+            dtype=torch.float32,
+        )
+
+    # Call the C++ kernel
+    torch.ops._C.silu_and_mul_per_block_quant(
+        output,
+        input,
+        scales,
+        group_size,  # Pass directly as int
+        scale_ub,
+        is_scale_transposed,
+    )
+
     return output, scales
 
 
@@ -2277,19 +2329,6 @@ def dsv3_router_gemm(
     return output
 
 
-def gpt_oss_router_gemm(
-    hidden_states: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
-) -> torch.Tensor:
-    output = torch.empty(
-        hidden_states.shape[0],
-        weight.shape[0],
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
-    )
-    torch.ops._moe_C.gpt_oss_router_gemm(output, hidden_states, weight, bias)
-    return output
-
-
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2600,6 +2639,22 @@ def swap_blocks(
     the block mapping tensor must on cpu.
     """
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
+
+
+def swap_blocks_batch(
+    src_ptrs: torch.Tensor,
+    dst_ptrs: torch.Tensor,
+    sizes: torch.Tensor,
+) -> None:
+    """
+    Batch version of swap_blocks: submit all copies in a single driver call.
+
+    Each entry specifies a raw pointer copy: src_ptrs[i] -> dst_ptrs[i]
+    of sizes[i] bytes. All three tensors must be int64 CPU tensors.
+    On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
+    overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
+    """
+    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
 
 
 def convert_fp8(
