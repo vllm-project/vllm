@@ -5,16 +5,14 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
 use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry};
 use crate::client::stream::EngineCoreStreamOutput;
-use crate::error::{
-    client_closed, control_closed, dispatcher_closed, unexpected_dispatcher_output,
-};
+use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::record_scheduler_stats;
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
@@ -24,7 +22,7 @@ use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
 
 pub(crate) struct ClientInner {
-    input_send: AsyncMutex<Option<RouterSendHalf>>,
+    input_send: RouterSendHalf,
     model_name: String,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
@@ -39,7 +37,7 @@ impl ClientInner {
         engines: &[ConnectedEngine],
     ) -> Self {
         Self {
-            input_send: AsyncMutex::new(Some(input_send)),
+            input_send,
             model_name,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
@@ -152,11 +150,9 @@ impl ClientInner {
         T: serde::Serialize,
     {
         let payload = encode_msgpack(payload)?;
-        let mut guard = self.input_send.lock().await;
-        let input_send = guard
-            .as_mut()
-            .ok_or_else(|| control_closed!("input sender already shut down"))?;
-        transport::send_message(input_send, engine_id, request_type.to_frame(), payload).await?;
+        let mut input_send = self.input_send.clone();
+        transport::send_message(&mut input_send, engine_id, request_type.to_frame(), payload)
+            .await?;
         Ok(())
     }
 
@@ -170,11 +166,10 @@ impl ClientInner {
             .await
     }
 
-    /// Shut down by closing all active request streams and then closing the input socket to signal
-    /// the engine that no more messages will be sent.
-    pub async fn shutdown(&self) {
+    /// Shut down by closing all active request streams and utility calls with a sticky client
+    /// closed error.
+    pub fn shutdown(&self) {
         self.close_registries(Arc::new(client_closed!("engine-core client shut down")));
-        self.input_send.lock().await.take();
     }
 
     /// Remove the request from the active registry for auto-abort and return the engine that the
