@@ -674,13 +674,13 @@ class TestBackfillRegistration:
 
             if num_computed < num_prompt:
                 ph = req["prefill_hash"]
-                if ph != 0 and (ph, "prefill") not in manager.config_to_row:
+                if ph != 0:
                     eff = req.get("effective_prefill")
                     if eff:
                         manager.register_config(ph, eff, phase="prefill")
             else:
                 dh = req["decode_hash"]
-                if dh != 0 and (dh, "decode") not in manager.config_to_row:
+                if dh != 0:
                     eff = req.get("effective_decode")
                     if eff:
                         manager.register_config(dh, eff, phase="decode")
@@ -861,15 +861,15 @@ class TestBackfillRegistration:
             f"Expected: {expected}\nGot: {table[row]}"
         )
 
-    def test_already_registered_config_not_duplicated(self):
-        """Backfill skips configs already present in config_to_row."""
+    def test_already_registered_config_increments_refcount(self):
+        """Backfill increments refcount for configs already in config_to_row."""
         mgr = _make_manager()
         vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         # Pre-register the config
         row_pre = mgr.register_config(config_hash=42, vectors=vectors, phase="prefill")
         assert mgr.config_refcounts[(42, "prefill")] == 1
 
-        # Backfill should skip because (42, "prefill") already registered
+        # Backfill should increment refcount for (42, "prefill")
         self._run_backfill(
             mgr,
             [
@@ -883,9 +883,48 @@ class TestBackfillRegistration:
                 },
             ],
         )
-        # Refcount should still be 1 — backfill did not re-register
-        assert mgr.config_refcounts[(42, "prefill")] == 1
+        # Refcount should now be 2 — backfill incremented it
+        assert mgr.config_refcounts[(42, "prefill")] == 2
         assert mgr.config_to_row[(42, "prefill")] == row_pre
+
+    def test_backfill_shared_hash_refcount(self):
+        """Two requests with the same prefill hash in one backfill batch
+        should produce refcount=2.  Releasing one should leave refcount=1
+        and the row still allocated."""
+        mgr = _make_manager()
+        vectors = {_HP: {0: [5.0] * HIDDEN_SIZE}}
+        self._run_backfill(
+            mgr,
+            [
+                {
+                    "num_computed": 0,
+                    "num_prompt": 100,
+                    "prefill_hash": 77,
+                    "decode_hash": 0,
+                    "effective_prefill": vectors,
+                    "effective_decode": None,
+                },
+                {
+                    "num_computed": 0,
+                    "num_prompt": 200,
+                    "prefill_hash": 77,
+                    "decode_hash": 0,
+                    "effective_prefill": vectors,
+                    "effective_decode": None,
+                },
+            ],
+        )
+        assert (77, "prefill") in mgr.config_to_row
+        assert mgr.config_refcounts[(77, "prefill")] == 2
+
+        # Release one request — row should stay allocated with refcount 1.
+        mgr.release_config(config_hash=77, phase="prefill")
+        assert mgr.config_refcounts[(77, "prefill")] == 1
+        assert (77, "prefill") in mgr.config_to_row
+
+        # Release the second — row should be freed.
+        mgr.release_config(config_hash=77, phase="prefill")
+        assert (77, "prefill") not in mgr.config_to_row
 
 
 # ---------------------------------------------------------------------------
