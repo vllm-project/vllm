@@ -8,7 +8,8 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx9, on_gfx942, on_gfx950
+from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.utils.platform_utils import num_compute_units
 
 DTYPES = [torch.bfloat16, torch.float16]
@@ -107,6 +108,12 @@ NKM_FACTORS_WVSPLITK_FP8 = [
 ]
 
 SEEDS = [0]
+
+GEMMA_3_1B_DECODE_FACTORS = [
+    # Gemma-3-1B MLP projection during decode on MI250X/gfx90a.
+    # n is the flattened token count, so n <= 4 takes the ROCm wvSplitK path.
+    (1, 1152, 6912),
+]
 
 
 def pad_fp8(weight):
@@ -229,6 +236,25 @@ def test_rocm_wvsplitk_kernel(
     # Accumulation error in fp16 GEMM scales with sqrt(K)
     atol = torch.finfo(dtype).eps * math.sqrt(k)
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.parametrize("n,k,m", GEMMA_3_1B_DECODE_FACTORS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@torch.inference_mode()
+def test_rocm_unquantized_gemm_gemma_decode_regression_mi250x(n, k, m):
+    if not on_gfx9() or on_gfx942() or on_gfx950():
+        pytest.skip("only meant for MI250X/gfx90a")
+
+    torch.manual_seed(0)
+    a = ((torch.rand(n, k, dtype=torch.bfloat16, device="cuda") * 2) - 1)
+    a = a / math.sqrt(k)
+    b = ((torch.rand(m, k, dtype=torch.bfloat16, device="cuda") * 2) - 1)
+    b = b / math.sqrt(k)
+
+    ref_out = torch.nn.functional.linear(a, b, None)
+    out = rocm_unquantized_gemm_impl(a, b, None)
+
+    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
 @pytest.mark.parametrize("xnorm", [False, True])
