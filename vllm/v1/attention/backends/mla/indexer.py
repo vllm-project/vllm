@@ -146,7 +146,6 @@ class DeepSeekV32IndexerDecodeMetadata:
     requires_padding: bool
     schedule_metadata: torch.Tensor
     use_large_context_topk: bool
-    offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
 @dataclass
@@ -292,6 +291,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.offsets_buffer = torch.arange(
             next_n, device=self.device, dtype=torch.int32
         )
+        # Pre-allocated decode seq_lens buffer. 2D (max_seqs, next_n) when
+        # spec decoding is enabled so topk kernels get per-token lengths;
+        # 1D (max_seqs,) otherwise.
+        if self.reorder_batch_threshold > 1:
+            self.decode_seq_lens_buffer = torch.zeros(
+                (scheduler_config.max_num_seqs, self.reorder_batch_threshold),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        else:
+            self.decode_seq_lens_buffer = torch.zeros(
+                scheduler_config.max_num_seqs,
+                dtype=torch.int32,
+                device=self.device,
+            )
         self.arange_buffer = torch.arange(
             scheduler_config.max_num_seqs * next_n,
             dtype=torch.int32,
@@ -435,11 +449,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             next_n = 1 + self.num_speculative_tokens
             use_native = not self.use_flattening and max_decode_len == next_n
 
-            if use_native and next_n > 1:
-                offsets = self.offsets_buffer
-                seq_lens = (seq_lens.unsqueeze(1) - next_n + 1 + offsets).flatten()
-                batch_size = num_decodes
-            elif max_decode_len > 1:
+            if not use_native and max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
                 # the kernel always sees next_n=1.
@@ -496,11 +506,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # All reqs now have decode_len=1
                 self.decode_lens_buffer[:num_decode_tokens] = 1
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
-                offsets = None
                 batch_size = num_decode_tokens
+                requires_padding = False
             else:
-                offsets = None
+                # Native path: plain decode (next_n==1) or spec decode
+                # with 2D per-token context lengths (next_n > 1).
                 batch_size = num_decodes
+                # When decode_lens are not truly uniform (e.g. some
+                # requests have decode_len < next_n due to padding or
+                # short prefills), the simple reshape in
+                # sparse_attn_indexer won't work. Use pack_seq_triton
+                # (requires_padding) instead.
+                min_decode_len = int(decode_lens_cpu.min().item())
+                requires_padding = min_decode_len != max_decode_len
+                if use_native and next_n > 1:
+                    # (B, next_n): token j attends to L - next_n + j + 1 KV tokens
+                    self.decode_seq_lens_buffer[:num_decodes] = (
+                        seq_lens.unsqueeze(1) - next_n + 1 + self.offsets_buffer
+                    )
+                else:
+                    self.decode_seq_lens_buffer[:num_decodes] = seq_lens
+                seq_lens = self.decode_seq_lens_buffer[:num_decodes]
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and has_deep_gemm():
@@ -521,10 +547,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 block_table=block_table,
                 seq_lens=seq_lens,
                 decode_lens=decode_lens,
-                requires_padding=False,
+                requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
                 use_large_context_topk=use_large_context_topk,
-                offsets=offsets,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

@@ -181,11 +181,14 @@ def sparse_attn_indexer(
         batch_size = padded_q_fp8_decode_tokens.shape[0]
         next_n = padded_q_fp8_decode_tokens.shape[1]
         num_padded_tokens = batch_size * next_n
+        seq_lens = decode_metadata.seq_lens[:batch_size]
+        # seq_lens is (B, next_n) for native spec decode, (B,) otherwise.
+        # All kernels support both shapes.
         logits = fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_padded_tokens],
-            decode_metadata.seq_lens[:batch_size],
+            seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
@@ -198,7 +201,7 @@ def sparse_attn_indexer(
             torch.ops._C.large_context_topk(
                 logits,
                 topk_indices,
-                decode_metadata.seq_lens,
+                seq_lens,
                 None,
             )
         else:
@@ -206,7 +209,7 @@ def sparse_attn_indexer(
                 ops.top_k_per_row_decode(
                     logits,
                     next_n,
-                    decode_metadata.seq_lens,
+                    seq_lens,
                     topk_indices,
                     num_rows,
                     logits.stride(0),
@@ -217,13 +220,18 @@ def sparse_attn_indexer(
                 torch.ops._C.top_k_per_row_decode(
                     logits,
                     next_n,
-                    decode_metadata.seq_lens,
+                    seq_lens,
                     topk_indices,
                     num_rows,
                     logits.stride(0),
                     logits.stride(1),
                     topk_tokens,
                 )
+
+        # if seq_lens.ndim == 2:
+        #     import torch as _torch
+        #     _torch.cuda.synchronize()
+        #     _logger.warning("DECODE DEBUG: topk done")
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack

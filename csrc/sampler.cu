@@ -564,8 +564,9 @@ template <int kNumThreadsPerBlock, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false>
 static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
     const float* logits, const int* seqLens, int* outIndices, int stride0,
-    int stride1, const int topK, int next_n, float* outLogits = nullptr,
-    const int numBlocksToMerge = 0, const int* indices = nullptr) {
+    int stride1, const int topK, int next_n, int seqLensStride = 0,
+    float* outLogits = nullptr, const int numBlocksToMerge = 0,
+    const int* indices = nullptr) {
   // The number of bins in the histogram.
   static constexpr int kNumBins = 2048;
 
@@ -574,8 +575,19 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
 
   // The range of logits within the row.
   int rowStart = 0;
-  int seq_len = seqLens[rowIdx / next_n];
-  int rowEnd = max(0, seq_len - next_n + (rowIdx % next_n) + 1);
+  int batch_idx = rowIdx / next_n;
+  int next_n_idx = rowIdx % next_n;
+  // seqLensStride == 0: 1D seqLens, all rows in a batch share the same
+  //                     seq_len. rowEnd needs offset calculation:
+  //                     seq_len - next_n + next_n_idx + 1
+  // seqLensStride > 0: 2D seqLens, each row has its own pre-computed
+  //                    effective seq_len. rowEnd is simply seq_len
+  //                    (Python already computed the final length)
+  int seq_len = (seqLensStride == 0)
+                    ? seqLens[batch_idx]
+                    : seqLens[batch_idx * seqLensStride + next_n_idx];
+  int rowEnd = (seqLensStride == 0) ? max(0, seq_len - next_n + next_n_idx + 1)
+                                    : max(0, seq_len);
 
   // Local pointers to this block
   if constexpr (!multipleBlocksPerRow && !mergeBlocks) {
@@ -653,6 +665,11 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const auto numColumns = logits.size(1);
 
+  // If seqLens is 2D (B, next_n), each row has its own pre-computed seq_len.
+  // If seqLens is 1D (B,), all rows in a batch share the same seq_len.
+  int seqLensStride =
+      seqLens.dim() == 2 ? static_cast<int>(seqLens.size(1)) : 0;
+
   if (numColumns < kSortingAlgorithmThreshold) {
     // Use insertion sort
     vllm::topKPerRowDecode<kNumThreadsPerBlock, false>
@@ -660,7 +677,7 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
             logits.data_ptr<float>(), seqLens.data_ptr<int>(),
             indices.data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
-            static_cast<int>(next_n));
+            static_cast<int>(next_n), seqLensStride);
   } else if (numColumns < kSplitWorkThreshold) {
     // From this threshold, use radix sort instead
     vllm::topKPerRowDecode<kNumThreadsPerBlock, true>
@@ -668,7 +685,7 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
             logits.data_ptr<float>(), seqLens.data_ptr<int>(),
             indices.data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
-            static_cast<int>(next_n));
+            static_cast<int>(next_n), seqLensStride);
   } else {
     // Long sequences are run in two steps
     constexpr auto multipleBlocksPerRowConfig = 10;
@@ -686,15 +703,16 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
             logits.data_ptr<float>(), seqLens.data_ptr<int>(),
             outIndicesAux.data_ptr<int>(), static_cast<int>(stride0),
             static_cast<int>(stride1), static_cast<int>(topK),
-            static_cast<int>(next_n), outLogitsAux.data_ptr<float>());
+            static_cast<int>(next_n), seqLensStride,
+            outLogitsAux.data_ptr<float>());
 
     constexpr int kNumThreadsPerBlockMerge = 1024;
     vllm::topKPerRowDecode<kNumThreadsPerBlockMerge, true, false, true>
         <<<numRows, kNumThreadsPerBlockMerge, topK * sizeof(int32_t), stream>>>(
             outLogitsAux.data_ptr<float>(), seqLens.data_ptr<int>(),
             indices.data_ptr<int>(), multipleBlocksPerRowConfig * topK, 1,
-            static_cast<int>(topK), static_cast<int>(next_n), nullptr,
-            multipleBlocksPerRowConfig, outIndicesAux.data_ptr<int>());
+            static_cast<int>(topK), static_cast<int>(next_n), seqLensStride,
+            nullptr, multipleBlocksPerRowConfig, outIndicesAux.data_ptr<int>());
   }
 }
 
