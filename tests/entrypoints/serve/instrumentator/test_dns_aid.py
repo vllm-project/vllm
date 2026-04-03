@@ -1,4 +1,4 @@
-"""Unit tests for vllm/entrypoints/dns_aid.py.
+"""Unit tests for vllm/entrypoints/serve/instrumentator/dns_aid.py.
 
 All dns_aid library calls are mocked -- no real DNS is touched.
 """
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import vllm.entrypoints.dns_aid as dns_aid_mod
-from vllm.entrypoints.dns_aid import (
+import vllm.entrypoints.serve.instrumentator.dns_aid as dns_aid_mod
+from vllm.entrypoints.serve.instrumentator.dns_aid import (
     _MAX_DNS_LABEL_LEN,
     build_agent_record,
     resolve_target_hostname,
@@ -136,7 +136,7 @@ class TestSlugify:
 
 
 class TestResolveTargetHostname:
-    _FQDN_PATCH = "vllm.entrypoints.dns_aid.socket.getfqdn"
+    _FQDN_PATCH = "vllm.entrypoints.serve.instrumentator.dns_aid.socket.getfqdn"
 
     def test_fqdn_returned(self):
         host = "serve.example.internal"
