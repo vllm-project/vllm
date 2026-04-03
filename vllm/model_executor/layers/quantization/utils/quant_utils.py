@@ -317,6 +317,34 @@ def scaled_quantize(
     return x_scl_sat.to(quant_dtype).contiguous(), scale.float().reciprocal()
 
 
+def scaled_quantize_experts(
+    weights: torch.Tensor,
+    group_shape: GroupShape,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Block-quantize a 3D (num_experts, out, in) weight tensor.
+
+    Flattens the expert dimension into the row dimension so that the
+    entire tensor is quantized in a single ``scaled_quantize`` call,
+    then reshapes back to 3D.  This is valid because each expert's
+    output dimension is already required to be divisible by
+    ``group_shape.row``, so no quantization block spans two experts.
+
+    Returns:
+        (qweights, scales_inv) each with leading expert dim.
+    """
+    assert weights.ndim == 3
+    num_experts, out_dim, in_dim = weights.shape
+    flatten_weights = weights.reshape(num_experts * out_dim, in_dim)
+    qweights, scales_inv = scaled_quantize(flatten_weights, group_shape, quant_dtype)
+    return (
+        qweights.reshape(num_experts, out_dim, in_dim),
+        scales_inv.reshape(
+            num_experts, out_dim // group_shape.row, in_dim // group_shape.col
+        ),
+    )
+
+
 # inverses `scaled_quantize`
 def scaled_dequantize(
     x_q: torch.Tensor,

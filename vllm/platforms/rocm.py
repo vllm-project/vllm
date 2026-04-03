@@ -397,6 +397,7 @@ class RocmPlatform(Platform):
         "gptq",
         "gptq_marlin",  # will be overwritten with gptq
         "fp8",
+        "block_fp8",
         "compressed-tensors",
         "fbgemm_fp8",
         "gguf",

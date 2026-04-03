@@ -12,6 +12,7 @@ logger = init_logger(__name__)
 QuantizationMethods = Literal[
     "awq",
     "fp8",
+    "block_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "modelopt",
@@ -135,6 +136,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
         "fp8": Fp8Config,
+        "block_fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,

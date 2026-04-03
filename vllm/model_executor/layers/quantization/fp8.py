@@ -114,11 +114,6 @@ class Fp8Config(QuantizationConfig):
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
         if weight_block_size is not None:
-            if not is_checkpoint_fp8_serialized:
-                raise ValueError(
-                    "The block-wise quantization only supports fp8-serialized "
-                    "checkpoint for now."
-                )
             if len(weight_block_size) != 2:
                 raise ValueError(
                     "The quantization block size of weight must have 2 "
@@ -179,6 +174,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
@@ -194,6 +190,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.is_checkpoint_fp8_serialized:
@@ -521,6 +518,18 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
+            validate_fp8_block_shape(
+                layer,
+                input_size,
+                output_size,
+                input_size_per_partition,
+                output_partition_sizes,
+                self.weight_block_size,
+            )
+
         weight = ModelWeightParameter(
             data=torch.empty(
                 output_size_per_partition,
@@ -540,25 +549,49 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        # TODO(future): support block_quant in online quant path
-        assert not self.block_quant
+        if self.block_quant and self.use_marlin:
+            raise NotImplementedError(
+                "Block-wise FP8 quantization is not yet supported with Marlin "
+                "in the online quantization path."
+            )
 
         layer.input_scale = None
-        qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
 
-        # Update layer with new values.
-        replace_parameter(layer, "weight", qweight.data)
-        replace_parameter(layer, "weight_scale", weight_scale.data)
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                scaled_quantize,
+            )
 
-        if self.use_marlin:
-            # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
-            # AttributeError if backend selection changes.
-            if hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
-            self.fp8_linear.process_weights_after_loading(layer)
+            qweight, weight_scale_inv = scaled_quantize(
+                layer.weight.data,
+                GroupShape(*self.weight_block_size),
+                torch.float8_e4m3fn,
+            )
+
+            qweight, weight_scale_inv = process_fp8_weight_block_strategy(
+                qweight, weight_scale_inv
+            )
+
+            replace_parameter(layer, "weight", qweight.data)
+            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
+
+            if self.use_deep_gemm:
+                maybe_post_process_fp8_weight_block(layer)
         else:
-            weight = qweight.t()
-            replace_parameter(layer, "weight", weight.data)
+            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
+
+            replace_parameter(layer, "weight", qweight.data)
+            replace_parameter(layer, "weight_scale", weight_scale.data)
+
+            if self.use_marlin:
+                # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
+                # AttributeError if backend selection changes.
+                if hasattr(self.fp8_linear, "marlin_input_dtype"):
+                    self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+                self.fp8_linear.process_weights_after_loading(layer)
+            else:
+                replace_parameter(layer, "weight", qweight.t().data)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -935,7 +968,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         super().__init__(quant_config, layer)
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
-        assert quant_config.weight_block_size is None
 
     def create_weights(
         self,
@@ -949,6 +981,27 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
+
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
+            tp_size = get_tensor_model_parallel_world_size()
+            block_n, block_k = (
+                self.weight_block_size[0],
+                self.weight_block_size[1],
+            )
+            if intermediate_size_per_partition % block_n != 0:
+                raise ValueError(
+                    f"The output_size of gate's and up's weight = "
+                    f"{intermediate_size_per_partition} is not divisible by "
+                    f"weight quantization block_n = {block_n}."
+                )
+            if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
+                raise ValueError(
+                    f"The input_size of down's weight = "
+                    f"{intermediate_size_per_partition} is not divisible by "
+                    f"weight quantization block_k = {block_k}."
+                )
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -1011,24 +1064,44 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             return
 
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = torch.ones(
-            layer.num_experts, device=w13.device, dtype=torch.float32
-        )
-        w2_scale = torch.ones(layer.num_experts, device=w2.device, dtype=torch.float32)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        for expert in range(layer.local_num_experts):
-            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert, :, :]
-            )
-            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert, :, :]
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                scaled_quantize_experts,
             )
 
-        # Shuffle weights to runtime format and setup kernel.
+            group_shape = GroupShape(*self.weight_block_size)
+            w13, w13_scale = scaled_quantize_experts(
+                layer.w13_weight, group_shape, torch.float8_e4m3fn
+            )
+            w2, w2_scale = scaled_quantize_experts(
+                layer.w2_weight, group_shape, torch.float8_e4m3fn
+            )
+
+            if current_platform.is_fp8_fnuz():
+                w13, w13_scale, _ = normalize_e4m3fn_to_e4m3fnuz(w13, w13_scale)
+                w2, w2_scale, _ = normalize_e4m3fn_to_e4m3fnuz(w2, w2_scale)
+        else:
+            w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
+            w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+            w13_scale = torch.ones(
+                layer.num_experts, device=w13.device, dtype=torch.float32
+            )
+            w2_scale = torch.ones(
+                layer.num_experts, device=w2.device, dtype=torch.float32
+            )
+
+            for expert in range(layer.local_num_experts):
+                w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
+                    layer.w13_weight[expert, :, :]
+                )
+                w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
+                    layer.w2_weight[expert, :, :]
+                )
+
         self._setup_kernel(
             layer,
             w13,
