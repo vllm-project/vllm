@@ -205,7 +205,10 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         # Attention/MLA layers are processed after all other layers
         if isinstance(layer, (Attention, MLAAttention)):
-            if info.load_numel > 0 or info.kernel_tensors is None:
+            if info.load_numel > 0 and info.kernel_tensors is not None:
+                _place_kernel_tensors(layer, info)
+                _reload_attention_scales(layer, info)
+            elif info.load_numel > 0 or info.kernel_tensors is None:
                 _layerwise_process(layer, info)
             else:
                 _place_kernel_tensors(layer, info)
@@ -238,6 +241,27 @@ def finalize_layerwise_reload(*args, **kwargs):
     finalize_layerwise_processing(*args, **kwargs)
 
 
+def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    """Re-create, load, and process attention scale weights during reload.
+
+    Uses create_weights to initialize scale Parameters with proper sentinel
+    values (e.g. -1.0) so that unloaded scales are correctly detected by
+    process_weights_after_loading. Must be called after _place_kernel_tensors.
+    """
+    quant_method = getattr(layer, "quant_method", None)
+    if quant_method is None:
+        return
+
+    quant_method.create_weights(layer)
+
+    for name, args in info.loaded_weights:
+        param = getattr(layer, name)
+        args.arguments["param"] = param
+        _get_weight_loader(param)(*args.args, **args.kwargs)
+
+    quant_method.process_weights_after_loading(layer)
+
+
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     """
     Finalize layer loading after all weights have been buffered.
@@ -267,9 +291,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param.weight_loader(*args.args, **args.kwargs)
 
     # Process weights (quantization, repacking, etc.)
-    # For Attention/MLA, this handles quant_method processing (e.g. KV scales).
-    # Attention-specific processing (impl init, MLA decompression) is called
-    # separately in finalize_layerwise_processing.
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
