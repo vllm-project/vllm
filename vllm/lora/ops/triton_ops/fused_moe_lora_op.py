@@ -11,7 +11,7 @@ from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .utils import supports_pdl_moe, supports_tma
+from .utils import supports_pdl, supports_tma
 
 
 @triton.jit
@@ -776,7 +776,7 @@ def _fused_moe_lora(
         device=device,
     )
 
-    use_gdc = supports_pdl_moe(device) and not fully_sharded
+    use_gdc = supports_pdl(device) and not fully_sharded
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
         qcurr_hidden_states,

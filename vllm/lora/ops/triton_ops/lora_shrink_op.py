@@ -14,7 +14,7 @@ from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
     get_lora_op_configs,
-    supports_pdl_linear,
+    supports_pdl,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -227,7 +227,7 @@ def _lora_shrink(
     )
 
     # PDL only works when dual-stream is being used.
-    use_gdc = supports_pdl_linear(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
+    use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,

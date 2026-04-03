@@ -110,7 +110,7 @@ def generate_and_test(
         )
 
 
-def test_olmoe_lora(olmoe_lora_files, enable_lora_dual_stream):
+def test_olmoe_lora(olmoe_lora_files, maybe_enable_lora_dual_stream):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
     llm = vllm.LLM(
@@ -141,7 +141,9 @@ def test_olmoe_lora_mixed(olmoe_lora_files):
     generate_and_test(llm, olmoe_lora_files, lora_id=[1, None, 3, None])
 
 
-def test_olmoe_lora_mixed_random(olmoe_lora_files, tmp_path, enable_lora_dual_stream):
+def test_olmoe_lora_mixed_random(
+    olmoe_lora_files, tmp_path, maybe_enable_lora_dual_stream
+):
     # Create a dummy LoRA with random weights based on the real one
     random_lora_path = tmp_path / "random_lora"
     shutil.copytree(olmoe_lora_files, random_lora_path)

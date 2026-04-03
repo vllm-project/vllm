@@ -28,13 +28,13 @@ from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
 
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-    _lora_aux_stream: torch.cuda.Stream | None = None
+    _lora_aux_cuda_stream: torch.cuda.Stream | None = None
 
-    def _get_lora_aux_stream() -> torch.cuda.Stream | None:
-        global _lora_aux_stream
-        if _lora_aux_stream is None and current_platform.is_cuda_alike():
-            _lora_aux_stream = torch.cuda.Stream()
-        return _lora_aux_stream
+    def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
+        global _lora_aux_cuda_stream
+        if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
+            _lora_aux_cuda_stream = torch.cuda.Stream()
+        return _lora_aux_cuda_stream
 
     def lora_linear_async(
         layer_name: str,
@@ -77,7 +77,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: LinearBase):
         super().__init__()
 
-        self._enable_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
         # Ensure tp_size and tp_rank consistency with the base_layer.
@@ -90,16 +90,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.n_slices: int
 
     def _init_lora_stream_context(self) -> None:
-        if not self._enable_stream:
+        if not self._enable_aux_cuda_stream:
             return
         vllm_config = get_current_vllm_config()
-        self._lora_stream = _get_lora_aux_stream()
-
-        self._events = (
-            [torch.cuda.Event(), torch.cuda.Event()]
-            if current_platform.is_cuda_alike()
-            else [None, None]
-        )
+        self._lora_stream = _get_lora_aux_cuda_stream()
+        assert current_platform.is_cuda_alike()
+        self._events = [torch.cuda.Event(), torch.cuda.Event()]
         # lora_linear avoids prefix conflicts with the base layer
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
@@ -195,7 +191,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         # is_forward_context_available for tower modules
-        if self._enable_stream and is_forward_context_available():
+        if self._enable_aux_cuda_stream and is_forward_context_available():
             output_size = sum(self.output_slices)
             return torch.ops.vllm.lora_linear_async(
                 self.layer_name, output_size, x, bias
@@ -239,7 +235,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         Base layer runs on default stream; LoRA runs on aux stream.
         """
         assert envs.VLLM_LORA_ENABLE_DUAL_STREAM
-
+        assert x.ndim in (2, 3)
         num_tokens = x.size(0) if x.ndim == 2 else x.size(1)
         output_size = sum(self.output_slices)
 
