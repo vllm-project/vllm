@@ -1,0 +1,28 @@
+=== Qwen 3.5-122B GGUF Q4_K — Test Results ===
+
+Status: OOM KILLED during expert store build (~45 GB RAM, 62 GB total)
+
+Architecture: 48 layers × 256 experts × top_k=8
+  Expert FFN: 1024→3072→1024 (small per expert)
+  Fused format: [out, in, 256] in Q4_K
+  Total expert data: ~64 GB (BF16 after dequant)
+
+What worked:
+  - GGUF parsing: 0.2s (3 shards, 879 tensors)
+  - Q4_K type ID: correctly mapped (was wrong, fixed)
+  - Q6_K dequant: added for non-expert tensors
+  - Multimodal wrapper: text_config extraction works
+  - Non-expert weight loading: succeeded
+  - Expert store build: started, processed ~30-35 of 48 layers before OOM
+
+Why it failed:
+  _build_expert_store_from_fused_reader accumulates all 12,288 experts
+  in a Python dict (BF16 tensors) before calling GenericExpertStore.from_dict.
+  At ~5.3 MB per expert × 12,288 experts = ~63 GB. Exceeds 62 GB RAM.
+
+What's needed:
+  Stream-to-mmap: write each expert directly to an mmap'd file as it's
+  dequanted, instead of accumulating in a dict. This would cap peak RAM
+  at ~2.4 GB (one fused layer at a time) regardless of total model size.
+
+No performance numbers available.

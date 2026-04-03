@@ -577,6 +577,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
+    @property
+    def supports_expert_lru_cache(self) -> bool:
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+
+        _compatible_backends = {
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.BATCHED_TRITON,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.XPU,
+        }
+        # Block-quant scales are multi-dimensional and cannot be remapped
+        # per slot; backends that reorder weights into opaque layouts
+        # (DEEPGEMM, MARLIN, AITER, FLASHINFER) are also incompatible.
+        return not self.block_quant and self.fp8_backend in _compatible_backends
+
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
@@ -832,6 +848,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
+        # Initialize expert LRU cache when requested and compatible.
+        if self.supports_expert_lru_cache:
+            layer._maybe_init_expert_lru_cache()
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -905,6 +928,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
+
+        provider = getattr(layer, "expert_weight_provider", None)
+        if provider is not None:
+            result = provider.prepare(topk_ids)
+            return self.moe_kernel.apply(
+                x,
+                result.w1,
+                result.w2,
+                topk_weights,
+                result.topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=(layer.apply_router_weight_on_input),
+                shared_experts_input=shared_experts_input,
+            )
+
         return self.moe_kernel.apply(
             x,
             layer.w13_weight,
