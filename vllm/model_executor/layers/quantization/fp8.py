@@ -497,6 +497,8 @@ class Fp8LinearMethod(LinearMethodBase):
         return self.fp8_linear.apply_weights(layer, x, bias)
 
 
+# TODO(future PR): remove this class in favor of
+# online/fp8.py::Fp8PerTensorOnlineLinearMethod
 class Fp8OnlineLinearMethod(Fp8LinearMethod):
     """Online version of Fp8LinearMethod which loads a full precision checkpoint
     and quantizes weights during loading."""
@@ -877,7 +879,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -902,7 +904,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -919,6 +921,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
 
+# TODO(future PR): remove this class in favor of
+# online/fp8.py::Fp8PerTensorOnlineMoEMethod
 class Fp8OnlineMoEMethod(Fp8MoEMethod):
     """MoE method for online FP8 quantization.
     Supports loading quantized FP16/BF16 model checkpoints with dynamic
@@ -1027,6 +1031,10 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
                 layer.w2_weight[expert, :, :]
             )
+
+        if current_platform.is_xpu():
+            w13.data = w13.transpose(-1, -2).contiguous()
+            w2.data = w2.transpose(-1, -2).contiguous()
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(

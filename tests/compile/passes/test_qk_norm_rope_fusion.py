@@ -3,11 +3,11 @@
 
 import pytest
 import torch
+from torch._ops import OpOverload, OpOverloadPacket
 
 from tests.compile.backend import TestBackend
 from vllm.compilation.passes.fusion.matcher_utils import (
     FLASHINFER_ROTARY_OP,
-    RMS_OP,
     ROTARY_OP,
 )
 from vllm.compilation.passes.fusion.qk_norm_rope_fusion import (
@@ -100,13 +100,8 @@ class QKNormRoPETestModel(torch.nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
-    def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops = []
-        if self.enable_rms_norm_custom_op:
-            ops.append(RMS_OP)
-        else:
-            ops.append(RSQRT_OP)
-
+    def ops_in_model_before(self) -> list[OpOverload | OpOverloadPacket]:
+        ops: list[OpOverload | OpOverloadPacket] = [torch.ops.vllm_ir.rms_norm]
         if self.enable_rope_custom_op:
             if self.rotary_emb.use_flashinfer:
                 ops.append(FLASHINFER_ROTARY_OP)
@@ -116,7 +111,7 @@ class QKNormRoPETestModel(torch.nn.Module):
             ops.append(INDEX_SELECT_OP)
         return ops
 
-    def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
+    def ops_in_model_after(self) -> list[OpOverload | OpOverloadPacket]:
         return [FUSED_QK_ROPE_OP]
 
 
@@ -166,7 +161,10 @@ def test_qk_norm_rope_fusion(
     num_heads, num_kv_heads, head_dim = 16, 4, 128
     T = 5
 
-    with set_current_vllm_config(vllm_config):
+    with (
+        set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
         model = QKNormRoPETestModel(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
