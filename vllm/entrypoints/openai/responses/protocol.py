@@ -589,7 +589,7 @@ class ResponsesResponse(OpenAIBaseModel):
         usage: ResponseUsage | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
-        kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
