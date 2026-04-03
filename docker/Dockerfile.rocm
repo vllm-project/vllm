@@ -400,6 +400,7 @@ def pytest_sessionfinish(session, exitstatus):
     _exit_code = int(exitstatus)
 
 def pytest_unconfigure(config):
+    import sys
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(_exit_code)
