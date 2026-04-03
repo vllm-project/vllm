@@ -50,25 +50,37 @@ class ScoringIOProcessor(PoolingIOProcessor):
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
 
-    def _validate_max_tokens_per_doc(self, max_tokens_per_doc: int) -> None:
-        if max_tokens_per_doc <= 0:
-            raise ValueError("max_tokens_per_doc must be a positive integer")
-        if max_tokens_per_doc >= self.model_config.max_model_len:
+    def _validate_token_limit(self, value: int, name: str) -> None:
+        if value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+        if value >= self.model_config.max_model_len:
             raise ValueError(
-                f"max_tokens_per_doc ({max_tokens_per_doc}) must be less "
+                f"{name} ({value}) must be less "
                 f"than max_model_len ({self.model_config.max_model_len})."
             )
 
-    def _truncate_data_2(
-        self, scoring_data: ScoringData, max_tokens_per_doc: int
+    def _truncate_scoring_data(
+        self,
+        scoring_data: ScoringData,
+        max_tokens_per_query: int = 0,
+        max_tokens_per_doc: int = 0,
     ) -> ScoringData:
-        """Truncate document texts in data_2 to max_tokens_per_doc."""
-        truncated = []
-        for d in scoring_data.data_2:
-            if isinstance(d, str):
-                d = truncate_text_to_tokens(d, self.tokenizer, max_tokens_per_doc)
-            truncated.append(d)
-        return ScoringData(data_1=scoring_data.data_1, data_2=truncated)
+        """Truncate query/document texts to token limits."""
+        data_1 = scoring_data.data_1
+        data_2 = scoring_data.data_2
+        if max_tokens_per_query > 0:
+            data_1 = [
+                truncate_text_to_tokens(d, self.tokenizer, max_tokens_per_query)
+                if isinstance(d, str) else d
+                for d in data_1
+            ]
+        if max_tokens_per_doc > 0:
+            data_2 = [
+                truncate_text_to_tokens(d, self.tokenizer, max_tokens_per_doc)
+                if isinstance(d, str) else d
+                for d in data_2
+            ]
+        return ScoringData(data_1=data_1, data_2=data_2)
 
     def valid_inputs(
         self,
@@ -103,12 +115,18 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
-        max_tokens_per_doc = getattr(request, "max_tokens_per_doc", None)
         scoring_data = self.valid_inputs(data_1, data_2)
 
-        if max_tokens_per_doc is not None:
-            self._validate_max_tokens_per_doc(max_tokens_per_doc)
-            scoring_data = self._truncate_data_2(scoring_data, max_tokens_per_doc)
+        max_tokens_per_query = getattr(request, "max_tokens_per_query", 0)
+        max_tokens_per_doc = getattr(request, "max_tokens_per_doc", 0)
+        if max_tokens_per_query > 0:
+            self._validate_token_limit(max_tokens_per_query, "max_tokens_per_query")
+        if max_tokens_per_doc > 0:
+            self._validate_token_limit(max_tokens_per_doc, "max_tokens_per_doc")
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
 
         tok_params = request.build_tok_params(self.model_config)
         engine_inputs = self._pre_process(
@@ -144,18 +162,24 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
             **(ctx.tokenization_kwargs or {})
         )
 
-        max_tokens_per_doc = None
+        extra = {}
         if ctx.pooling_params is not None and not isinstance(
             ctx.pooling_params, list
         ):
-            max_tokens_per_doc = ctx.pooling_params.extra_kwargs.get(
-                "max_tokens_per_doc"
-            ) if ctx.pooling_params.extra_kwargs else None
+            extra = ctx.pooling_params.extra_kwargs or {}
+
+        max_tokens_per_query = extra.get("max_tokens_per_query", 0)
+        max_tokens_per_doc = extra.get("max_tokens_per_doc", 0)
 
         scoring_data = ctx.prompts
-        if max_tokens_per_doc is not None:
-            self._validate_max_tokens_per_doc(max_tokens_per_doc)
-            scoring_data = self._truncate_data_2(scoring_data, max_tokens_per_doc)
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            if max_tokens_per_query > 0:
+                self._validate_token_limit(max_tokens_per_query, "max_tokens_per_query")
+            if max_tokens_per_doc > 0:
+                self._validate_token_limit(max_tokens_per_doc, "max_tokens_per_doc")
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
 
         return self._pre_process(scoring_data, tok_params)
 
@@ -296,11 +320,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
-        max_tokens_per_doc = getattr(request, "max_tokens_per_doc", None)
         scoring_data = self.valid_inputs(data_1, data_2)
 
-        if max_tokens_per_doc is not None:
-            self._validate_max_tokens_per_doc(max_tokens_per_doc)
+        max_tokens_per_query = getattr(request, "max_tokens_per_query", 0)
+        max_tokens_per_doc = getattr(request, "max_tokens_per_doc", 0)
+        if max_tokens_per_query > 0:
+            self._validate_token_limit(max_tokens_per_query, "max_tokens_per_query")
+        if max_tokens_per_doc > 0:
+            self._validate_token_limit(max_tokens_per_doc, "max_tokens_per_doc")
 
         tok_params = request.build_tok_params(self.model_config)
         pooling_params = self.create_pooling_params(request)
@@ -310,6 +337,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             tok_params,
             pooling_params,
             chat_template=self.chat_template,
+            max_tokens_per_query=max_tokens_per_query,
             max_tokens_per_doc=max_tokens_per_doc,
             prompt_extras={
                 k: v
@@ -332,18 +360,20 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             **(ctx.tokenization_kwargs or {})
         )
 
-        max_tokens_per_doc = None
+        extra = {}
         if ctx.pooling_params is not None:
-            max_tokens_per_doc = ctx.pooling_params.extra_kwargs.get(
-                "max_tokens_per_doc"
-            ) if ctx.pooling_params.extra_kwargs else None
+            extra = ctx.pooling_params.extra_kwargs or {}
 
-        scoring_data = ctx.prompts
-        if max_tokens_per_doc is not None:
-            self._validate_max_tokens_per_doc(max_tokens_per_doc)
+        max_tokens_per_query = extra.get("max_tokens_per_query", 0)
+        max_tokens_per_doc = extra.get("max_tokens_per_doc", 0)
+        if max_tokens_per_query > 0:
+            self._validate_token_limit(max_tokens_per_query, "max_tokens_per_query")
+        if max_tokens_per_doc > 0:
+            self._validate_token_limit(max_tokens_per_doc, "max_tokens_per_doc")
 
         engine_inputs, pooling_params_list = self._pre_process(
-            scoring_data, tok_params, ctx.pooling_params, ctx.chat_template,
+            ctx.prompts, tok_params, ctx.pooling_params, ctx.chat_template,
+            max_tokens_per_query=max_tokens_per_query,
             max_tokens_per_doc=max_tokens_per_doc,
         )
         ctx.pooling_params = pooling_params_list
@@ -358,7 +388,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tok_params: TokenizeParams,
         pooling_params: PoolingParams | None,
         chat_template: str | None = None,
-        max_tokens_per_doc: int | None = None,
+        max_tokens_per_query: int = 0,
+        max_tokens_per_doc: int = 0,
         prompt_extras: dict[str, Any] | None = None,
     ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
         # todo: support prompt_extras
@@ -381,6 +412,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 data_2=d,
                 encode_kwargs=tok_params.get_encode_kwargs(),
                 chat_template=chat_template,
+                max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
             )
 
@@ -404,7 +436,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         data_2: ScoreData,
         encode_kwargs: dict[str, Any],
         chat_template: str | None = None,
-        max_tokens_per_doc: int | None = None,
+        max_tokens_per_query: int = 0,
+        max_tokens_per_doc: int = 0,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -415,6 +448,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             model_config,
         )
 
+        # Apply query truncation if requested
+        if max_tokens_per_query > 0 and isinstance(prompt_1, str):
+            prompt_1 = truncate_text_to_tokens(
+                prompt_1, tokenizer, max_tokens_per_query
+            )
+
         def default_tokenizer_encode():
             nonlocal prompt_2
             local_kwargs = encode_kwargs.copy()
@@ -422,7 +461,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             if self.supports_score_template:
                 assert self.model is not None
                 # Template case — truncate text before applying template
-                if max_tokens_per_doc is not None and isinstance(prompt_2, str):
+                if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
                     prompt_2 = truncate_text_to_tokens(
                         prompt_2, tokenizer, max_tokens_per_doc
                     )
@@ -434,9 +473,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else:
                 if self.use_sep_token:
                     # Cross-encoder — use tokenizer's built-in truncation
-                    if max_tokens_per_doc is not None and isinstance(
-                        prompt_2, str
-                    ):
+                    if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
                         query_tokens = tokenizer.encode(
                             prompt_1, add_special_tokens=False
                         )
@@ -462,9 +499,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
                     # `llm as reranker` — direct token slicing
-                    if max_tokens_per_doc is not None and isinstance(
-                        prompt_2, str
-                    ):
+                    if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
                         query_ids = tokenizer.encode(
                             prompt_1, add_special_tokens=False
                         )
@@ -494,11 +529,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             # If that fails because there is no such template,
             # fall back to the default implementation.
             try:
-                # Template case — truncate text first if needed
                 doc_content = prompt_2
-                if max_tokens_per_doc is not None and isinstance(
-                    prompt_2, str
-                ):
+                if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
                     doc_content = truncate_text_to_tokens(
                         prompt_2, tokenizer, max_tokens_per_doc
                     )

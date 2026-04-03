@@ -248,15 +248,15 @@ class PoolingServing:
                 " Please request a smaller truncation size."
             )
 
-        max_tokens_per_doc = getattr(ctx.request, "max_tokens_per_doc", None)
-        if max_tokens_per_doc is not None:
-            if max_tokens_per_doc <= 0:
+        for param_name in ("max_tokens_per_doc", "max_tokens_per_query"):
+            value = getattr(ctx.request, param_name, 0)
+            if value < 0:
                 raise ValueError(
-                    "max_tokens_per_doc must be a positive integer"
+                    f"{param_name} must be a non-negative integer"
                 )
-            if max_tokens_per_doc >= self.max_model_len:
+            if value > 0 and value >= self.max_model_len:
                 raise ValueError(
-                    f"max_tokens_per_doc ({max_tokens_per_doc}) must be less "
+                    f"{param_name} ({value}) must be less "
                     f"than max_model_len ({self.max_model_len})."
                 )
         return None
