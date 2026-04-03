@@ -226,7 +226,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        out_dtype = self.config.input_dtype
+        out_dtype = self.config.out_dtype
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
                 A,
@@ -246,8 +246,6 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             )
 
 
-# We need to pass in the is_hopper flag as argument because the function
-# current_platform.is_device_capability() is not supported by Torch compiler.
 def cutlass_scaled_mm(
     A: torch.Tensor,
     B: torch.Tensor,
