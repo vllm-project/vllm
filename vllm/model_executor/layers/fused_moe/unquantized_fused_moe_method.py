@@ -190,7 +190,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # OOT handles internally.
             return
 
-        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
+        elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
             # CPU stays on the old path — no oracle, no moe_kernel.
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 
