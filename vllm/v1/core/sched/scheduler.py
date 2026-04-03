@@ -1655,7 +1655,6 @@ class Scheduler(SchedulerInterface):
             mm_feature = request.mm_features[input_id]
             start_pos = mm_feature.mm_position.offset
             num_tokens = mm_feature.mm_position.length
-            print(f"{start_pos = } {num_tokens = } {request.num_computed_tokens = }")
             if self.is_encoder_decoder and request.num_computed_tokens > 0:
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention

@@ -1079,7 +1079,6 @@ class GPUModelRunner(
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
-            print(f"free {mm_hash = }")
             self.encoder_cache.pop(mm_hash, None)
 
         # Remove the unscheduled requests from the persistent batch.
@@ -2949,7 +2948,6 @@ class GPUModelRunner(
                     continue
 
                 mm_hash = mm_feature.identifier
-                print(f"Fetch {mm_hash = } {shift_computed_tokens = }")
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
