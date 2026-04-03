@@ -556,7 +556,9 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         libcublas-${CUDA_VERSION_DASH} \
         # Fixes nccl_allocator requiring nccl.h at runtime
         # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-        libnccl-dev && \
+        libnccl-dev \
+        # Required by fastsafetensors (fixes #20384)
+        libnuma-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
@@ -651,11 +653,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi; \
     uv pip install --system accelerate hf_transfer modelscope \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
-
-# Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN apt-get update -y \
-    && apt-get install -y --no-install-recommends libnuma-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
