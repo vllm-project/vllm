@@ -6844,7 +6844,7 @@ class GPUModelRunner(
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
-        if has_kv_transfer_group():
+        if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
             if self.cross_layers_kv_cache is not None:
                 assert self.cross_layers_attn_backend is not None
