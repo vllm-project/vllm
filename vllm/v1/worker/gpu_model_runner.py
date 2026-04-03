@@ -6160,6 +6160,7 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
+                profile_seq_lens=profile_seq_lens,
             )
         self._dummy_run(
             desc.num_tokens,
