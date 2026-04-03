@@ -121,7 +121,7 @@ class PassConfig:
     fuse_act_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = None  # type: ignore[assignment]
-    """Fuse the custom attention + quant ops."""
+    """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = None  # type: ignore[assignment]
@@ -495,9 +495,10 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models
-    on selected platforms. Disabled by default until more models
-    are supported/tested to work."""
+    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models on selected
+    platforms. It may also work for models loaded with the Transformers modeling backend
+    if the encoder is compilable. Disabled by default until more models are
+    supported/tested to work."""
 
     # Vision encoder CUDA graph
     cudagraph_mm_encoder: bool = False

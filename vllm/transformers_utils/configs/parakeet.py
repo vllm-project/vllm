@@ -44,15 +44,19 @@ class ExtractorConfig:
     subsampling_factor: int
     subsampling_conv_kernel_size: int
     subsampling_conv_stride: int
+    hop_length: int = 160
+    """Default `160`: Matches HF default"""
     clip_duration_s: int = 30
     clip_min_duration_s: float = 0.1
 
     @staticmethod
     def from_hf_config(config: PretrainedConfig) -> "ExtractorConfig":
         assert isinstance(config, PretrainedConfig)
+        hop_length = int(getattr(config, "hop_length", ExtractorConfig.hop_length))
         return ExtractorConfig(
             feature_size=config.num_mel_bins,
             sampling_rate=config.sampling_rate,
+            hop_length=hop_length,
             subsampling_factor=config.subsampling_factor,
             subsampling_conv_kernel_size=config.subsampling_conv_kernel_size,
             subsampling_conv_stride=config.subsampling_conv_stride,
