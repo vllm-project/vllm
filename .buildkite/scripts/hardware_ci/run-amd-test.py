@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import atexit
 import fcntl
+import glob as _glob
 import grp
 import json
 import os
@@ -132,24 +133,104 @@ ENABLE_DOCKER_EVICTION = os.environ.get("VLLM_ROCM_CI_DOCKER_EVICTION", "1") == 
 ENABLE_DIAGNOSTICS = os.environ.get("VLLM_ROCM_CI_DIAGNOSTICS", "1") == "1"
 ENABLE_JUNIT_OVERRIDE = os.environ.get("VLLM_ROCM_CI_JUNIT_OVERRIDE", "1") == "1"
 
-# VLLM_ROCM_CI_LEGACY_DOCKER_TAG
+# Docker image resolution:
+#   1. Use DOCKER_IMAGE_NAME when the pipeline sets it explicitly.
+#   2. Otherwise fall back to the shared commit-tagged AMD image.
 #
-# Controls how the Docker image tag is resolved for the test container.
+# ROCm CI now builds a single multi-arch image per commit, so there is no
+# separate per-arch image mode to validate or fall back between here.
+DEFAULT_IMAGE_REPO = "rocm/vllm-ci"
+
+# --------------------------------------------------------------------------
+# GPU architecture registry
 #
-#   "1" (default, current):
-#     Image tag is rocm/vllm-ci:{BUILDKITE_COMMIT} -- the single fat
-#     multi-arch image built for all GPU architectures. This is the
-#     pattern used by the current amd.yaml pipeline.
+# Every ROCm GPU architecture that CI is allowed to run on must be listed
+# here. This is a safety gate: if a pipeline step targets an architecture
+# that is not in this registry, the script exits immediately with a clear
+# error pointing to this line.
 #
-#   "0" (per-arch, PR #36949):
-#     Image tag is read from DOCKER_IMAGE_NAME, which the pipeline
-#     template sets per step (e.g., rocm/vllm-ci:{commit}-gfx942).
-#     DOCKER_IMAGE_NAME must be set or the script exits with an error.
-#     This is the pattern introduced by the ci-bake three-tier build.
+# Why this exists:
+#   - Prevents silent misconfiguration. A typo in DOCKER_IMAGE_NAME
+#     (e.g., "gfx94" instead of "gfx942") would pull a nonexistent image
+#     and fail late with a confusing Docker error. The registry catches it
+#     upfront.
+#   - Prevents running on unsupported hardware. If a new GPU architecture
+#     is added to the fleet without updating the CI runner, tests may
+#     produce wrong results (wrong compiled kernels, wrong NCCL config).
+#     The registry forces a conscious decision to support a new arch.
+#   - Documents exactly which architectures are tested. Anyone reading
+#     this file knows the full set.
 #
-# When migrating to per-arch images, flip this to "0" in the pipeline
-# YAML and ensure every test step sets DOCKER_IMAGE_NAME.
-ENABLE_LEGACY_DOCKER_TAG = os.environ.get("VLLM_ROCM_CI_LEGACY_DOCKER_TAG", "1") == "1"
+# To add a new architecture:
+#   1. Add it to SUPPORTED_ROCM_ARCHS below.
+#   2. Verify the architecture string matches what PYTORCH_ROCM_ARCH and
+#      rocm-smi report (e.g., "gfx942", not "mi300x").
+# --------------------------------------------------------------------------
+SUPPORTED_ROCM_ARCHS = frozenset(
+    {
+        "gfx90a",  # MI210, MI250, MI250X
+        "gfx942",  # MI300X, MI300A, MI325X
+        "gfx950",  # MI350X, MI355X
+    }
+)
+
+
+def _validate_image_arch(image_name):
+    # type: (str) -> None
+    """Validate that an arch-suffixed image tag targets a supported architecture.
+
+    If DOCKER_IMAGE_NAME is set to a per-arch tag, it is expected to end with
+    "-{arch}" (for example, "rocm/vllm-ci:abc123-gfx942"). This function
+    extracts that suffix and checks it against SUPPORTED_ROCM_ARCHS.
+
+    Shared multi-arch commit tags (for example, "rocm/vllm-ci:abc123") have no
+    arch suffix, so there is nothing to validate and this function returns.
+
+    Args:
+        image_name: Full Docker image name from DOCKER_IMAGE_NAME.
+
+    Raises:
+        SystemExit: If the arch suffix is present but not supported.
+    """
+    if ":" not in image_name:
+        return
+
+    tag = image_name.rsplit(":", 1)[1]
+    if "-" not in tag:
+        return
+
+    arch = tag.rsplit("-", 1)[1]
+    if arch not in SUPPORTED_ROCM_ARCHS:
+        error(
+            f"GPU architecture '{arch}' (from image tag '{image_name}') "
+            f"is not in the supported architecture registry.\n"
+            f"\n"
+            f"  Registered architectures: "
+            f"{', '.join(sorted(SUPPORTED_ROCM_ARCHS))}\n"
+            f"\n"
+            f"  This check exists at SUPPORTED_ROCM_ARCHS in:\n"
+            f"    {__file__}:{_SUPPORTED_ROCM_ARCHS_LINE}\n"
+            f"\n"
+            f"  If '{arch}' is a valid new architecture, add it to\n"
+            f"  SUPPORTED_ROCM_ARCHS. If this is a typo, fix\n"
+            f"  DOCKER_IMAGE_NAME in the pipeline YAML."
+        )
+        sys.exit(1)
+
+    info(f"Architecture '{arch}' is registered and supported")
+
+
+# Line number of SUPPORTED_ROCM_ARCHS for error messages. This avoids
+# hardcoding a line number that goes stale on every edit.
+_SUPPORTED_ROCM_ARCHS_LINE = "?"  # type: str
+try:
+    with open(__file__) as _f:
+        for _i, _line in enumerate(_f, 1):
+            if _line.strip().startswith("SUPPORTED_ROCM_ARCHS"):
+                _SUPPORTED_ROCM_ARCHS_LINE = str(_i)
+                break
+except OSError:
+    pass
 
 # --------------------------------------------------------------------------
 # Hard reset switches
@@ -186,131 +267,6 @@ RESET_CACHE_L1 = os.environ.get("VLLM_ROCM_CI_RESET_CACHE_L1", "0") == "1"
 RESET_CACHE_L2 = os.environ.get("VLLM_ROCM_CI_RESET_CACHE_L2", "0") == "1"
 RESET_DOCKER = os.environ.get("VLLM_ROCM_CI_RESET_DOCKER", "0") == "1"
 RESET_OVERLAY = os.environ.get("VLLM_ROCM_CI_RESET_OVERLAY", "0") == "1"
-
-# --------------------------------------------------------------------------
-# GPU architecture registry
-#
-# Every ROCm GPU architecture that CI is allowed to run on must be listed
-# here. This is a safety gate: if a pipeline step targets an architecture
-# that is not in this registry, the script exits immediately with a clear
-# error pointing to this line.
-#
-# Why this exists:
-#   - Prevents silent misconfiguration. A typo in DOCKER_IMAGE_NAME
-#     (e.g., "gfx94" instead of "gfx942") would pull a nonexistent image
-#     and fail late with a confusing Docker error. The registry catches it
-#     upfront.
-#   - Prevents running on unsupported hardware. If a new GPU architecture
-#     is added to the fleet without updating the CI runner, tests may
-#     produce wrong results (wrong compiled kernels, wrong NCCL config).
-#     The registry forces a conscious decision to support a new arch.
-#   - Documents exactly which architectures are tested. Anyone reading
-#     this file knows the full set.
-#
-# To add a new architecture:
-#   1. Add it to SUPPORTED_ROCM_ARCHS below.
-#   2. Add a per-arch build step in amd.yaml (see PR #36949 pattern).
-#   3. Update the pipeline template to set DOCKER_IMAGE_NAME for the
-#      new arch's test steps.
-#   4. Verify the architecture string matches what PYTORCH_ROCM_ARCH and
-#      rocm-smi report (e.g., "gfx942", not "mi300x").
-# --------------------------------------------------------------------------
-SUPPORTED_ROCM_ARCHS = frozenset(
-    {
-        "gfx90a",  # MI210, MI250, MI250X
-        "gfx942",  # MI300X, MI300A
-        "gfx950",  # MI350X
-    }
-)
-
-
-def _validate_image_arch(image_name):
-    # type: (str) -> None
-    """Validate that a per-arch image tag targets a supported architecture.
-
-    When VLLM_ROCM_CI_LEGACY_DOCKER_TAG=0, the image tag is expected to
-    end with a "-{arch}" suffix (e.g., "rocm/vllm-ci:abc123-gfx942").
-    This function extracts the arch suffix and checks it against the
-    SUPPORTED_ROCM_ARCHS registry.
-
-    Called only in per-arch mode. In legacy mode (fat multi-arch image),
-    there is no arch suffix to validate.
-
-    Args:
-        image_name: Full Docker image name from DOCKER_IMAGE_NAME.
-
-    Raises:
-        SystemExit: If the arch is not in SUPPORTED_ROCM_ARCHS.
-    """
-    # Extract the tag portion after the colon.
-    if ":" not in image_name:
-        # No tag at all -- let docker pull fail with its own error.
-        return
-
-    tag = image_name.rsplit(":", 1)[1]
-
-    # Extract the arch suffix after the last hyphen.
-    # Tag format: {commit}-{arch}  e.g., "abc123def-gfx942"
-    if "-" not in tag:
-        warn(
-            f"Image tag '{tag}' has no '-{{arch}}' suffix. "
-            f"In per-arch mode, tags are expected to be "
-            f"'{{commit}}-{{arch}}' (e.g., abc123-gfx942). "
-            f"Skipping arch validation."
-        )
-        return
-
-    arch = tag.rsplit("-", 1)[1]
-
-    if arch not in SUPPORTED_ROCM_ARCHS:
-        error(
-            f"GPU architecture '{arch}' (from image tag '{image_name}') "
-            f"is not in the supported architecture registry.\n"
-            f"\n"
-            f"  Registered architectures: "
-            f"{', '.join(sorted(SUPPORTED_ROCM_ARCHS))}\n"
-            f"\n"
-            f"  This check exists at SUPPORTED_ROCM_ARCHS in:\n"
-            f"    {__file__}:{_SUPPORTED_ROCM_ARCHS_LINE}\n"
-            f"\n"
-            f"  If '{arch}' is a valid new architecture, add it to\n"
-            f"  SUPPORTED_ROCM_ARCHS. If this is a typo, fix\n"
-            f"  DOCKER_IMAGE_NAME in the pipeline YAML."
-        )
-        sys.exit(1)
-
-    info(f"Architecture '{arch}' is registered and supported")
-
-
-def _extract_arch_from_image(image_name):
-    # type: (str) -> str | None
-    """Extract the GPU architecture suffix from a per-arch image tag.
-
-    Returns the arch string (e.g., "gfx942") or None if no valid arch
-    suffix is found.  Used by wheel artifact fallback to try arch-specific
-    artifacts before fat/legacy ones.
-    """
-    if ":" not in image_name:
-        return None
-    tag = image_name.rsplit(":", 1)[1]
-    if "-" not in tag:
-        return None
-    arch = tag.rsplit("-", 1)[1]
-    return arch if arch in SUPPORTED_ROCM_ARCHS else None
-
-
-# Line number of SUPPORTED_ROCM_ARCHS for error messages. This trick
-# avoids hardcoding a line number that goes stale on every edit.
-# We search for the frozenset assignment in our own source.
-_SUPPORTED_ROCM_ARCHS_LINE = "?"  # type: str
-try:
-    with open(__file__) as _f:
-        for _i, _line in enumerate(_f, 1):
-            if _line.strip().startswith("SUPPORTED_ROCM_ARCHS"):
-                _SUPPORTED_ROCM_ARCHS_LINE = str(_i)
-                break
-except OSError:
-    pass
 
 # GPU state file written by the AMD GPU driver's userspace tooling.
 # The driver writes "clean" after a successful reset. We write "reset"
@@ -431,11 +387,15 @@ RESULTS_MOUNT = "/tmp/vllm-ci-results"
 #   3. The volume mount and env var are injected into docker run.
 #   4. If backing is configured, overlay or seed happens automatically.
 #
-# Override env vars:
+# Kubernetes-managed model/test caches:
+#   HF_HOME, HF_DATASETS_CACHE, MODELSCOPE_CACHE, VLLM_TEST_CACHE,
+#   VLLM_CACHE_ROOT, and VLLM_MEDIA_CACHE are expected to be set on the outer
+#   Buildkite pod. This runner bind-mounts that existing host cache tree into
+#   the inner Docker container, but does not budget, seed, or evict it.
+#
+# Override env vars for runner-managed caches:
 #   VLLM_CI_CACHE_ROOT         Hot tier path (default: ~/vllm-ci-cache)
 #   VLLM_CI_CACHE_BACKING_ROOT Warm tier path (default: unset = single-tier)
-#   VLLM_HF_CACHE              Legacy HF host path kept outside CACHE_ROOT
-#                              so existing warmed nodes are still reused.
 #   VLLM_CACHE_MAX_<ENV_VAR>   Override one cache's L1 budget in GB.
 #   VLLM_CACHE_L2_MAX_DAYS     Default L2 stale-file eviction age in days.
 #   VLLM_CACHE_L1_FS_MIN_HEADROOM_GB
@@ -448,7 +408,7 @@ RESULTS_MOUNT = "/tmp/vllm-ci-results"
 #                              watchdog sync stop early if this cap is hit.
 #
 # Safety:
-#   VLLM_CI_CACHE_ROOT must not be nested inside VLLM_HF_CACHE (or vice versa).
+#   Runner-managed cache roots in CACHES must not overlap one another.
 #   Overlapping host cache roots make per-cache budgets double-count disk usage,
 #   which can defeat eviction guardrails and trigger node or pod disk pressure.
 # ---------------------------------------------------------------------------
@@ -504,10 +464,19 @@ ACCESS_LOG_FILE = CACHE_ROOT / ".access_counts"
 #   VLLM_CACHE_MAX_<ENV_VAR>=<gb>
 #   Example: VLLM_CACHE_MAX_PIP_CACHE_DIR=5
 #
-# Legacy HF cache path: the original bash script used ~/huggingface (not
-# under CACHE_ROOT). We preserve this path so existing warm caches on CI
-# nodes are not invalidated. New caches go under CACHE_ROOT.
-_HF_CACHE_HOST = Path(os.environ.get("VLLM_HF_CACHE", str(Path.home() / "huggingface")))
+# Kubernetes-managed cache tree. These long-lived model/test caches continue to
+# live under the outer Buildkite pod's HF tree; the runner only bind-mounts the
+# tree into the inner Docker container and injects the container-side env vars.
+K8S_CACHE_HOST_ROOT = Path(os.environ.get("HF_HOME", str(Path.home() / "huggingface")))
+K8S_CACHE_CONTAINER_ROOT = "/root/.cache/huggingface"
+K8S_MANAGED_CACHE_ENVS = (
+    ("HF_HOME", K8S_CACHE_CONTAINER_ROOT),
+    ("HF_DATASETS_CACHE", f"{K8S_CACHE_CONTAINER_ROOT}/datasets"),
+    ("MODELSCOPE_CACHE", f"{K8S_CACHE_CONTAINER_ROOT}/modelscope"),
+    ("VLLM_TEST_CACHE", f"{K8S_CACHE_CONTAINER_ROOT}/vllm-test-cache"),
+    ("VLLM_CACHE_ROOT", f"{K8S_CACHE_CONTAINER_ROOT}/vllm-cache"),
+    ("VLLM_MEDIA_CACHE", f"{K8S_CACHE_CONTAINER_ROOT}/vllm-cache/media_cache"),
+)
 
 # Default L2 time-based eviction: files not accessed in this many days
 # are evicted from NFS/PVC. Override per-cache or globally via env var.
@@ -523,54 +492,6 @@ L1_FS_MIN_HEADROOM_GB = float(os.environ.get("VLLM_CACHE_L1_FS_MIN_HEADROOM_GB",
 L1_FS_MAX_UTIL_PCT = float(os.environ.get("VLLM_CACHE_L1_FS_MAX_UTIL_PCT", "85"))
 
 CACHES = [
-    {
-        "host_subdir": "__hf_legacy__",
-        "host_dir_override": str(_HF_CACHE_HOST),
-        "container_path": "/root/.cache/huggingface",
-        "env_var": "HF_HOME",
-        "max_gb": 1408,  # L1 budget
-        "l2_max_gb": 7168,  # L2 budget (NFS)
-        "l2_max_days": 14,  # evict from L2 if untouched 14d
-        "description": "HuggingFace models and datasets",
-    },
-    {
-        "host_subdir": "modelscope",
-        "container_path": "/root/.cache/modelscope",
-        "env_var": "MODELSCOPE_CACHE",
-        "max_gb": 220,
-        "l2_max_gb": 1792,
-        "l2_max_days": 14,
-        "description": "ModelScope models",
-    },
-    {
-        "host_subdir": "vllm-test-cache",
-        "container_path": "/root/.cache/vllm-test-cache",
-        "env_var": "VLLM_TEST_CACHE",
-        "max_gb": 208,
-        "l2_max_gb": 512,
-        "l2_max_days": 14,  # test data goes stale faster
-        "description": "Test data (dummy models, datasets)",
-    },
-    {
-        "host_subdir": "vllm",
-        "container_path": "/root/.cache/vllm",
-        "env_var": "VLLM_CACHE_ROOT",
-        "max_gb": 32,
-        "l2_max_gb": 512,
-        "l2_max_days": 7,  # compiled kernels for old code
-        "description": "vLLM runtime cache (compiled kernels)",
-    },
-    {
-        # Keep this outside the main vLLM host directory so L1/L2 eviction
-        # budgets do not double-count media files as part of VLLM_CACHE_ROOT.
-        "host_subdir": "vllm-media-cache",
-        "container_path": "/root/.cache/vllm/media_cache",
-        "env_var": "VLLM_MEDIA_CACHE",
-        "max_gb": 16,
-        "l2_max_gb": 64,
-        "l2_max_days": 14,
-        "description": "Media URL cache (images, audio, video)",
-    },
     {
         # pip respects PIP_CACHE_DIR. Used by the 46 "pip install"
         # commands in test-amd.yaml.
@@ -594,14 +515,16 @@ CACHES = [
         "description": "uv package manager cache",
     },
     {
-        # sccache is the compiler cache used in the ROCm Dockerfile.
-        "host_subdir": "sccache",
-        "container_path": "/root/.cache/sccache",
-        "env_var": "SCCACHE_DIR",
+        # ROCm CI runtime images compile with ccache when source builds happen
+        # inside the test container (for example editable installs or plugin
+        # builds). Keep this on the host so repeated jobs reuse object files.
+        "host_subdir": "ccache",
+        "container_path": "/root/.cache/ccache",
+        "env_var": "CCACHE_DIR",
         "max_gb": 80,
         "l2_max_gb": 256,
         "l2_max_days": 21,
-        "description": "sccache compiler cache (ROCm builds)",
+        "description": "ccache compiler cache (ROCm source builds)",
     },
 ]  # type: list[dict]
 
@@ -992,12 +915,8 @@ def log_effective_config():
     info(f"    DOCKER_EVICTION:         {_on_off(ENABLE_DOCKER_EVICTION)}")
     info(f"    DIAGNOSTICS:             {_on_off(ENABLE_DIAGNOSTICS)}")
     info(f"    JUNIT_OVERRIDE:          {_on_off(ENABLE_JUNIT_OVERRIDE)}")
-    tag_mode = (
-        "legacy (commit-only)"
-        if ENABLE_LEGACY_DOCKER_TAG
-        else "per-arch (DOCKER_IMAGE_NAME)"
-    )
-    info(f"    DOCKER_TAG_MODE:         {tag_mode}")
+    docker_image_override = os.environ.get("DOCKER_IMAGE_NAME", "").strip() or "(unset)"
+    info(f"    DOCKER_IMAGE_NAME:       {docker_image_override}")
 
     any_off = not all(
         [
@@ -1101,7 +1020,6 @@ def log_effective_config():
         "VLLM_CI_CACHE_BACKING_ROOT",
         "VLLM_CACHE_L2_MAX_DAYS",
         "VLLM_CI_REGISTRY",
-        "VLLM_ROCM_CI_LEGACY_DOCKER_TAG",
         "DOCKER_IMAGE_NAME",
         "VLLM_LOCAL_IMAGE_CACHE",
         "VLLM_CI_BASE_IMAGE",
@@ -2580,13 +2498,13 @@ def reset_gpus():
 #   - Multi-tier Docker images (PR 36949): ci_base caches stable deps,
 #     per-commit images are thin. Host caches complement this by caching
 #     data that changes per-model (HF weights) not per-build.
-#   - Media URL caching (PR 37123): VLLM_MEDIA_CACHE caches fetched media
-#     files by SHA-256 hash, avoiding repeated downloads in tests.
+#   - Kubernetes-managed model/test caches: the outer pod keeps the HF tree
+#     warm across jobs, while this runner manages only build-tool caches.
 #   - Ephemeral storage: set VLLM_CI_CACHE_ROOT to a fast local disk
 #     (NVMe /scratch) instead of shared NFS for better I/O.
-#   - Per-arch builds: the ccache entry caches compiled kernels so that
-#     ROCm arch-specific builds (gfx90a, gfx942, gfx950) can share
-#     compilation results across jobs.
+#   - Single multi-arch builds: the ccache entry still caches compiled
+#     objects across jobs even though the pipeline now publishes one image
+#     tag per commit instead of separate per-arch tags.
 # ==========================================================================
 
 
@@ -2627,21 +2545,30 @@ def setup_caches():
         info(f"  Creating cache root: {CACHE_ROOT}")
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
+    info(
+        f"Kubernetes-managed cache tree: {K8S_CACHE_HOST_ROOT} -> "
+        f"{K8S_CACHE_CONTAINER_ROOT}"
+    )
+
     # Try OverlayFS first (L1+L2 merged transparently by kernel). If some
     # caches fail to mount, seed only those caches from backing so partial
     # overlay failure does not leave them completely cold.
     mounted_subdirs = mount_overlay_caches()
     sync_caches_from_backing(skip_subdirs=mounted_subdirs)
 
-    # Show the top-K access frequency table so operators can see which
-    # models are hot across jobs and tune cache budgets accordingly.
-    log_top_k_access_counts()
+    # Access-frequency seeding only matters for two-tier caches. In
+    # single-tier mode there is no backing store to seed from, so the
+    # "first run / no access data" message is just noise.
+    if CACHE_BACKING_ROOT is not None:
+        log_top_k_access_counts()
 
     cache_bytes = {}  # type: dict[str, int]
     for cache in CACHES:
         host_dir = _get_cache_host_dir(cache)
         host_dir.mkdir(parents=True, exist_ok=True)
         max_gb = _get_cache_max_gb(cache)
+        override_gb = _get_cache_env_override_gb(cache)
+        default_gb = int(cache.get("max_gb", 0))
 
         # Report cache size, file count, and limit.
         try:
@@ -2674,7 +2601,17 @@ def setup_caches():
         except ValueError:
             status = "unknown"
 
-        limit = f"{max_gb}GB" if max_gb > 0 else "unlimited"
+        if max_gb > 0:
+            limit = f"{max_gb}GB"
+            if (
+                CACHE_BACKING_ROOT is None
+                and override_gb is None
+                and default_gb > 0
+                and max_gb != default_gb
+            ):
+                limit = f"{limit} (scaled from {default_gb}GB)"
+        else:
+            limit = "unlimited"
         env = cache["env_var"]
         info(f"  {env:25s} {size:>8s} ({count} files) [{status}] limit={limit}")
 
@@ -2688,19 +2625,29 @@ def build_cache_docker_args():
     """Build docker run arguments for all persistent cache mounts.
 
     Returns a list of ``-v`` and ``-e`` flags to pass to ``docker run``:
-      - ``-v host_dir:container_path`` for each cache
-      - ``-e ENV_VAR=container_path`` for each cache
+      - one bind mount for the Kubernetes-managed HF cache tree
+      - ``-e ENV_VAR=container_path`` for the Kubernetes-managed cache envs
+      - ``-v host_dir:container_path`` for each runner-managed cache
+      - ``-e ENV_VAR=container_path`` for each runner-managed cache
 
-    This is the single place where cache mounts are defined, so adding
-    a new cache type only requires editing the CACHES list.
+    This is the single place where cache mounts are defined. The long-lived
+    model/test caches come from the outer Buildkite pod's HF tree; the caches
+    in CACHES are the runner-managed hot-tier caches under CACHE_ROOT.
 
     Returns:
         List of docker CLI arguments (strings).
         Empty list if ENABLE_CACHE is False.
     """
-    if not ENABLE_CACHE or CACHE_RUNTIME_FAILED:
+    if not ENABLE_CACHE:
         return []
     args = []  # type: list[str]
+    args += ["-v", f"{K8S_CACHE_HOST_ROOT}:{K8S_CACHE_CONTAINER_ROOT}"]
+    for env_var, container_path in K8S_MANAGED_CACHE_ENVS:
+        args += ["-e", f"{env_var}={container_path}"]
+
+    if CACHE_RUNTIME_FAILED:
+        return args
+
     for cache in CACHES:
         # If overlay is active for this cache, mount the merged view
         # (which transparently includes both L1 and L2).
@@ -3498,14 +3445,9 @@ def _detect_storage_type(path):
     return fstype
 
 
-def _get_cache_max_gb(cache):
-    # type: (dict) -> int
-    """Resolve the effective max_gb for a cache, with env var override.
-
-    The env var VLLM_CACHE_MAX_<ENV_VAR> overrides the default max_gb.
-    For example, VLLM_CACHE_MAX_PIP_CACHE_DIR=5 sets the pip cache
-    limit to 5 GB. 0 means unlimited.
-    """
+def _get_cache_env_override_gb(cache):
+    # type: (dict) -> int | None
+    """Return the user-provided max_gb override for a cache, if any."""
     env_key = f"VLLM_CACHE_MAX_{cache['env_var']}"
     env_val = os.environ.get(env_key)
     if env_val is not None:
@@ -3516,7 +3458,63 @@ def _get_cache_max_gb(cache):
                 f"Invalid value for {env_key}='{env_val}' "
                 f"(expected integer GB) -- using default"
             )
-    return int(cache.get("max_gb", 0))
+    return None
+
+
+def _get_cache_max_gb(cache):
+    # type: (dict) -> int
+    """Resolve the effective L1 budget for a cache.
+
+    Order of precedence:
+      1. ``VLLM_CACHE_MAX_<ENV_VAR>`` override.
+      2. The cache's configured default ``max_gb``.
+      3. In single-tier mode, dynamically scale defaults down so the sum of
+         all cache budgets on the shared filesystem fits within local disk
+         headroom. This keeps guardrails meaningful on ~1TB agents while
+         preserving the original larger defaults for two-tier deployments.
+    """
+    override = _get_cache_env_override_gb(cache)
+    if override is not None:
+        return override
+
+    default_gb = int(cache.get("max_gb", 0))
+    if default_gb <= 0 or CACHE_BACKING_ROOT is not None:
+        return default_gb
+
+    host_dir = _get_cache_host_dir(cache)
+    probe = host_dir if host_dir.exists() else host_dir.parent
+    try:
+        probe_stat = probe.stat()
+        usage = shutil.disk_usage(str(probe))
+    except OSError:
+        return default_gb
+
+    total_default_gb = 0.0
+    for entry in CACHES:
+        if _get_cache_env_override_gb(entry) is not None:
+            continue
+        entry_default_gb = int(entry.get("max_gb", 0))
+        if entry_default_gb <= 0:
+            continue
+        entry_host = _get_cache_host_dir(entry)
+        entry_probe = entry_host if entry_host.exists() else entry_host.parent
+        try:
+            if entry_probe.stat().st_dev != probe_stat.st_dev:
+                continue
+        except OSError:
+            continue
+        total_default_gb += float(entry_default_gb)
+
+    if total_default_gb <= 0:
+        return default_gb
+
+    total_gb = usage.total / (1024**3)
+    usable_gb = max(1.0, total_gb - min(L1_FS_MIN_HEADROOM_GB, total_gb * 0.1))
+    if total_default_gb <= usable_gb:
+        return default_gb
+
+    scaled_gb = max(1, int(default_gb * (usable_gb / total_default_gb)))
+    return min(default_gb, scaled_gb)
 
 
 def _get_dir_size_bytes(path):
@@ -4228,10 +4226,8 @@ def _try_download_wheel_artifact(wheel_tmp, artifact_dir):
     # type: (str, str) -> list[str]
     """Try to download wheel artifacts from a specific artifact directory.
 
-    Returns a list of .whl.zst file paths if found, empty list otherwise.
+    Returns a list of plain ``.whl`` file paths if found, empty list otherwise.
     """
-    import glob as _glob
-
     try:
         r = sh(
             [
@@ -4249,22 +4245,31 @@ def _try_download_wheel_artifact(wheel_tmp, artifact_dir):
     if r.returncode != 0:
         return []
 
-    zst_files = _glob.glob(os.path.join(wheel_tmp, artifact_dir, "*.whl.zst"))
-    return zst_files
+    wheel_paths = _glob.glob(os.path.join(wheel_tmp, artifact_dir, "*.whl"))
+    if wheel_paths:
+        return wheel_paths
+
+    zst_paths = _glob.glob(os.path.join(wheel_tmp, artifact_dir, "*.zst"))
+    if zst_paths:
+        warn(
+            f"Tier 1: Found compressed wheel artifacts in {artifact_dir} "
+            "(expected plain .whl uploads)."
+        )
+    return []
 
 
 def _assemble_from_wheel(image):
     # type: (str) -> bool
     """Tier 1: Assemble a test image locally from ci_base + wheel artifact.
 
-    The build step uploads the vLLM wheel as a Buildkite artifact.
-    Wheels are namespaced by architecture:
+    The build step uploads a plain ROCm wheel artifact at:
 
-      artifacts/vllm-wheel-{arch}/*.whl.zst   (per-arch, e.g. gfx942)
-      artifacts/vllm-wheel-fat/*.whl.zst      (fat multi-arch build)
-      artifacts/vllm-wheel/*.whl.zst          (legacy path)
+      artifacts/vllm-wheel-rocm/*.whl
 
-    This function tries arch-specific first, then fat, then legacy.
+    For a short migration window, we also accept the legacy path:
+
+      artifacts/vllm-wheel-multi-arch/*.whl
+
     If ci_base is already loaded (by the hooks from NVMe tar) and the
     wheel is available, we build a lightweight image locally -- zero
     Docker Hub traffic.
@@ -4283,53 +4288,25 @@ def _assemble_from_wheel(image):
     info("Tier 1: Checking for wheel artifact...")
     wheel_tmp = tempfile.mkdtemp(prefix="vllm-wheel-")
     try:
-        import glob as _glob  # noqa: F811 -- also imported in helper
-
-        # Build ordered list of artifact paths to try:
-        # 1. Arch-specific (e.g. artifacts/vllm-wheel-gfx942)
-        # 2. Fat multi-arch (artifacts/vllm-wheel-fat)
-        # 3. Legacy (artifacts/vllm-wheel)
-        arch = _extract_arch_from_image(image)
-        artifact_dirs = []
-        if arch:
-            artifact_dirs.append(f"artifacts/vllm-wheel-{arch}")
-        artifact_dirs.append("artifacts/vllm-wheel-fat")
-        artifact_dirs.append("artifacts/vllm-wheel")
-
-        zst_files = []  # type: list[str]
+        artifact_dirs = [
+            "artifacts/vllm-wheel-rocm",
+            "artifacts/vllm-wheel-multi-arch",
+        ]
+        wheel_artifacts = []
         for artifact_dir in artifact_dirs:
             info(f"Tier 1: Trying {artifact_dir}/ ...")
-            zst_files = _try_download_wheel_artifact(wheel_tmp, artifact_dir)
-            if zst_files:
+            wheel_artifacts = _try_download_wheel_artifact(wheel_tmp, artifact_dir)
+            if wheel_artifacts:
                 info(f"Tier 1: Found wheel artifact via {artifact_dir}/")
                 break
-        else:
+        if not wheel_artifacts:
             info("Tier 1: No wheel artifact available from any path")
             return False
 
-        if not zst_files:
-            info("Tier 1: No .whl.zst files in artifact")
-            return False
-
-        for zst_file in zst_files:
-            whl_name = os.path.basename(zst_file).removesuffix(".zst")
-            sh(
-                ["zstd", "-d", "-f", zst_file, "-o", os.path.join(wheel_tmp, whl_name)],
-                capture=True,
-            )
-
-        # Decompress tests archive if present (search in the artifact_dir
-        # that matched, falling back to any dir that contains the archive).
-        tests_archive = ""
-        for adir in [artifact_dir] + artifact_dirs:
-            candidate = os.path.join(wheel_tmp, adir, "tests.tar.zst")
-            if os.path.isfile(candidate):
-                tests_archive = candidate
-                break
-        if tests_archive:
-            sh(
-                f"zstd -d '{tests_archive}' --stdout | tar xf - -C '{wheel_tmp}/'",
-                capture=True,
+        for artifact_path in wheel_artifacts:
+            shutil.copy2(
+                artifact_path,
+                os.path.join(wheel_tmp, os.path.basename(artifact_path)),
             )
 
         # Find the workspace (Buildkite checkout)
@@ -4356,34 +4333,82 @@ def _assemble_from_wheel(image):
                 info("Tier 1: Could not pull ci_base, skipping local assembly")
                 return False
 
-        # Copy wheels into workspace for Docker build context
-        dist_dir = os.path.join(workspace, "dist")
+        # Stage a temporary Docker build context instead of mutating the
+        # checkout in-place. Some Buildkite agent pods mount the checkout
+        # read-only or with a different owner uid, which makes workspace/dist
+        # writes fail even though the checkout is readable.
+        build_context = os.path.join(wheel_tmp, "build-context")
+        shutil.copytree(
+            workspace,
+            build_context,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                "__pycache__",
+                ".mypy_cache",
+                ".pytest_cache",
+                "build",
+                "dist",
+                "wheel-export",
+            ),
+        )
+
+        # The repo's .dockerignore excludes dist/, which would hide the
+        # downloaded wheel we place into this temporary context. Override it
+        # with a context-specific ignore file that keeps dist/*.whl visible
+        # while still dropping the main noisy/generated directories.
+        dockerignore = os.path.join(build_context, ".dockerignore")
+        with open(dockerignore, "w") as f:
+            f.write(
+                ".git\n"
+                "__pycache__/\n"
+                ".mypy_cache/\n"
+                ".pytest_cache/\n"
+                ".venv/\n"
+                "build/\n"
+                "wheel-export/\n"
+                "*.py[cod]\n"
+            )
+
+        # Copy wheels into the temporary build context.
+        dist_dir = os.path.join(build_context, "dist")
         os.makedirs(dist_dir, exist_ok=True)
         for whl in whl_files:
             shutil.copy2(whl, dist_dir)
 
-        # Write a minimal Dockerfile for local assembly
-        dockerfile = os.path.join(wheel_tmp, "Dockerfile.ci-assemble")
+        # Write a minimal Dockerfile for local assembly.
+        # Use uv (already in ci_base) for fast installs consistent with
+        # Dockerfile.rocm.
+        dockerfile = os.path.join(build_context, "Dockerfile.ci-assemble")
         with open(dockerfile, "w") as f:
             f.write(
                 f"FROM {CI_BASE_IMAGE}\n"
                 "COPY dist/*.whl /opt/vllm-wheels/\n"
-                "RUN pip install --no-deps /opt/vllm-wheels/*.whl 2>/dev/null || "
-                "pip install /opt/vllm-wheels/*.whl\n"
-                "COPY . /vllm-workspace\n"
+                "RUN uv pip install --system --no-deps /opt/vllm-wheels/*.whl\n"
                 "WORKDIR /vllm-workspace\n"
-                "RUN pip install -e tests/vllm_test_utils 2>/dev/null || true\n"
+                "COPY . /vllm-workspace\n"
+                "RUN uv pip install --system -e tests/vllm_test_utils\n"
                 "RUN mkdir -p src && mv vllm src/vllm 2>/dev/null || true\n"
             )
 
         info("Building local image: ci_base + wheel + workspace...")
         with timed("local image assembly"):
             r = sh(
-                ["docker", "build", "-t", image, "-f", dockerfile, workspace],
+                ["docker", "build", "-t", image, "-f", dockerfile, build_context],
                 capture=True,
             )
 
         if r.returncode != 0:
+            build_output = "\n".join(
+                line
+                for line in [(r.stdout or "").strip(), (r.stderr or "").strip()]
+                if line
+            )
+            if build_output:
+                build_output = "\n".join(build_output.splitlines()[-80:])
+                warn(
+                    "Tier 1: Local image build failed; docker build output tail:\n"
+                    f"{build_output}"
+                )
             warn("Tier 1: Local image build failed, falling back to pull")
             return False
 
@@ -4661,10 +4686,8 @@ def cleanup_docker_disk():
             raw_images.append((parts[0], parts[1], parts[2], parts[3]))
 
     # Protect the current job's image from eviction.
-    # Protect both the per-arch image (DOCKER_IMAGE_NAME, e.g.,
-    # rocm/vllm-ci:abc123-gfx942) and the legacy fat image
-    # (rocm/vllm-ci:abc123) so eviction does not delete the image
-    # we are about to run or are currently running.
+    # DOCKER_IMAGE_NAME may override the default commit-tagged image, so keep
+    # both names protected if both are present.
     current_commit = os.environ.get("BUILDKITE_COMMIT", "")
     protected_names = set()  # type: set[str]
     if current_commit:
@@ -4683,7 +4706,7 @@ def cleanup_docker_disk():
             info(f"  Protected (base image): {name}")
             continue
         # Protect the ci_base image (shared Tier-1 layer from PR #36949).
-        # This image is rebuilt weekly and shared by all per-arch builds.
+        # This image is rebuilt weekly and shared by all ROCm jobs.
         if "ci_base" in name:
             info(f"  Protected (ci_base): {name}")
             continue
@@ -5199,12 +5222,8 @@ def run_container(
         "PYTHONPATH=..",
         # NCCL tuning for ROCm multi-GPU tests.
         # NCCL_DEBUG=WARN: log NCCL warnings (INFO is too noisy for CI).
-        # NCCL_CUMEM_HOST_ENABLE=0: workaround for NCCL host memory issue
-        #   (see https://github.com/NVIDIA/nccl/issues/1838).
         "-e",
         "NCCL_DEBUG=WARN",
-        "-e",
-        "NCCL_CUMEM_HOST_ENABLE=0",
         # Tell pytest to write JUnit XML to the bind-mounted results dir.
         # This is the KEY to the exit-code fix: the XML is written BEFORE
         # Python's atexit handlers run, and it persists on the host.
@@ -5223,7 +5242,7 @@ def run_container(
     # Unset PYTORCH_ROCM_ARCH inside the container so PyTorch
     # auto-detects the GPU arch at runtime. The image is pre-compiled;
     # a stale value from the host/build env can cause PyTorch to skip
-    # arch-specific kernels or attempt recompilation.
+    # the right kernels or attempt recompilation.
     # See: https://github.com/vllm-project/vllm/pull/38272
     container_commands = f"unset PYTORCH_ROCM_ARCH && {commands}"
 
@@ -6344,7 +6363,7 @@ class _Cleanup:
       3. Kill GPU zombie processes via amd-smi/rocm-smi (cross PID namespace).
       4. Reset GPU state file (write "reset", locked).
       5. Remove stale containers from this commit.
-      6. Remove the Docker image.
+      6. Keep the Docker image for local cache reuse.
       7. Remove the results directory from disk.
       8. Set Buildkite metadata to confirm cleanup completed.
     """
@@ -6378,13 +6397,16 @@ class _Cleanup:
                 info("Signal-triggered cleanup: skipping cache sync (time-limited)")
             else:
                 # 0a. Update access frequency counts from this job's file atimes.
-                with best_effort("cleanup access count update"):
-                    info("  [0/8] Updating cache access counts...")
-                    counts = _load_access_counts()
-                    for cache in CACHES:
-                        counts = update_access_counts_from_atime(cache, counts)
-                    _save_access_counts(counts)
-                    log_top_k_access_counts()
+                if CACHE_BACKING_ROOT is not None:
+                    with best_effort("cleanup access count update"):
+                        info("  [0/8] Updating cache access counts...")
+                        counts = _load_access_counts()
+                        for cache in CACHES:
+                            counts = update_access_counts_from_atime(cache, counts)
+                        _save_access_counts(counts)
+                        log_top_k_access_counts()
+                else:
+                    info("  [0/8] Access count update skipped (single-tier cache)")
 
             # 0b. Unmount overlay caches (must happen before rsync to backing,
             # because the upper layer files are only visible after unmount
@@ -6677,26 +6699,13 @@ def main():
         error("BUILDKITE_COMMIT is not set")
         sys.exit(1)
 
-    if ENABLE_LEGACY_DOCKER_TAG:
-        # Legacy: single fat multi-arch image tagged by commit only.
-        image = f"rocm/vllm-ci:{commit}"
-        info("Image tag mode: legacy (VLLM_ROCM_CI_LEGACY_DOCKER_TAG=1)")
-    else:
-        # Per-arch: pipeline template sets DOCKER_IMAGE_NAME per step
-        # (e.g., rocm/vllm-ci:abc123-gfx942). Required.
-        image = os.environ.get("DOCKER_IMAGE_NAME", "").strip()
-        if not image:
-            error(
-                "DOCKER_IMAGE_NAME is not set but legacy docker tag is disabled "
-                "(VLLM_ROCM_CI_LEGACY_DOCKER_TAG=0).\n"
-                "  The pipeline must set DOCKER_IMAGE_NAME to the per-arch "
-                "image tag (e.g., rocm/vllm-ci:$COMMIT-gfx942).\n"
-                "  To use the legacy single-image pattern, set "
-                "VLLM_ROCM_CI_LEGACY_DOCKER_TAG=1."
-            )
-            sys.exit(1)
-        info(f"Image tag mode: per-arch (DOCKER_IMAGE_NAME={image})")
+    image = os.environ.get("DOCKER_IMAGE_NAME", "").strip()
+    if image:
+        info(f"Image tag source: DOCKER_IMAGE_NAME ({image})")
         _validate_image_arch(image)
+    else:
+        image = f"{DEFAULT_IMAGE_REPO}:{commit}"
+        info(f"Image tag source: default commit image ({image})")
     container = f"rocm_{commit}_{os.urandom(5).hex()}"
     info(f"Image: {image}")
     info(f"Container name: {container}")
@@ -6729,7 +6738,7 @@ def main():
         with best_effort("Tier 1: local assembly"):
             image_ready = _assemble_from_wheel(image)
 
-    # Tier 2/3: docker pull (with per-arch -> fat fallback)
+    # Tier 2/3: docker pull
     if not image_ready:
         try:
             with timed(f"docker pull {image}"):
@@ -6739,22 +6748,6 @@ def main():
                     image_ready = True
         except subprocess.TimeoutExpired:
             warn(f"Tier 2: docker pull {image} timed out after 600s")
-
-    # Tier 2b: per-arch pull failed, try the fat (all-archs) image as fallback.
-    # Only applies in per-arch mode; in legacy mode the fat image IS the primary.
-    if not image_ready and not ENABLE_LEGACY_DOCKER_TAG:
-        fat_image = f"rocm/vllm-ci:{commit}"
-        if fat_image != image:
-            info(f"Tier 2b: Per-arch pull failed, trying fat image {fat_image}")
-            try:
-                with timed(f"docker pull {fat_image} (fat fallback)"):
-                    r = sh(["docker", "pull", fat_image], capture=True, timeout=600)
-                if r.returncode == 0:
-                    sh(["docker", "tag", fat_image, image])
-                    info(f"Tier 2b: Re-tagged {fat_image} as {image}")
-                    image_ready = True
-            except subprocess.TimeoutExpired:
-                warn(f"Tier 2b: docker pull {fat_image} timed out after 600s")
 
     # Final fallback: retry with full retry logic (may exit on failure)
     if not image_ready:
