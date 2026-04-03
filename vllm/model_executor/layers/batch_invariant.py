@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -177,7 +178,7 @@ def matmul_persistent(
         },
         torch.float16: {
             "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128, # match the block size n of bfloat16
+            "BLOCK_SIZE_N": _fp16_block_size_n,
             "BLOCK_SIZE_K": 64,
             "GROUP_SIZE_M": 8,
             "num_stages": 3,
@@ -700,7 +701,7 @@ def bmm_batch_invariant(a, b, *, out=None):
         },
         torch.float16: {
             "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_N": _fp16_block_size_n,
             "BLOCK_SIZE_K": 64,
             "num_stages": 3,
             "num_warps": 8,
@@ -924,12 +925,15 @@ _original_fp16_reduction_precision = None
 _original_bf16_reduction_precision = None
 _original_cublas_workspace_cfg = None
 _original_cublaslt_workspace_size = None
+_fp16_block_size_n = 256
 
 
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
     global _original_fp16_reduction_precision, _original_bf16_reduction_precision
     global _original_cublas_workspace_cfg, _original_cublaslt_workspace_size
+    global _fp16_block_size_n
+
     if _batch_invariant_MODE:
         return
 
@@ -945,6 +949,10 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
+
+        # Query the shared memory size and set block size
+        # accordingly to avoid triton OutOfResources
+        _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     else:
         # Only source of batch invariance for Hopper is split-k, can disable through
         # cuBLAS workspace config
