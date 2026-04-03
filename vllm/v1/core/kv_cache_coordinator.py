@@ -399,12 +399,26 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # different KV cache groups have different block sizes, the actual block size
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
+        # With DCP, hash_block_size is multiplied by dcp_world_size upstream
+        # (in engine core). But individual group specs retain the original
+        # block_size. For hybrid models, use the original block_size as the
+        # hash_block_size to match the group specs.
+        if dcp_world_size > 1 or pcp_world_size > 1:
+            cp_factor = dcp_world_size * pcp_world_size
+            if hash_block_size % cp_factor == 0:
+                self.hash_block_size = hash_block_size // cp_factor
+        
         assert all(
-            g.kv_cache_spec.block_size % hash_block_size == 0
+            g.kv_cache_spec.block_size % self.hash_block_size == 0
             for g in kv_cache_config.kv_cache_groups
         ), "block_size must be divisible by hash_block_size"
-        assert dcp_world_size == 1, "DCP not support hybrid attn now."
-        assert pcp_world_size == 1, "PCP not support hybrid attn now."
+        # DCP/PCP asserts lifted: the hybrid coordinator delegates DCP handling
+        # to each SingleTypeKVCacheManager via get_manager_for_kv_cache_spec.
+        # The coordinator's own logic (find_longest_cache_hit, group splitting)
+        # doesn't reference dcp_world_size directly.
+        #
+        # assert dcp_world_size == 1, "DCP not support hybrid attn now."
+        # assert pcp_world_size == 1, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:

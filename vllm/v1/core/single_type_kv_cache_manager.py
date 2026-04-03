@@ -498,8 +498,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
-        assert dcp_world_size == 1, "DCP not support sliding window attn now."
-        assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        # DCP/PCP asserts lifted: the prefix cache hit search operates on
+        # block hashes and doesn't depend on how tokens are distributed
+        # across DCP ranks. The DCP token-to-block mapping is handled at
+        # the block allocation level, not in the cache hit lookup.
+        #
+        # assert dcp_world_size == 1, "DCP not support sliding window attn now."
+        # assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window

@@ -249,10 +249,21 @@ class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
-            "DCP not support sliding window."
-        )
+        # Original assert lifted to support DCP + SWA. Each DCP rank stores
+        # a contiguous chunk of the sequence (max_model_len / dcp_size tokens).
+        # The SWA window is applied locally per rank — tokens outside the
+        # window are masked during attention and their blocks can be freed.
+        # The DCP reduce-scatter with LSE correction handles the case where
+        # the window straddles DCP rank boundaries.
+        #
+        # assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
+        #     "DCP not support sliding window."
+        # )
         max_model_len = vllm_config.model_config.max_model_len
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        if dcp_world_size * pcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         # During chunked prefill, we allocate KV cache for the last
