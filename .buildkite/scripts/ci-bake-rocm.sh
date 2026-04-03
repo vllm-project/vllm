@@ -36,6 +36,8 @@
 
 set -euo pipefail
 
+IMAGE_EXISTED_BEFORE_BUILD=0
+
 get_remote_image_label() {
     local image_ref="$1"
     local label_key="$2"
@@ -69,6 +71,28 @@ except Exception:
 ' "${image_ref}" "${label_key}" 2>/dev/null || echo ""
 }
 
+get_remote_image_label_with_retry() {
+    local image_ref="$1"
+    local label_key="$2"
+    local attempts="${3:-6}"
+    local delay_secs="${4:-5}"
+    local label_value=""
+    local attempt
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        label_value=$(get_remote_image_label "${image_ref}" "${label_key}")
+        if [[ -n "${label_value}" ]]; then
+            printf '%s\n' "${label_value}"
+            return 0
+        fi
+        if [[ ${attempt} -lt ${attempts} ]]; then
+            sleep "${delay_secs}"
+        fi
+    done
+
+    return 0
+}
+
 # Check if image already exists (skip build if it does)
 #
 # For commit-tagged images (rocm/vllm-ci:$COMMIT), the tag is unique per
@@ -82,6 +106,7 @@ except Exception:
 if [[ -n "${IMAGE_TAG:-}" && "${FORCE_BUILD:-0}" != "1" ]]; then
     echo "--- :mag: Checking if image exists"
     if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+        IMAGE_EXISTED_BEFORE_BUILD=1
         # Image exists. Check content hash for stable tags.
         if [[ -n "${CI_BASE_CONTENT_FILES:-}" ]]; then
             LOCAL_HASH=$(cat ${CI_BASE_CONTENT_FILES} 2>/dev/null | sha256sum | cut -d' ' -f1)
@@ -265,7 +290,7 @@ if [[ ${BUILD_RC} -ne 0 ]]; then
         IMAGE_CONFIRMED=0
         if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             if [[ -n "${CI_BASE_CONTENT_HASH:-}" ]]; then
-                REMOTE_HASH=$(get_remote_image_label "${IMAGE_TAG}" "vllm.ci_base.content_hash")
+                REMOTE_HASH=$(get_remote_image_label_with_retry "${IMAGE_TAG}" "vllm.ci_base.content_hash")
                 if [[ -n "${REMOTE_HASH}" && "${REMOTE_HASH}" == "${CI_BASE_CONTENT_HASH}" ]]; then
                     IMAGE_CONFIRMED=1
                 else
@@ -274,8 +299,11 @@ if [[ ${BUILD_RC} -ne 0 ]]; then
                     echo "  found:    ${REMOTE_HASH:0:16}..."
                 fi
             elif [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
-                REMOTE_REVISION=$(get_remote_image_label "${IMAGE_TAG}" "org.opencontainers.image.revision")
+                REMOTE_REVISION=$(get_remote_image_label_with_retry "${IMAGE_TAG}" "org.opencontainers.image.revision")
                 if [[ -n "${REMOTE_REVISION}" && "${REMOTE_REVISION}" == "${BUILDKITE_COMMIT}" ]]; then
+                    IMAGE_CONFIRMED=1
+                elif [[ ${IMAGE_EXISTED_BEFORE_BUILD} -eq 0 ]]; then
+                    echo "Remote image exists under a commit-unique tag; accepting push despite missing revision label."
                     IMAGE_CONFIRMED=1
                 else
                     echo "Remote image exists but revision label does not match ${BUILDKITE_COMMIT}."
