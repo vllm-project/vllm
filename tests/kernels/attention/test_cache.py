@@ -203,6 +203,8 @@ def test_reshape_and_cache_flash(
         pytest.skip("Only CUDA implementation supports attn_head scaling.")
 
     if kv_cache_dtype == "nvfp4":
+        if not current_platform.has_device_capability(100):
+            pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
         if implementation != "cuda":
             pytest.skip("NVFP4 only supports CUDA implementation.")
         if kv_scale_type != "tensor":
