@@ -184,7 +184,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        self.quant_config = self.config.quantization_config
+        self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -244,7 +244,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
-        if self.quant_config.get_name() != "fp8":
+        if self.quant_config is None or self.quant_config.get_name() != "fp8":
             # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
             indexer_fused_mapping = [
                 ("wk_weights_proj", "wk", 0),

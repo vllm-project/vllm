@@ -640,7 +640,7 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        if self.quant_config.get_name() == "fp8":
+        if self.quant_config is not None and self.quant_config.get_name() == "fp8":
             self.wk = ReplicatedLinear(
                 hidden_size,
                 self.head_dim,
@@ -648,7 +648,6 @@ class Indexer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.wk",
             )
-            self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
             self.weights_proj = ReplicatedLinear(
                 hidden_size,
                 self.n_head,
@@ -711,7 +710,7 @@ class Indexer(nn.Module):
         q_pe, q_nope = torch.split(
             q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
-        if self.quant_config.get_name() == "fp8":
+        if self.quant_config is not None and self.quant_config.get_name() == "fp8":
             k, _ = self.wk(hidden_states)
             weights, _ = self.weights_proj(hidden_states)
         else:
@@ -1462,7 +1461,7 @@ class DeepseekV2ForCausalLM(
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
-        if self.quant_config.get_name() != "fp8":
+        if self.quant_config is not None and self.quant_config.get_name() == "fp8":
             # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
             indexer_fused_mapping = [
                 ("wk_weights_proj", "wk", 0),
