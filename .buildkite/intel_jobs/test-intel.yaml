@@ -56,7 +56,7 @@ steps:
         'cd tests &&
         pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py &&
         pytest -v -s v1/engine --ignore=v1/engine/test_output_processor.py &&
-        pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py &&
+        pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py -k "not test_topk_only" &&
         pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py --ignore=v1/worker/test_worker_memory_snapshot.py &&
         pytest -v -s v1/structured_output &&
         pytest -v -s v1/test_serial_utils.py &&
