@@ -91,9 +91,9 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
   if (n == 0) return;
 
-  const int64_t* src_data = src_ptrs.data_ptr<int64_t>();
-  const int64_t* dst_data = dst_ptrs.data_ptr<int64_t>();
-  const int64_t* size_data = sizes.data_ptr<int64_t>();
+  int64_t* src_data = src_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* dst_data = dst_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* size_data = sizes.mutable_data_ptr<int64_t>();
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -109,21 +109,19 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
   size_t attrs_idx = 0;
   #if defined(CUDA_VERSION) && CUDA_VERSION >= 13000
   CUresult result = cuMemcpyBatchAsync(
-      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(dst_data)),
-      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(src_data)),
-      reinterpret_cast<size_t*>(const_cast<int64_t*>(size_data)),
-      static_cast<size_t>(n), &attr, &attrs_idx, 1,
-      static_cast<CUstream>(stream));
+      reinterpret_cast<CUdeviceptr*>(dst_data),
+      reinterpret_cast<CUdeviceptr*>(src_data),
+      reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), &attr,
+      &attrs_idx, 1, static_cast<CUstream>(stream));
   TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed with error ",
               result);
   #else
   size_t fail_idx = 0;
   CUresult result = cuMemcpyBatchAsync(
-      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(dst_data)),
-      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(src_data)),
-      reinterpret_cast<size_t*>(const_cast<int64_t*>(size_data)),
-      static_cast<size_t>(n), &attr, &attrs_idx, 1, &fail_idx,
-      static_cast<CUstream>(stream));
+      reinterpret_cast<CUdeviceptr*>(dst_data),
+      reinterpret_cast<CUdeviceptr*>(src_data),
+      reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), &attr,
+      &attrs_idx, 1, &fail_idx, static_cast<CUstream>(stream));
   TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed at index ",
               fail_idx, " with error ", result);
   #endif
