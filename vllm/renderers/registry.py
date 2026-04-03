@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.registry import (
+    cached_tokenizer_from_config,
+    tokenizer_args_from_config,
+)
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .base import BaseRenderer
@@ -19,9 +23,9 @@ _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "hf": ("hf", "HfRenderer"),
     "grok2": ("grok2", "Grok2Renderer"),
-    "kimi_audio": ("kimi_audio", "KimiAudioRenderer"),
+    "kimi_audio": ("hf", "HfRenderer"),
     "mistral": ("mistral", "MistralRenderer"),
-    "qwen_vl": ("qwen_vl", "QwenVLRenderer"),
+    "qwen_vl": ("hf", "HfRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
 
@@ -58,10 +62,10 @@ class RendererRegistry:
         self,
         renderer_mode: str,
         config: "VllmConfig",
-        tokenizer_kwargs: dict[str, Any],
+        tokenizer: TokenizerLike | None,
     ) -> BaseRenderer:
         renderer_cls = self.load_renderer_cls(renderer_mode)
-        return renderer_cls.from_config(config, tokenizer_kwargs)
+        return renderer_cls(config, tokenizer)
 
 
 RENDERER_REGISTRY = RendererRegistry(
@@ -76,27 +80,7 @@ RENDERER_REGISTRY = RendererRegistry(
 def renderer_from_config(config: "VllmConfig", **kwargs):
     model_config = config.model_config
 
-    tokenizer_mode, tokenizer_name, args, kwargs = tokenizer_args_from_config(
-        model_config, **kwargs
-    )
+    tokenizer = cached_tokenizer_from_config(model_config, **kwargs)
+    renderer_mode, *_ = tokenizer_args_from_config(model_config, **kwargs)
 
-    # Override tokenizer_mode for Kimi-Audio models
-    if model_config.architecture == "MoonshotKimiaForCausalLM":
-        tokenizer_mode = "kimi_audio"
-        # Update model_config so other components (e.g., multimodal registry)
-        # also use the correct tokenizer mode
-        model_config.tokenizer_mode = "kimi_audio"
-
-    if (
-        model_config.tokenizer_mode == "auto"
-        and model_config.model_impl == "terratorch"
-    ):
-        renderer_mode = "terratorch"
-    else:
-        renderer_mode = tokenizer_mode
-
-    return RENDERER_REGISTRY.load_renderer(
-        renderer_mode,
-        config,
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
-    )
+    return RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)

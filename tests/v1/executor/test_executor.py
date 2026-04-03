@@ -14,10 +14,33 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+from vllm.v1.executor.uniproc_executor import (
+    ExecutorWithExternalLauncher,
+    UniProcExecutor,
+)
 
 
 class Mock: ...
+
+
+def test_supports_async_scheduling_base_executor():
+    assert Executor.supports_async_scheduling() is False
+
+
+def test_supports_async_scheduling_uniproc_executor():
+    assert UniProcExecutor.supports_async_scheduling() is True
+
+
+def test_supports_async_scheduling_executor_with_external_launcher():
+    # ExecutorWithExternalLauncher inherits from UniProcExecutor and does not
+    # override supports_async_scheduling, so it should return True.
+    assert ExecutorWithExternalLauncher.supports_async_scheduling() is True
+
+
+def test_supports_async_scheduling_multiproc_executor():
+    assert MultiprocExecutor.supports_async_scheduling() is True
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):

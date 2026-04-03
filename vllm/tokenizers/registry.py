@@ -159,18 +159,6 @@ def resolve_tokenizer_args(
     ):
         tokenizer_mode = "mistral"
 
-    # Try to use Grok2 tiktoken tokenizer if possible
-    if tokenizer_mode == "auto" and any_pattern_in_repo_files(
-        model_name_or_path=str(tokenizer_name),
-        allow_patterns=["tokenizer.tok.json"],
-        revision=revision,
-    ):
-        tokenizer_mode = "grok2"
-
-    # Model-specific tokenizers
-    if tokenizer_mode == "auto" and "/Qwen-VL" in str(tokenizer_name):
-        tokenizer_mode = "qwen_vl"
-
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"

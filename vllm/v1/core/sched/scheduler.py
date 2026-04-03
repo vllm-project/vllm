@@ -52,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -184,13 +184,11 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
-        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(
+        supports_mm_inputs = mm_registry.supports_multimodal_inputs(
             vllm_config.model_config
         )
-        self.mm_budget = mm_budget = (
-            MultiModalBudget(vllm_config, mm_registry)
-            if self.supports_mm_inputs
-            else None
+        mm_budget = (
+            MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
         )
 
         # NOTE: Text-only encoder-decoder models are implemented as
@@ -236,8 +234,18 @@ class Scheduler(SchedulerInterface):
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
         )
+        # Bind GPU block pool to the KV connector. This must happen after
+        # kv_cache_manager is constructed so block_pool is available.
+        if self.connector is not None and hasattr(
+            self.connector, "bind_gpu_block_pool"
+        ):
+            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        self.scheduler_reserve_full_isl = (
+            self.scheduler_config.scheduler_reserve_full_isl
+        )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -259,9 +267,26 @@ class Scheduler(SchedulerInterface):
             assert len(kv_cache_config.kv_cache_groups) > 0, (
                 "enable_return_routed_experts requires at least one kv cache group"
             )
+            # Find the attention group for routed experts indexing.
+            self.routed_experts_attn_gid = 0
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+                if isinstance(group.kv_cache_spec, AttentionSpec):
+                    self.routed_experts_attn_gid = gid
+                    break
+            min_block_size = min(
+                [
+                    group.kv_cache_spec.block_size
+                    for group in kv_cache_config.kv_cache_groups
+                ]
+            )
+            num_groups = len(kv_cache_config.kv_cache_groups)
             self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
-            ) * self.block_size
+                kv_cache_config.num_blocks // num_groups
+            ) * min_block_size
+            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+            pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+            if pcp_size * dcp_size > 1:
+                self.max_num_kv_tokens *= pcp_size * dcp_size
 
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
@@ -704,6 +729,20 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
+                if (
+                    self.scheduler_reserve_full_isl
+                    and not self.kv_cache_manager.can_fit_full_sequence(
+                        request,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        num_encoder_tokens=num_encoder_tokens,
+                    )
+                ):
+                    if request.has_encoder_inputs:
+                        self.encoder_cache_manager.free(request)
+                    break
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -895,9 +934,7 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta: KVConnectorMetadata = self.connector.build_connector_meta(
-                scheduler_output
-            )
+            meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
         # Build the connector meta for ECConnector
@@ -910,6 +947,11 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def _build_kv_connector_meta(
+        self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        return connector.build_connector_meta(scheduler_output)
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
@@ -1291,7 +1333,8 @@ class Scheduler(SchedulerInterface):
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
             failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids
+                kv_connector_output.invalid_block_ids,
+                num_scheduled_tokens,
             )
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
@@ -1515,7 +1558,7 @@ class Scheduler(SchedulerInterface):
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:
         return status in (
-            RequestStatus.WAITING_FOR_FSM,
+            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
             RequestStatus.WAITING_FOR_REMOTE_KVS,
             RequestStatus.WAITING_FOR_STREAMING_REQ,
         )
@@ -1561,13 +1604,14 @@ class Scheduler(SchedulerInterface):
             return None
 
         kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
-        block_ids = kv_blocks.get_block_ids()[0]
+        block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
         num_tokens = request.num_tokens - 1
 
-        # compute slot mapping
+        # compute slot mapping using attention group's block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)
         num_blocks = len(block_ids)
-        block_size = self.block_size
+        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
+        block_size = attn_group.kv_cache_spec.block_size
 
         # generate block offsets
         block_offsets = np.arange(0, block_size)
@@ -2048,7 +2092,7 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.WAITING
             return True
 
-        if request.status == RequestStatus.WAITING_FOR_FSM:
+        if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             structured_output_req = request.structured_output_request
             if not (structured_output_req and structured_output_req.grammar):
                 return False
@@ -2097,6 +2141,7 @@ class Scheduler(SchedulerInterface):
         self,
         requests: Iterable[Request],
         invalid_block_ids: set[int],
+        num_scheduled_tokens: dict[str, int],
         evict_blocks: bool = True,
     ) -> tuple[set[str], int, set[int]]:
         """
@@ -2110,6 +2155,7 @@ class Scheduler(SchedulerInterface):
         Args:
             requests: The set of requests to scan for invalid blocks.
             invalid_block_ids: IDs of invalid blocks.
+            num_scheduled_tokens: req_id -> number of scheduled tokens.
             evict_blocks: Whether to collect blocks for eviction (False for
                 async requests which aren't cached yet).
 
@@ -2137,12 +2183,9 @@ class Scheduler(SchedulerInterface):
             (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
-            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                # Async loading. num_computed_tokens does not include new tokens
-                req_num_computed_tokens = request.num_computed_tokens
-            else:
-                # Sync loading. num_computed_tokens includes new tokens
-                req_num_computed_tokens = request.num_cached_tokens
+            req_num_computed_tokens = (
+                request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
+            )
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
@@ -2189,15 +2232,17 @@ class Scheduler(SchedulerInterface):
                     # Currently this only applies to sync loading; Async
                     # loading does not yet support block sharing
                     total_affected_tokens += (
-                        request.num_computed_tokens - request.num_cached_tokens
+                        request.num_computed_tokens - req_num_computed_tokens
                     )
-                    request.num_computed_tokens = request.num_cached_tokens
+                    request.num_computed_tokens = req_num_computed_tokens
 
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
-    def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
+    def _handle_invalid_blocks(
+        self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
+    ) -> set[str]:
         """
         Handle requests affected by invalid KV cache blocks.
 
@@ -2214,7 +2259,10 @@ class Scheduler(SchedulerInterface):
         )
         async_failed_req_ids, num_failed_tokens, _ = (
             self._update_requests_with_invalid_blocks(
-                async_load_reqs, invalid_block_ids, evict_blocks=False
+                async_load_reqs,
+                invalid_block_ids,
+                num_scheduled_tokens,
+                evict_blocks=False,
             )
         )
 
@@ -2224,7 +2272,7 @@ class Scheduler(SchedulerInterface):
         # handle sync loads (may be cached, collect blocks for eviction)
         sync_failed_req_ids, num_failed_tokens, sync_blocks_to_evict = (
             self._update_requests_with_invalid_blocks(
-                self.running, invalid_block_ids, evict_blocks=True
+                self.running, invalid_block_ids, num_scheduled_tokens, evict_blocks=True
             )
         )
 

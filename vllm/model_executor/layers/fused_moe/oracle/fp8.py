@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -104,83 +107,84 @@ def _get_priority_backends(
 
 def backend_to_kernel_cls(
     backend: Fp8MoeBackend,
-) -> type[mk.FusedMoEExperts]:
+) -> list[type[mk.FusedMoEExperts]]:
     if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (  # noqa: E501
-            TrtLlmFp8Experts,
+            TrtLlmFp8ExpertsModular,
+            TrtLlmFp8ExpertsMonolithic,
         )
 
-        return TrtLlmFp8Experts
+        return [TrtLlmFp8ExpertsMonolithic, TrtLlmFp8ExpertsModular]
 
     elif backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
             FlashInferExperts,
         )
 
-        return FlashInferExperts
+        return [FlashInferExperts]
 
     elif backend == Fp8MoeBackend.DEEPGEMM:
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
         )
 
-        return TritonOrDeepGemmExperts
+        return [TritonOrDeepGemmExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_DEEPGEMM:
         from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
             BatchedDeepGemmExperts,
         )
 
-        return BatchedDeepGemmExperts
+        return [BatchedDeepGemmExperts]
 
     elif backend == Fp8MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             MarlinExperts,
         )
 
-        return MarlinExperts
+        return [MarlinExperts]
 
     elif backend == Fp8MoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             TritonExperts,
         )
 
-        return TritonExperts
+        return [TritonExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_TRITON:
         from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
             BatchedTritonExperts,
         )
 
-        return BatchedTritonExperts
+        return [BatchedTritonExperts]
 
     elif backend == Fp8MoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             AiterExperts,
         )
 
-        return AiterExperts
+        return [AiterExperts]
 
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
             TritonOrCutlassExperts,
         )
 
-        return TritonOrCutlassExperts
+        return [TritonOrCutlassExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             CutlassBatchedExpertsFp8,
         )
 
-        return CutlassBatchedExpertsFp8
+        return [CutlassBatchedExpertsFp8]
 
     elif backend == Fp8MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
             XPUExpertsFp8,
         )
 
-        return XPUExpertsFp8
+        return [XPUExpertsFp8]
 
     else:
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
@@ -215,8 +219,9 @@ def select_fp8_moe_backend(
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+
     if config.is_lora_enabled:
-        return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)
+        return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)[0]
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
@@ -256,13 +261,13 @@ def select_fp8_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls, config, weight_key, activation_key, activation_format
-        )
-        if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
-            return backend, k_cls
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend), scope="local")
+                return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Handle explicit moe_backend from user.
@@ -312,7 +317,7 @@ def select_fp8_moe_backend(
                 raise ValueError(
                     f"FlashInfer MOE backend {fi_backend} does not support FP8 MoE."
                 )
-            k_cls = backend_to_kernel_cls(backend)
+            k_cls = backend_to_kernel_cls(backend)[0]
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
@@ -322,22 +327,22 @@ def select_fp8_moe_backend(
                 Fp8MoeBackend.FLASHINFER_TRTLLM,
                 Fp8MoeBackend.FLASHINFER_CUTLASS,
             ]:
-                k_cls = backend_to_kernel_cls(backend)
-                supported, reason = k_cls.is_supported_config(
-                    k_cls,
-                    config,
-                    weight_key,
-                    activation_key,
-                    activation_format,
-                )
-
-                if supported:
-                    logger.info_once(_make_log_backend(backend), scope="local")
-                    return backend, k_cls
-                else:
-                    logger.debug_once(
-                        _make_log_unsupported(backend, reason), scope="local"
+                for k_cls in backend_to_kernel_cls(backend):
+                    supported, reason = k_cls.is_supported_config(
+                        k_cls,
+                        config,
+                        weight_key,
+                        activation_key,
+                        activation_format,
                     )
+
+                    if supported:
+                        logger.info_once(_make_log_backend(backend), scope="local")
+                        return backend, k_cls
+                    else:
+                        logger.debug_once(
+                            _make_log_unsupported(backend, reason), scope="local"
+                        )
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
@@ -382,20 +387,19 @@ def select_fp8_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls,
-            config,
-            weight_key,
-            activation_key,
-            activation_format,
-        )
-
-        if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
-            return backend, k_cls
-        else:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls,
+                config,
+                weight_key,
+                activation_key,
+                activation_format,
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend), scope="local")
+                return backend, k_cls
+            else:
+                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list
@@ -432,18 +436,32 @@ def convert_to_fp8_moe_kernel_format(
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
-        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-        )
+        weight_block_size = getattr(layer, "weight_block_size", None)
+        if weight_block_size == [1, 32]:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+                prepare_mxfp8_moe_layer_for_marlin,
+            )
+
+            w13, w2, w13_scale, w2_scale = prepare_mxfp8_moe_layer_for_marlin(
+                layer,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+            )
+        else:
+            w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
+                layer,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+            )
     elif fp8_backend in [
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
     ]:
-        w13, w2, w13_scale = prepare_fp8_moe_layer_for_fi(
+        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_fi(
             layer=layer,
             w13=w13,
             w2=w2,
@@ -511,6 +529,21 @@ def make_fp8_moe_quant_config(
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
         )
+    # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
+    # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
+    # Non-swizzled layout is required since the TRTLLM kernel expects
+    # scales in (num_tokens, hidden_dim // 32) format.
+    if block_shape == [1, 32]:
+        return FusedMoEQuantConfig.make(
+            "mxfp8",
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_shape,
+            is_nvfp4_scale_swizzled=False,
+        )
+
     # All other backends use normal config.
     return fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
@@ -529,7 +562,7 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
+    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -565,12 +598,7 @@ def make_fp8_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if moe_config.moe_parallel_config.use_all2all_kernels
-            else None
-        ),
-        moe_parallel_config=moe_config.moe_parallel_config,
+        shared_experts=shared_experts,
         inplace=(
             not moe_config.disable_inplace
             and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS

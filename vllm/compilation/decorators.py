@@ -118,6 +118,7 @@ def support_torch_compile(
     dynamic_arg_dims: dict[str, int | list[int]] | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
+    is_encoder: bool = False,
     shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
 ) -> Callable[[type[_T]], type[_T]] | type[_T]:
     """
@@ -177,6 +178,11 @@ def support_torch_compile(
     enforce that dynamo does not specialize on 0/1 values in the case of dummy input
     such as for vision model compilation
 
+    `is_encoder` marks this module as a portion of an multimodal encoder.
+    When True, the compile range upper bound is set to MAX_INT32 instead of
+    max_num_batched_tokens, since encoder input shapes are unpredictable.
+    This is typically used for vision encoder sub-modules in multimodal models.
+
     `shape_invariants` is a function that gets compiled right before forward.
     The function should have the torch._check calls that are needed to set
     the relationships between different input sizes. For example:
@@ -199,6 +205,8 @@ def support_torch_compile(
                 if v.annotation in [
                     torch.Tensor,
                     torch.Tensor | None,
+                    torch.FloatTensor,
+                    torch.FloatTensor | None,
                     IntermediateTensors,
                     IntermediateTensors | None,
                 ]:
@@ -226,6 +234,7 @@ def support_torch_compile(
             inferred_dynamic_arg_dims,
             mark_unbacked_dims,
             enable_if,
+            is_encoder,
             shape_invariants,
         )
 
@@ -266,11 +275,59 @@ def _verify_source_unchanged(
         )
 
 
+def _try_load_aot_compiled_fn(
+    model: Any,
+    aot_compilation_path: str,
+) -> Any | None:
+    """Try to load an AOT-compiled function from disk.
+
+    Returns the loaded callable on success, or None on failure.
+    Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
+    """
+    try:
+        with monitor_torch_compile(model.vllm_config):
+            with (
+                set_current_vllm_config(model.vllm_config),
+                open(aot_compilation_path, "rb") as f,
+            ):
+                loaded_fn = torch.compiler.load_compiled_function(
+                    f, f_globals=model.forward.__globals__
+                )
+            _verify_source_unchanged(loaded_fn.source_info(), model.vllm_config)
+            ds_config = model.compilation_config.dynamic_shapes_config
+            if not ds_config.evaluate_guards:
+                loaded_fn.disable_guard_check()
+            # Eagerly load compiled artifacts now that traced_files
+            # is populated by _verify_source_unchanged.
+            with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
+                loaded_fn._artifacts.compiled_fn.finalize_loading(model.vllm_config)
+            compilation_counter.num_aot_artifacts_loaded += 1
+            logger.info(
+                "Directly load AOT compilation from path %s", aot_compilation_path
+            )
+        return loaded_fn
+    except Exception as e:
+        if os.path.exists(aot_compilation_path):
+            if isinstance(e, EOFError):
+                message = "Compile cache file corrupted."
+            else:
+                message = str(e)
+            logger.warning(
+                "Compiling model again due to a load failure from %s, reason: %s",
+                aot_compilation_path,
+                message,
+            )
+        if envs.VLLM_FORCE_AOT_LOAD:
+            raise e
+        return None
+
+
 def _support_torch_compile(
     cls: type[_T],
     dynamic_arg_dims: dict[str, int | list[int]],
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
+    is_encoder: bool = False,
     shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
 ) -> type[_T]:
     """
@@ -291,7 +348,7 @@ def _support_torch_compile(
 
     def __init__(
         self: _T,
-        *,
+        *args,
         vllm_config: VllmConfig | None = None,
         prefix: str = "",
         **kwargs: Any,
@@ -300,14 +357,26 @@ def _support_torch_compile(
             vllm_config = get_current_vllm_config()
 
         # NOTE: to support multimodal models (such as encoder),
-        # we may not have vllm_config so we may need to patch
-        # it
+        # we may not have vllm_config so we may need to patch it
         sig = inspect.signature(old_init)
+        # Check that any positional arguments match the old_init method signature
+        annotations = [p.annotation for p in sig.parameters.values()]
+        for arg, annotation in zip(args, annotations):
+            if annotation is inspect._empty:
+                continue
+            if not isinstance(arg, annotation):
+                init = f"'{type(self).__name__}.__init__'"
+                arg_type = f"'{type(arg).__name__}'"
+                raise TypeError(
+                    f"{init} received a positional argument of type {arg_type}, "
+                    "but no parameter of that type was found in the method signature. "
+                    f"Please either annotate {init} or pass it as a keyword argument."
+                )
         if "vllm_config" in sig.parameters:
             kwargs["vllm_config"] = vllm_config
         if "prefix" in sig.parameters:
             kwargs["prefix"] = prefix
-        old_init(self, **kwargs)
+        old_init(self, *args, **kwargs)
 
         self.vllm_config = vllm_config
         self.compilation_config = self.vllm_config.compilation_config
@@ -329,7 +398,11 @@ def _support_torch_compile(
         self.compiled = False
 
         # Handled by monkeypatching `TorchCompileWithNoGuardsWrapper` into base class
-        TorchCompileWithNoGuardsWrapper.__init__(self)
+        TorchCompileWithNoGuardsWrapper.__init__(
+            self,
+            compile_prefix=cls.__name__ if is_encoder else "",
+            is_encoder=is_encoder,
+        )
 
     cls.__init__ = __init__
 
@@ -438,51 +511,17 @@ def _support_torch_compile(
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
-            try:
-                with monitor_torch_compile(self.vllm_config):
+            if not envs.VLLM_DISABLE_COMPILE_CACHE:
+                loaded_fn = _try_load_aot_compiled_fn(self, aot_compilation_path)
+                if loaded_fn is not None:
+                    self.aot_compiled_fn = loaded_fn
+                    self.was_aot_compile_fn_loaded_from_disk = True
                     with (
-                        set_current_vllm_config(self.vllm_config),
-                        open(aot_compilation_path, "rb") as f,
+                        monitor_profiling_run(),
+                        maybe_use_cudagraph_partition_wrapper(self.vllm_config),
                     ):
-                        loaded_fn = torch.compiler.load_compiled_function(
-                            f, f_globals=self.forward.__globals__
-                        )
-                    _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
-                    ds_config = self.compilation_config.dynamic_shapes_config
-                    if not ds_config.evaluate_guards:
-                        loaded_fn.disable_guard_check()
-                    # Eagerly load compiled artifacts now that traced_files
-                    # is populated by _verify_source_unchanged.
-                    with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
-                        loaded_fn._artifacts.compiled_fn.finalize_loading(
-                            self.vllm_config
-                        )
-                self.aot_compiled_fn = loaded_fn
-                self.was_aot_compile_fn_loaded_from_disk = True
-            except Exception as e:
-                if os.path.exists(aot_compilation_path):
-                    if isinstance(e, EOFError):
-                        message = "Compile cache file corrupted."
-                    else:
-                        message = str(e)
-                    logger.warning(
-                        "Compiling model again due to a load failure from %s, "
-                        "reason: %s",
-                        aot_compilation_path,
-                        message,
-                    )
-                if envs.VLLM_FORCE_AOT_LOAD:
-                    raise e
-            if getattr(self, "aot_compiled_fn", None) is not None:
-                logger.info(
-                    "Directly load AOT compilation from path %s", aot_compilation_path
-                )
-                with (
-                    monitor_profiling_run(),
-                    maybe_use_cudagraph_partition_wrapper(self.vllm_config),
-                ):
-                    output = self.aot_compiled_fn(self, *args, **kwargs)
-                return output
+                        output = self.aot_compiled_fn(self, *args, **kwargs)
+                    return output
 
         if self.compiled:
             assert (
@@ -570,6 +609,7 @@ def _support_torch_compile(
                 self._aot_cache_dir = cache_dir
                 with monitor_torch_compile(self.vllm_config):
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    compilation_counter.num_aot_compiles += 1
                     # All compilation is done at this point, save the
                     # AOT artifact.
                     self.save_aot_compiled_function()
@@ -593,6 +633,9 @@ def _support_torch_compile(
 
     # triggers VllmSerializableFunction.serialize()
     def save_aot_compiled_function(self: type[_T]) -> None:
+        if envs.VLLM_DISABLE_COMPILE_CACHE:
+            return
+
         if self.was_aot_compile_fn_loaded_from_disk:
             logger.debug("AOT compiled function was loaded from cache, skipping save")
             return
@@ -608,6 +651,7 @@ def _support_torch_compile(
             tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
             self.aot_compiled_fn.save_compiled_function(tmp_file)
             os.replace(tmp_file, self._aot_compilation_path)
+            compilation_counter.num_aot_artifacts_saved += 1
             logger.info_once(
                 "saved AOT compiled function to %s",
                 self._aot_compilation_path,

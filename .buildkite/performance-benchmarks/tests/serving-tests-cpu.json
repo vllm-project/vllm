@@ -26,6 +26,7 @@
       "model": "meta-llama/Llama-3.1-8B-Instruct",
       "backend": "vllm",
       "ignore-eos": "",
+      "temperature": 0,
       "num_prompts": 200
     }
   },
@@ -73,17 +74,6 @@
       }
     },
     {
-      "test_name": "serving_llama8B_tp4_random_128_128",
-      "server_parameters": {
-        "tensor_parallel_size": 4
-      },
-      "client_parameters": {
-        "dataset_name": "random",
-        "random-input-len": 128,
-        "random-output-len": 128
-      }
-    },
-    {
       "test_name": "serving_llama8B_tp1_random_128_2048",
       "server_parameters": {
         "tensor_parallel_size": 1
@@ -98,17 +88,6 @@
       "test_name": "serving_llama8B_tp2_random_128_2048",
       "server_parameters": {
         "tensor_parallel_size": 2
-      },
-      "client_parameters": {
-        "dataset_name": "random",
-        "random-input-len": 128,
-        "random-output-len": 2048
-      }
-    },
-    {
-      "test_name": "serving_llama8B_tp4_random_128_2048",
-      "server_parameters": {
-        "tensor_parallel_size": 4
       },
       "client_parameters": {
         "dataset_name": "random",
@@ -139,14 +118,25 @@
       }
     },
     {
-      "test_name": "serving_llama8B_tp4_random_2048_128",
+      "test_name": "serving_llama8B_tp1_random_2048_2048",
       "server_parameters": {
-        "tensor_parallel_size": 4
+        "tensor_parallel_size": 1
       },
       "client_parameters": {
         "dataset_name": "random",
         "random-input-len": 2048,
-        "random-output-len": 128
+        "random-output-len": 2048
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp2_random_2048_2048",
+      "server_parameters": {
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 2048,
+        "random-output-len": 2048
       }
     }
   ]

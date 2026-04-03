@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import pytest
 from packaging.version import Version
+from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config.model import ModelDType, TokenizerMode
@@ -70,6 +71,12 @@ class _HfExamplesInfo:
     Whether to enforce eager execution. If True, we will
     disable CUDA graph and always execute the model in eager mode.
     If False, we will use CUDA graph and eager execution in hybrid.
+    """
+
+    enable_prefix_caching: bool = True
+    """
+    Whether to enable prefix caching for the model. If True, we will test the model with
+    prefix caching enabled. If False, we will test the model without prefix caching.
     """
 
     is_available_online: bool = True
@@ -271,6 +278,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "google/gemma-2-9b", extras={"tiny": "google/gemma-2-2b-it"}
     ),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
+    "Gemma4ForCausalLM": _HfExamplesInfo(
+        "google/gemma-4-E2B-it",
+        min_transformers_version="5.0.0",
+    ),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
@@ -314,7 +325,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
-        "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
+        "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         trust_remote_code=True,
     ),
     "InternLMForCausalLM": _HfExamplesInfo(
@@ -527,6 +538,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
     ),
+    "TeleChat3ForCausalLM": _HfExamplesInfo(
+        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
+    ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
@@ -546,6 +560,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "ErnieModel": _HfExamplesInfo("shibing624/text2vec-base-chinese-sentence"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -621,15 +636,27 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["ColBERTJinaRobertaModel"]},
     ),
+    "ColBERTLfm2Model": _HfExamplesInfo(
+        "LiquidAI/LFM2-ColBERT-350M",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["ColBERTLfm2Model"]},
+    ),
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
+        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
+    "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
         "TomoroAI/tomoro-colqwen3-embed-4b", trust_remote_code=True
     ),
     "OpsColQwen3Model": _HfExamplesInfo(
         "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
+    ),
+    "ColQwen3_5": _HfExamplesInfo(
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        trust_remote_code=True,
+        max_model_len=4096,
     ),
     "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
         "nvidia/nemotron-colembed-vl-4b-v2",
@@ -659,6 +686,9 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
+    "ErnieForTokenClassification": _HfExamplesInfo(
+        "gyr66/Ernie-3.0-base-chinese-finetuned-ner"
+    ),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
@@ -667,6 +697,9 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    ),
+    "ErnieForSequenceClassification": _HfExamplesInfo(
+        "Forrest20231206/ernie-3.0-base-zh-cls",
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
@@ -728,7 +761,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.0.0.dev"
+        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
@@ -741,6 +774,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),
+    "Cheers": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
+    "CheersForConditionalGeneration": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
     ),
@@ -760,12 +801,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "rednote-hilab/dots.ocr", trust_remote_code=True
     ),
     "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/Eagle2.5-8B", trust_remote_code=True, is_available_online=False
+        "nvidia/Eagle2.5-8B",
+        trust_remote_code=True,
     ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
+        revision="refs/pr/17",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
@@ -778,6 +821,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "Gemma4ForConditionalGeneration": _HfExamplesInfo(
+        "google/gemma-4-E2B-it",
+        min_transformers_version="5.5.0",
+    ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
@@ -785,7 +832,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
-        "ibm-granite/granite-speech-3.3-2b"
+        "ibm-granite/granite-speech-3.3-2b",
+        extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
@@ -957,7 +1005,26 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
-        "nano_vl_dummy", is_available_online=False, trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        # NemotronH layers are constructed via `hybrid_override_pattern`:
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,  # Trigger image dynamic res
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                # Trigger conv3d:
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B", trust_remote_code=True
@@ -1001,6 +1068,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "HF model use deprecated imports which have been removed."
         },  # noqa: E501
         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"},
+    ),
+    "Phi4ForCausalLMV": _HfExamplesInfo(
+        "microsoft/Phi-4-reasoning-vision-15B", trust_remote_code=True
     ),
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
@@ -1067,6 +1137,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
     ),
+    "Qwen3ASRForcedAlignerForTokenClassification": _HfExamplesInfo(
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B", trust_remote_code=True
@@ -1102,6 +1178,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
+    "CohereAsrForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/cohere-transcribe-03-2026",
+        trust_remote_code=True,
+        is_available_online=False,  # TODO (ekagra): revert after asr release
+    ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
     ),
@@ -1125,6 +1206,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     #     "JackFram/llama-160m",
     #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
     # ),
+    # [DFlash]
+    "DFlashDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.5-4B",
+        speculative_model="z-lab/Qwen3.5-4B-DFlash",
+        use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     # [Eagle]
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
@@ -1136,6 +1225,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
         tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
+    ),
+    "Eagle3DeepseekV2ForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        tokenizer="moonshotai/Kimi-K2.5",
+    ),
+    "Eagle3DeepseekV3ForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        speculative_model="AQ-MedAI/Kimi-K25-eagle3",
+        tokenizer="moonshotai/Kimi-K2.5",
     ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",
@@ -1194,6 +1295,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "LGAI-EXAONE/K-EXAONE-236B-A23B",
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
         min_transformers_version="5.1.0",
+        enable_prefix_caching=False,
     ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
