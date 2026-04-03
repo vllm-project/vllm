@@ -13,7 +13,9 @@ use vllm_engine_core_client::protocol::{
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::{Error, FinishReason, GeneratePromptInfo, GenerateRequest, Llm};
+use vllm_llm::{
+    Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
+};
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -69,6 +71,32 @@ fn request_output_with_logprobs(
         stop_reason: None,
         events: None,
         kv_transfer_params: None,
+        trace_headers: None,
+        num_cached_tokens: 0,
+        num_external_computed_tokens: 0,
+        routed_experts: None,
+        num_nans_in_logits: 0,
+    }
+}
+
+fn request_output_with_logprobs_and_kv(
+    request_id: &str,
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<EngineCoreFinishReason>,
+    new_logprobs: Option<Logprobs>,
+    prompt_logprobs: Option<Logprobs>,
+    kv_transfer_params: Option<serde_json::Value>,
+) -> EngineCoreOutput {
+    EngineCoreOutput {
+        request_id: request_id.to_string(),
+        new_token_ids,
+        new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
+        new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
+        pooling_output: None,
+        finish_reason,
+        stop_reason: None,
+        events: None,
+        kv_transfer_params,
         trace_headers: None,
         num_cached_tokens: 0,
         num_external_computed_tokens: 0,
@@ -280,6 +308,81 @@ async fn generate_streams_outputs() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-collect-output".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.request_id, "req-collect");
+
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        engine_index: 0,
+                        outputs: vec![
+                            request_output_with_logprobs(
+                                &request.request_id,
+                                vec![33],
+                                None,
+                                Some(logprobs_for_position(33, -0.1, 1, 99, -0.2)),
+                                Some(prompt_logprobs()),
+                            ),
+                            request_output_with_logprobs_and_kv(
+                                &request.request_id,
+                                vec![44],
+                                Some(EngineCoreFinishReason::Stop),
+                                Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
+                                None,
+                                Some(serde_json::json!({"connector": "x"})),
+                            ),
+                        ],
+                        scheduler_stats: None,
+                        timestamp: 0.0,
+                        utility_output: None,
+                        finished_requests: None,
+                        wave_complete: None,
+                        start_wave: None,
+                    },
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
+    let stream = llm
+        .generate(sample_generate_request("req-collect", 4))
+        .await
+        .unwrap();
+    let collected = stream.collect_output().await.unwrap();
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+
+    assert_eq!(collected.request_id, "req-collect");
+    assert_eq!(collected.prompt_token_ids, vec![11, 22]);
+    assert_eq!(collected.token_ids, vec![33, 44]);
+    assert_eq!(collected.finish_reason, FinishReason::stop_eos());
+    assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
+    assert_eq!(
+        collected.logprobs.as_ref().map(|lp| lp.positions.len()),
+        Some(2)
+    );
+    assert_eq!(
+        collected.kv_transfer_params,
+        Some(serde_json::json!({"connector": "x"}))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

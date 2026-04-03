@@ -7,6 +7,7 @@ edition.workspace = true
 test-util = []
 
 [dependencies]
+easy-ext.workspace = true
 enum-as-inner.workspace = true
 futures.workspace = true
 serde.workspace = true

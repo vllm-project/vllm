@@ -288,7 +288,6 @@ pub struct ChatRequest {
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
-    #[serde(default)]
     pub add_special_tokens: bool,
 }
 

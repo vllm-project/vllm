@@ -6,7 +6,10 @@ mod request;
 mod request_metrics;
 
 pub use error::{Error, Result};
-pub use output::{FinishReason, GenerateOutput, GenerateOutputStream, GeneratePromptInfo};
+pub use output::{
+    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
+    GenerateOutputStreamExt, GeneratePromptInfo,
+};
 pub use request::GenerateRequest;
 pub use vllm_engine_core_client::protocol::{Logprobs, PositionLogprobs, TokenLogprob};
 

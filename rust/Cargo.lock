@@ -4587,6 +4587,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "easy-ext",
  "enum-as-inner",
  "expect-test",
  "futures",

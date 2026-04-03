@@ -1,5 +1,6 @@
 mod cache;
 mod health;
+mod inference;
 mod load;
 mod metrics;
 mod openai;
@@ -36,7 +37,9 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
-        .route("/v1/chat/completions", post(openai::chat_completions));
+        .route("/v1/chat/completions", post(openai::chat_completions))
+        // vLLM specific inference endpoints
+        .route("/inference/v1/generate", post(inference::generate));
 
     if dev_mode_enabled {
         // Development-only

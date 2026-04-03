@@ -1,10 +1,11 @@
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use enum_as_inner::EnumAsInner;
-use futures::Stream;
 use futures::stream::FusedStream;
+use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::EngineCoreOutputStream;
 use vllm_engine_core_client::protocol::{
@@ -13,6 +14,19 @@ use vllm_engine_core_client::protocol::{
 
 use crate::error::Result;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
+
+/// Final raw token output plus terminal stream metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectedGenerateOutput {
+    pub request_id: String,
+    pub prompt_token_ids: Vec<u32>,
+    pub prompt_logprobs: Option<Logprobs>,
+    pub token_ids: Vec<u32>,
+    pub logprobs: Option<Logprobs>,
+    pub finish_reason: FinishReason,
+    /// Connector-specific KV transfer parameters for disaggregated serving.
+    pub kv_transfer_params: Option<serde_json::Value>,
+}
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for one request.
 #[derive(Debug, Clone, PartialEq)]
@@ -255,5 +269,63 @@ impl Drop for GenerateOutputStream {
         // observability entirely.
         self.request_metrics
             .record_finished(current_unix_timestamp_secs(), FinishReason::Abort);
+    }
+}
+
+#[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
+#[easy_ext::ext(GenerateOutputStreamExt)]
+impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
+    /// Collect the raw generate stream to completion and return the final token output.
+    pub fn collect_output(self) -> impl Future<Output = Result<CollectedGenerateOutput>> + Send {
+        async move {
+            let stream = self;
+            pin_mut!(stream);
+            let mut prompt_token_ids = None;
+            let mut prompt_logprobs = None;
+            let mut collected: Option<CollectedGenerateOutput> = None;
+
+            while let Some(output) = stream.next().await.transpose()? {
+                if let Some(info) = output.prompt_info.as_ref() {
+                    if prompt_token_ids.is_none() {
+                        prompt_token_ids = Some(info.prompt_token_ids.to_vec());
+                    }
+                    if prompt_logprobs.is_none() {
+                        prompt_logprobs = info.prompt_logprobs.clone();
+                    }
+                }
+
+                if let Some(existing) = collected.as_mut() {
+                    existing.token_ids.extend_from_slice(&output.token_ids);
+                    if let Some(step_logprobs) = output.logprobs.as_ref() {
+                        if let Some(collected_logprobs) = existing.logprobs.as_mut() {
+                            collected_logprobs
+                                .positions
+                                .extend_from_slice(&step_logprobs.positions);
+                        } else {
+                            existing.logprobs = Some(step_logprobs.clone());
+                        }
+                    }
+                } else {
+                    collected = Some(CollectedGenerateOutput {
+                        request_id: output.request_id.clone(),
+                        prompt_token_ids: prompt_token_ids.clone().unwrap_or_default(),
+                        prompt_logprobs: prompt_logprobs.clone(),
+                        token_ids: output.token_ids.clone(),
+                        logprobs: output.logprobs.clone(),
+                        finish_reason: FinishReason::Error,
+                        kv_transfer_params: None,
+                    });
+                }
+
+                if let Some(finish_reason) = output.finish_reason() {
+                    let mut collected = collected.expect("terminal output must exist");
+                    collected.finish_reason = finish_reason;
+                    collected.kv_transfer_params = output.raw.kv_transfer_params;
+                    return Ok(collected);
+                }
+            }
+
+            unreachable!("generate stream should yield an error instead of closing early")
+        }
     }
 }

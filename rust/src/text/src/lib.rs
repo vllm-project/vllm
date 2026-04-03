@@ -23,7 +23,7 @@ pub use output::{
 pub use request::{Prompt, SamplingParams, TextRequest};
 use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;
-use vllm_llm::Llm;
+use vllm_llm::{GenerateOutputStream, Llm};
 
 mod backend;
 pub mod backends;
@@ -76,8 +76,31 @@ impl TextLlm {
         self.llm.engine_core_client()
     }
 
+    /// Tokenize if needed, lower to a generate request, and return the raw token stream.
+    pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {
+        let (_, raw_stream) = self.generate_inner(request).await?;
+        Ok(raw_stream)
+    }
+
     /// Tokenize if needed, lower to a generate request, and stream incrementally decoded text.
-    pub async fn generate(&self, mut request: TextRequest) -> Result<impl TextOutputStream> {
+    pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
+        let (text_request, raw_stream) = self.generate_inner(request).await?;
+        let tokenizer = self.backend.tokenizer();
+        let decoded_stream = output::decoded_text_event_stream(
+            text_request.request_id,
+            tokenizer,
+            raw_stream,
+            text_request.decode_options,
+            text_request.intermediate,
+        );
+
+        Ok(decoded_stream)
+    }
+
+    async fn generate_inner(
+        &self,
+        mut request: TextRequest,
+    ) -> Result<(TextRequest, GenerateOutputStream)> {
         request.validate()?;
 
         let tokenizer = self.backend.tokenizer();
@@ -92,17 +115,13 @@ impl TextLlm {
         if let Some(max_model_len) = self.max_model_len {
             sampling_hints.max_model_len = Some(max_model_len);
         }
-        let prepared = lower_text_request(request, prompt_token_ids, sampling_hints, &*tokenizer)?;
-        let raw_stream = self.llm.generate(prepared.generate_request).await?;
-        let decoded_stream = output::decoded_text_event_stream(
-            prepared.text_request.request_id,
-            tokenizer,
-            raw_stream,
-            prepared.text_request.decode_options,
-            prepared.text_request.intermediate,
-        );
+        let PreparedTextRequest {
+            text_request,
+            generate_request,
+        } = lower_text_request(request, prompt_token_ids, sampling_hints, &*tokenizer)?;
 
-        Ok(decoded_stream)
+        let raw_stream = self.llm.generate(generate_request).await?;
+        Ok((text_request, raw_stream))
     }
 
     /// Abort one in-flight request by request ID.
