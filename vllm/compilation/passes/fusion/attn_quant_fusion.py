@@ -420,25 +420,26 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
                 if layer.impl.fused_output_quant_supported(kNvfp4Dynamic):
                     self.register(AttnNvfp4QuantPattern(layer, dtype))
 
-        if current_platform.is_cuda():
-            for layer in layers:
-                for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
-                    scale = ScaleDesc(torch.float32, False, group_shape)
-                    quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
-                    if not layer.impl.fused_output_quant_supported(quant_key):
-                        continue
-                    for has_col_major in [True, False]:
-                        for is_e8m0 in [False, True]:
-                            for is_tma_aligned in [False, True]:
-                                self.register(
-                                    AttnFp8GroupQuantPattern(
-                                        layer,
-                                        dtype,
-                                        group_shape=group_shape,
-                                        has_col_major_scales=has_col_major,
-                                        is_e8m0=is_e8m0,
-                                        is_tma_aligned=is_tma_aligned,
-                                    )
+        for layer in layers:
+            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                scale = ScaleDesc(torch.float32, False, group_shape)
+                quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
+                if quant_key not in QUANT_OPS:
+                    continue
+                if not layer.impl.fused_output_quant_supported(quant_key):
+                    continue
+                for has_col_major in [True, False]:
+                    for is_e8m0 in [False, True]:
+                        for is_tma_aligned in [False, True]:
+                            self.register(
+                                AttnFp8GroupQuantPattern(
+                                    layer,
+                                    dtype,
+                                    group_shape=group_shape,
+                                    has_col_major_scales=has_col_major,
+                                    is_e8m0=is_e8m0,
+                                    is_tma_aligned=is_tma_aligned,
                                 )
+                            )
 
         self.dump_patterns(config, self.pm_pass)
