@@ -11,7 +11,6 @@ steps:
     depends_on: []
     device: amd_cpu
     no_plugin: true
-    soft_fail: true
     commands:
       - export IMAGE_TAG="rocm/vllm-ci:$BUILDKITE_COMMIT"
       - export VLLM_BAKE_FILE="docker/docker-bake-rocm.hcl"
