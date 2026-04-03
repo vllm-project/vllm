@@ -321,7 +321,13 @@ class RequestState:
         if self.parent_req is None:
             outputs = [output]
         else:
-            outputs, finished = self.parent_req.get_outputs(self.request_id, output)
+            if kv_transfer_params is None:
+                outputs, finished = self.parent_req.get_outputs(self.request_id, output)
+            else:
+                output_with_kv_transfer = self.parent_req.aggre_kv_transfer_params(
+                    self.request_id, output, kv_transfer_params
+                )
+                outputs, finished, kv_transfer_params = output_with_kv_transfer
             if not outputs:
                 return None
             external_req_id = self.parent_req.external_req_id
@@ -335,7 +341,7 @@ class RequestState:
         external_req_id: str,
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
-        kv_transfer_params: dict[str, Any] | None = None,
+        kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids

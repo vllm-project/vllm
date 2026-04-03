@@ -107,7 +107,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
-    kv_transfer_params: dict[str, Any] | None = Field(
+    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
         default=None, description="KVTransfer parameters."
     )
 
@@ -332,7 +332,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    kv_transfer_params: dict[str, Any] | None = Field(
+    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )

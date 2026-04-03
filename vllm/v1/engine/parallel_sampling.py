@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from copy import copy
-from typing import cast
+from copy import deepcopy
+from typing import Any, cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -26,6 +26,8 @@ class ParentRequest:
 
     # To aggregate child completions when not streaming
     output_aggregator: list[CompletionOutput]
+    # To store kv_transfer_params for child request
+    output_kv_transfer_params_list: list[dict[str, Any]]
 
     # To find the max number of generated tokens across all children
     max_num_generation_tokens: int
@@ -48,6 +50,7 @@ class ParentRequest:
         )
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
+        self.output_kv_transfer_params_list = []
 
     def _get_child_sampling_params(
         self,
@@ -66,15 +69,21 @@ class ParentRequest:
           Child `sampling_params` instance.
         """
         seed = self.sampling_params.seed
+        no_caching = seed is None and self.sampling_params.n > 1
         if self.cached_child_sampling_params:
             # Reuse child sampling_params data structure
             return self.cached_child_sampling_params
         # Build child sampling_params
-        child_sampling_params = copy(self.sampling_params)
+        child_sampling_params = deepcopy(self.sampling_params)
         child_sampling_params.n = 1
+        kv_transfer = child_sampling_params.extra_args.get("kv_transfer_params")
+        if kv_transfer is not None and isinstance(kv_transfer, list):
+            child_sampling_params.extra_args["kv_transfer_params"] = kv_transfer[index]
+
         if seed is None:
-            # Cache child sampling_params for later reuse
-            self.cached_child_sampling_params = child_sampling_params
+            if not no_caching:
+                # Cache child sampling_params for later reuse
+                self.cached_child_sampling_params = child_sampling_params
         else:
             # Each child gets a clone with a unique seed
             child_sampling_params.seed = seed + index
@@ -124,6 +133,16 @@ class ParentRequest:
 
         finished = not self.child_requests
         return outputs, finished
+
+    def aggre_kv_transfer_params(
+        self,
+        child_request_id: str,
+        completion_output: CompletionOutput,
+        kv_transfer_params: dict[str, Any],
+    ) -> tuple[list[CompletionOutput], bool, list[dict[str, Any]]]:
+        outputs, finished = self.get_outputs(child_request_id, completion_output)
+        self.output_kv_transfer_params_list.append(kv_transfer_params)
+        return outputs, finished, self.output_kv_transfer_params_list
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(
