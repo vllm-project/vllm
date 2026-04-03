@@ -2,7 +2,7 @@ group: CUDA
 depends_on: 
   - image-build
 steps:
-- label: Platform Tests (CUDA)
+- label: Platform Tests (Accelerator)
   timeout_in_minutes: 15
   source_file_dependencies:
   - vllm/

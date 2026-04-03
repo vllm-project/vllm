@@ -29,7 +29,51 @@ MODELS = [
     "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
-TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
+TARGET_TEST_SUITE_ENV = "VLLM_TARGET_TEST_SUITE"
+LEGACY_TARGET_TEST_SUITE_ENV = "TARGET_TEST_SUITE"
+
+GENERIC_DISTRIBUTED_TEST_SUITES = ("L4", "MI250", "MI325", "MI355")
+ALL_DISTRIBUTED_TEST_SUITES = (*GENERIC_DISTRIBUTED_TEST_SUITES, "A100")
+
+
+def _default_target_test_suite() -> str:
+    if not current_platform.is_rocm():
+        return "L4"
+
+    try:
+        device_name = current_platform.get_device_name().upper()
+    except Exception:
+        device_name = ""
+
+    if "MI355" in device_name:
+        return "MI355"
+    if "MI325" in device_name:
+        return "MI325"
+    if "MI250" in device_name:
+        return "MI250"
+
+    try:
+        from vllm.platforms import rocm as rocm_platform
+
+        if rocm_platform.on_gfx950():
+            return "MI355"
+        if rocm_platform.on_gfx942():
+            return "MI325"
+    except Exception:
+        pass
+
+    return "MI250"
+
+
+def _resolve_target_test_suite() -> str:
+    for env_name in (TARGET_TEST_SUITE_ENV, LEGACY_TARGET_TEST_SUITE_ENV):
+        value = os.environ.get(env_name, "").strip().upper()
+        if value:
+            return value
+    return _default_target_test_suite()
+
+
+TARGET_TEST_SUITE = _resolve_target_test_suite()
 
 
 def test_vllm_gc_ed():
@@ -131,14 +175,27 @@ def test_models(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model, distributed_executor_backend, attention_backend, test_suite, extra_env",
+    (
+        "model, distributed_executor_backend, attention_backend, "
+        "target_test_suites, extra_env"
+    ),
     [
-        ("facebook/opt-125m", "ray", "", "L4", {}),
-        ("facebook/opt-125m", "mp", "", "L4", {}),
-        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
-        ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
-        ("facebook/opt-125m", "ray", "", "A100", {}),
-        ("facebook/opt-125m", "mp", "", "A100", {}),
+        ("facebook/opt-125m", "ray", "", ALL_DISTRIBUTED_TEST_SUITES, {}),
+        ("facebook/opt-125m", "mp", "", ALL_DISTRIBUTED_TEST_SUITES, {}),
+        (
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "ray",
+            "",
+            GENERIC_DISTRIBUTED_TEST_SUITES,
+            {},
+        ),
+        (
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "mp",
+            "",
+            GENERIC_DISTRIBUTED_TEST_SUITES,
+            {},
+        ),
     ],
 )
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
@@ -150,19 +207,19 @@ def test_models_distributed(
     model: str,
     distributed_executor_backend: str,
     attention_backend: str,
-    test_suite: str,
+    target_test_suites: tuple[str, ...],
     extra_env: dict[str, str],
     enable_prompt_embeds: bool,
 ) -> None:
-    if test_suite != TARGET_TEST_SUITE:
-        pytest.skip(f"Skip test for {test_suite}")
+    if TARGET_TEST_SUITE and TARGET_TEST_SUITE not in target_test_suites:
+        pytest.skip(f"Skip test for {TARGET_TEST_SUITE}")
 
     with monkeypatch.context() as monkeypatch_context:
         if (
             model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"
             and attention_backend == ""
-            and test_suite == "L4"
+            and TARGET_TEST_SUITE == "L4"
             and enable_prompt_embeds
         ):  # noqa
             pytest.skip("enable_prompt_embeds does not work with ray compiled dag.")
