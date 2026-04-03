@@ -181,8 +181,6 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
-    is_hopper: bool = current_platform.is_device_capability(90)
-
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
@@ -194,6 +192,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             use_ue8m0=False,
             column_major_scales=True,
         )
+        self.is_hopper = current_platform.is_device_capability(90)
 
     @classmethod
     def is_supported(cls, compute_capability=None):
