@@ -154,7 +154,7 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
+    kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
@@ -481,7 +481,7 @@ class CompletionResponse(OpenAIBaseModel):
     usage: UsageInfo
 
     # vLLM-specific fields that are not in OpenAI spec
-    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
+    kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
 
