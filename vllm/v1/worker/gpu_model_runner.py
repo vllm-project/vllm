@@ -6077,6 +6077,7 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
+                profile_seq_lens=profile_seq_lens,
             )
         self._dummy_run(
             desc.num_tokens,
@@ -6843,7 +6844,7 @@ class GPUModelRunner(
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
-        if has_kv_transfer_group():
+        if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
             if self.cross_layers_kv_cache is not None:
                 assert self.cross_layers_attn_backend is not None
