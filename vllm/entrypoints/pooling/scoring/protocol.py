@@ -20,6 +20,24 @@ from .typing import ScoreContentPartParam, ScoreInput
 
 
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
+    max_tokens_per_doc: int = Field(
+        default=0,
+        description=(
+            "Maximum number of tokens per document. Documents longer than "
+            "this will be truncated to this length. 0 means no "
+            "document-level truncation is applied (only truncate_prompt_tokens "
+            "applies to the combined query+document)."
+        ),
+    )
+    max_tokens_per_query: int = Field(
+        default=0,
+        description=(
+            "Maximum number of tokens per query. Queries longer than "
+            "this will be truncated to this length. 0 means no "
+            "query-level truncation is applied."
+        ),
+    )
+
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
@@ -91,38 +109,10 @@ ScoreRequest: TypeAlias = (
 )
 
 
-class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
+class RerankRequest(ScoreRequestMixin):
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
     top_n: int = Field(default_factory=lambda: 0)
-    max_tokens_per_doc: int | None = Field(
-        default=None,
-        description=(
-            "Maximum number of tokens per document. Documents longer than "
-            "this will be truncated to this length. If not specified, no "
-            "document-level truncation is applied (only truncate_prompt_tokens "
-            "applies to the combined query+document). This parameter is useful "
-            "for limiting document length independently of the query."
-        ),
-    )
-
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
-
-        return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            max_output_tokens=0,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            max_total_tokens_param="max_model_len",
-        )
-
-    def to_pooling_params(self, task: PoolingTask = "classify"):
-        return PoolingParams(
-            task=task,
-            use_activation=self.use_activation,
-        )
 
 
 ScoringRequest: TypeAlias = ScoreRequest | RerankRequest

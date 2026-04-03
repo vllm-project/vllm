@@ -547,7 +547,7 @@ async def test_rerank_max_tokens_per_doc_validation(
     query = "What is the capital of France?"
     documents = ["The capital of France is Paris."]
 
-    # Test with invalid max_tokens_per_doc (0)
+    # Test with max_tokens_per_doc=0 (should succeed — means no truncation)
     response = requests.post(
         server.url_for("rerank"),
         json={
@@ -557,8 +557,7 @@ async def test_rerank_max_tokens_per_doc_validation(
             "max_tokens_per_doc": 0,
         },
     )
-    assert response.status_code == 400
-    assert "max_tokens_per_doc must be a positive integer" in response.text
+    response.raise_for_status()
 
     # Test with invalid max_tokens_per_doc (negative)
     response = requests.post(
@@ -571,7 +570,7 @@ async def test_rerank_max_tokens_per_doc_validation(
         },
     )
     assert response.status_code == 400
-    assert "max_tokens_per_doc must be a positive integer" in response.text
+    assert "max_tokens_per_doc must be a non-negative integer" in response.text
 
 
 @pytest.mark.asyncio
