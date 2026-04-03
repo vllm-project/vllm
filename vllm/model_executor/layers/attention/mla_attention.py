@@ -364,6 +364,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         # Initialize KV cache quantization attributes
+        # C++ concat_and_cache_mla only understands "auto" and "fp8" variants;
+        # map bfloat16/float16 to "auto" so the op dispatches correctly.
+        if kv_cache_dtype in ("bfloat16", "float16"):
+            kv_cache_dtype = "auto"
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
         _init_kv_cache_quant(self, quant_config, prefix)
