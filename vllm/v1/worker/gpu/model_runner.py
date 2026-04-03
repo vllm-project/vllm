@@ -17,10 +17,6 @@ hidden. Prefer utility functions defined elsewhere and call them from here,
 instead of embedding feature-specific logic directly.
 """
 
-import os as _os
-
-EAGLE_DEBUG = _os.environ.get("EAGLE_DEBUG", "0") == "1"
-
 import functools
 import gc
 import time
@@ -778,20 +774,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits,
             total_num_logits,
         )
-        if EAGLE_DEBUG:
-            logger.info(
-                "[EAGLE_DEBUG][model_runner.prepare_inputs] "
-                "req_ids=%s num_reqs=%d num_tokens=%d "
-                "total_draft=%d "
-                "input_ids[:10]=%s "
-                "positions[:10]=%s",
-                req_ids[:3],
-                num_reqs,
-                num_tokens,
-                total_num_draft_tokens,
-                self.input_buffers.input_ids[: min(10, num_tokens)].tolist(),
-                self.input_buffers.positions[: min(10, num_tokens)].tolist(),
-            )
+        logger.info(
+            "[spec_decode_debug][prepare_inputs] "
+            "req_ids=%s num_reqs=%d num_tokens=%d "
+            "total_draft=%d input_ids[:10]=%s "
+            "positions[:10]=%s",
+            req_ids[:3],
+            num_reqs,
+            num_tokens,
+            total_num_draft_tokens,
+            self.input_buffers.input_ids[: min(10, num_tokens)].tolist(),
+            self.input_buffers.positions[: min(10, num_tokens)].tolist(),
+        )
 
         return InputBatch(
             req_ids=req_ids,
@@ -852,20 +846,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
-        if EAGLE_DEBUG:
+        if input_batch.num_reqs > 0:
             first_logits = logits[0]
-            topk_vals, topk_ids = torch.topk(first_logits, 5)
+            topk_vals, topk_ids = torch.topk(first_logits.float(), 5)
             logger.info(
-                "[EAGLE_DEBUG][model_runner.sample.LOGITS] "
-                "num_reqs=%d num_draft=%d "
-                "top5_ids=%s top5_vals=%s "
-                "logits_shape=%s argmax=%d",
+                "[spec_decode_debug][logits] reqs=%d draft=%d "
+                "argmax=%d top5_ids=%s top5_vals=%s",
                 input_batch.num_reqs,
                 input_batch.num_draft_tokens,
-                topk_ids.tolist(),
-                topk_vals.tolist(),
-                list(logits.shape),
                 first_logits.argmax().item(),
+                topk_ids.tolist(),
+                ["{:.6f}".format(v) for v in topk_vals.tolist()],
             )
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -1171,17 +1162,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
-        if EAGLE_DEBUG:
-            n = min(3, input_batch.num_reqs)
-            logger.info(
-                "[EAGLE_DEBUG][model_runner.sample_result] "
-                "req_ids=%s sampled=%s "
-                "num_sampled=%s num_rejected=%s",
-                input_batch.req_ids[:n],
-                sampler_output.sampled_token_ids[:n].tolist(),
-                num_sampled[:n].tolist(),
-                num_rejected[:n].tolist(),
-            )
+        n = min(3, input_batch.num_reqs)
+        logger.info(
+            "[spec_decode_debug][sample_result] "
+            "req_ids=%s sampled=%s "
+            "num_sampled=%s num_rejected=%s",
+            input_batch.req_ids[:n],
+            sampler_output.sampled_token_ids[:n].tolist(),
+            num_sampled[:n].tolist(),
+            num_rejected[:n].tolist(),
+        )
 
         if self.use_pp:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -1263,18 +1253,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            if EAGLE_DEBUG:
-                n = min(3, input_batch.num_reqs)
-                idxs = input_batch.idx_mapping[:n]
-                logger.info(
-                    "[EAGLE_DEBUG][model_runner.post_propose] "
-                    "req_ids=%s last_sampled=%s "
-                    "new_draft=%s computed=%s",
-                    input_batch.req_ids[:n],
-                    self.req_states.last_sampled_tokens[idxs].tolist(),
-                    draft_tokens[:n].tolist(),
-                    self.req_states.num_computed_tokens.gpu[idxs].tolist(),
-                )
+            n = min(3, input_batch.num_reqs)
+            idxs = input_batch.idx_mapping[:n]
+            logger.info(
+                "[spec_decode_debug][post_propose] "
+                "req_ids=%s last_sampled=%s "
+                "new_draft=%s computed=%s",
+                input_batch.req_ids[:n],
+                self.req_states.last_sampled_tokens[idxs].tolist(),
+                draft_tokens[:n].tolist(),
+                self.req_states.num_computed_tokens.gpu[idxs].tolist(),
+            )
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
         if self.use_async_scheduling:
