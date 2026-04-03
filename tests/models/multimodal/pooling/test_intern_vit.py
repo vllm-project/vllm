@@ -7,6 +7,7 @@ from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
@@ -14,6 +15,8 @@ from ....conftest import ImageTestAssets
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @torch.inference_mode()
@@ -39,9 +42,9 @@ def run_intern_vit_test(
 
     hf_model = AutoModel.from_pretrained(
         model, dtype=torch_dtype, trust_remote_code=True
-    ).to("cuda")
+    ).to(DEVICE_TYPE)
     hf_outputs_per_image = [
-        hf_model(pixel_value.to("cuda")).last_hidden_state
+        hf_model(pixel_value.to(DEVICE_TYPE)).last_hidden_state
         for pixel_value in pixel_values
     ]
 
@@ -53,9 +56,10 @@ def run_intern_vit_test(
     del hf_model
     cleanup_dist_env_and_memory()
 
-    vllm_model = vllm_model.to("cuda", torch_dtype)
+    vllm_model = vllm_model.to(DEVICE_TYPE, torch_dtype)
     vllm_outputs_per_image = [
-        vllm_model(pixel_values=pixel_value.to("cuda")) for pixel_value in pixel_values
+        vllm_model(pixel_values=pixel_value.to(DEVICE_TYPE))
+        for pixel_value in pixel_values
     ]
     del vllm_model
     cleanup_dist_env_and_memory()

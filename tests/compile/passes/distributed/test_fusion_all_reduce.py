@@ -37,6 +37,8 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
+
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
     def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
@@ -199,7 +201,9 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("flashinfer_allreduce_backend", ["trtllm", "mnnvl"])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on GPU"
+)
 @pytest.mark.skipif(
     not find_spec("flashinfer")
     or not has_module_attribute("flashinfer.comm", "allreduce_fusion")
@@ -261,7 +265,7 @@ def all_reduce_fusion_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -293,7 +297,7 @@ def all_reduce_fusion_pass_on_test_model(
     vllm_config.compilation_config.pass_config = PassConfig(
         fuse_allreduce_rms=True, eliminate_noops=True
     )
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
     vllm_config.parallel_config.rank = local_rank  # Setup rank for debug path
 
     # this is a fake model name to construct the model config

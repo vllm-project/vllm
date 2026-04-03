@@ -10,6 +10,8 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
+
 
 class ModuleWithBatchNorm(torch.nn.Module):
     def __init__(self):
@@ -172,10 +174,14 @@ class raise_if_cuda_sync:
         torch.cuda.set_sync_debug_mode(self.previous_debug_mode)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(DEVICE_TYPE in ["cuda", "xpu"], reason="Skip if not cuda")
 def test_merge_multimodal_embeddings_no_sync():
-    inputs_embeds = torch.zeros([5, 10], dtype=torch.bfloat16, device="cuda:0")
-    multimodal_embeddings = [torch.ones([3, 10], dtype=torch.bfloat16, device="cuda:0")]
+    inputs_embeds = torch.zeros(
+        [5, 10], dtype=torch.bfloat16, device=f"{DEVICE_TYPE}:0"
+    )
+    multimodal_embeddings = [
+        torch.ones([3, 10], dtype=torch.bfloat16, device=f"{DEVICE_TYPE}:0")
+    ]
     is_multimodal = torch.tensor([True, False, True, True, False], device="cpu")
     with raise_if_cuda_sync():
         _merge_multimodal_embeddings(
