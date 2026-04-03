@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     MXFP4_BLOCK_SIZE,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    xpu_mxfp4_quantize as quant_mxfp4,
+    xpu_mxfp4_quant as quant_mxfp4,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -66,7 +66,7 @@ class XPUMXFP4LinearKernel(MXFP4LinearKernel):
         x_fp4, x_blockscale = quant_mxfp4(x)
         return torch.ops._xpu_C.fp4_gemm(
             x_fp4,
-            layer.weight_packed,
+            layer.weight,
             x_blockscale,
             layer.weight_scale,
             orig_dtype,

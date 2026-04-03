@@ -3,7 +3,6 @@
 from collections.abc import Callable
 
 import torch
-from compressed_tensors.quantization import QuantizationArgs
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.kernels.linear import (
@@ -11,7 +10,7 @@ from vllm.model_executor.kernels.linear import (
     choose_mxfp4_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsW4A16Mxfp4,
+    CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import MXFP4_BLOCK_SIZE
 from vllm.model_executor.parameter import (
@@ -22,7 +21,7 @@ from vllm.model_executor.parameter import (
 __all__ = ["CompressedTensorsW4A4MxFp4"]
 
 
-class CompressedTensorsW4A4MxFp4(CompressedTensorsW4A16Mxfp4):
+class CompressedTensorsW4A4MxFp4(CompressedTensorsScheme):
     """
     Compressed tensors scheme for MXFP4 quantization.
 
@@ -35,10 +34,8 @@ class CompressedTensorsW4A4MxFp4(CompressedTensorsW4A16Mxfp4):
     - No global scale (unlike NVFP4)
     """
 
-    def __init__(self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
+    def __init__(self):
         self.group_size = MXFP4_BLOCK_SIZE
-        self.weight_quant = weight_quant
-        self.input_quant = input_quant
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -101,9 +98,6 @@ class CompressedTensorsW4A4MxFp4(CompressedTensorsW4A16Mxfp4):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename weight_packed to weight that marlin expects
-        layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
-        del layer.weight_packed
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
