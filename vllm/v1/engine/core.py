@@ -1043,6 +1043,7 @@ class EngineCoreProc(EngineCore):
 
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
+        exitcode = 0
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1104,6 +1105,7 @@ class EngineCoreProc(EngineCore):
             logger.debug("EngineCore exiting.")
             raise
         except Exception as e:
+            exitcode = 1
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
             else:
@@ -1117,12 +1119,17 @@ class EngineCoreProc(EngineCore):
                 signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
-            # Close the global httpx session used by huggingface_hub.
-            # Without this, httpx's non-daemon connection pool threads
-            # block Python's threading._shutdown() indefinitely,
-            # preventing the subprocess from exiting cleanly.
-            from huggingface_hub import close_session
-            close_session()
+            try:
+                from huggingface_hub import close_session
+                close_session()
+            except Exception:
+                pass
+            # Bypass threading._shutdown() which hangs when huggingface_hub
+            # >= 1.0.0 creates non-daemon httpx threads that cannot be
+            # reliably closed (client may be recreated during shutdown).
+            # All application cleanup is done by engine_core.shutdown().
+            # See: https://github.com/vllm-project/vllm/issues/38384
+            os._exit(exitcode)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
