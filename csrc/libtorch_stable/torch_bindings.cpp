@@ -410,6 +410,26 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int type, SymInt row, SymInt tokens) -> Tensor");
 
   ops.def("ggml_moe_get_block_size(int type) -> int");
+
+  // Apply repetition penalties to logits in-place
+  ops.def(
+      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
+      "Tensor output_mask, Tensor repetition_penalties) -> ()");
+
+  // Optimized top-k per row operation
+  ops.def(
+      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, "
+      "int stride1, int topK) -> ()");
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
+
+  ops.def(
+      "large_context_topk(Tensor score, Tensor indices, Tensor lengths, "
+      "Tensor? row_starts_opt) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -509,6 +529,12 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
   ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
   ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
+
+  ops.impl("apply_repetition_penalties_",
+           TORCH_BOX(&apply_repetition_penalties_));
+  ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
+  ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
+  ops.impl("large_context_topk", TORCH_BOX(&large_context_topk));
 }
 
 // These capability-check functions take only primitive args (no tensors), so

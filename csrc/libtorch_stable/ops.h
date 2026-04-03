@@ -301,3 +301,171 @@ torch::stable::Tensor ggml_moe_a8_vec(torch::stable::Tensor X,
                                       int64_t tokens);
 
 int64_t ggml_moe_get_block_size(int64_t type);
+
+void apply_repetition_penalties_(
+    torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
+    const torch::stable::Tensor& output_mask,
+    const torch::stable::Tensor& repetition_penalties);
+
+void top_k_per_row_prefill(const torch::stable::Tensor& logits,
+                           const torch::stable::Tensor& rowStarts,
+                           const torch::stable::Tensor& rowEnds,
+                           torch::stable::Tensor& indices, int64_t numRows,
+                           int64_t stride0, int64_t stride1, int64_t topK);
+
+void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
+                          const torch::stable::Tensor& seqLens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK);
+
+void large_context_topk(const torch::stable::Tensor& score,
+                        torch::stable::Tensor& indices,
+                        const torch::stable::Tensor& lengths,
+                        std::optional<torch::stable::Tensor> row_starts_opt);
+
+void paged_attention_v1(
+    torch::stable::Tensor& out, torch::stable::Tensor& query,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    int64_t num_kv_heads, double scale, torch::stable::Tensor& block_tables,
+    torch::stable::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step);
+
+void paged_attention_v2(
+    torch::stable::Tensor& out, torch::stable::Tensor& exp_sums,
+    torch::stable::Tensor& max_logits, torch::stable::Tensor& tmp_out,
+    torch::stable::Tensor& query, torch::stable::Tensor& key_cache,
+    torch::stable::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::stable::Tensor& block_tables, torch::stable::Tensor& seq_lens,
+    int64_t block_size, int64_t max_seq_len,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step);
+
+void selective_scan_fwd(
+    const torch::stable::Tensor& u, const torch::stable::Tensor& delta,
+    const torch::stable::Tensor& A, const torch::stable::Tensor& B,
+    const torch::stable::Tensor& C,
+    const std::optional<torch::stable::Tensor>& D_,
+    const std::optional<torch::stable::Tensor>& z_,
+    const std::optional<torch::stable::Tensor>& delta_bias_,
+    bool delta_softplus,
+    const std::optional<torch::stable::Tensor>& query_start_loc,
+    const std::optional<torch::stable::Tensor>& cache_indices,
+    const std::optional<torch::stable::Tensor>& has_initial_state,
+    const torch::stable::Tensor& ssm_states, int64_t null_block_id,
+    int64_t block_size,
+    const std::optional<torch::stable::Tensor>& block_idx_first_scheduled_token,
+    const std::optional<torch::stable::Tensor>& block_idx_last_scheduled_token,
+    const std::optional<torch::stable::Tensor>& initial_state_idx,
+    const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
+    const std::optional<torch::stable::Tensor>& last_chunk_indices);
+
+// Cache ops (shared CUDA/ROCm)
+void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
+                 int64_t block_size_in_bytes,
+                 const torch::stable::Tensor& block_mapping);
+
+// Batch swap: submit all block copies in a single driver call.
+void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
+                       const torch::stable::Tensor& dst_ptrs,
+                       const torch::stable::Tensor& sizes);
+
+void reshape_and_cache(torch::stable::Tensor& key, torch::stable::Tensor& value,
+                       torch::stable::Tensor& key_cache,
+                       torch::stable::Tensor& value_cache,
+                       torch::stable::Tensor& slot_mapping,
+                       const std::string& kv_cache_dtype,
+                       torch::stable::Tensor& k_scale,
+                       torch::stable::Tensor& v_scale);
+
+void reshape_and_cache_flash(
+    torch::stable::Tensor& key, torch::stable::Tensor& value,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    torch::stable::Tensor& slot_mapping, const std::string& kv_cache_dtype,
+    torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale);
+
+void concat_and_cache_mla(torch::stable::Tensor& kv_c,
+                          torch::stable::Tensor& k_pe,
+                          torch::stable::Tensor& kv_cache,
+                          torch::stable::Tensor& slot_mapping,
+                          const std::string& kv_cache_dtype,
+                          torch::stable::Tensor& scale);
+
+// NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
+void concat_and_cache_mla_rope_fused(
+    torch::stable::Tensor& positions, torch::stable::Tensor& q_pe,
+    torch::stable::Tensor& k_pe, torch::stable::Tensor& kv_c,
+    torch::stable::Tensor& rope_cos_sin_cache, bool rope_is_neox,
+    torch::stable::Tensor& kv_cache_slot_mapping,
+    torch::stable::Tensor& kv_cache, const std::string& kv_cache_dtype,
+    torch::stable::Tensor& kv_cache_quant_scale);
+
+// Just for unittest
+void convert_fp8(torch::stable::Tensor& dst_cache,
+                 torch::stable::Tensor& src_cache, const double scale,
+                 const std::string& kv_cache_dtype);
+
+void gather_and_maybe_dequant_cache(
+    torch::stable::Tensor const& src_cache,     // [NUM_BLOCKS, BLOCK_SIZE,
+                                                // ENTRIES...]
+    torch::stable::Tensor const& dst,           // [TOT_TOKENS, ENTRIES...]
+    torch::stable::Tensor const& block_table,   // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& cu_seq_lens,   // [BATCH+1]
+    torch::stable::Tensor const& token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNKS]
+    int64_t num_tokens, const std::string& kv_cache_dtype,
+    torch::stable::Tensor const& scale,
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
+
+// TODO(hc): cp_gather_cache need support scaled kvcahe in the future.
+void cp_gather_cache(
+    torch::stable::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE,
+                                               // ENTRIES...]
+    torch::stable::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
+    torch::stable::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& cu_seq_lens,  // [BATCH+1]
+    int64_t batch_size,
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
+
+// Gather and upconvert FP8 KV cache to BF16 workspace
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::stable::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE,
+                                                    // 656]
+    torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& seq_lens,          // [BATCH]
+    torch::stable::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
+
+// Indexer K quantization and cache function
+void indexer_k_quant_and_cache(
+    torch::stable::Tensor& k,             // [num_tokens, head_dim]
+    torch::stable::Tensor& kv_cache,      // [num_blocks, block_size,
+                                          // cache_stride]
+    torch::stable::Tensor& slot_mapping,  // [num_tokens]
+    int64_t quant_block_size,             // quantization block size
+    const std::string& scale_fmt);
+
+// Concatenate query nope and rope for MLA/DSA attention
+void concat_mla_q(
+    torch::stable::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
+    torch::stable::Tensor& q_pe,     // [num_tokens, num_heads, rope_dim]
+    torch::stable::Tensor& q_out);   // [num_tokens, num_heads, nope_dim +
+                                     // rope_dim]
+
+// Extract function to gather quantized K cache
+void cp_gather_indexer_k_quant_cache(
+    const torch::stable::Tensor& kv_cache,      // [num_blocks, block_size,
+                                                // cache_stride]
+    torch::stable::Tensor& dst_k,               // [num_tokens, head_dim]
+    torch::stable::Tensor& dst_scale,           // [num_tokens, head_dim /
+                                                // quant_block_size * 4]
+    const torch::stable::Tensor& block_table,   // [batch_size, num_blocks]
+    const torch::stable::Tensor& cu_seq_lens);  // [batch_size + 1]

@@ -92,32 +92,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-  // Apply repetition penalties to logits in-place
-  ops.def(
-      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
-      "Tensor output_mask, Tensor repetition_penalties) -> ()");
-  ops.impl("apply_repetition_penalties_", torch::kCUDA,
-           &apply_repetition_penalties_);
-
-  // Optimized top-k per row operation
-  ops.def(
-      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, int numRows, int stride0, "
-      "int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_prefill", torch::kCUDA, &top_k_per_row_prefill);
-
-  ops.def(
-      "top_k_per_row_decode(Tensor logits, int next_n, "
-      "Tensor seq_lens, Tensor! indices, "
-      "int numRows, int stride0, int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
-
-  ops.def(
-      "large_context_topk(Tensor score, Tensor indices, Tensor lengths, "
-      "Tensor? "
-      "row_starts_opt) -> ()");
-  ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
-
   // Quantization ops
 #ifndef USE_ROCM
   // Fused SiLU+Mul + per-block quantization

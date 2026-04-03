@@ -3,11 +3,9 @@
 // and
 // https://github.com/sgl-project/sglang/pull/17747
 
-#include "cuda_compat.h"
+#include "../cuda_compat.h"
 #include "dispatch_utils.h"
-
-#include <torch/cuda.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "torch_utils.h"
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -290,39 +288,40 @@ __global__ __launch_bounds__(kThreadsPerBlock) void topk_kernel(
 }
 
 FastTopKParams get_params(
-    const at::Tensor& score, const at::Tensor& lengths,
-    std::optional<at::Tensor> row_starts_opt = std::nullopt,
-    std::optional<at::Tensor> indices_opt = std::nullopt) {
+    const torch::stable::Tensor& score, const torch::stable::Tensor& lengths,
+    std::optional<torch::stable::Tensor> row_starts_opt = std::nullopt,
+    std::optional<torch::stable::Tensor> indices_opt = std::nullopt) {
   const int64_t batch_size = score.size(0);
 
-  TORCH_CHECK(score.dim() == 2 && score.stride(1) == 1,
-              "score must be 2D with contiguous rows");
-  TORCH_CHECK(lengths.dim() == 1 && lengths.is_contiguous() &&
-                  lengths.size(0) == batch_size,
-              "lengths must be 1D contiguous with size matching batch");
+  STD_TORCH_CHECK(score.dim() == 2 && score.stride(1) == 1,
+                  "score must be 2D with contiguous rows");
+  STD_TORCH_CHECK(lengths.dim() == 1 && lengths.is_contiguous() &&
+                      lengths.size(0) == batch_size,
+                  "lengths must be 1D contiguous with size matching batch");
 
   const int32_t* row_starts_ptr = nullptr;
   if (row_starts_opt.has_value()) {
     const auto& row_starts = *row_starts_opt;
-    TORCH_CHECK(row_starts.dim() == 1 && row_starts.size(0) == batch_size,
-                "row_starts must be 1D with size matching batch");
-    row_starts_ptr = row_starts.data_ptr<int32_t>();
+    STD_TORCH_CHECK(row_starts.dim() == 1 && row_starts.size(0) == batch_size,
+                    "row_starts must be 1D with size matching batch");
+    row_starts_ptr = row_starts.const_data_ptr<int32_t>();
   }
 
   int32_t* indices_ptr = nullptr;
   if (indices_opt.has_value()) {
     const auto& indices = *indices_opt;
-    TORCH_CHECK(indices.dim() == 2 && indices.is_contiguous() &&
-                    indices.size(0) == batch_size && indices.size(1) == TopK,
-                "indices must be 2D contiguous [batch, TopK]");
-    indices_ptr = indices.data_ptr<int32_t>();
+    STD_TORCH_CHECK(indices.dim() == 2 && indices.is_contiguous() &&
+                        indices.size(0) == batch_size &&
+                        indices.size(1) == TopK,
+                    "indices must be 2D contiguous [batch, TopK]");
+    indices_ptr = indices.mutable_data_ptr<int32_t>();
   }
 
   return FastTopKParams{
-      .input = score.data_ptr<float>(),
+      .input = score.const_data_ptr<float>(),
       .row_starts = row_starts_ptr,
       .indices = indices_ptr,
-      .lengths = lengths.data_ptr<int32_t>(),
+      .lengths = lengths.mutable_data_ptr<int32_t>(),
       .input_stride = score.stride(0),
   };
 }
@@ -339,7 +338,7 @@ void setup_kernel_smem_once() {
         func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
   }();
 
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       result == cudaSuccess,
       "Failed to set kernel shared memory limit: ", cudaGetErrorString(result));
 }
@@ -347,20 +346,20 @@ void setup_kernel_smem_once() {
 }  // namespace vllm
 
 void large_context_topk(
-    const torch::Tensor& logits, torch::Tensor& indices,
-    const torch::Tensor& seq_lens,
-    std::optional<torch::Tensor> row_starts = std::nullopt) {
-  TORCH_CHECK(logits.is_cuda(), "logits must be a CUDA tensor");
-  TORCH_CHECK(indices.is_cuda(), "indices must be a CUDA tensor");
-  TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be a CUDA tensor");
+    const torch::stable::Tensor& logits, torch::stable::Tensor& indices,
+    const torch::stable::Tensor& seq_lens,
+    std::optional<torch::stable::Tensor> row_starts = std::nullopt) {
+  STD_TORCH_CHECK(logits.is_cuda(), "logits must be a CUDA tensor");
+  STD_TORCH_CHECK(indices.is_cuda(), "indices must be a CUDA tensor");
+  STD_TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be a CUDA tensor");
   if (row_starts.has_value()) {
-    TORCH_CHECK(row_starts->is_cuda(), "row_starts must be a CUDA tensor");
+    STD_TORCH_CHECK(row_starts->is_cuda(), "row_starts must be a CUDA tensor");
   }
 
   const auto params = vllm::get_params(logits, seq_lens, row_starts, indices);
   const int64_t batch_size = logits.size(0);
 
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const cudaStream_t stream = get_current_cuda_stream();
   const dim3 grid(static_cast<uint32_t>(batch_size));
   const dim3 block(vllm::kThreadsPerBlock);
 
@@ -368,6 +367,6 @@ void large_context_topk(
   vllm::topk_kernel<<<grid, block, vllm::kSmem, stream>>>(params);
 
   const cudaError_t result = cudaGetLastError();
-  TORCH_CHECK(result == cudaSuccess,
-              "large_context_topk kernel failed: ", cudaGetErrorString(result));
+  STD_TORCH_CHECK(result == cudaSuccess, "large_context_topk kernel failed: ",
+                  cudaGetErrorString(result));
 }
