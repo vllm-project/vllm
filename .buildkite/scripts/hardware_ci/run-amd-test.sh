@@ -282,7 +282,7 @@ apply_rocm_test_overrides() {
 
   # --- LoRA: disable custom paged attention ---
   if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
   fi
 
   # --- Kernel ignores ---
@@ -326,8 +326,7 @@ apply_rocm_test_overrides() {
   if [[ $cmds == *" kernels/moe"* ]]; then
     cmds="${cmds} \
     --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py \
-    --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
+    --ignore=kernels/moe/test_cutlass_moe.py"
   fi
 
   # --- Entrypoint ignores ---
@@ -336,12 +335,15 @@ apply_rocm_test_overrides() {
     --ignore=entrypoints/openai/chat_completion/test_audio.py \
     --ignore=entrypoints/openai/completion/test_shutdown.py \
     --ignore=entrypoints/openai/test_completion.py \
-    --ignore=entrypoints/openai/test_models.py \
-    --ignore=entrypoints/openai/test_lora_adapters.py \
+    --ignore=entrypoints/openai/models/test_models.py \
     --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
     --ignore=entrypoints/openai/chat_completion/test_root_path.py \
-    --ignore=entrypoints/openai/test_tokenization.py \
     --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
+  fi
+
+  if [[ $cmds == *" entrypoints/serve"* ]]; then
+    cmds="${cmds} \
+    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
   fi
 
   if [[ $cmds == *" entrypoints/llm "* ]]; then
@@ -494,6 +496,7 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -509,6 +512,7 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${commands}"

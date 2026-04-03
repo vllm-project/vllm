@@ -43,12 +43,12 @@ class MockAttentionLayer:
     """Minimal mock of an attention layer for testing."""
 
     def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._q_scale = torch.tensor(2.0, device=device)
+        self._k_scale = torch.tensor(3.0, device=device)
+        self._v_scale = torch.tensor(4.0, device=device)
+        self._q_scale_float = 2.0
+        self._k_scale_float = 3.0
+        self._v_scale_float = 4.0
         self._o_scale_float = None
 
 

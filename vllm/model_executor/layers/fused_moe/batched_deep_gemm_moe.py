@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    get_fp8_min_max,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
@@ -117,7 +118,10 @@ def _silu_mul_fp8_quant_deep_gemm(
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
 
-        y_s = tl.maximum(tl.max(tl.abs(y)), eps) / fp8_max
+        # Use multiply-by-reciprocal to match PyTorch's tensor/scalar
+        # division precision (Triton GPU fast-division for constexpr
+        # divisors can introduce 1-ULP error).
+        y_s = tl.maximum(tl.max(tl.abs(y)), eps) * (1.0 / fp8_max)
         if ceil_ue8m0:
             y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
 
@@ -190,7 +194,7 @@ def persistent_masked_m_silu_mul_quant(
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
-    fp8_dtype = torch.float8_e4m3fn
+    fp8_dtype = current_platform.fp8_dtype()
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
 
     ys_shape, ys_strides, ys_dtype = scales_shape_stride_dtype(E, T, G, quant_scale_fmt)
@@ -210,11 +214,14 @@ def persistent_masked_m_silu_mul_quant(
         device_id=y.device.index
     ).to_int()
 
-    if cuda_arch >= 80:
+    if current_platform.is_cuda() and cuda_arch >= 80:
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y, tokens_per_expert, y_q, y_s, ceil_ue8m0
         )
     else:
+        # Triton fallback for ROCm -- the C++ kernel is guarded by
+        # #ifndef USE_ROCM in activation_kernels.cu.
+        # https://github.com/ROCm/aiter/issues/2420
         stride_cnt_e = tokens_per_expert.stride()[0]
 
         # Static grid over experts and H-groups.
@@ -224,13 +231,11 @@ def persistent_masked_m_silu_mul_quant(
         stride_i_e, stride_i_t, stride_i_h = y.stride()
         stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
 
-        f_info = torch.finfo(fp8_dtype)
-        fp8_max = f_info.max
-        fp8_min = f_info.min
+        fp8_min, fp8_max = get_fp8_min_max()
         eps: float = 1e-10
         assert y_s.dtype == torch.float32, (
-            "_silu_mul_fp8_quant_deep_gemm does"
-            "not support {y_s.dtype} scales. Only torch.float32 supported."
+            "_silu_mul_fp8_quant_deep_gemm Triton fallback does not "
+            f"support {y_s.dtype} scales. Only torch.float32 supported."
         )
         _silu_mul_fp8_quant_deep_gemm[grid](
             y,

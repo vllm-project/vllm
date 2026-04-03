@@ -49,6 +49,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert not self.base_layer.use_ep, (
             "EP support for Fused MoE LoRA is not implemented yet."
         )
+        assert not self.base_layer.quant_method.is_monolithic, (
+            "Monolithic kernels are not supported for Fused MoE LoRA."
+        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
@@ -109,8 +112,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         else:  # fall back to the default config
             get_config_func = functools.partial(
                 try_get_optimal_moe_lora_config,
-                w1_shape=layer.w13_weight.size(),
-                w2_shape=layer.w2_weight.size(),
+                w1_shape=layer.w13_weight.shape,
+                w2_shape=layer.w2_weight.shape,
                 rank=rank,
                 top_k=top_k,
                 dtype=config_dtype,

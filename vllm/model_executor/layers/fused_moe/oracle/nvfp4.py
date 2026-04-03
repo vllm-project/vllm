@@ -14,7 +14,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    mxfp4_w4a16_moe_quant_config,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
@@ -90,7 +89,7 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (  # noqa: E501
             FlashInferCuteDSLExperts,
         )
 
@@ -350,16 +349,6 @@ def convert_to_nvfp4_moe_kernel_format(
     )
 
 
-def make_mxfp4_moe_quant_config(
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> FusedMoEQuantConfig:
-    return mxfp4_w4a16_moe_quant_config(
-        w1_scale=w13_scale,
-        w2_scale=w2_scale,
-    )
-
-
 def make_nvfp4_moe_quant_config(
     backend: NvFp4MoeBackend,
     w13_scale: torch.Tensor,
@@ -436,7 +425,7 @@ def make_nvfp4_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts if prepare_finalize.supports_async() else None,
+        shared_experts=shared_experts,
         inplace=False,
     )
 

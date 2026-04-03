@@ -4,14 +4,14 @@
 import ast
 import json
 from json import JSONDecodeError, JSONDecoder
-from typing import Any
+from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
     FunctionTool,
     ToolChoiceFunction,
 )
-from openai.types.responses.tool import Tool
+from openai.types.responses.tool import Tool as ResponsesTool
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -25,6 +25,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
 )
 from vllm.logger import init_logger
+
+Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
 
@@ -130,7 +132,7 @@ def consume_space(i: int, s: str) -> int:
 
 
 def _extract_tool_info(
-    tool: Tool | ChatCompletionToolsParam,
+    tool: Tool,
 ) -> tuple[str, dict[str, Any] | None]:
     if isinstance(tool, FunctionTool):
         return tool.name, tool.parameters
@@ -140,7 +142,7 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
-def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
+def _get_tool_schema_from_tool(tool: Tool) -> dict:
     name, params = _extract_tool_info(tool)
     params = params if params else {"type": "object", "properties": {}}
     return {
@@ -153,7 +155,7 @@ def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
 
 
 def _get_tool_schema_defs(
-    tools: list[Tool | ChatCompletionToolsParam],
+    tools: list[Tool],
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
@@ -172,7 +174,7 @@ def _get_tool_schema_defs(
 
 
 def _get_json_schema_from_tools(
-    tools: list[Tool | ChatCompletionToolsParam],
+    tools: list[Tool],
 ) -> dict:
     json_schema = {
         "type": "array",
@@ -190,7 +192,7 @@ def _get_json_schema_from_tools(
 
 def get_json_schema_from_tools(
     tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
-    tools: list[FunctionTool | ChatCompletionToolsParam] | None,
+    tools: list[Tool] | None,
 ) -> str | dict | None:
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:

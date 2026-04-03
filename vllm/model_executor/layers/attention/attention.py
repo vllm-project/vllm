@@ -15,7 +15,6 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
@@ -39,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    get_kv_quant_mode,
 )
 
 if TYPE_CHECKING:
@@ -241,6 +241,31 @@ class Attention(nn.Module, AttentionLayerBase):
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
 
+        # Skip quantization for specified layers
+        if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            skip = False
+            # Check attention type
+            if (
+                sliding_window is not None
+                and "sliding_window" in cache_config.kv_cache_dtype_skip_layers
+            ):
+                skip = True
+            # Check layer index
+            layer_idx = extract_layer_index(prefix)
+            if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
+                skip = True
+            if skip:
+                kv_cache_dtype = "auto"
+                calculate_kv_scales = False
+            logger.info(
+                "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
+                prefix,
+                kv_cache_dtype,
+                sliding_window,
+            )
+
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
@@ -296,7 +321,7 @@ class Attention(nn.Module, AttentionLayerBase):
         if (
             cache_config is not None
             and cache_config.enable_prefix_caching
-            and vllm_is_batch_invariant()
+            and envs.VLLM_BATCH_INVARIANT
             and (
                 self.attn_backend.get_name() == "FLASHINFER"
                 or self.attn_backend.get_name() == "TRITON_MLA"
@@ -350,18 +375,17 @@ class Attention(nn.Module, AttentionLayerBase):
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
-        ]
+        self.kv_cache = torch.tensor([])
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
         # for attn backends supporting query quantization
         self.query_quant = None
-        if self.impl.supports_quant_query_input and self.kv_cache_dtype.startswith(
-            "fp8"
+        if (
+            self.impl.supports_quant_query_input
+            and self.kv_cache_dtype.startswith("fp8")
+            and not self.kv_cache_dtype.endswith("per_token_head")
         ):
             is_per_head = (
                 hasattr(self, "q_scale") and self.q_scale.numel() == self.num_kv_heads
@@ -518,6 +542,7 @@ class Attention(nn.Module, AttentionLayerBase):
         block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
+        quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
@@ -527,6 +552,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             )
         else:
@@ -536,6 +562,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
             )
 
 
@@ -589,7 +616,7 @@ def get_attention_context(
         - attn_metadata: Attention metadata for this specific layer, or None if
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
-        - kv_cache: The KV cache tensor for current virtual engine
+        - kv_cache: The KV cache tensor for current forward pass
         - slot_mapping: The slot mapping for this specific layer
 
         Note: attn_metadata may be None, but attn_layer and kv_cache are always
@@ -600,7 +627,7 @@ def get_attention_context(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "

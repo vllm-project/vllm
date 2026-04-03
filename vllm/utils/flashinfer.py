@@ -19,9 +19,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -205,6 +202,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
@@ -244,7 +242,7 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     required_functions = [
         ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
         ("flashinfer", "scaled_fp4_grouped_quantize"),
-        ("flashinfer", "silu_and_scaled_nvfp4_experts_quantize"),
+        ("flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -289,13 +287,13 @@ def supports_trtllm_attention() -> bool:
     NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
     """
     # Batch-invariant mode disables TRTLLM attention
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return (
-        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
-    )
+    # TRTLLM attention is currently only validated on SM100 (CC 10.0).
+    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
+    # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
+    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
 
 def force_use_trtllm_attention() -> bool | None:

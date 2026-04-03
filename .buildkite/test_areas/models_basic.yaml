@@ -51,7 +51,7 @@ steps:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
-  device: cpu
+  device: cpu-small
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py
 

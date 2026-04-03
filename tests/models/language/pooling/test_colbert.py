@@ -9,7 +9,7 @@ generic ColBERT support works with different encoder architectures.
 import pytest
 import torch
 
-from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
 # -----------------------------------------------------------------------
 # Model definitions: (model_name, colbert_dim, extra vllm_runner kwargs)
@@ -56,6 +56,22 @@ COLBERT_MODELS = {
             "weights_file": "model.safetensors",
             "weights_key": "linear.weight",
             "trust_remote_code": True,
+            "model_cls": "AutoModel",
+        },
+    },
+    "lfm2": {
+        "model": "LiquidAI/LFM2-ColBERT-350M",
+        "colbert_dim": 128,
+        "max_model_len": 511,
+        "extra_kwargs": {
+            "hf_overrides": {
+                "architectures": ["ColBERTLfm2Model"],
+            },
+        },
+        "hf_comparison": {
+            "weights_file": "1_Dense/model.safetensors",
+            "weights_key": "linear.weight",
+            "trust_remote_code": False,
             "model_cls": "AutoModel",
         },
     },

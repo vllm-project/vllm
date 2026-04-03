@@ -2,25 +2,38 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Demonstrates async reinforcement learning using vLLM and Ray,
-with native weight syncing APIs at engine instance.
+with native weight syncing APIs and batch-invariant generation.
 
 The script separates training and inference workloads onto distinct GPUs
 so that Ray can manage process placement and inter-process communication.
-A Hugging Face Transformer model occupies one GPU for training, whereas a
-2x tensor-parallel vLLM inference engine occupies two GPUs.
+A Hugging Face Transformer model occupies one GPU for training, and a
+vLLM AsyncLLMEngine occupies another GPU for inference.
+
+Batch invariance is enabled so that generation output is deterministic
+regardless of how many requests are batched together. This is required
+for the validation phase to succeed. Batch invariance currently requires
+NVIDIA GPUs with compute capability 9.0 or higher:
+  - H-series: H100, H200
+  - B-series: B100, B200
 
 The example performs the following steps:
-* Load the training model on one gpu (scheduled via ray)
-* Initialize the inference model with dummy weights across
-  two gpus using vLLM's tensor parallelism and Ray placement groups.
-* Generate gibberish from a list of prompts using the randomly initialized
-  inference engine.
-* Pause generation once generation completes for one sequence
-* Update the weights of the training model and broadcast the updated weights
-  to the inference engine by using a Ray collective RPC group.
-* Resume generation and print out the results
+* Load the training model (Qwen3-1.7B) on one GPU via a Ray actor.
+* Initialize the inference engine with a base model (Qwen3-1.7B-Base)
+  on a separate GPU using vLLM's AsyncLLMEngine with Ray as the
+  distributed executor backend.
+* Set up an NCCL-based weight transfer channel between the trainer
+  and the inference engine.
+* Submit generation requests for a batch of prompts.
+* Pause generation once any request reaches a token threshold.
+* Broadcast the training model's weights to the inference engine
+  via the NCCL weight transfer engine, replacing the base weights.
+* Resume generation and collect results, noting which tokens were
+  generated before vs. after the weight swap.
+* Validate correctness by launching a fresh vLLM instance loaded
+  directly with the training model and comparing its output to the
+  post-swap tokens from the weight-synced engine.
 
-This example assumes a single-node cluster with three GPUs, but Ray
+This example assumes a single-node cluster with two GPUs, but Ray
 supports multi-node clusters. vLLM expects the GPUs are only used for vLLM
 workloads. Residual GPU activity interferes with vLLM memory profiling and
 causes unexpected behavior.

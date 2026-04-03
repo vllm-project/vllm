@@ -1,7 +1,7 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.0-complete
-ARG TRITON_BRANCH="57c693b6"
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.1-complete
+ARG TRITON_BRANCH="ba5c1517"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="89075173"
+ARG PYTORCH_BRANCH="8514f051" # release/2.10 as of 3/17
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_BRANCH="v0.24.1"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
@@ -44,7 +44,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
     && for i in 1 2 3; do \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
@@ -114,6 +114,8 @@ ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
+    && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
+    && git cherry-pick 555d04f \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
@@ -142,10 +144,14 @@ ARG PYTORCH_VISION_REPO
 ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
+RUN apt-get update && apt-get install -y pkg-config liblzma-dev
 RUN git clone ${PYTORCH_REPO} pytorch
-RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
-    && pip install -r requirements.txt && git submodule update --init --recursive \
-    && python3 tools/amd_build/build_amd.py \
+RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
+RUN cd pytorch \
+    && pip install -r requirements.txt && git submodule update --init --recursive
+RUN cd pytorch/third_party/kineto \
+    && git remote add rocm https://github.com/ROCm/kineto && git fetch rocm && git checkout 2d73be3 
+RUN cd pytorch && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && export CMAKE_C_COMPILER_LAUNCHER=sccache \
@@ -239,7 +245,7 @@ RUN pip install pyyaml && cd aiter \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
-    && GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
