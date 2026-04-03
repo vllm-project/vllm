@@ -41,3 +41,13 @@ def test_scalar_type_min_max(type_tuple):
     print(t, min, max, t.min(), t.max())
     assert min == t.min(), f"min: {min} != {t.min()}"
     assert max == t.max(), f"max: {max} != {t.max()}"
+
+
+def test_scalar_type_nan_repr_helpers():
+    # IEEE-754 types should be identified as IEEE-754 and should not carry
+    # extra non-standard flags in their string representations.
+    assert scalar_types.float16_e8m7.is_ieee_754()
+    assert str(scalar_types.float16_e8m7) == "float16_e8m7"
+
+    # Types created with NanRepr.NONE should report no NaNs.
+    assert not scalar_types.float4_e2m1f.has_nans()
