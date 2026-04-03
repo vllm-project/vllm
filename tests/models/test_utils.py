@@ -174,7 +174,10 @@ class raise_if_cuda_sync:
         torch.cuda.set_sync_debug_mode(self.previous_debug_mode)
 
 
-@pytest.mark.skipif(DEVICE_TYPE in ["cuda", "xpu"], reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Skip if not CUDA/XPU",
+)
 def test_merge_multimodal_embeddings_no_sync():
     inputs_embeds = torch.zeros(
         [5, 10], dtype=torch.bfloat16, device=f"{DEVICE_TYPE}:0"
