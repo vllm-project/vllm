@@ -187,7 +187,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         tensor_parallel_size=tp_size,
         max_num_seqs=128,
         max_model_len=8192,
-        dtype="bfloat16",  # not everything is supported
+        dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
@@ -400,7 +400,7 @@ def test_simple_generation(backend):
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         gpu_memory_utilization=0.9,
         max_model_len=2048,
-        dtype="bfloat16",
+        dtype="auto",
         enable_prefix_caching=False,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
@@ -466,7 +466,7 @@ def test_logprobs_without_batch_invariance_should_fail(
         tensor_parallel_size=tp_size,
         max_num_seqs=32,
         max_model_len=8192,
-        dtype="bfloat16",
+        dtype="auto",
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
@@ -686,7 +686,7 @@ def test_decode_logprobs_match_prefill_logprobs(
         tensor_parallel_size=tp_size,
         max_num_seqs=32,
         max_model_len=8192,
-        dtype="bfloat16",
+        dtype="auto",
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
@@ -931,7 +931,7 @@ def LLM_with_max_seqs(
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
-        dtype="bfloat16",
+        dtype="auto",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
