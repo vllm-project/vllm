@@ -43,6 +43,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
+    EMULATION = "EMULATION"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -108,6 +109,12 @@ def backend_to_kernel_cls(
         )
 
         return [MarlinExperts]
+    elif backend == NvFp4MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.nvfp4_emulation_moe import (
+            Nvfp4QuantizationEmulationTritonExperts,
+        )
+
+        return [Nvfp4QuantizationEmulationTritonExperts]
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -120,6 +127,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         "marlin": NvFp4MoeBackend.MARLIN,
+        "emulation": NvFp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -146,6 +154,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.EMULATION,
     ]
 
     # NOTE(rob): this is kind of a hack. We need to peak into
@@ -334,6 +343,30 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             is_act_and_mul=is_act_and_mul,
         )
+    elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
+        if a13_scale is None or a2_scale is None:
+            raise ValueError(
+                "Activation global scales should not be None, got"
+                f" a13_scale={a13_scale}, a2_scale={a2_scale}"
+            )
+
+        if torch.unique(a13_scale).numel() != 1 or torch.unique(a2_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the activation global scale for inputs are different"
+                " for MOE w13 (gate_up_proj) layer or MOE w2 (down_proj). Using"
+                " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
+            )
+
+        # 1. We take the max following e.g. quantization/utils/flashinfer_fp4_moe.py.
+        # 2. moe_kernel_quantize_input -> ref_nvfp4_quant_dequant
+        # use the inverse scale directly (large global scale).
+        # NOTE: Before this point, `a13_scale` and `a2_scale` are such that:
+        # `FP8_MAX = activation[expert_id].abs().max() * global_scale[expert_id]`,
+        # and `global_scale[expert_id]` are small (~1e-4).
+        # Taking the largest global scale likely results in overflowing the FP8 range
+        # for other experts - other selection strategies may be used.
+        a13_scale = 1.0 / a13_scale.max().to(torch.float32)
+        a2_scale = 1.0 / a2_scale.max().to(torch.float32)
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
@@ -362,6 +395,15 @@ def make_nvfp4_moe_quant_config(
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+        )
+    elif backend == NvFp4MoeBackend.EMULATION:
+        return nvfp4_moe_quant_config(
+            g1_alphas=w13_scale_2,
+            g2_alphas=w2_scale_2,
+            a1_gscale=a13_scale,
+            a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
         )

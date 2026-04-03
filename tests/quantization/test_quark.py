@@ -228,8 +228,7 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(
-            tp_size=tp_size,
-            kwargs={"cudagraph_capture_sizes": [16]},
+            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
         ),
         tasks=task,
         batch_size=64,
