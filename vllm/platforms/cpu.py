@@ -150,6 +150,10 @@ class CpuPlatform(Platform):
         torch.cpu.set_device(device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        pass
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 

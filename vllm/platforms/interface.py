@@ -385,7 +385,7 @@ class Platform:
     @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         """Set RNG seed across all devices for the current platform."""
-        pass
+        raise NotImplementedError
 
     @classmethod
     def pre_register_and_update(
