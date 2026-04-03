@@ -41,6 +41,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weigh
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -261,6 +262,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self._forward_method = (
+            self.forward_xpu if current_platform.is_xpu() else self.forward_cuda
+        )
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -493,6 +497,13 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
+        self._forward_method(hidden_states, output)
+
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
         """
         Forward pass with three parts:
         1. Input projection
@@ -553,6 +564,90 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             core_attn_out,
             self.prefix,
         )
+
+        # ============================================================
+        # Part 3: Output Projection
+        # ============================================================
+        z_shape_og = z.shape
+        # Reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def forward_xpu(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        """
+        Forward pass with three parts:
+        1. Input projection
+        2. Core attention (custom op)
+        3. Output projection
+        """
+        num_tokens = hidden_states.size(0)
+
+        assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on XPU."
+
+        # ============================================================
+        # Part 1: Input Projection
+        # ============================================================
+        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+
+        # ============================================================
+        # Part 2: Core Attention
+        # ============================================================
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        z = torch.empty_like(core_attn_out)
+        if attn_metadata is not None:
+            attn_metadata = attn_metadata[self.prefix]
+
+            # TODO: xpu does not support this param yet
+            spec_sequence_masks = attn_metadata.spec_sequence_masks
+            assert spec_sequence_masks is None
+
+            conv_weights = self.conv1d.weight.view(
+                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+            )
+
+            conv_state = self.kv_cache[0]
+            ssm_state = self.kv_cache[1]
+
+            torch.ops._xpu_C.gdn_attention(
+                core_attn_out,
+                z,
+                projected_states_qkvz,
+                projected_states_ba,
+                self.num_k_heads,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                conv_state=conv_state,
+                ssm_state=ssm_state,
+                conv_weights=conv_weights,
+                conv_bias=self.conv1d.bias,
+                activation=self.activation,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_prefills=attn_metadata.num_prefills,
+                num_decodes=attn_metadata.num_decodes,
+                has_initial_state=attn_metadata.has_initial_state,
+                non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,
+                non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
+                num_actual_tokens=attn_metadata.num_actual_tokens,
+                tp_size=self.tp_size,
+                reorder_input=not self.gqa_interleaved_layout,
+            )
 
         # ============================================================
         # Part 3: Output Projection
@@ -699,7 +794,13 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
-        conv_state = self_kv_cache[0].transpose(-1, -2)
+        # conv_state must be (..., dim, width-1) for the conv kernels.
+        # DS layout stores it that way directly; SD layout needs a transpose.
+        conv_state = (
+            self_kv_cache[0]
+            if is_conv_state_dim_first()
+            else self_kv_cache[0].transpose(-1, -2)
+        )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
@@ -914,7 +1015,13 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
-        conv_state = self_kv_cache[0].transpose(-1, -2)
+        # conv_state must be (..., dim, width-1) for the conv kernels.
+        # DS layout stores it that way directly; SD layout needs a transpose.
+        conv_state = (
+            self_kv_cache[0]
+            if is_conv_state_dim_first()
+            else self_kv_cache[0].transpose(-1, -2)
+        )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
 
