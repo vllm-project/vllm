@@ -309,8 +309,10 @@ class SparseAttnIndexer(CustomOp):
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
         if current_platform.is_cuda() and not has_deep_gemm():
-            raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
+            import logging
+            logging.getLogger("vllm").warning(
+                "DeepGEMM not available for Sparse Attention Indexer. "
+                "Sparse attention will be disabled (dense MLA fallback)."
             )
 
     def forward_native(
