@@ -1118,6 +1118,10 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
+            from huggingface_hub import close_session
+
+            close_session()
+
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
