@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING,Optional
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
-
+from vllm_xpu_kernels.fused_moe_interface import *
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -74,6 +74,33 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         N = q_weight.size(1)
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
+if hasattr(torch.ops._moe_C, "fused_grouped_topk"):
+
+    @register_fake("_moe_C::fused_grouped_topk")
+    def _fused_grouped_topk_fake(
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+        num_expert_group: int,
+        topk_group: int,
+        scoring_func: str,
+        routed_scaling_factor: float,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = hidden_states.shape[0]
+        topk_weights = torch.empty(
+            (num_tokens, topk),
+            device=hidden_states.device,
+            dtype=torch.float32,
+        )
+        topk_ids = torch.empty(
+            (num_tokens, topk),
+            device=hidden_states.device,
+            dtype=torch.int32,
+        )
+        return topk_weights, topk_ids
+
 
 def _xpu_ops_deepseek_scaling_rope_impl(
     positions: torch.Tensor,
@@ -88,7 +115,6 @@ def _xpu_ops_deepseek_scaling_rope_impl(
     return torch.ops._xpu_C.deepseek_scaling_rope(
         positions, query, key, offsets, cos_sin_cache, rotary_dim, is_neox_style
     )
-
 
 def _xpu_ops_deepseek_scaling_rope_fake(
     positions: torch.Tensor,

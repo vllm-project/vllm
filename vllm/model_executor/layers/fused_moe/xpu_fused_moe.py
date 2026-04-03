@@ -23,7 +23,7 @@ from vllm.platforms import current_platform
 if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
-
+from typing import Optional, Tuple
 class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
@@ -185,3 +185,28 @@ class XPUExpertsMXFp4(XPUExperts):
             (kMxfp4Static, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+def xpu_fused_grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert hidden_states.size(0) == gating_output.size(0), (
+        "Number of tokens mismatch")
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output
+    else:   
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+    return torch.ops._moe_C.fused_grouped_topk(hidden_states, scores, topk,
+                                  renormalize, num_expert_group, topk_group,
+                                  scoring_func, routed_scaling_factor,
+                                  e_score_correction_bias)
