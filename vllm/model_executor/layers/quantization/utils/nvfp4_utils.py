@@ -196,12 +196,8 @@ def convert_to_nvfp4_linear_kernel_format(
     backend: NvFp4LinearBackend,
     layer: torch.nn.Module,
 ) -> None:
-    """Convert layer to NVFP4 linear kernel format.
-
-    Args:
-        backend: The NVFP4 backend to use
-        layer: The layer to convert
-        group_size: Block size for dequantization (default: 16)
+    """
+    Convert layer to NVFP4 linear kernel format.
     """
 
     assert layer.weight_scale.dtype == torch.float8_e4m3fn, (

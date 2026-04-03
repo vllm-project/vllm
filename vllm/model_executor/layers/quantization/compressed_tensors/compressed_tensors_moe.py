@@ -205,10 +205,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"or None for NVFP4A16, found {input_quant}",
                 )
             return CompressedTensorsW4A4Nvfp4MoEMethod(
-                layer.moe_config,
-                quant_config=quant_config,
-                layer_name=layer_name,
-                use_a16=(input_quant is None),
+                layer.moe_config, layer_name, use_a16=(input_quant is None)
             )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
@@ -378,13 +375,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
         moe: FusedMoEConfig,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         layer_name: str | None = None,
         use_a16: bool = False,
     ):
         super().__init__(moe)
         self.group_size = 16
-        self.quant_config = quant_config
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(

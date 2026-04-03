@@ -420,11 +420,8 @@ class ModelConfig:
 
         for key, value in overrides.items():
             attr = getattr(config, key, None)
-            if attr is not None and isinstance(attr, (PretrainedConfig, dict)):
-                # It's a nested config - recursively update it.
-                # e.g.
-                # --hf-overrides.quantization_config.emulation_dequantize_weights=true
-                # updates the existing quantization_config dict.
+            if attr is not None and isinstance(attr, PretrainedConfig):
+                # It's a nested config - recursively update it
                 self._update_nested(attr, value)
             else:
                 # It's a dict-valued parameter - set it directly

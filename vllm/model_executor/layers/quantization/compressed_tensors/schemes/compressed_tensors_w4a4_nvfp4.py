@@ -136,10 +136,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(
-            self.backend,
-            layer,
-        )
+        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
 
     def apply_weights(
         self,

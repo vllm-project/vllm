@@ -1189,10 +1189,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(
-            self.backend,
-            layer,
-        )
+        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
 
     def apply(
         self,
