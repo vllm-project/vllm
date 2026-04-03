@@ -38,6 +38,45 @@ set -euo pipefail
 
 IMAGE_EXISTED_BEFORE_BUILD=0
 
+clean_docker_tag() {
+    local input="$1"
+    echo "$input" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-128
+}
+
+get_buildkite_repo_slug() {
+    local default_slug="vllm-project/vllm"
+    local repo_url="${BUILDKITE_PULL_REQUEST_REPO:-${BUILDKITE_REPO:-}}"
+    local repo_slug=""
+
+    if [[ -z "${repo_url}" ]]; then
+        printf '%s\n' "${default_slug}"
+        return 0
+    fi
+
+    repo_slug=$(echo "${repo_url}" | sed -E 's#(git@|https?://)([^/:]+)[:/]([^/]+/[^/.]+)(\.git)?$#\3#')
+    if [[ "${repo_slug}" != */* ]]; then
+        repo_slug="${default_slug}"
+    fi
+    printf '%s\n' "${repo_slug}"
+}
+
+get_buildkite_target_repo_slug() {
+    local default_slug="vllm-project/vllm"
+    local repo_url="${BUILDKITE_REPO:-}"
+    local repo_slug=""
+
+    if [[ -z "${repo_url}" ]]; then
+        printf '%s\n' "${default_slug}"
+        return 0
+    fi
+
+    repo_slug=$(echo "${repo_url}" | sed -E 's#(git@|https?://)([^/:]+)[:/]([^/]+/[^/.]+)(\.git)?$#\3#')
+    if [[ "${repo_slug}" != */* ]]; then
+        repo_slug="${default_slug}"
+    fi
+    printf '%s\n' "${repo_slug}"
+}
+
 get_remote_image_label() {
     local image_ref="$1"
     local label_key="$2"
@@ -225,10 +264,39 @@ else
     echo "Using provided PARENT_COMMIT: ${PARENT_COMMIT}"
 fi
 
+# Compute a branch-scoped cache tag for the ROCm native build cache.
+# This keeps native cache shareable across commits on the same branch while
+# avoiding collisions between forks that use the same branch name.
+if [[ -z "${ROCM_CACHE_BRANCH_TAG:-}" && -n "${BUILDKITE_BRANCH:-}" ]]; then
+    ROCM_CACHE_REPO_TAG=$(clean_docker_tag "$(get_buildkite_repo_slug)")
+    ROCM_CACHE_BRANCH_TAG="${ROCM_CACHE_REPO_TAG}-$(clean_docker_tag "${BUILDKITE_BRANCH}")"
+    export ROCM_CACHE_BRANCH_TAG
+    echo "Computed ROCm branch cache tag: ${ROCM_CACHE_BRANCH_TAG}"
+elif [[ -n "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
+    echo "Using provided ROCM_CACHE_BRANCH_TAG: ${ROCM_CACHE_BRANCH_TAG}"
+fi
+
+# Fork PRs can also read from the upstream base branch native cache. This is a
+# read-only fallback so fork branches benefit from warm upstream ROCm objects
+# without polluting the upstream branch cache namespace.
+if [[ -z "${ROCM_CACHE_UPSTREAM_BRANCH_TAG:-}" \
+      && -n "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}" \
+      && "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+    SOURCE_REPO_SLUG=$(get_buildkite_repo_slug)
+    TARGET_REPO_SLUG=$(get_buildkite_target_repo_slug)
+    if [[ "${SOURCE_REPO_SLUG}" != "${TARGET_REPO_SLUG}" ]]; then
+        ROCM_CACHE_UPSTREAM_BRANCH_TAG="$(clean_docker_tag "${TARGET_REPO_SLUG}")-$(clean_docker_tag "${BUILDKITE_PULL_REQUEST_BASE_BRANCH}")"
+        export ROCM_CACHE_UPSTREAM_BRANCH_TAG
+        echo "Computed ROCm upstream branch cache tag: ${ROCM_CACHE_UPSTREAM_BRANCH_TAG}"
+    fi
+elif [[ -n "${ROCM_CACHE_UPSTREAM_BRANCH_TAG:-}" ]]; then
+    echo "Using provided ROCM_CACHE_UPSTREAM_BRANCH_TAG: ${ROCM_CACHE_UPSTREAM_BRANCH_TAG}"
+fi
+
 # Compute merge-base with main for an additional cache fallback layer.
 # Mirrors the VLLM_MERGE_BASE_COMMIT pattern used in the shared ci.hcl file.
 # Useful for long-lived PRs where parent-commit cache may be missing but the
-# merge-base (a real main commit) maps to a warm :rocm-latest snapshot.
+# merge-base (a real main commit) still maps to a warm mainline cache snapshot.
 if [[ -z "${VLLM_MERGE_BASE_COMMIT:-}" ]]; then
     # Fetch just the tip of main so merge-base can be resolved on shallow clones.
     git fetch --depth=1 origin main 2>/dev/null || true
