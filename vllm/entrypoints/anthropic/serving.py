@@ -205,10 +205,11 @@ class AnthropicServingMessages(OpenAIServingChat):
                 openai_msg["content"] = content_parts[0]["text"]
             else:
                 openai_msg["content"] = content_parts  # type: ignore
-        elif tool_calls or reasoning_parts:
-            # Ensure content is always set when tool_calls or reasoning are
-            # present.  Some tokenizers (e.g. mistral-common) require the
-            # content field to exist on assistant messages.
+        elif msg.role == "assistant":
+            # Ensure content is always present on assistant messages.
+            # Some tokenizers (e.g. mistral-common) require the content
+            # field on every assistant message, even when only tool_calls,
+            # reasoning, or redacted thinking blocks are present.
             openai_msg["content"] = ""
 
     @classmethod
