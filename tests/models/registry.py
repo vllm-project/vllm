@@ -537,6 +537,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
     ),
+    "TeleChat3ForCausalLM": _HfExamplesInfo(
+        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
+    ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
@@ -1045,6 +1048,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "HF model use deprecated imports which have been removed."
         },  # noqa: E501
         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"},
+    ),
+    "Phi4ForCausalLMV": _HfExamplesInfo(
+        "microsoft/Phi-4-reasoning-vision-15B", trust_remote_code=True
     ),
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
