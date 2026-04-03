@@ -288,6 +288,35 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             max_num_tiles=max_num_tiles,
         )
 
+    def get_dummy_image_size_and_max_tokens(
+        self, mm_counts: Mapping[str, int]
+    ) -> tuple[tuple[int, int], int]:
+        processor = self.get_hf_processor()
+        num_images = mm_counts.get("image", 0)
+
+        if tiler := processor.dynamic_tiler:
+            budget = tiler.max_num_tokens_available(text_prompt_length=num_images)
+            target_width, target_height = (
+                tiler.width_and_height_for_max_num_tokens_available(budget)
+            )
+            return (
+                (target_width, target_height),
+                tiler._get_num_embeddings(target_width, target_height),
+            )
+
+        max_num_tiles = processor.max_num_tiles
+        target_width, target_height = self.get_image_size_with_most_features(
+            max_num_tiles
+        )
+        return (
+            (target_width, target_height),
+            processor.get_num_image_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                max_num_tiles=max_num_tiles,
+            ),
+        )
+
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
@@ -312,7 +341,9 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         mm_max_tokens: dict[str, int] = {}
 
         if mm_counts.get("image", 0) > 0:
-            mm_max_tokens["image"] = seq_len
+            _, mm_max_tokens["image"] = self.get_dummy_image_size_and_max_tokens(
+                mm_counts
+            )
 
         if mm_counts.get("video", 0) > 0:
             assert self.supports_video
@@ -726,17 +757,10 @@ class NanoNemotronVLDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
+        (target_width, target_height), _ = (
+            self.info.get_dummy_image_size_and_max_tokens(mm_counts)
+        )
         processor = self.info.get_hf_processor()
-        if tiler := processor.dynamic_tiler:
-            budget = tiler.max_num_tokens_available(text_prompt_length=num_images)
-            target_width, target_height = (
-                tiler.width_and_height_for_max_num_tokens_available(budget)
-            )
-        else:
-            max_num_tiles = 12
-            target_width, target_height = self.info.get_image_size_with_most_features(
-                max_num_tiles
-            )
 
         image_overrides = mm_options.get("image")
 
