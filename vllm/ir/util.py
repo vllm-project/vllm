@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def hash_file(path: Path) -> str:
     """Hash the contents of a file, cached per path."""
     hasher = hashlib.sha256()
