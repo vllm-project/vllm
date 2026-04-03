@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from typing import Any, TypeAlias, cast
+from typing import Any, TypeAlias
 
 import torch.nn.functional as F
 
@@ -16,7 +16,7 @@ from vllm.entrypoints.pooling.typing import (
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
-from vllm.tasks import PoolingTask, ScoreType
+from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
@@ -63,7 +63,7 @@ class ScoringIOProcessor(PoolingIOProcessor):
 
 
 class BiEncoderIOProcessor(ScoringIOProcessor):
-    name: ScoreType = "bi-encoder"
+    name = "bi-encoder"
     pooling_task: PoolingTask = "embed"
 
     #######################################
@@ -94,20 +94,17 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         )
 
         ctx.engine_inputs = engine_inputs
-        ctx.intermediates = len(scoring_data.data_1)
+        ctx.n_queries = len(scoring_data.data_1)
 
     def post_process_online(
         self,
         ctx: ScoringServeContext,
     ):
-        if ctx.final_res_batch is None:
-            raise ValueError("Final response batch not available")
-
-        if ctx.intermediates is None:
-            raise ValueError("data_1 len not available")
+        assert ctx.final_res_batch is not None
+        assert isinstance(ctx.n_queries, int)
 
         ctx.final_res_batch = self._post_process(
-            outputs=ctx.final_res_batch, offset=cast(int, ctx.intermediates)
+            outputs=ctx.final_res_batch, n_queries=ctx.n_queries
         )
 
     #######################################
@@ -124,8 +121,8 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         self,
         ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        assert ctx.offset is not None
-        return self._post_process(outputs=ctx.outputs, offset=ctx.offset)
+        assert ctx.n_queries is not None
+        return self._post_process(outputs=ctx.outputs, n_queries=ctx.n_queries)
 
     #######################################
     # helpers
@@ -145,9 +142,9 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
             prompts=data_1 + data_2, tok_params=tok_params, prompt_extras=prompt_extras
         )
 
-    def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
-        emb_data_1 = outputs[:offset]
-        emb_data_2 = outputs[offset:]
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
+        emb_data_1 = outputs[:n_queries]
+        emb_data_2 = outputs[n_queries:]
 
         if len(emb_data_1) == 1:
             emb_data_1 = emb_data_1 * len(emb_data_2)
@@ -177,13 +174,13 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
 
 class LateInteractionIOProcessor(BiEncoderIOProcessor):
-    name: ScoreType = "late-interaction"
+    name = "late-interaction"
     pooling_task: PoolingTask = "token_embed"
 
-    def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
         # Split into query and document embeddings
-        emb_data_1 = outputs[:offset]
-        emb_data_2 = outputs[offset:]
+        emb_data_1 = outputs[:n_queries]
+        emb_data_2 = outputs[n_queries:]
 
         # Expand queries if 1:N scoring
         if len(emb_data_1) == 1:
@@ -217,8 +214,15 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
         return final_res_batch
 
 
+class FlashLateInteractionIOProcessor(LateInteractionIOProcessor):
+    name = "flash-late-interaction"
+
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
+        return outputs
+
+
 class CrossEncoderIOProcessor(ScoringIOProcessor):
-    name: ScoreType = "cross-encoder"
+    name = "cross-encoder"
     pooling_task: PoolingTask = "classify"
 
     def __init__(self, *args, **kwargs):
@@ -475,6 +479,7 @@ ScoringIOProcessors: dict[str, type[ScoringIOProcessor]] = {
         BiEncoderIOProcessor,
         LateInteractionIOProcessor,
         JinaLateInteractionIOProcessor,
+        FlashLateInteractionIOProcessor,
         CrossEncoderIOProcessor,
     ]
 }
