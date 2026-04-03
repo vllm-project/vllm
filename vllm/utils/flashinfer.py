@@ -291,7 +291,7 @@ def supports_trtllm_attention() -> bool:
         return False
 
     # TRTLLM attention is currently only validated on SM100 (CC 10.0).
-    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
+    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.post1.
     # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
     return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
