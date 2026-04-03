@@ -906,7 +906,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # The nvfp4_scaled_mm_sm120 kernels for Blackwell SM12x require
   # CUDA 12.8 or later
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(FP4_ARCHS "12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(FP4_ARCHS "12.0a;12.1a;12.0f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(FP4_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
