@@ -988,14 +988,6 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
-            request.num_computed_tokens += num_scheduled_token
-            request.is_prefill_chunk = request.num_computed_tokens < (
-                request.num_tokens + request.num_output_placeholders
-            )
-            scheduler_output.has_structured_output_requests |= (
-                request.use_structured_output and not request.is_prefill_chunk
-            )
-
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
             # decoding. However, it is safe to call the method here because
@@ -1003,6 +995,13 @@ class Scheduler(SchedulerInterface):
             # and thus are unaffected by speculative decoding.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
+            request.num_computed_tokens += num_scheduled_token
+            request.is_prefill_chunk = request.num_computed_tokens < (
+                request.num_tokens + request.num_output_placeholders
+            )
+            scheduler_output.has_structured_output_requests |= (
+                request.use_structured_output and not request.is_prefill_chunk
+            )
 
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
@@ -1656,6 +1655,7 @@ class Scheduler(SchedulerInterface):
             mm_feature = request.mm_features[input_id]
             start_pos = mm_feature.mm_position.offset
             num_tokens = mm_feature.mm_position.length
+            print(f"{start_pos = } {num_tokens = } {request.num_computed_tokens = }")
             if self.is_encoder_decoder and request.num_computed_tokens > 0:
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention

@@ -173,6 +173,7 @@ class EncoderCacheManager:
         while num_embeds > self.num_free_slots:
             mm_hash, num_free_embeds = self.freeable.popitem(last=False)
             del self.cached[mm_hash]
+            print(f"freed {mm_hash = }")
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_embeds
         return True
@@ -238,6 +239,7 @@ class EncoderCacheManager:
             num_encoder_embeds = request.get_num_encoder_embeds(input_id)
             self.freeable[mm_hash] = num_encoder_embeds
             self.num_freeable_slots += num_encoder_embeds
+            print(f"freeable {mm_hash = }")
 
     def free(self, request: Request) -> None:
         """Free all encoder input cache reference held by *request*.
