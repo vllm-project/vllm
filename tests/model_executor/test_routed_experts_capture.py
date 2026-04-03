@@ -9,10 +9,10 @@ import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 pytestmark = pytest.mark.cpu_test
 
@@ -226,8 +226,8 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     assert torch.equal(capturer._device_buffer[:3, 0, :], topk)
 
 
-def test_routed_experts_capturer_dp_unexpected_batch_skips(caplog):
-    """Mismatch between topk batch dim and DP layout: skip capture and log."""
+def test_routed_experts_capturer_dp_unexpected_batch_raises():
+    """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = SimpleNamespace(
@@ -236,7 +236,7 @@ def test_routed_experts_capturer_dp_unexpected_batch_skips(caplog):
     # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
     topk = torch.tensor([[1, 2]], dtype=torch.int32)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        with caplog.at_level("WARNING"):
+        with pytest.raises(AssertionError,
+                           match="unexpected topk_ids batch dim"):
             capturer.capture(layer_id=0, topk_ids=topk)
     assert capturer._device_buffer[0, 0, 0].item() == -1
-    assert "unexpected topk_ids batch dim" in caplog.text

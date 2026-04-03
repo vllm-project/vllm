@@ -192,15 +192,11 @@ class RoutedExpertsCapturer:
                 start_loc = 0
                 end_loc = token_num_per_dp
             else:
-                logger.error(
-                    "RoutedExpertsCapturer: unexpected topk_ids batch dim %s "
-                    "(expected %s or %s for dp_rank=%s); skipping capture",
-                    n,
-                    total,
-                    token_num_per_dp,
-                    self.dp_rank,
+                raise AssertionError(
+                    "RoutedExpertsCapturer: unexpected topk_ids batch dim "
+                    f"{n} (expected {total} or {token_num_per_dp} "
+                    f"for dp_rank={self.dp_rank})"
                 )
-                return
 
         if layer_id >= self._device_buffer.shape[1]:
             return
