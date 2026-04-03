@@ -327,8 +327,8 @@ class RequestState:
                 output_with_kv_transfer = self.parent_req.aggre_kv_transfer_params(
                     self.request_id, output, kv_transfer_params
                 )
-                # overwrite kv_transfer_params with the aggregated one
-                # from children requests in case of parallel sampling
+                # Overwrite kv_transfer_params using the aggregated values from
+                # child requests in the case of parallel sampling.
                 outputs, finished, kv_transfer_params = output_with_kv_transfer
             if not outputs:
                 return None
