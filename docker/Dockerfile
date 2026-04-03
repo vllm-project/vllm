@@ -652,6 +652,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system accelerate hf_transfer modelscope \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
+# Install libnuma-dev, required by fastsafetensors (fixes #20384)
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
 # ============================================================
