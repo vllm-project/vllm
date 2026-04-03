@@ -389,52 +389,9 @@ def _reshape_cache_int4_packed(
         15.0,
     )
 
-    # Phase 3: MSE-optimal scale via least squares
-    # Residuals: r_i = q_i - zp   (centred quantisation levels)
-    # s* = Σ(x·r) / Σ(r²)
-    k_even_r = k_even_q - k_zp_f
-    k_odd_r = k_odd_q - k_zp_f
-    xr = tl.sum(tl.where(even_k_mask, k_even * k_even_r, 0.0)) + tl.sum(
-        tl.where(odd_k_mask, k_odd * k_odd_r, 0.0)
-    )
-    rr = tl.sum(tl.where(even_k_mask, k_even_r * k_even_r, 0.0)) + tl.sum(
-        tl.where(odd_k_mask, k_odd_r * k_odd_r, 0.0)
-    )
-    k_scale = tl.maximum(xr / tl.maximum(rr, 1e-6), 1e-6)
+    k_scale = k_scale_init
 
-    # Phase 4: re-quantize with optimal scale
-    inv_k = 1.0 / k_scale
-    k_zp_f = tl.clamp(
-        tl.where(
-            -k_min * inv_k >= 0,
-            (-k_min * inv_k + 0.5).to(tl.int32),
-            (-k_min * inv_k - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    k_even_s = k_even * inv_k + k_zp_f
-    k_odd_s = k_odd * inv_k + k_zp_f
-    k_even_q = tl.clamp(
-        tl.where(
-            k_even_s >= 0,
-            (k_even_s + 0.5).to(tl.int32),
-            (k_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    k_odd_q = tl.clamp(
-        tl.where(
-            k_odd_s >= 0,
-            (k_odd_s + 0.5).to(tl.int32),
-            (k_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-
-    # Phase 5: pack zp into low 4 bits of scale (steganography)
+    # Phase 3: pack zp into low 4 bits of scale (steganography)
     # Loses ~0.001% scale precision (4 of 23 mantissa bits) — negligible.
     k_zp_int = k_zp_f.to(tl.int32)
     k_scale_bits = k_scale.to(tl.int32, bitcast=True)
@@ -516,46 +473,7 @@ def _reshape_cache_int4_packed(
         15.0,
     )
 
-    v_even_r = v_even_q - v_zp_f
-    v_odd_r = v_odd_q - v_zp_f
-    xr_v = tl.sum(tl.where(even_v_mask, v_even * v_even_r, 0.0)) + tl.sum(
-        tl.where(odd_v_mask, v_odd * v_odd_r, 0.0)
-    )
-    rr_v = tl.sum(tl.where(even_v_mask, v_even_r * v_even_r, 0.0)) + tl.sum(
-        tl.where(odd_v_mask, v_odd_r * v_odd_r, 0.0)
-    )
-    v_scale = tl.maximum(xr_v / tl.maximum(rr_v, 1e-6), 1e-6)
-
-    inv_v = 1.0 / v_scale
-    v_zp_f = tl.clamp(
-        tl.where(
-            -v_min * inv_v >= 0,
-            (-v_min * inv_v + 0.5).to(tl.int32),
-            (-v_min * inv_v - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    v_even_s = v_even * inv_v + v_zp_f
-    v_odd_s = v_odd * inv_v + v_zp_f
-    v_even_q = tl.clamp(
-        tl.where(
-            v_even_s >= 0,
-            (v_even_s + 0.5).to(tl.int32),
-            (v_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    v_odd_q = tl.clamp(
-        tl.where(
-            v_odd_s >= 0,
-            (v_odd_s + 0.5).to(tl.int32),
-            (v_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
+    v_scale = v_scale_init
 
     v_zp_int = v_zp_f.to(tl.int32)
     v_scale_bits = v_scale.to(tl.int32, bitcast=True)

@@ -534,47 +534,68 @@ def test_triton_unified_attention_per_token_head_scale(
 
     is_int4 = qcfg.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD
 
-    # Per-token-head quantization: one scale per (block, slot, head)
-    k_absmax = key_cache_bf16.float().abs().amax(dim=-1)  # [..., num_kv_heads]
-    v_absmax = value_cache_bf16.float().abs().amax(dim=-1)
-    k_scale_cache = (k_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
-    v_scale_cache = (v_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
-
-    scaled_k = key_cache_bf16.float() / k_scale_cache[:, :, :, None]
-    scaled_v = value_cache_bf16.float() / v_scale_cache[:, :, :, None]
-
-    # Quantize
-    key_cache_q_full = scaled_k.round().clamp(qcfg.quant_min, qcfg.quant_max)
-    value_cache_q_full = scaled_v.round().clamp(qcfg.quant_min, qcfg.quant_max)
-
-    # Dequantized reference (before packing, for the baseline comparison)
-    key_cache_deq = key_cache_q_full * k_scale_cache[:, :, :, None]
-    value_cache_deq = value_cache_q_full * v_scale_cache[:, :, :, None]
-
     if is_int4:
-        # Pack two int4 values into one uint8: low_nibble=even, high_nibble=odd
+        # Asymmetric quantization reference (matches the Triton kernel).
+        kf = key_cache_bf16.float()
+        vf = value_cache_bf16.float()
+        k_min = kf.amin(dim=-1)
+        k_max = kf.amax(dim=-1)
+        v_min = vf.amin(dim=-1)
+        v_max = vf.amax(dim=-1)
+        k_scale_cache = ((k_max - k_min) / 15.0).clamp(min=1e-6).to(torch.float32)
+        v_scale_cache = ((v_max - v_min) / 15.0).clamp(min=1e-6).to(torch.float32)
+        k_zp = (-k_min / k_scale_cache).round().clamp(0, 15)
+        v_zp = (-v_min / v_scale_cache).round().clamp(0, 15)
+
+        key_cache_q_full = (
+            (kf / k_scale_cache[..., None] + k_zp[..., None]).round().clamp(0, 15)
+        )
+        value_cache_q_full = (
+            (vf / v_scale_cache[..., None] + v_zp[..., None]).round().clamp(0, 15)
+        )
+
+        # Dequantized reference: x_hat = (q - zp) * scale
+        key_cache_deq = (key_cache_q_full - k_zp[..., None]) * k_scale_cache[..., None]
+        value_cache_deq = (value_cache_q_full - v_zp[..., None]) * v_scale_cache[
+            ..., None
+        ]
+
+        # Pack two uint4 values into one byte
         def _pack_int4(data_float):
-            # data_float: [..., head_size] with values in [-8, 7]
-            u = (data_float + 8.0).to(torch.uint8)  # [0, 15]
-            lo = u[..., 0::2]  # even indices
-            hi = u[..., 1::2]  # odd indices
-            return (lo & 0xF) | ((hi & 0xF) << 4)  # uint8
+            u = data_float.to(torch.uint8)
+            lo = u[..., 0::2]
+            hi = u[..., 1::2]
+            return (lo & 0xF) | ((hi & 0xF) << 4)
 
         key_cache_q = _pack_int4(key_cache_q_full)
         value_cache_q = _pack_int4(value_cache_q_full)
 
-        # Pack zp=8 into the low 4 mantissa bits of the float32 scale
-        # (steganography), matching what the Triton kernel writes and
-        # the attention kernel expects to read.
-        zp = 8  # symmetric quant: offset = 8 maps [-8,7] → [0,15]
+        # Steganography: pack zp into low 4 bits of scale
+        k_zp_int = k_zp.to(torch.int32)
         k_bits = k_scale_cache.view(torch.int32)
-        k_scale_cache = ((k_bits & -16) | (zp & 0xF)).view(torch.float32)
+        k_scale_cache = ((k_bits & -16) | (k_zp_int & 0xF)).view(torch.float32)
+        v_zp_int = v_zp.to(torch.int32)
         v_bits = v_scale_cache.view(torch.int32)
-        v_scale_cache = ((v_bits & -16) | (zp & 0xF)).view(torch.float32)
-    elif qcfg.uses_trunc:
+        v_scale_cache = ((v_bits & -16) | (v_zp_int & 0xF)).view(torch.float32)
+    else:
+        # Symmetric quantization for int8/fp8.
+        k_absmax = key_cache_bf16.float().abs().amax(dim=-1)
+        v_absmax = value_cache_bf16.float().abs().amax(dim=-1)
+        k_scale_cache = (k_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
+        v_scale_cache = (v_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
+        scaled_k = key_cache_bf16.float() / k_scale_cache[:, :, :, None]
+        scaled_v = value_cache_bf16.float() / v_scale_cache[:, :, :, None]
+
+        key_cache_q_full = scaled_k.round().clamp(qcfg.quant_min, qcfg.quant_max)
+        value_cache_q_full = scaled_v.round().clamp(qcfg.quant_min, qcfg.quant_max)
+
+        key_cache_deq = key_cache_q_full * k_scale_cache[:, :, :, None]
+        value_cache_deq = value_cache_q_full * v_scale_cache[:, :, :, None]
+
+    if not is_int4 and qcfg.uses_trunc:
         key_cache_q = key_cache_q_full.to(qcfg.cache_dtype)
         value_cache_q = value_cache_q_full.to(qcfg.cache_dtype)
-    else:
+    elif not is_int4:
         key_cache_q = scaled_k.clamp(qcfg.quant_min, qcfg.quant_max).to(
             qcfg.cache_dtype
         )
