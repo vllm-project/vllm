@@ -4,6 +4,7 @@ import time
 from collections.abc import Sequence
 from typing import Any, TypeAlias
 
+import torch
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
@@ -96,6 +97,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ctx.engine_inputs = engine_inputs
         ctx.n_queries = len(scoring_data.data_1)
 
+    @torch.inference_mode()
     def post_process_online(
         self,
         ctx: ScoringServeContext,
@@ -117,6 +119,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         )
         return self._pre_process(ctx.prompts, tok_params)
 
+    @torch.inference_mode()
     def post_process_offline(
         self,
         ctx: OfflineOutputsContext,
@@ -416,8 +419,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-class JinaLateInteractionIOProcessor(LateInteractionIOProcessor):
-    name = "jina-late-interaction"
+class JinaRankingIOProcessor(LateInteractionIOProcessor):
+    name = "jina-reranking-scoring"
     pooling_task: PoolingTask = "token_embed"
 
     def __init__(self, *args, **kwargs):
@@ -450,15 +453,18 @@ class JinaLateInteractionIOProcessor(LateInteractionIOProcessor):
             prompts=prompts, tok_params=tok_params, prompt_extras=prompt_extras
         )
 
-    def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
         final_res_batch: list[PoolingRequestOutput] = []
 
         for i in range(len(outputs)):
             embeds = outputs[i].outputs.data.float()
-            emb_1 = embeds[0]
-            emb_2 = embeds[1:]
 
-            scores = F.cosine_similarity(emb_1, emb_2)
+            # The JinaForRanking model concatenates docs first, then query.
+            # Let's stay consistent with this novel design.
+            query_embeds = embeds[-1]
+            doc_embeds = embeds[:-1]
+
+            scores = F.cosine_similarity(query_embeds, doc_embeds)
 
             for score in scores:
                 final_res_batch.append(
@@ -478,7 +484,7 @@ ScoringIOProcessors: dict[str, type[ScoringIOProcessor]] = {
     for p in [
         BiEncoderIOProcessor,
         LateInteractionIOProcessor,
-        JinaLateInteractionIOProcessor,
+        JinaRankingIOProcessor,
         FlashLateInteractionIOProcessor,
         CrossEncoderIOProcessor,
     ]

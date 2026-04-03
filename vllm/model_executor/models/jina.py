@@ -76,8 +76,8 @@ class JinaForRankingPoolerHead(TokenPoolerHead):
     def __init__(self, projector: nn.Sequential):
         super().__init__()
 
-        self.doc_embed_token_id = 151670
-        self.query_embed_token_id = 151671
+        self.doc_token_id = 151670
+        self.query_token_id = 151671
 
         self.projector = projector
 
@@ -95,16 +95,15 @@ class JinaForRankingPoolerHead(TokenPoolerHead):
         embeds_list = []
         for b in range(len(pooled_data)):
             hidden_states = pooled_data[b]
-            prompt_token_ids_cpu = pooling_metadata.prompt_token_ids_cpu[b]
+            input_ids = pooling_metadata.prompt_token_ids_cpu[b]
 
-            query_embed_token_indexes = torch.where(
-                torch.eq(prompt_token_ids_cpu, self.query_embed_token_id)
-            )[0]
-            doc_embed_token_indexes = torch.where(
-                torch.eq(prompt_token_ids_cpu, self.doc_embed_token_id)
-            )[0]
+            docs_indexes = torch.where(torch.eq(input_ids, self.doc_token_id))[0]
 
-            indexes = torch.cat([query_embed_token_indexes, doc_embed_token_indexes])
+            query_indexes = torch.where(torch.eq(input_ids, self.query_token_id))[0]
+
+            # The JinaForRanking model concatenates docs first, then query.
+            # Let's stay consistent with this novel design.
+            indexes = torch.cat([docs_indexes, query_indexes])
             embeds = self.projector(hidden_states[indexes])
             embeds_list.append(embeds)
 
