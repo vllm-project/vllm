@@ -238,53 +238,73 @@ def _reshape_cache_per_token_head(
 
 
 # ---------------------------------------------------------------------------
-# INT4 packed per-token-head quantization kernel
+# INT4 NF4 (NormalFloat4) per-token-head quantization kernel
 # ---------------------------------------------------------------------------
-# Packs two unsigned int4 values [0, 15] into one uint8 byte.
-# Byte layout: low_nibble = even_index, high_nibble = odd_index.
+# Uses 16 non-uniform quantization levels optimally spaced for Gaussian
+# distributions (from QLoRA).  Levels are denser near zero where most
+# activation values cluster, giving lower MSE than uniform spacing.
 #
-# Three techniques combine to match or exceed FP16 KV cache accuracy
-# while using 73% less memory (benchmarked on ChartQA with
-# Qwen3.5-35B-A3B-GPTQ, INT4 scored +3.5% over FP16 baseline):
+# Algorithm:
+#   1. Compute absmax per (token, head) → scale = absmax
+#   2. Normalize: x_norm = x / scale → [-1, 1]
+#   3. Find nearest NF4 level via binary search → index [0..15]
+#   4. Pack pairs of 4-bit indices into uint8 bytes
+#   5. Store scale (clean float32, no steganography needed)
 #
-# 1. ASYMMETRIC QUANTIZATION with zero-point
-#    Uses the full [0, 15] unsigned range mapped to [min, max] of each
-#    (token, head) vector.  Unlike symmetric [-8, 7], no levels are wasted
-#    when the distribution is not centred at zero.
-#      scale = (max - min) / 15
-#      zp    = round(-min / scale), clamped to [0, 15]
-#      q     = clamp(round(x / scale + zp), 0, 15)
-#      x_hat = (q - zp) * scale
-#
-# 2. MSE-OPTIMAL SCALE via least squares (one Newton step)
-#    After initial quantization, the scale is refined to minimise
-#    reconstruction MSE in closed form:
-#      r_i = q_i - zp                      (centred levels)
-#      s*  = Σ(x_i · r_i) / Σ(r_i²)       (OLS solution)
-#    Then zp and q are recomputed with the optimal scale.
-#
-# 3. ZERO-POINT STEGANOGRAPHY (zero memory overhead)
-#    The 4-bit zero_point [0..15] is hidden inside the lowest 4 mantissa
-#    bits of the float32 scale via bitcast.  This loses < 0.001% of scale
-#    precision (19 of 23 mantissa bits remain) — negligible compared to
-#    the 4-bit data quantisation error.
-#      pack:   scale_bits = bitcast(scale, int32)
-#              packed     = (scale_bits & -16) | (zp & 0xF)
-#      unpack: zp    = packed_bits & 0xF
-#              scale = bitcast(packed_bits & -16, float32)
-#
-#    The attention kernel recovers zp and applies an exact algebraic
-#    correction at near-zero cost:
-#      For K:  S += (dot(Q, K_uint) - zp · sum(Q)) × scale
-#      For V:  acc += dot(P·scale, V_uint) - Σ(P·scale·zp)
-#
-# The OPTIMAL_CLIP_RATIO below is only used as the initial scale seed
-# before the LS refinement.  It is the MSE-optimal symmetric clipping
-# point for Gaussian data at 4-bit resolution:
-#   clip = 2.83σ, σ ≈ mean(|x|) · √(π/2)
-#   → clip ≈ 3.55 · mean(|x|)
+# Dequantization in attention:  x_hat = NF4_TABLE[index] * scale
 # ---------------------------------------------------------------------------
-_INT4_OPTIMAL_CLIP_RATIO: float = 3.55
+
+
+@triton.jit
+def _nf4_quantize(x):
+    """Map normalized float [-1, 1] to nearest NF4 index [0..15].
+
+    Uses a balanced binary tree of 15 boundary comparisons (4 levels deep).
+    Boundaries are midpoints between consecutive NF4 levels.
+    """
+    # fmt: off
+    return tl.where(x < 0.03979,
+        tl.where(x < -0.33968,
+            tl.where(x < -0.61063,
+                tl.where(x < -0.84810, 0, 1),
+                tl.where(x < -0.46000, 2, 3)),
+            tl.where(x < -0.13791,
+                tl.where(x < -0.23461, 4, 5),
+                tl.where(x < -0.04553, 6, 7))),
+        tl.where(x < 0.38931,
+            tl.where(x < 0.20352,
+                tl.where(x < 0.12026, 8, 9),
+                tl.where(x < 0.29201, 10, 11)),
+            tl.where(x < 0.64279,
+                tl.where(x < 0.50166, 12, 13),
+                tl.where(x < 0.86148, 14, 15))))
+    # fmt: on
+
+
+@triton.jit
+def _nf4_dequant(idx):
+    """Map NF4 index [0..15] to normalized float [-1, 1].
+
+    Uses a balanced binary tree of 15 select operations (4 levels deep).
+    Values are the standard NF4 levels from QLoRA (Dettmers et al., 2023).
+    """
+    # fmt: off
+    return tl.where(idx < 8,
+        tl.where(idx < 4,
+            tl.where(idx < 2,
+                tl.where(idx == 0, -1.0, -0.6962),
+                tl.where(idx == 2, -0.5251, -0.3949)),
+            tl.where(idx < 6,
+                tl.where(idx == 4, -0.2844, -0.1848),
+                tl.where(idx == 6, -0.0911, 0.0))),
+        tl.where(idx < 12,
+            tl.where(idx < 10,
+                tl.where(idx == 8, 0.0796, 0.1609),
+                tl.where(idx == 10, 0.2461, 0.3379)),
+            tl.where(idx < 14,
+                tl.where(idx == 12, 0.4407, 0.5626),
+                tl.where(idx == 14, 0.7230, 1.0))))
+    # fmt: on
 
 
 @triton.jit
@@ -315,14 +335,9 @@ def _reshape_cache_int4_packed(
     block_size: tl.constexpr,
     head_size: tl.constexpr,
     head_size_v: tl.constexpr,
-    HALF_HEAD_PADDED: tl.constexpr,  # next_power_of_2(max(head_size, head_size_v) // 2)
-    OPTIMAL_CLIP_RATIO: tl.constexpr,
+    HALF_HEAD_PADDED: tl.constexpr,
 ):
-    """Asymmetric INT4 quantization with zero-point steganography.
-
-    See the module-level comment block above for the full algorithm
-    description and benchmark results.
-    """
+    """NF4 quantization: normalize by absmax, find nearest NF4 level, pack."""
     tok = tl.program_id(0)
     head = tl.program_id(1)
 
@@ -346,73 +361,25 @@ def _reshape_cache_int4_packed(
     k_even = tl.load(key_base + even_offs, mask=even_k_mask, other=0.0).to(tl.float32)
     k_odd = tl.load(key_base + odd_offs, mask=odd_k_mask, other=0.0).to(tl.float32)
 
-    # Phase 1: asymmetric range → scale + zero_point
-    k_min = tl.minimum(
-        tl.min(tl.where(even_k_mask, k_even, float("inf"))),
-        tl.min(tl.where(odd_k_mask, k_odd, float("inf"))),
+    # absmax → scale, normalize to [-1, 1], quantize via NF4 table
+    k_absmax = tl.maximum(
+        tl.max(tl.where(even_k_mask, tl.abs(k_even), 0.0)),
+        tl.max(tl.where(odd_k_mask, tl.abs(k_odd), 0.0)),
     )
-    k_max = tl.maximum(
-        tl.max(tl.where(even_k_mask, k_even, float("-inf"))),
-        tl.max(tl.where(odd_k_mask, k_odd, float("-inf"))),
-    )
-    k_scale_init = tl.maximum((k_max - k_min) / 15.0, 1e-6)
-    k_zp_f = tl.clamp(
-        tl.where(
-            -k_min / k_scale_init >= 0,
-            (-k_min / k_scale_init + 0.5).to(tl.int32),
-            (-k_min / k_scale_init - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-
-    # Phase 2: quantize to unsigned [0, 15]
-    inv_k = 1.0 / k_scale_init
-    k_even_s = k_even * inv_k + k_zp_f
-    k_odd_s = k_odd * inv_k + k_zp_f
-    k_even_q = tl.clamp(
-        tl.where(
-            k_even_s >= 0,
-            (k_even_s + 0.5).to(tl.int32),
-            (k_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    k_odd_q = tl.clamp(
-        tl.where(
-            k_odd_s >= 0,
-            (k_odd_s + 0.5).to(tl.int32),
-            (k_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-
-    k_scale = k_scale_init
-
-    # Phase 3: pack zp into low 4 bits of scale (steganography)
-    # Loses ~0.001% scale precision (4 of 23 mantissa bits) — negligible.
-    k_zp_int = k_zp_f.to(tl.int32)
-    k_scale_bits = k_scale.to(tl.int32, bitcast=True)
-    k_scale_packed = ((k_scale_bits & -16) | (k_zp_int & 0xF)).to(
-        tl.float32, bitcast=True
-    )
+    k_scale = tl.maximum(k_absmax, 1e-6)
+    inv_k = 1.0 / k_scale
+    k_even_idx = _nf4_quantize(k_even * inv_k).to(tl.uint8)
+    k_odd_idx = _nf4_quantize(k_odd * inv_k).to(tl.uint8)
 
     tl.store(
         k_scale_cache_ptr
         + blk * stride_ks_blk
         + slot_in_blk * stride_ks_slot
         + head * stride_ks_head,
-        k_scale_packed,
+        k_scale,
     )
 
-    # Pack unsigned [0,15]: low nibble = even, high nibble = odd
-    k_even_u = k_even_q.to(tl.uint8)
-    k_odd_u = k_odd_q.to(tl.uint8)
-    k_packed = (k_even_u & 0xF) | ((k_odd_u & 0xF) << 4)
-
-    packed_k_mask = half_offs < half_k
+    k_packed = (k_even_idx & 0xF) | ((k_odd_idx & 0xF) << 4)
     tl.store(
         key_cache_ptr
         + blk * stride_kc_blk
@@ -420,10 +387,10 @@ def _reshape_cache_int4_packed(
         + head * stride_kc_head
         + half_offs,
         k_packed,
-        mask=packed_k_mask,
+        mask=half_offs < half_k,
     )
 
-    # ---- Value (same algorithm) --------------------------------------------
+    # ---- Value --------------------------------------------------------------
     half_v = head_size_v // 2
     even_v_mask = even_offs < head_size_v
     odd_v_mask = odd_offs < head_size_v
@@ -432,68 +399,24 @@ def _reshape_cache_int4_packed(
     v_even = tl.load(val_base + even_offs, mask=even_v_mask, other=0.0).to(tl.float32)
     v_odd = tl.load(val_base + odd_offs, mask=odd_v_mask, other=0.0).to(tl.float32)
 
-    v_min = tl.minimum(
-        tl.min(tl.where(even_v_mask, v_even, float("inf"))),
-        tl.min(tl.where(odd_v_mask, v_odd, float("inf"))),
+    v_absmax = tl.maximum(
+        tl.max(tl.where(even_v_mask, tl.abs(v_even), 0.0)),
+        tl.max(tl.where(odd_v_mask, tl.abs(v_odd), 0.0)),
     )
-    v_max = tl.maximum(
-        tl.max(tl.where(even_v_mask, v_even, float("-inf"))),
-        tl.max(tl.where(odd_v_mask, v_odd, float("-inf"))),
-    )
-    v_scale_init = tl.maximum((v_max - v_min) / 15.0, 1e-6)
-    v_zp_f = tl.clamp(
-        tl.where(
-            -v_min / v_scale_init >= 0,
-            (-v_min / v_scale_init + 0.5).to(tl.int32),
-            (-v_min / v_scale_init - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-
-    inv_v = 1.0 / v_scale_init
-    v_even_s = v_even * inv_v + v_zp_f
-    v_odd_s = v_odd * inv_v + v_zp_f
-    v_even_q = tl.clamp(
-        tl.where(
-            v_even_s >= 0,
-            (v_even_s + 0.5).to(tl.int32),
-            (v_even_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-    v_odd_q = tl.clamp(
-        tl.where(
-            v_odd_s >= 0,
-            (v_odd_s + 0.5).to(tl.int32),
-            (v_odd_s - 0.5).to(tl.int32),
-        ).to(tl.float32),
-        0.0,
-        15.0,
-    )
-
-    v_scale = v_scale_init
-
-    v_zp_int = v_zp_f.to(tl.int32)
-    v_scale_bits = v_scale.to(tl.int32, bitcast=True)
-    v_scale_packed = ((v_scale_bits & -16) | (v_zp_int & 0xF)).to(
-        tl.float32, bitcast=True
-    )
+    v_scale = tl.maximum(v_absmax, 1e-6)
+    inv_v = 1.0 / v_scale
+    v_even_idx = _nf4_quantize(v_even * inv_v).to(tl.uint8)
+    v_odd_idx = _nf4_quantize(v_odd * inv_v).to(tl.uint8)
 
     tl.store(
         v_scale_cache_ptr
         + blk * stride_vs_blk
         + slot_in_blk * stride_vs_slot
         + head * stride_vs_head,
-        v_scale_packed,
+        v_scale,
     )
 
-    v_even_u = v_even_q.to(tl.uint8)
-    v_odd_u = v_odd_q.to(tl.uint8)
-    v_packed = (v_even_u & 0xF) | ((v_odd_u & 0xF) << 4)
-
-    packed_v_mask = half_offs < half_v
+    v_packed = (v_even_idx & 0xF) | ((v_odd_idx & 0xF) << 4)
     tl.store(
         value_cache_ptr
         + blk * stride_vc_blk
@@ -501,7 +424,7 @@ def _reshape_cache_int4_packed(
         + head * stride_vc_head
         + half_offs,
         v_packed,
-        mask=packed_v_mask,
+        mask=half_offs < half_v,
     )
 
 
@@ -584,7 +507,6 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
             head_size=head_size,
             head_size_v=head_size_v,
             HALF_HEAD_PADDED=half_head_padded,
-            OPTIMAL_CLIP_RATIO=_INT4_OPTIMAL_CLIP_RATIO,
             num_warps=num_warps,
         )
         return
