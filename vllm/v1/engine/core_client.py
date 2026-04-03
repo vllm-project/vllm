@@ -893,8 +893,11 @@ class AsyncMPClient(MPClient):
         client_count: int = 1,
         client_index: int = 0,
     ):
-        if vllm_config.parallel_config.enable_fault_tolerance:
-            client_addresses = client_addresses or {}
+        if (
+            vllm_config.parallel_config.enable_fault_tolerance
+            and client_addresses is None
+        ):
+            client_addresses = {}
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,

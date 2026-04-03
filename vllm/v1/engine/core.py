@@ -854,8 +854,6 @@ class EngineCoreProc(EngineCore):
                 vllm_config.parallel_config.enable_fault_tolerance
             )
             if self.enable_fault_tolerance:
-                ft_config = vllm_config.parallel_config.fault_tolerance_config
-                self.engine_recovery_timeout_sec = ft_config.engine_recovery_timeout_sec
                 assert addresses.fault_tolerance_addresses is not None
                 ft_addresses = addresses.fault_tolerance_addresses
                 engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities

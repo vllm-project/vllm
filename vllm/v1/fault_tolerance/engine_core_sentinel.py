@@ -16,6 +16,9 @@ from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
 from vllm.v1.fault_tolerance.utils import FaultInfo
 
+if TYPE_CHECKING:
+    from vllm.v1.engine.core import EngineCoreProc
+
 
 class EngineCoreSentinel(BaseSentinel):
     """
@@ -38,6 +41,9 @@ class EngineCoreSentinel(BaseSentinel):
         )
 
         self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
+        self.engine_recovery_timeout_sec = (
+            parallel_config.fault_tolerance_config.engine_recovery_timeout_sec
+        )
 
         # Client <-> EngineCoreSentinel sockets
         self.engine_fault_socket = make_zmq_socket(
@@ -81,10 +87,6 @@ class EngineCoreSentinel(BaseSentinel):
         super().shutdown()
 
 
-if TYPE_CHECKING:
-    from vllm.v1.engine.core import EngineCoreProc
-
-
 def fault_tolerant_wrapper(busy_loop_func: Callable):
     """
     Wrap the busy loop function to perform fault tolerance.
@@ -107,7 +109,7 @@ def fault_tolerant_wrapper(busy_loop_func: Callable):
                     # todo: Currently only wait a certain time before shutting
                     #  down the engine. Will implement fault tolerance methods
                     #  in the upcoming PRs.
-                    time.sleep(self.engine_recovery_timeout_sec)
+                    time.sleep(self.engine_core_sentinel.engine_recovery_timeout_sec)
 
                 # Fault tolerance not enabled OR no instruction received
                 # before timeout. Re-raise the original exception
