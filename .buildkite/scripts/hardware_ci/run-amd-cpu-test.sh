@@ -7,7 +7,7 @@ set -euox pipefail
 # allow to bind to different cores
 CORE_RANGE=${CORE_RANGE:-48-95}
 NUMA_NODE=${NUMA_NODE:-1}
-IMAGE_NAME="cpu-test-$NUMA_NODE"
+IMAGE_NAME="amd-cpu-test-$NUMA_NODE"
 TIMEOUT_VAL=$1
 TEST_COMMAND=$2
 
