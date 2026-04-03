@@ -186,11 +186,11 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - tests/standalone_tests/python_only_compile.sh
+  - tests/standalone_tests/python_only_compile_rocm.sh
   - setup.py
   - vllm/platforms/rocm.py
   commands:
-  - bash standalone_tests/python_only_compile.sh
+  - bash standalone_tests/python_only_compile_rocm.sh
 
 
 - label: Basic Correctness # TBD
