@@ -268,7 +268,9 @@ class SteeringManager:
                         phase_global = global_decode
 
                     if phase_global is not None and per_req is not None:
-                        combined = phase_global + per_req.squeeze(0)
+                        combined = phase_global + per_req.squeeze(0).to(
+                            phase_global.device
+                        )
                         table[row].copy_(combined.to(table.dtype))
                     elif phase_global is not None:
                         table[row].copy_(phase_global.to(table.dtype))
