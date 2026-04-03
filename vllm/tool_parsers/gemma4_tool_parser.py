@@ -678,7 +678,7 @@ class Gemma4ToolParser(ToolParser):
         # tokens arrive. Strip trailing '}', '"', and ']' sequences
         # to get the "safe prefix".
         safe_json = current_args_json
-        while safe_json and safe_json[-1] in ("}", '"', "]"):
+        while safe_json and safe_json[-1] in ("}", '"', "]", "<", "|", "\\", ">"):
             safe_json = safe_json[:-1]
 
         prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
