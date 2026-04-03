@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import requests
-from openai import InternalServerError, NotFoundError, OpenAI
+from openai import BadRequestError, InternalServerError, NotFoundError, OpenAI
 from openai_harmony import Message
 
 from tests.utils import RemoteOpenAIServer
@@ -1247,3 +1247,40 @@ async def test_system_prompt_structured_content(client: OpenAI, model_name: str)
     assert response is not None
     assert response.status == "completed"
     assert response.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_truncation_auto(client: OpenAI, model_name: str):
+    """Oversized input with truncation=auto should succeed, not 400."""
+    # Build input that exceeds max_model_len (5000 tokens).
+    filler = "This is filler text to consume tokens. "
+    oversized_input = [{"role": "user", "content": filler} for _ in range(600)]
+
+    response = await client.responses.create(
+        model=model_name,
+        input=oversized_input,
+        truncation="auto",
+        max_output_tokens=16,
+    )
+    assert response is not None
+    assert response.status in ("completed", "incomplete")
+    assert response.usage is not None
+    assert response.usage.input_tokens > 0
+    assert response.usage.input_tokens < 5000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_truncation_disabled_rejects_oversized(client: OpenAI, model_name: str):
+    """Oversized input with truncation=disabled should return 400."""
+    filler = "This is filler text to consume tokens. "
+    oversized_input = [{"role": "user", "content": filler} for _ in range(600)]
+
+    with pytest.raises(BadRequestError):
+        await client.responses.create(
+            model=model_name,
+            input=oversized_input,
+            truncation="disabled",
+            max_output_tokens=16,
+        )
