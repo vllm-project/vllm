@@ -164,18 +164,10 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     )
     apply_input_quant: ClassVar[bool] = False
 
-    @classmethod
-    def is_supported(cls, compute_capability=None):
-        if envs.VLLM_BATCH_INVARIANT:
-            return False, "Always use deepgemm for batch invariant"
-        return super().is_supported(compute_capability)
-
     def __init__(self, config: FP8ScaledMMLinearLayerConfig):
         super().__init__(config)
         self.base: FlashInferFp8BlockScaledMMKernel
         self.fallback: DeepGemmFp8BlockScaledMMKernel
-        # Use DeepGEMM's quant_fp8, since FlashInfer does not quantize the activation.
-        self.quant_fp8 = self.fallback.quant_fp8
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         # DeepGEMM need post-processing; both kernels share the same
@@ -298,6 +290,9 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
             is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
         )
         return output
+
+    if envs.VLLM_BATCH_INVARIANT:
+        return run_deepgemm(input, weight, weight_scale)
 
     condition = input.shape[0] < 32
 
