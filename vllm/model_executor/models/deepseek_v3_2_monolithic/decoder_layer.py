@@ -388,6 +388,50 @@ class MonolithicDecoderLayer(nn.Module):
 
         return hidden_states, residual
 
+    def fuse_shared_expert_act_quant(self) -> None:
+        """Fuse SiLU-and-Mul + NVFP4 quantize in the shared expert MLP.
+
+        Replaces the shared expert forward so that the activation and the
+        FP4 input quantisation happen in a single kernel.  The monolithic
+        path always runs on Blackwell with FLASHINFER_CUTLASS for linear
+        NVFP4, so we hard-code that backend.
+        """
+        if not self.is_moe:
+            return
+        shared_experts = self.mlp.shared_experts
+        if shared_experts is None:
+            return
+
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptNvFp4LinearMethod,
+        )
+
+        if not isinstance(
+            shared_experts.down_proj.quant_method, ModelOptNvFp4LinearMethod
+        ):
+            return
+
+        from vllm._custom_ops import silu_and_mul_nvfp4_quant
+        from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
+
+        dp = shared_experts.down_proj
+
+        def _fused_forward(x: torch.Tensor) -> torch.Tensor:
+            gate_up, _ = shared_experts.gate_up_proj(x)
+            x_fp4, x_bs = silu_and_mul_nvfp4_quant(gate_up, dp.input_global_scale_inv)
+            out = flashinfer_scaled_fp4_mm(
+                x_fp4,
+                dp.weight,
+                x_bs,
+                dp.weight_scale,
+                dp.alpha,
+                gate_up.dtype,
+                backend="cutlass",
+            )
+            return out
+
+        shared_experts.forward = _fused_forward
+
 
 @torch.compile
 def scale_and_add(x: torch.Tensor, scale: float, y: torch.Tensor) -> torch.Tensor:

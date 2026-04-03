@@ -104,6 +104,40 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         return None
 
 
+def silu_and_mul_nvfp4_quant(
+    input: torch.Tensor,
+    input_global_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused SiLU-and-Mul + NVFP4 quantization.
+
+    Computes silu(input[..., :d]) * input[..., d:] and quantizes the result
+    to FP4 in a single kernel launch, avoiding the intermediate BF16/FP16
+    materialization between the activation and the quantization.
+
+    Args:
+        input: The pre-activation tensor of shape [..., 2 * d].
+        input_global_scale: A scalar (1/input_scale) used for FP4 quantization.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: The FP4-quantized output (uint8,
+            two values packed per byte) and float8_e4m3 block scaling factors.
+    """
+    d = input.shape[-1] // 2
+    other_dims = 1 if input.ndim == 1 else -1
+    input = input.reshape(other_dims, input.shape[-1])
+    m, _ = input.shape
+
+    output, output_scale = create_fp4_output_tensors(
+        m, d, input.device, is_sf_swizzled_layout=True
+    )
+    torch.ops._C.silu_and_mul_nvfp4_quant(
+        output, output_scale, input, input_global_scale
+    )
+    output_scale = output_scale.view(torch.float8_e4m3fn)
+    return output, output_scale
+
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
