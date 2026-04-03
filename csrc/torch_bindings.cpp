@@ -202,25 +202,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // conditionally compiled so impl registration is in source file
 
 #endif
-
-  // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "Tensor! ssm_states,"
-      "int null_block_id,"
-      "int block_size,"
-      "Tensor? block_idx_first_scheduled_token,"
-      "Tensor? block_idx_last_scheduled_token,"
-      "Tensor? initial_state_idx,"
-      "Tensor? cu_chunk_seqlen,"
-      "Tensor? last_chunk_indices) -> ()");
-  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

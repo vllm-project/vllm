@@ -280,7 +280,6 @@ endif()
 #
 
 set(VLLM_EXT_SRC
-  "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
   "csrc/cache_kernels.cu"
   "csrc/cache_kernels_fused.cu"
   "csrc/attention/paged_attention_v1.cu"
@@ -605,7 +604,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
     "csrc/libtorch_stable/attention/merge_attn_states.cu"
     "csrc/libtorch_stable/sampler.cu"
-    "csrc/libtorch_stable/topk.cu")
+    "csrc/libtorch_stable/topk.cu"
+    "csrc/libtorch_stable/mamba/selective_scan_fwd.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
