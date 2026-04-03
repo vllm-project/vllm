@@ -25,9 +25,12 @@ steps:
 - label: AMD-CPU-Kernel Tests
   depends_on: []
   soft_fail: false
-  device: amd_zen_cpu
+  device: amd-zen-cpu-inference
   no_plugin: true
   source_file_dependencies:
+  - csrc/cpu/
+  - cmake/cpu_extension.cmake
+  - CMakeLists.txt
   - vllm/model_executor/layers/utils.py
   - vllm/platforms/zen_cpu.py
   - vllm/platforms/__init__.py
@@ -53,7 +56,7 @@ steps:
 - label: AMD-CPU-Compatibility Tests
   depends_on: []
   soft_fail: false
-  device: amd_zen_cpu
+  device: amd-zen-cpu-inference
   no_plugin: true
   source_file_dependencies:
   - setup.py
@@ -85,9 +88,10 @@ steps:
 - label: AMD-CPU-Language Generation and Pooling Model Tests
   depends_on: []
   soft_fail: false
-  device: amd_zen_cpu
+  device: amd-zen-cpu-inference
   no_plugin: true
   source_file_dependencies:
+  - csrc/cpu/
   - vllm/model_executor/layers/utils.py
   - vllm/platforms/zen_cpu.py
   - vllm/platforms/__init__.py
@@ -143,7 +147,7 @@ steps:
 - label: AMD-CPU-Distributed Tests
   depends_on: []
   soft_fail: false
-  device: amd_zen_cpu
+  device: amd-zen-cpu-inference
   no_plugin: true
   source_file_dependencies:
   - csrc/cpu/shm.cpp
