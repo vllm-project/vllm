@@ -236,6 +236,17 @@ class CacheConfig:
             object.__setattr__(self, "user_specified_mamba_block_size", True)
         return self
 
+    @model_validator(mode="after")
+    def _validate_tlru_requires_prefix_caching(self) -> "CacheConfig":
+        if self.tlru_xi_tokens is not None and not self.enable_prefix_caching:
+            raise ValueError(
+                "T-LRU eviction (--tlru-xi-tokens) requires prefix caching "
+                "to be enabled (--enable-prefix-caching). T-LRU classifies "
+                "cached prefix blocks as TEL-safe or protected; without "
+                "prefix caching there are no cached blocks to classify."
+            )
+        return self
+
     @field_validator("calculate_kv_scales", mode="after")
     @classmethod
     def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:

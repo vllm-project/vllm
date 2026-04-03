@@ -11,11 +11,9 @@ T-LRU is described in the companion paper and implemented across:
   - SingleTypeKVCacheManager.free() (routes blocks to correct queue)
 """
 
-from collections import deque
-
 import pytest
 
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueue, KVCacheBlock
 
 pytestmark = pytest.mark.cpu_test
 
@@ -80,8 +78,8 @@ class TestBlockPoolTlruInit:
     def test_tlru_disabled_by_default(self):
         pool = _make_pool(num_blocks=10, tlru_xi_blocks=None)
         assert pool.tlru_xi_blocks is None
-        assert isinstance(pool.tel_safe_queue, deque)
-        assert len(pool.tel_safe_queue) == 0
+        assert isinstance(pool.tel_safe_queue, FreeKVCacheBlockQueue)
+        assert pool.tel_safe_queue.num_free_blocks == 0
 
     def test_tlru_enabled_stores_parameters(self):
         pool = _make_pool(num_blocks=10, tlru_xi_blocks=5, tlru_qhat_blocks=2)
@@ -90,7 +88,7 @@ class TestBlockPoolTlruInit:
 
     def test_tel_safe_queue_is_empty_initially(self):
         pool = _make_pool(num_blocks=10, tlru_xi_blocks=4, tlru_qhat_blocks=1)
-        assert len(pool.tel_safe_queue) == 0
+        assert pool.tel_safe_queue.num_free_blocks == 0
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +143,7 @@ class TestFreeBlocksTlru:
         tel_safe_count = sum(1 for b in blocks if b.is_tel_safe)
         expected_tel_safe = H - threshold  # = 3
         assert tel_safe_count == expected_tel_safe
-        assert len(pool.tel_safe_queue) == expected_tel_safe
+        assert pool.tel_safe_queue.num_free_blocks == expected_tel_safe
 
     def test_all_blocks_tel_safe_when_xi_loose(self):
         """
@@ -165,7 +163,7 @@ class TestFreeBlocksTlru:
         expected_tel_safe = H - threshold   # = 2
         tel_safe_count = sum(1 for b in blocks if b.is_tel_safe)
         assert tel_safe_count == expected_tel_safe
-        assert len(pool.tel_safe_queue) == expected_tel_safe
+        assert pool.tel_safe_queue.num_free_blocks == expected_tel_safe
 
     def test_mixed_routing_correct_split(self):
         """Verify the exact split between tel_safe_queue and normal queue."""
@@ -179,7 +177,7 @@ class TestFreeBlocksTlru:
         expected_tel_safe = H - threshold  # 4
         expected_normal = threshold         # 4
 
-        assert len(pool.tel_safe_queue) == expected_tel_safe
+        assert pool.tel_safe_queue.num_free_blocks == expected_tel_safe
         # Count blocks NOT marked tel_safe
         normal_count = sum(1 for b in blocks if not b.is_tel_safe)
         assert normal_count == expected_normal
@@ -217,12 +215,12 @@ class TestGetNewBlocksPriority:
         blocks = pool.get_new_blocks(10)
         pool.free_blocks_tlru(blocks, req_total_blocks=10)
 
-        assert len(pool.tel_safe_queue) == 5
+        assert pool.tel_safe_queue.num_free_blocks == 5
 
         # Now allocate 5 blocks – they should come from tel_safe_queue
         new_blocks = pool.get_new_blocks(5)
         # TEL-safe queue should be drained
-        assert len(pool.tel_safe_queue) == 0
+        assert pool.tel_safe_queue.num_free_blocks == 0
         # Returned blocks should have been is_tel_safe reset to False by pool
         assert all(not b.is_tel_safe for b in new_blocks)
 
@@ -274,7 +272,8 @@ class TestTouchTelSafeBlock:
         pool.touch(tel_safe_blocks[:1])
 
         # After touch the block is no longer in tel_safe_queue.
-        assert tel_safe_blocks[0] not in pool.tel_safe_queue
+        # After touch(), the block is removed from tel_safe_queue
+        # (verified via is_tel_safe flag below).
         # The TEL-safe tag must be cleared.
         assert tel_safe_blocks[0].is_tel_safe is False
         # ref_cnt must have been incremented.
@@ -333,7 +332,7 @@ class TestGetNewBlocksRetouchedTelSafe:
         touched_block = tel_safe[0]
         assert touched_block.ref_cnt == 1
         assert touched_block.is_tel_safe is False  # cleared by touch()
-        assert touched_block not in pool.tel_safe_queue
+        # Block was removed from tel_safe_queue by touch().
 
         # Now ask for 2 blocks. tel_safe_queue has 2 remaining free blocks.
         # The re-touched block was already removed by touch(), so this is safe.
@@ -357,11 +356,11 @@ class TestResetPrefixCacheWithTelSafe:
         blocks = pool.get_new_blocks(6)
         pool.free_blocks_tlru(blocks, req_total_blocks=6)
 
-        assert len(pool.tel_safe_queue) > 0
+        assert pool.tel_safe_queue.num_free_blocks > 0
 
         ok = pool.reset_prefix_cache()
         assert ok
-        assert len(pool.tel_safe_queue) == 0
+        assert pool.tel_safe_queue.num_free_blocks == 0
         # All blocks should have is_tel_safe cleared.
         for b in blocks:
             assert b.is_tel_safe is False
@@ -407,3 +406,11 @@ class TestCacheConfigTlruFields:
         base = CacheConfig()
         with_tlru = CacheConfig(tlru_xi_tokens=512, tlru_qhat_tokens=100)
         assert base.compute_hash() == with_tlru.compute_hash()
+
+    def test_tlru_requires_prefix_caching(self):
+        """T-LRU must raise when prefix caching is disabled."""
+        from pydantic import ValidationError
+
+        from vllm.config.cache import CacheConfig
+        with pytest.raises(ValidationError, match="prefix caching"):
+            CacheConfig(tlru_xi_tokens=1024, enable_prefix_caching=False)

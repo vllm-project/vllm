@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
@@ -134,8 +135,13 @@ class KVCacheManager:
         # KV cache group (they must all share the same block_size for now).
         if tlru_xi_tokens is not None and kv_cache_config.kv_cache_groups:
             _block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-            tlru_xi_blocks: int | None = tlru_xi_tokens // _block_size
-            tlru_qhat_blocks: int = tlru_qhat_tokens // _block_size
+            # Use ceil for xi so we are conservative (a partial block
+            # still counts toward the SLA budget).  Use ceil for qhat
+            # so the estimated prompt length is not under-counted.
+            tlru_xi_blocks: int | None = math.ceil(
+                tlru_xi_tokens / _block_size)
+            tlru_qhat_blocks: int = math.ceil(
+                tlru_qhat_tokens / _block_size)
         else:
             tlru_xi_blocks = None
             tlru_qhat_blocks = 0

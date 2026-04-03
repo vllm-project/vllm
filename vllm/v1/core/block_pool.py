@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import deque
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -169,7 +168,9 @@ class BlockPool:
         # TEL-safe eviction queue (Phase 1): holds blocks whose position in
         # the conversation is beyond the TEL-safe cap.  Eviction always drains
         # this queue before touching the normal LRU free_block_queue.
-        self.tel_safe_queue: deque[KVCacheBlock] = deque()
+        # Uses FreeKVCacheBlockQueue (doubly-linked list) for O(1) removal in
+        # touch(), matching the data structure used by free_block_queue.
+        self.tel_safe_queue = FreeKVCacheBlockQueue([])
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -349,21 +350,14 @@ class BlockPool:
         # blocks in the normal free_block_queue are candidates for prefix-cache
         # prefetch; tel_safe blocks are not cached but can supply raw memory.
         ret: list[KVCacheBlock] = []
-        while len(ret) < num_blocks and self.tel_safe_queue:
+        while len(ret) < num_blocks and self.tel_safe_queue.num_free_blocks > 0:
             block = self.tel_safe_queue.popleft()
             # The block may have been re-touched (ref_cnt > 0) since it was
             # queued; skip it in that case.  We must still clear the TEL-safe
-            # tag and return it to the normal LRU queue so it is not lost.
+            # tag so it is not lost.
             block.is_tel_safe = False
             if block.ref_cnt == 0 and not block.is_null:
                 ret.append(block)
-            elif not block.is_null:
-                # Block was touched (cache hit) while sitting in tel_safe_queue.
-                # It now has ref_cnt > 0, so it is in-use; do nothing — the
-                # caller that called touch() already incremented ref_cnt.
-                # When the caller eventually frees the block it will land back in
-                # one of the two free queues through the normal free_blocks* path.
-                pass
         # Fall back to normal LRU queue for the remaining blocks.
         remaining = num_blocks - len(ret)
         if remaining > 0:
@@ -438,9 +432,8 @@ class BlockPool:
             # candidate), so remove it from whichever queue it is in.
             if block.ref_cnt == 0 and not block.is_null:
                 if block.is_tel_safe:
-                    # Block is in tel_safe_queue (a deque), not in the
-                    # doubly-linked free_block_queue.  Remove it from there
-                    # and clear the T-LRU tag so subsequent logic is clean.
+                    # Block is in tel_safe_queue.  Remove it (O(1) via
+                    # doubly-linked list) and clear the T-LRU tag.
                     self.tel_safe_queue.remove(block)
                     block.is_tel_safe = False
                 else:
@@ -497,6 +490,7 @@ class BlockPool:
         for block in blocks_list:
             block.ref_cnt -= 1
 
+        tel_safe_blocks: list[KVCacheBlock] = []
         normal_blocks: list[KVCacheBlock] = []
         for idx, block in enumerate(blocks_list):
             if block.ref_cnt != 0 or block.is_null:
@@ -508,10 +502,11 @@ class BlockPool:
             # i.e. idx <= req_total_blocks-1-B = num_tel_safe-1.
             if idx < num_tel_safe:
                 block.is_tel_safe = True
-                self.tel_safe_queue.append(block)
+                tel_safe_blocks.append(block)
             else:
                 normal_blocks.append(block)
 
+        self.tel_safe_queue.append_n(tel_safe_blocks)
         self.free_block_queue.append_n(normal_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
@@ -555,11 +550,13 @@ class BlockPool:
         # clear their tags.  After a cache reset the TEL-safe distinction is
         # meaningless, and leaving blocks in tel_safe_queue with stale
         # is_tel_safe=True flags would confuse touch() and get_new_blocks().
-        while self.tel_safe_queue:
+        drained: list[KVCacheBlock] = []
+        while self.tel_safe_queue.num_free_blocks > 0:
             block = self.tel_safe_queue.popleft()
             block.is_tel_safe = False
             if not block.is_null:
-                self.free_block_queue.append(block)
+                drained.append(block)
+        self.free_block_queue.append_n(drained)
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
@@ -584,7 +581,8 @@ class BlockPool:
         Returns:
             The number of free blocks (normal LRU queue + TEL-safe queue).
         """
-        return self.free_block_queue.num_free_blocks + len(self.tel_safe_queue)
+        return (self.free_block_queue.num_free_blocks
+                + self.tel_safe_queue.num_free_blocks)
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
