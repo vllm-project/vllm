@@ -324,6 +324,7 @@ class RequestState:
             if kv_transfer_params is None:
                 outputs, finished = self.parent_req.get_outputs(self.request_id, output)
             else:
+                assert isinstance(kv_transfer_params, dict)
                 output_with_kv_transfer = self.parent_req.aggre_kv_transfer_params(
                     self.request_id, output, kv_transfer_params
                 )

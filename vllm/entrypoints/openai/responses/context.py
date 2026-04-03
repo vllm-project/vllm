@@ -182,7 +182,7 @@ class SimpleContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
-        self.kv_transfer_params: dict[str, Any] | None = None
+        self.kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -311,7 +311,7 @@ class ParsableContext(ConversationContext):
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
-        self.kv_transfer_params: dict[str, Any] | None = None
+        self.kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
@@ -544,7 +544,7 @@ class HarmonyContext(ConversationContext):
         self.all_turn_metrics: list[TurnMetrics] = []
         self.is_first_turn = True
         self.first_tok_of_message = True  # For streaming support
-        self.kv_transfer_params: dict[str, Any] | None = None
+        self.kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None
 
     def _update_num_reasoning_tokens(self):
         channel = self.parser.current_channel

@@ -113,7 +113,7 @@ class AnthropicMessagesRequest(BaseModel):
     top_p: float | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
-    kv_transfer_params: dict[str, Any] | None = Field(
+    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
@@ -188,7 +188,7 @@ class AnthropicMessagesResponse(BaseModel):
     usage: AnthropicUsage | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
-    kv_transfer_params: dict[str, Any] | None = Field(
+    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
         default=None, description="KVTransfer parameters."
     )
 
