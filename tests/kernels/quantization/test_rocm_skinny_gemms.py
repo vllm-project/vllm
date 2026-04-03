@@ -239,9 +239,12 @@ def test_rocm_wvsplitk_kernel(
 
 
 @pytest.mark.parametrize("n,k,m", GEMMA_3_1B_DECODE_FACTORS)
+@pytest.mark.parametrize("padded_weight", [False, True])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
-def test_rocm_unquantized_gemm_gemma_decode_regression_mi250x(n, k, m):
+def test_rocm_unquantized_gemm_gemma_decode_regression_mi250x(
+    n, k, m, padded_weight
+):
     if not on_gfx9() or on_gfx942() or on_gfx950():
         pytest.skip("only meant for MI250X/gfx90a")
 
@@ -250,6 +253,8 @@ def test_rocm_unquantized_gemm_gemma_decode_regression_mi250x(n, k, m):
     a = a / math.sqrt(k)
     b = ((torch.rand(m, k, dtype=torch.bfloat16, device="cuda") * 2) - 1)
     b = b / math.sqrt(k)
+    if padded_weight:
+        b = pad_fp8(b)
 
     ref_out = torch.nn.functional.linear(a, b, None)
     out = rocm_unquantized_gemm_impl(a, b, None)

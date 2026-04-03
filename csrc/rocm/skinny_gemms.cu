@@ -340,6 +340,30 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
 }
 
+#if defined(__HIP__GFX9__)
+__device__ inline float wvsplitk_reduce_wave_gfx9(float value) {
+  asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
+      : "=v"(value)
+      : "0"(value), "v"(value), "v"(value));
+  asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
+      : "=v"(value)
+      : "0"(value), "v"(value), "v"(value));
+  asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
+      : "=v"(value)
+      : "0"(value), "v"(value), "v"(value));
+  asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
+      : "=v"(value)
+      : "0"(value), "v"(value), "v"(value));
+  asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:15 bound_ctrl:0"
+      : "=v"(value)
+      : "0"(value), "v"(value), "v"(value));
+  asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
+      : "=v"(value)
+      : "0"(value), "v"(value), "v"(value));
+  return value;
+}
+#endif
+
 #if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets cases where A[] fits LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
@@ -474,6 +498,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
+#if defined(__HIP__GFX9__)
+          sum[n][y] = wvsplitk_reduce_wave_gfx9(sum[n][y]);
+#else
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
                                                 1);  // row_shr8
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
@@ -482,14 +509,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                                                 1);  // row_shr2
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
                                                 1);  // row_shr1
-  #if defined(__HIP__GFX9__)
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
-                                                1);  // ROW_BCAST15
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
-                                                1);  // ROW_BCAST31
-  #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-  #endif
+#endif
         }
       }
 
@@ -695,6 +716,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
+#if defined(__HIP__GFX9__)
+          sum[n][y] = wvsplitk_reduce_wave_gfx9(sum[n][y]);
+#else
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
                                                 1);  // row_shr8
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
@@ -703,14 +727,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                                                 1);  // row_shr2
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
                                                 1);  // row_shr1
-  #if defined(__HIP__GFX9__)
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
-                                                1);  // ROW_BCAST15
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
-                                                1);  // ROW_BCAST31
-  #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-  #endif
+#endif
         }
       }
 
@@ -1048,6 +1066,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
+#if defined(__HIP__GFX9__)
+          sum[n][y] = wvsplitk_reduce_wave_gfx9(sum[n][y]);
+#else
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
                                                 1);  // row_shr8
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
@@ -1056,14 +1077,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                                                 1);  // row_shr2
           sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
                                                 1);  // row_shr1
-  #if defined(__HIP__GFX9__)
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
-                                                1);  // ROW_BCAST15
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
-                                                1);  // ROW_BCAST31
-  #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-  #endif
+#endif
         }
       }
 
