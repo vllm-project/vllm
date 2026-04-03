@@ -109,8 +109,8 @@ NKM_FACTORS_WVSPLITK_FP8 = [
 
 SEEDS = [0]
 
-GEMMA_3_1B_DECODE_FACTORS = [
-    # Gemma-3-1B MLP projection during decode on MI250X/gfx90a.
+MI250X_DECODE_REGRESSION_FACTORS = [
+    # Representative decode shape on MI250X/gfx90a.
     # n is the flattened token count, so n <= 4 takes the ROCm wvSplitK path.
     (1, 1152, 6912),
 ]
@@ -238,11 +238,11 @@ def test_rocm_wvsplitk_kernel(
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
-@pytest.mark.parametrize("n,k,m", GEMMA_3_1B_DECODE_FACTORS)
+@pytest.mark.parametrize("n,k,m", MI250X_DECODE_REGRESSION_FACTORS)
 @pytest.mark.parametrize("padded_weight", [False, True])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
-def test_rocm_unquantized_gemm_gemma_decode_regression_mi250x(
+def test_rocm_unquantized_gemm_decode_regression_mi250x(
     n, k, m, padded_weight
 ):
     if not on_gfx9() or on_gfx942() or on_gfx950():
