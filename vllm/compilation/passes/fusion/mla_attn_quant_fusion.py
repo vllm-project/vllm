@@ -11,9 +11,9 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     QuantKey,
-    ScaleDesc,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -245,7 +245,7 @@ class MLAAttnFp8GroupQuantPattern(
         self,
         layer: MLAAttention,
         dtype: torch.dtype,
-        group_size: int,
+        quant_key: QuantKey,
         has_col_major_scales: bool,
         is_e8m0: bool,
         is_tma_aligned: bool,
@@ -259,13 +259,11 @@ class MLAAttnFp8GroupQuantPattern(
         self._output_dim = layer.num_heads * layer.v_head_dim
         self._dtype = dtype
         self._layer = layer
-        self._group_size = group_size
+        self._group_size = quant_key.scale.group_shape[1]
         self._has_col_major_scales = has_col_major_scales
         self._is_e8m0 = is_e8m0
         self._is_tma_aligned = is_tma_aligned
 
-        scale = ScaleDesc(torch.float32, False, GroupShape(1, group_size))
-        quant_key = QuantKey(FP8_DTYPE, scale, symmetric=True)
         self._quant_matcher = MatcherQuantFP8(
             quant_key,
             has_col_major_scales=has_col_major_scales,
@@ -283,6 +281,7 @@ class MLAAttnFp8GroupQuantPattern(
             k_pe: torch.Tensor,
             output_attn: torch.Tensor,
             kv_cache_dummy_dep: torch.Tensor,
+            scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at1 = auto_functionalized(
                 MLA_ATTN_OP,
@@ -295,8 +294,25 @@ class MLAAttnFp8GroupQuantPattern(
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
-            # MLA output is already 2D (T, N*V), no reshape needed
-            return self._quant_matcher(at1[1])
+            attn_out = at1[1]
+            result = torch.empty(
+                attn_out.shape, device=attn_out.device, dtype=FP8_DTYPE
+            )
+            finfo = torch.finfo(FP8_DTYPE)
+            _, result, scale = auto_functionalized(
+                self._quant_matcher.QUANT_OP,
+                input=attn_out,
+                output_q=result,
+                output_s=scale,
+                group_size=self._group_size,
+                eps=1e-10,
+                fp8_min=finfo.min,
+                fp8_max=finfo.max,
+                scale_ue8m0=self._is_e8m0,
+                dummy_is_scale_transposed=self._has_col_major_scales,
+                dummy_is_tma_aligned=self._is_tma_aligned,
+            )
+            return result, scale
 
         return _pattern
 
@@ -310,6 +326,7 @@ class MLAAttnFp8GroupQuantPattern(
             k_pe: torch.Tensor,
             output_attn: torch.Tensor,
             kv_cache_dummy_dep: torch.Tensor,
+            scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # Set config on the layer now that this pattern matched.
             # Done here (not in __init__) because all flag combinations
@@ -367,6 +384,7 @@ class MLAAttnFp8GroupQuantPattern(
             self.empty(5, 1, self._qk_rope_head_dim, dtype=self._dtype),
             self.empty(5, self._output_dim, dtype=self._dtype),
             self.empty(0, dtype=self._dtype),
+            self._quant_matcher.empty_f32(1, 1),
         ]
 
 
@@ -402,15 +420,9 @@ class MLAAttnQuantFusionPass(VllmFusionPatternMatcherPass):
                 if layer.impl.fused_output_quant_supported(kNvfp4Dynamic):
                     self.register(MLAAttnNvfp4QuantPattern(layer, dtype))
 
-        # Per-group FP8 (block quant) — register all flag combinations
+        # Per-group FP8 (block quant) — register all flag combinations.
         if current_platform.is_cuda():
-            for group_size in [128, 64]:
-                group_shape = GroupShape(1, group_size)
-                quant_key = QuantKey(
-                    FP8_DTYPE,
-                    ScaleDesc(torch.float32, False, group_shape),
-                    symmetric=True,
-                )
+            for quant_key in [kFp8Dynamic128Sym, kFp8Dynamic64Sym]:
                 for col_major in [True, False]:
                     for is_e8m0 in [True, False]:
                         for tma_aligned in [False, True]:
@@ -420,7 +432,7 @@ class MLAAttnQuantFusionPass(VllmFusionPatternMatcherPass):
                                         MLAAttnFp8GroupQuantPattern(
                                             layer,
                                             dtype,
-                                            group_size,
+                                            quant_key,
                                             col_major,
                                             is_e8m0,
                                             tma_aligned,
