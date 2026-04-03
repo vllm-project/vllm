@@ -302,7 +302,6 @@ def use_rocm_custom_paged_attention(
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024
             and sinks is None
         )
 
@@ -314,7 +313,6 @@ def use_rocm_custom_paged_attention(
             and head_size == 128
             and block_size == 16
             and (gqa_ratio >= 3 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024
             and alibi_slopes is None
             and kv_cache_dtype == "auto"
             and sinks is None

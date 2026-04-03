@@ -68,6 +68,18 @@ enum class MFMAType {
   Fp4 = 2,
 };
 
+// Forward declaration of merge kernel - defined here so it's available to all architectures
+template <typename scalar_t, typename OUTT, int HEAD_SIZE>
+__global__ void paged_attention_merge_reduce_kernel(
+    OUTT* __restrict__ out,
+    const scalar_t* __restrict__ tmp_out,
+    const int64_t temp_base_offset,
+    const int* __restrict__ seq_lens,
+    const int* __restrict__ query_start_loc_ptr,
+    const int num_passes,
+    const int num_heads,
+    const float* __restrict__ fp8_out_scale_ptr);
+
 #if defined(__HIP__GFX9__)
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
@@ -1436,7 +1448,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions, head_size]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const int seq_len_offset,
+    const int64_t temp_offset,
+    const int partition_offset) {
   const auto num_heads = gridDim.x;
   const auto head_idx = blockIdx.x;
   const auto seq_idx = blockIdx.y;
@@ -1448,16 +1463,31 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     return;
   }
 
-  const int seq_len = seq_lens[seq_idx];
+  const int seq_len = seq_lens[seq_idx] - seq_len_offset;
+  if (seq_len <= 0) {
+    // No work for this pass. In multi-pass mode (OUTT==float4), write a neutral
+    // element so the merge kernel correctly ignores this pass via exp(-FLT_MAX)≈0.
+    if constexpr (std::is_same<OUTT, float4>::value) {
+      const int64_t query_start_off = static_cast<int64_t>(
+          query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+      float4* temp_dst = reinterpret_cast<float4*>(
+          reinterpret_cast<char*>(const_cast<scalar_t*>(tmp_out)) + temp_offset);
+      float4* temp_out_ptr = temp_dst + query_start_off * num_heads * HEAD_SIZE +
+                             static_cast<int64_t>(head_idx) * HEAD_SIZE;
+      temp_out_ptr[threadIdx.x] = make_float4(0.f, 0.f, -FLT_MAX, 0.f);
+    }
+    return;
+  }
   const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
   const auto warpid = threadIdx.x / WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
+  __shared__ float shared_max_logit;
   // max num partitions supported is warp_size * NPAR_LOOPS
   __shared__ float shared_exp_sums[NPAR_LOOPS * WARP_SIZE];
 
   if (warpid == 0) {
-    const float* max_logits_ptr = max_logits +
+    const float* max_logits_ptr = max_logits + partition_offset +
                                   seq_idx * num_heads * max_num_partitions +
                                   head_idx * max_num_partitions;
 
@@ -1488,7 +1518,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
-    const float* exp_sums_ptr = exp_sums +
+    const float* exp_sums_ptr = exp_sums + partition_offset +
                                 seq_idx * num_heads * max_num_partitions +
                                 head_idx * max_num_partitions;
 
@@ -1521,11 +1551,13 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     }
     if (threadIdx.x == 0) {
       shared_global_exp_sum = global_exp_sum;
+      shared_max_logit = max_logit;
     }
   }  // warpid == 0
   const scalar_t* tmp_out_ptr =
       tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-      head_idx * max_num_partitions * HEAD_SIZE + threadIdx.x;
+      head_idx * max_num_partitions * HEAD_SIZE +
+      static_cast<int64_t>(partition_offset) * HEAD_SIZE + threadIdx.x;
   constexpr int MAX_NPAR = 64;
   scalar_t tmps[MAX_NPAR];
   const float dzero = 0.0f;
@@ -1614,18 +1646,31 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       __fdividef(1.0f, shared_global_exp_sum + 1e-6f);
   const float out_scale =
       (fp8_out_scale_ptr != nullptr) ? 1.0f / (*fp8_out_scale_ptr) : 1.0f;
-  acc *= inv_global_exp_sum;
-  acc *= out_scale;
+
   const int64_t query_start_off = static_cast<int64_t>(
       query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
   OUTT* out_ptr = out + query_start_off * num_heads * HEAD_SIZE +
                   static_cast<int64_t>(head_idx) * HEAD_SIZE;
-  if constexpr (std::is_same<OUTT, bit8_t>::value) {
-    out_ptr[threadIdx.x] =
-        __hip_cvt_float_to_fp8(acc, vllm::fp8::fp8_type::__default_saturation,
-                               vllm::fp8::fp8_type::__default_interpret);
+
+  // If OUTT is float4, output (acc, exp_sum, max_logit, 0) for merging multiple reductions.
+  // Use temp_offset from tmp_out instead of 'out' to avoid derived pointers in CUDA graphs.
+  if constexpr (std::is_same<OUTT, float4>::value) {
+    float4* temp_dst = reinterpret_cast<float4*>(
+        reinterpret_cast<char*>(const_cast<scalar_t*>(tmp_out)) + temp_offset);
+    float4* temp_out_ptr = temp_dst + query_start_off * num_heads * HEAD_SIZE +
+                           static_cast<int64_t>(head_idx) * HEAD_SIZE;
+    temp_out_ptr[threadIdx.x] =
+        make_float4(acc, shared_global_exp_sum, shared_max_logit, 0.f);
   } else {
-    out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+    acc *= inv_global_exp_sum;
+    acc *= out_scale;
+    if constexpr (std::is_same<OUTT, bit8_t>::value) {
+      out_ptr[threadIdx.x] =
+          __hip_cvt_float_to_fp8(acc, vllm::fp8::fp8_type::__default_saturation,
+                                 vllm::fp8::fp8_type::__default_interpret);
+    } else {
+      out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+    }
   }
 }
 
@@ -2203,7 +2248,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions, head_size]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const int seq_len_offset,
+    const int64_t temp_offset,
+    const int partition_offset) {
   const auto num_heads = gridDim.x;
   const auto head_idx = blockIdx.x;
   const auto seq_idx = blockIdx.y;
@@ -2215,16 +2263,31 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     return;
   }
 
-  const int seq_len = seq_lens[seq_idx];
+  const int seq_len = seq_lens[seq_idx] - seq_len_offset;
+  if (seq_len <= 0) {
+    // No work for this pass. In multi-pass mode (OUTT==float4), write a neutral
+    // element so the merge kernel correctly ignores this pass via exp(-FLT_MAX)≈0.
+    if constexpr (std::is_same<OUTT, float4>::value) {
+      const int64_t query_start_off = static_cast<int64_t>(
+          query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+      float4* temp_dst = reinterpret_cast<float4*>(
+          reinterpret_cast<char*>(const_cast<scalar_t*>(tmp_out)) + temp_offset);
+      float4* temp_out_ptr = temp_dst + query_start_off * num_heads * HEAD_SIZE +
+                             static_cast<int64_t>(head_idx) * HEAD_SIZE;
+      temp_out_ptr[threadIdx.x] = make_float4(0.f, 0.f, -FLT_MAX, 0.f);
+    }
+    return;
+  }
   const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
   const int warpid = threadIdx.x / WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
+  __shared__ float shared_max_logit;
   // max num partitions supported is warp_size * NPAR_LOOPS
   __shared__ float shared_exp_sums[NPAR_LOOPS * WARP_SIZE];
 
   if (warpid == 0) {
-    const float* max_logits_ptr = max_logits +
+    const float* max_logits_ptr = max_logits + partition_offset +
                                   seq_idx * num_heads * max_num_partitions +
                                   head_idx * max_num_partitions;
 
@@ -2255,7 +2318,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
-    const float* exp_sums_ptr = exp_sums +
+    const float* exp_sums_ptr = exp_sums + partition_offset +
                                 seq_idx * num_heads * max_num_partitions +
                                 head_idx * max_num_partitions;
 
@@ -2288,11 +2351,13 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     }
     if (threadIdx.x == 0) {
       shared_global_exp_sum = global_exp_sum;
+      shared_max_logit = max_logit;
     }
   }  // warpid == 0
   const scalar_t* tmp_out_ptr =
       tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-      head_idx * max_num_partitions * HEAD_SIZE + threadIdx.x;
+      head_idx * max_num_partitions * HEAD_SIZE +
+      static_cast<int64_t>(partition_offset) * HEAD_SIZE + threadIdx.x;
   constexpr int MAX_NPAR = 32;
   scalar_t tmps[MAX_NPAR];
   const float dzero = 0.0f;
@@ -2379,13 +2444,26 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
   const float inv_global_exp_sum =
       __fdividef(1.0f, shared_global_exp_sum + 1e-6f);
-  acc *= inv_global_exp_sum;
 
   const int64_t query_start_off = static_cast<int64_t>(
       query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
   OUTT* out_ptr = out + query_start_off * num_heads * HEAD_SIZE +
                   static_cast<int64_t>(head_idx) * HEAD_SIZE;
-  out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+
+  // If OUTT is float4, output (acc, exp_sum, max_logit, 0) for merging multiple reductions.
+  // Use temp_offset from tmp_out instead of 'out' to avoid derived pointers in CUDA graphs.
+  if constexpr (std::is_same<OUTT, float4>::value) {
+    float4* temp_dst = reinterpret_cast<float4*>(
+        reinterpret_cast<char*>(const_cast<scalar_t*>(tmp_out)) + temp_offset);
+    float4* temp_out_ptr = temp_dst + query_start_off * num_heads * HEAD_SIZE +
+                           static_cast<int64_t>(head_idx) * HEAD_SIZE;
+    temp_out_ptr[threadIdx.x] =
+        make_float4(acc, shared_global_exp_sum, shared_max_logit, 0.f);
+    return;
+  } else {
+    acc *= inv_global_exp_sum;
+    out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+  }
 }
 
 #elif defined(__HIP__GFX12__)
@@ -2936,7 +3014,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions, head_size]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const int seq_len_offset,
+    const int64_t temp_offset,
+    const int partition_offset) {
   const auto num_heads = gridDim.x;
   const auto head_idx = blockIdx.x;
   const auto seq_idx = blockIdx.y;
@@ -2948,16 +3029,31 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     return;
   }
 
-  const int seq_len = seq_lens[seq_idx];
+  const int seq_len = seq_lens[seq_idx] - seq_len_offset;
+  if (seq_len <= 0) {
+    // No work for this pass. In multi-pass mode (OUTT==float4), write a neutral
+    // element so the merge kernel correctly ignores this pass via exp(-FLT_MAX)≈0.
+    if constexpr (std::is_same<OUTT, float4>::value) {
+      const int64_t query_start_off = static_cast<int64_t>(
+          query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+      float4* temp_dst = reinterpret_cast<float4*>(
+          reinterpret_cast<char*>(const_cast<scalar_t*>(tmp_out)) + temp_offset);
+      float4* temp_out_ptr = temp_dst + query_start_off * num_heads * HEAD_SIZE +
+                             static_cast<int64_t>(head_idx) * HEAD_SIZE;
+      temp_out_ptr[threadIdx.x] = make_float4(0.f, 0.f, -FLT_MAX, 0.f);
+    }
+    return;
+  }
   const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
   const int warpid = threadIdx.x / WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
+  __shared__ float shared_max_logit;
   // max num partitions supported is warp_size * NPAR_LOOPS
   __shared__ float shared_exp_sums[NPAR_LOOPS * WARP_SIZE];
 
   if (warpid == 0) {
-    const float* max_logits_ptr = max_logits +
+    const float* max_logits_ptr = max_logits + partition_offset +
                                   seq_idx * num_heads * max_num_partitions +
                                   head_idx * max_num_partitions;
 
@@ -2988,7 +3084,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       max_logit = fmaxf(max_logit, __shfl_xor(max_logit, mask));
     }
 
-    const float* exp_sums_ptr = exp_sums +
+    const float* exp_sums_ptr = exp_sums + partition_offset +
                                 seq_idx * num_heads * max_num_partitions +
                                 head_idx * max_num_partitions;
 
@@ -3021,11 +3117,13 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     }
     if (threadIdx.x == 0) {
       shared_global_exp_sum = global_exp_sum;
+      shared_max_logit = max_logit;
     }
   }  // warpid == 0
   const scalar_t* tmp_out_ptr =
       tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-      head_idx * max_num_partitions * HEAD_SIZE + threadIdx.x;
+      head_idx * max_num_partitions * HEAD_SIZE +
+      static_cast<int64_t>(partition_offset) * HEAD_SIZE + threadIdx.x;
   constexpr int MAX_NPAR = 32;
   scalar_t tmps[MAX_NPAR];
   const float dzero = 0.0f;
@@ -3112,13 +3210,26 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
   const float inv_global_exp_sum =
       __fdividef(1.0f, shared_global_exp_sum + 1e-6f);
-  acc *= inv_global_exp_sum;
 
   const int64_t query_start_off = static_cast<int64_t>(
       query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
   OUTT* out_ptr = out + query_start_off * num_heads * HEAD_SIZE +
                   static_cast<int64_t>(head_idx) * HEAD_SIZE;
-  out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+
+  // If OUTT is float4, output (acc, exp_sum, max_logit, 0) for merging multiple reductions.
+  // Use temp_offset from tmp_out instead of 'out' to avoid derived pointers in CUDA graphs.
+  if constexpr (std::is_same<OUTT, float4>::value) {
+    float4* temp_dst = reinterpret_cast<float4*>(
+        reinterpret_cast<char*>(const_cast<scalar_t*>(tmp_out)) + temp_offset);
+    float4* temp_out_ptr = temp_dst + query_start_off * num_heads * HEAD_SIZE +
+                           static_cast<int64_t>(head_idx) * HEAD_SIZE;
+    temp_out_ptr[threadIdx.x] =
+        make_float4(acc, shared_global_exp_sum, shared_max_logit, 0.f);
+    return;
+  } else {
+    acc *= inv_global_exp_sum;
+    out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+  }
 }
 
 #else
@@ -3189,7 +3300,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
     const int* __restrict__ seq_lens,  // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr,
+    const int seq_len_offset,
+    const int64_t temp_offset,
+    const int partition_offset) {
   UNREACHABLE_CODE
 }
 // clang-format on
@@ -3218,12 +3332,18 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
-#define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
-  paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE,        \
+#define LAUNCH_CUSTOM_REDUCTION_INNER(NPAR_LOOPS, DST, OUT_TYPE,             \
+                                     TEMP_OFFSET, PART_OFFSET)              \
+  paged_attention_ll4mi_reduce_kernel<T, OUT_TYPE, HEAD_SIZE, HEAD_SIZE,    \
                                       PARTITION_SIZE, NPAR_LOOPS>           \
       <<<reduce_grid, reduce_block, 0, stream>>>(                           \
-          out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr, \
-          query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr);
+          reinterpret_cast<OUT_TYPE*>(DST), exp_sums_ptr, max_logits_ptr,   \
+          tmp_out_ptr, seq_lens_ptr,                                        \
+          query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr,       \
+          seq_len_offset, TEMP_OFFSET, PART_OFFSET);
+
+#define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
+  LAUNCH_CUSTOM_REDUCTION_INNER(NPAR_LOOPS, out_ptr, OUTT, 0, 0)
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
@@ -3348,8 +3468,16 @@ void paged_attention_custom_launcher(
   dim3 reduce_grid(num_heads, num_seqs);
   dim3 reduce_block(head_size);
   const int npar_loops = DIVIDE_ROUND_UP(max_num_partitions, WARP_SIZE);
+  int seq_len_offset = 0;
   // reduction kernel supports upto 8 NPAR_loops * 64 (warp_size) * 256
   // (partition size) = 128K context length
+
+  // Byte offset from tmp_out to the float4 multi-pass buffer.
+  // The buffer lives at the end of tmp_out, after max_num_partitions partition slices.
+  // Python allocates extra partitions in tmp_out: extra = max_passes * sizeof(float4)/sizeof(T).
+  const int64_t temp_base_offset =
+      (int64_t)num_seqs * num_heads * max_num_partitions * head_size * sizeof(T);
+
   switch (npar_loops) {
     case 1:
       LAUNCH_CUSTOM_REDUCTION(1);
@@ -3376,8 +3504,43 @@ void paged_attention_custom_launcher(
       LAUNCH_CUSTOM_REDUCTION(8);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
+      // For npar_loops > 8, perform multiple reductions with 8 loops each.
+      // GFX9 hardware has a hard limit of 8 npar_loops per reduction kernel.
+      // This corresponds to processing 8 * WARP_SIZE (512) partitions per pass.
+      // For sequences longer than 128K tokens (which require ~512 partitions at 256-tok/partition),
+      // we split the work into multiple passes:
+      //   - Each pass outputs float4 (value, exp_sum, max_logit, pad) for intermediate results
+      //   - A final merge kernel combines these using log-sum-exp for numerical stability
+      //   - This allows unlimited sequence length via multiple passes
+      if (npar_loops > 8) {
+        const int num_passes = (npar_loops + 7) / 8;
+        const int partitions_per_pass = 8 * WARP_SIZE;  // 8 npar_loops * 64 warp_size
+        for (int pass = 0; pass < num_passes; ++pass) {
+          const int part_offset = pass * partitions_per_pass;
+          const int64_t pass_temp_offset = temp_base_offset +
+              pass * (int64_t)num_seqs * num_heads * head_size * sizeof(float4);
+          LAUNCH_CUSTOM_REDUCTION_INNER(8, out_ptr, float4,
+                                        pass_temp_offset, part_offset);
+          seq_len_offset += 8 * PARTITION_SIZE * 64;
+        }
+      } else {
+        TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
+      }
       break;
+  }
+
+  // If we did multi-pass reductions, merge the results using log-sum-exp.
+  // The multi-pass reductions produced float4 outputs per pass.
+  // This merge kernel combines them into the final output using the stable log-sum-exp formula:
+  //   result = value_1 + exp_sum_1 * (value_2 / exp_sum_1 + ...)
+  // This ensures numerical stability when merging attention weights from multiple passes.
+  if (npar_loops > 8) {
+    const int num_passes = (npar_loops + 7) / 8;
+    paged_attention_merge_reduce_kernel<T, OUTT, HEAD_SIZE>
+        <<<reduce_grid, reduce_block, 0, stream>>>(
+            out_ptr, tmp_out_ptr, temp_base_offset,
+            seq_lens_ptr, query_start_loc_ptr, num_passes,
+            num_heads, fp8_out_scale_ptr);
   }
 }
 
@@ -3438,6 +3601,7 @@ void paged_attention_custom_launcher_navi(
   dim3 block(NTHR);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  int seq_len_offset = 0;
 
   switch (gqa_ratio) {
     case 1:
@@ -3497,8 +3661,12 @@ void paged_attention_custom_launcher_navi(
   dim3 reduce_block(head_size);
   const int warp_size = 32;
   const int npar_loops = DIVIDE_ROUND_UP(max_num_partitions, warp_size);
-  // reduction kernel supports upto 16 NPAR_loops * 32 (warp_size) * 256
-  // (partition size) = 128K context length
+  // Byte offset from tmp_out to the float4 multi-pass buffer.
+  // The buffer lives at the end of tmp_out, after max_num_partitions partition slices.
+  // Python allocates extra partitions in tmp_out: extra = max_passes * sizeof(float4)/sizeof(T).
+  const int64_t temp_base_offset =
+      (int64_t)num_seqs * num_heads * max_num_partitions * head_size * sizeof(T);
+
   switch (npar_loops) {
     case 1:
       LAUNCH_CUSTOM_REDUCTION(1);
@@ -3549,8 +3717,43 @@ void paged_attention_custom_launcher_navi(
       LAUNCH_CUSTOM_REDUCTION(16);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
+      // For npar_loops > 16, perform multiple reductions with 16 loops each.
+      // RDNA (GFX12) hardware has a limit of 16 npar_loops per reduction kernel.
+      // This corresponds to processing 16 * warp_size (512) partitions per pass.
+      // For sequences longer than 128K tokens (which require ~512 partitions at 256-tok/partition),
+      // we split the work into multiple passes:
+      //   - Each pass outputs float4 (value, exp_sum, max_logit, pad) for intermediate results
+      //   - A final merge kernel combines these using log-sum-exp for numerical stability
+      //   - This allows unlimited sequence length via multiple passes
+      if (npar_loops > 16) {
+        const int num_passes = (npar_loops + 15) / 16;
+        const int partitions_per_pass = 16 * warp_size;  // 16 npar_loops * 32 warp_size
+        for (int pass = 0; pass < num_passes; ++pass) {
+          const int part_offset = pass * partitions_per_pass;
+          const int64_t pass_temp_offset = temp_base_offset +
+              pass * (int64_t)num_seqs * num_heads * head_size * sizeof(float4);
+          LAUNCH_CUSTOM_REDUCTION_INNER(16, out_ptr, float4,
+                                        pass_temp_offset, part_offset);
+          seq_len_offset += 16 * PARTITION_SIZE * 32;
+        }
+      } else {
+        TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
+      }
       break;
+  }
+
+  // If we did multi-pass reductions, merge the results using log-sum-exp.
+  // The multi-pass reductions produced float4 outputs per pass.
+  // This merge kernel combines them into the final output using the stable log-sum-exp formula:
+  //   result = value_1 + exp_sum_1 * (value_2 / exp_sum_1 + ...)
+  // This ensures numerical stability when merging attention weights from multiple passes.
+  if (npar_loops > 16) {
+    const int num_passes = (npar_loops + 15) / 16;
+    paged_attention_merge_reduce_kernel<T, OUTT, HEAD_SIZE>
+        <<<reduce_grid, reduce_block, 0, stream>>>(
+            out_ptr, tmp_out_ptr, temp_base_offset,
+            seq_lens_ptr, query_start_loc_ptr, num_passes,
+            num_heads, fp8_out_scale_ptr);
   }
 }
 
@@ -3627,6 +3830,87 @@ void paged_attention_custom_launcher_navi(
       TORCH_CHECK(false, "Unsupported head size: ", head_size);    \
       break;                                                       \
   }
+
+// Merge kernel implementation: combines multiple float4 (acc, exp_sum, max_logit, 0) outputs
+// using numerically stable log-sum-exp across passes. Defined outside architecture blocks.
+// temps layout: [num_passes][num_seqs * num_heads * HEAD_SIZE] float4 elements
+template <typename scalar_t, typename OUTT, int HEAD_SIZE>
+__global__ void paged_attention_merge_reduce_kernel(
+    OUTT* __restrict__ out,           // [num_seqs, num_heads, head_size]
+    const scalar_t* __restrict__ tmp_out, // base pointer (same as reduce kernel receives)
+    const int64_t temp_base_offset,   // byte offset from tmp_out to float4 temp buffer
+    const int* __restrict__ seq_lens, // [num_seqs]
+    const int* __restrict__ query_start_loc_ptr, // [num_seqs+1] or nullptr
+    const int num_passes,
+    const int num_heads,
+    const float* __restrict__ fp8_out_scale_ptr) {
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX12__)
+  const auto head_idx = blockIdx.x;
+  const auto seq_idx = blockIdx.y;
+
+  // NOTE queries with sequence len > 1 are prefills and taken care by another kernel.
+  if (query_start_loc_ptr != nullptr &&
+      (query_start_loc_ptr[seq_idx + 1] - query_start_loc_ptr[seq_idx] != 1)) {
+    return;
+  }
+
+  // Reconstruct temps pointer from tmp_out + byte offset (CUDA graph safe).
+  const float4* temps = reinterpret_cast<const float4*>(
+      reinterpret_cast<const char*>(tmp_out) + temp_base_offset);
+
+  // Each element of temps is float4(acc, exp_sum, max_logit, 0).
+  // acc and exp_sum are relative to max_logit (that pass's global max).
+  // To correctly merge, re-scale each pass to the true global max across all passes.
+  // temps layout: [num_passes][num_seqs * num_heads * HEAD_SIZE] float4 elements.
+  const int num_seqs = gridDim.y;
+  const int64_t per_pass_stride = (int64_t)num_seqs * num_heads * HEAD_SIZE;
+  const int64_t seq_head_offset = (int64_t)seq_idx * num_heads * HEAD_SIZE +
+                                  (int64_t)head_idx * HEAD_SIZE + threadIdx.x;
+
+  // Pass 1: find the true global max logit across all passes
+  float true_max_logit = -FLT_MAX;
+  for (int pass = 0; pass < num_passes; ++pass) {
+    const int64_t idx = (int64_t)pass * per_pass_stride + seq_head_offset;
+    // max_logit is per (seq, head), same for all threadIdx.x — but we read it per element;
+    // they are identical across threadIdx.x for the same (pass, seq, head), so no issue.
+    true_max_logit = fmaxf(true_max_logit, temps[idx].z);
+  }
+
+  // Pass 2: accumulate with correction for different pass max_logits
+  float acc = 0.0f;
+  float global_exp_sum = 0.0f;
+  for (int pass = 0; pass < num_passes; ++pass) {
+    const int64_t idx = (int64_t)pass * per_pass_stride + seq_head_offset;
+    const float4 temp = temps[idx];
+    const float correction = expf(temp.z - true_max_logit);
+    acc           += temp.x * correction;
+    global_exp_sum += temp.y * correction;
+  }
+
+  const int64_t query_start_off = static_cast<int64_t>(
+      query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
+  OUTT* out_ptr = out + query_start_off * num_heads * HEAD_SIZE +
+                  static_cast<int64_t>(head_idx) * HEAD_SIZE;
+
+  // Normalize and write output
+  const float inv_global_exp_sum = __fdividef(1.0f, global_exp_sum + 1e-6f);
+  const float out_scale = (fp8_out_scale_ptr != nullptr) ? 1.0f / (*fp8_out_scale_ptr) : 1.0f;
+  acc *= inv_global_exp_sum;
+  acc *= out_scale;
+
+#ifdef __HIP__GFX9__
+  if constexpr (std::is_same<OUTT, bit8_t>::value) {
+    out_ptr[threadIdx.x] =
+        __hip_cvt_float_to_fp8(acc, vllm::fp8::fp8_type::__default_saturation,
+                               vllm::fp8::fp8_type::__default_interpret);
+  } else {
+    out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+  }
+#else
+  out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
+#endif
+#endif
+}
 
 bool is_navi_gpu() {
   static bool is_cached = false;

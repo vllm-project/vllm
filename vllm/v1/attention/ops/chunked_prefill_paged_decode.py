@@ -361,8 +361,26 @@ def chunked_prefill_paged_decode(
         ) // _PARTITION_SIZE_ROCM
         assert _PARTITION_SIZE_ROCM % block_size == 0
         total_num_seq = block_table.shape[0]
+        # Extra space for multi-pass float4 reduction buffer.
+        # The float4 buffer starts at byte offset
+        # num_seqs * num_heads * max_num_partitions * head_size * elem_size
+        # which must be 16-byte aligned (sizeof(float4)).
+        assert (head_size * query.element_size()) % 16 == 0, (
+            f"head_size * element_size must be float4-aligned, "
+            f"got {head_size} * {query.element_size()}"
+        )
+        max_passes = (max_num_partitions + 511) // 512
+        float4_bytes = 16
+        elem_bytes = query.element_size()
+        extra_per_pass = (
+            1 + (float4_bytes + elem_bytes - 1) // elem_bytes
+        )
+        padded_partitions = (
+            max_num_partitions + max_passes * extra_per_pass
+        )
         tmp_output = torch.empty(
-            size=(total_num_seq, num_query_heads, max_num_partitions, head_size),
+            size=(total_num_seq, num_query_heads,
+                  padded_partitions, head_size),
             dtype=query.dtype,
             device=output.device,
         )
