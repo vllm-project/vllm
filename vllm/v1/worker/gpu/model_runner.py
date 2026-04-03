@@ -774,17 +774,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits,
             total_num_logits,
         )
-        logger.info(
+        print(
             "[spec_decode_debug][prepare_inputs] "
-            "req_ids=%s num_reqs=%d num_tokens=%d "
-            "total_draft=%d input_ids[:10]=%s "
-            "positions[:10]=%s",
-            req_ids[:3],
-            num_reqs,
-            num_tokens,
-            total_num_draft_tokens,
-            self.input_buffers.input_ids[: min(10, num_tokens)].tolist(),
-            self.input_buffers.positions[: min(10, num_tokens)].tolist(),
+            f"req_ids={req_ids[:3]} num_reqs={num_reqs} num_tokens={num_tokens} "
+            f"total_draft={total_num_draft_tokens} "
+            f"input_ids[:10]={self.input_buffers.input_ids[: min(10, num_tokens)].tolist()} "
+            f"positions[:10]={self.input_buffers.positions[: min(10, num_tokens)].tolist()}"
         )
 
         return InputBatch(
@@ -849,14 +844,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if input_batch.num_reqs > 0:
             first_logits = logits[0]
             topk_vals, topk_ids = torch.topk(first_logits.float(), 5)
-            logger.info(
-                "[spec_decode_debug][logits] reqs=%d draft=%d "
-                "argmax=%d top5_ids=%s top5_vals=%s",
-                input_batch.num_reqs,
-                input_batch.num_draft_tokens,
-                first_logits.argmax().item(),
-                topk_ids.tolist(),
-                ["{:.6f}".format(v) for v in topk_vals.tolist()],
+            print(
+                "[spec_decode_debug][logits] "
+                f"reqs={input_batch.num_reqs} draft={total_num_draft_tokens} "
+                f"argmax={first_logits.argmax().item()} "
+                f"top5_ids={topk_ids.tolist()} "
+                f"top5_vals={[f'{v:.6f}' for v in topk_vals.tolist()]}"
             )
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -1163,14 +1156,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, grammar_output
         )
         n = min(3, input_batch.num_reqs)
-        logger.info(
+        print(
             "[spec_decode_debug][sample_result] "
-            "req_ids=%s sampled=%s "
-            "num_sampled=%s num_rejected=%s",
-            input_batch.req_ids[:n],
-            sampler_output.sampled_token_ids[:n].tolist(),
-            num_sampled[:n].tolist(),
-            num_rejected[:n].tolist(),
+            f"req_ids={input_batch.req_ids[:n]} "
+            f"sampled={sampler_output.sampled_token_ids[:n].tolist()} "
+            f"num_sampled={num_sampled[:n].tolist()} "
+            f"num_rejected={num_rejected[:n].tolist()}"
         )
 
         if self.use_pp:
@@ -1255,14 +1246,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             n = min(3, input_batch.num_reqs)
             idxs = input_batch.idx_mapping[:n]
-            logger.info(
+            print(
                 "[spec_decode_debug][post_propose] "
-                "req_ids=%s last_sampled=%s "
-                "new_draft=%s computed=%s",
-                input_batch.req_ids[:n],
-                self.req_states.last_sampled_tokens[idxs].tolist(),
-                draft_tokens[:n].tolist(),
-                self.req_states.num_computed_tokens.gpu[idxs].tolist(),
+                f"req_ids={input_batch.req_ids[:n]} "
+                f"last_sampled={self.req_states.last_sampled_tokens[idxs].tolist()} "
+                f"new_draft={draft_tokens[:n].tolist()} "
+                f"computed={self.req_states.num_computed_tokens.gpu[idxs].tolist()}"
             )
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
