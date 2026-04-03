@@ -14,12 +14,16 @@ from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from .cache import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
+    LmdbObjectStoreEngineReceiverCache,
+    LmdbObjectStoreSenderCache,
+    LmdbObjectStoreWorkerReceiverCache,
     MultiModalProcessorOnlyCache,
     MultiModalProcessorSenderCache,
     MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
     ShmObjectStoreSenderCache,
 )
+from .lmdb_cache import LmdbMultiModalCache
 from .processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -268,7 +272,7 @@ class MultiModalRegistry:
     def _get_cache_type(
         self,
         vllm_config: "VllmConfig",
-    ) -> Literal[None, "processor_only", "lru", "shm"]:
+    ) -> Literal[None, "processor_only", "lru", "shm", "lmdb"]:
         model_config = vllm_config.model_config
         if not self.supports_multimodal_inputs(model_config):
             return None
@@ -280,10 +284,19 @@ class MultiModalRegistry:
 
         # Check if IPC caching is supported.
         parallel_config = vllm_config.parallel_config
-        is_ipc_supported = parallel_config._api_process_count == 1 and (
-            parallel_config.data_parallel_size == 1
-            or parallel_config.data_parallel_external_lb
-        )
+        if mm_config.mm_processor_cache_type == "lmdb":
+            # LMDB cache is supported as long as all local
+            # frontends are only communicating with local
+            # backends.
+            is_ipc_supported = (
+                parallel_config.data_parallel_size_local
+                == parallel_config.data_parallel_size
+            ) or parallel_config.data_parallel_external_lb
+        else:
+            is_ipc_supported = parallel_config._api_process_count == 1 and (
+                parallel_config.data_parallel_size == 1
+                or parallel_config.data_parallel_external_lb
+            )
 
         if not is_ipc_supported:
             return "processor_only"
@@ -305,6 +318,10 @@ class MultiModalRegistry:
             return MultiModalProcessorSenderCache(vllm_config.model_config)
         elif cache_type == "shm":
             return ShmObjectStoreSenderCache(vllm_config)
+        elif cache_type == "lmdb":
+            return LmdbObjectStoreSenderCache(
+                LmdbMultiModalCache.from_vllm_config(vllm_config)
+            )
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -329,6 +346,10 @@ class MultiModalRegistry:
             return None
         elif cache_type == "lru":
             return MultiModalReceiverCache(vllm_config.model_config)
+        elif cache_type == "lmdb":
+            return LmdbObjectStoreEngineReceiverCache(
+                LmdbMultiModalCache.from_vllm_config(vllm_config)
+            )
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -343,6 +364,10 @@ class MultiModalRegistry:
             return None
         elif cache_type == "shm":
             return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
+        elif cache_type == "lmdb":
+            return LmdbObjectStoreWorkerReceiverCache(
+                LmdbMultiModalCache.from_vllm_config(vllm_config)
+            )
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
