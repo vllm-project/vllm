@@ -228,11 +228,6 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
-        # if seq_lens.ndim == 2:
-        #     import torch as _torch
-        #     _torch.cuda.synchronize()
-        #     _logger.warning("DECODE DEBUG: topk done")
-
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
