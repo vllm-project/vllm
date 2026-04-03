@@ -26,7 +26,7 @@ steps:
     - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci
     env:
       DOCKER_BUILDKIT: "1"
-      CI_BASE_CONTENT_FILES: "requirements/rocm.txt requirements/rocm-test.in requirements/rocm-test.txt docker/Dockerfile.rocm docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh"
+      CI_BASE_CONTENT_FILES: "requirements/common.txt requirements/rocm.txt requirements/rocm-test.in requirements/rocm-test.txt docker/Dockerfile.rocm docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh"
       IMAGE_TAG: "rocm/vllm-dev:ci_base"
       CI_BASE_IMAGE_TAG: "rocm/vllm-dev:ci_base"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"

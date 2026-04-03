@@ -429,6 +429,13 @@ RUN bash /tmp/install_torchcodec.sh \
     && rm /tmp/install_torchcodec.sh \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Pre-install shared ROCm runtime dependencies.
+# rocm.txt includes common.txt via a relative -r include, so copy both files.
+COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
+    && rm -rf /tmp/ci-base-requirements
+
 # hf_transfer for fast model downloads (pytest-shard is in rocm-test.txt lockfile)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system hf_transfer
@@ -462,8 +469,8 @@ ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
 RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt
 
 # Install the vLLM wheel.
-# Runtime + test deps are already in ci_base (rocm-test.txt lockfile is
-# compiled with -c rocm.txt, so all runtime packages are covered).
+# Runtime + test deps are already in ci_base via the explicit rocm.txt install
+# above plus the pre-installed rocm-test.txt lockfile.
 # Keep the per-PR test layer dependency-free so it never re-resolves package
 # graphs or drifts toward CUDA-only dependencies.
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
