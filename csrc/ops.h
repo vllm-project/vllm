@@ -54,13 +54,6 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
-void merge_attn_states(
-    torch::Tensor& output, std::optional<torch::Tensor> output_lse,
-    const torch::Tensor& prefix_output, const torch::Tensor& prefix_lse,
-    const torch::Tensor& suffix_output, const torch::Tensor& suffix_lse,
-    const std::optional<int64_t> prefill_tokens_with_context,
-    const std::optional<torch::Tensor>& output_scale = std::nullopt);
-
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
