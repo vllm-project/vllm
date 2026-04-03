@@ -254,6 +254,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
     sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
     sed -i -e 's/.*sentencepiece.*//g' /src/pyproject.toml /src/requirements/*.txt && \
+    uv pip install -U "meson-python>=0.15.0" meson ninja && \
     uv pip install sentencepiece==0.2.0 pandas pythran nanobind pybind11 /hf_wheels/*.whl && \
     make -C /numactl install && \
     # sentencepiece.pc is in some pkgconfig inside uv cache
