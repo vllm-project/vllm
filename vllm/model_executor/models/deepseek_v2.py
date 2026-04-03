@@ -630,8 +630,6 @@ class Indexer(nn.Module):
             self.quant_config is not None
             and self.quant_config.get_name() == "modelopt_fp4"
         )
-        print(self.quant_config.get_name())
-        print(self.is_fp4_ckpt)
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
