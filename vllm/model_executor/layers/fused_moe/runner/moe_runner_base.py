@@ -508,9 +508,6 @@ class MoERunnerBase(MoERunner):
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
 
-        assert hidden_states.dtype == self.moe_config.in_dtype
-        assert router_logits.dtype == self.moe_config.router_logits_dtype
-
         with self._sequence_parallel_context():
             return self._forward_impl(
                 layer,
