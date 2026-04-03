@@ -355,3 +355,29 @@ torch::stable::Tensor ggml_moe_a8_vec(torch::stable::Tensor X,
                                       int64_t tokens);
 
 int64_t ggml_moe_get_block_size(int64_t type);
+
+void paged_attention_v1(
+    torch::stable::Tensor& out, torch::stable::Tensor& query,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    int64_t num_kv_heads, double scale, torch::stable::Tensor& block_tables,
+    torch::stable::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step);
+
+void paged_attention_v2(
+    torch::stable::Tensor& out, torch::stable::Tensor& exp_sums,
+    torch::stable::Tensor& max_logits, torch::stable::Tensor& tmp_out,
+    torch::stable::Tensor& query, torch::stable::Tensor& key_cache,
+    torch::stable::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::stable::Tensor& block_tables, torch::stable::Tensor& seq_lens,
+    int64_t block_size, int64_t max_seq_len,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step);
