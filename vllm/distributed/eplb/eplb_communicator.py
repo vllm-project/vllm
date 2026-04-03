@@ -231,10 +231,11 @@ class NixlEplbCommunicator(EplbCommunicator):
         self._nixl_memory_type = "VRAM"
         self._registered_desc: object | None = None
         self._remote_agents: dict[int, str] = {}
-        self._remote_send_meta: dict[torch.dtype, dict[int, tuple[int, int, int]]] = {}
-        self._send_buffers: dict[torch.dtype, torch.Tensor] = {}
-        self._recv_buffers: dict[torch.dtype, torch.Tensor] = {}
-        self._peer_partition_numels: dict[torch.dtype, int] = {}
+        self._remote_send_meta: dict[int, tuple[int, int, int]] = {}
+        self._send_buffer: torch.Tensor = torch.empty(0)
+        self._recv_buffer: torch.Tensor = torch.empty(0)
+        self._peer_partition_bytes: int = 0
+        self._dtype_max_bytes: dict[torch.dtype, int] = {}
         self._cuda_device_id = int(self._device.index or 0)
         try:
             self._init_registered_buffers(expert_weights)
@@ -302,79 +303,85 @@ class NixlEplbCommunicator(EplbCommunicator):
             )
 
     def _init_registered_buffers(self, expert_weights: Sequence[torch.Tensor]) -> None:
-        buffers_to_register: list[torch.Tensor] = []
+        total_max_bytes = 0
         for dtype in self._dtypes:
-            max_peer_partition_numel = max(
+            max_numel = max(
                 sum(t.numel() for t in expert_weights if t.dtype == dtype), 1
             )
-            total_numel = max_peer_partition_numel * self._world_size
-            send_buffer = torch.empty(total_numel, device=self._device, dtype=dtype)
-            recv_buffer = torch.empty(total_numel, device=self._device, dtype=dtype)
-            self._send_buffers[dtype] = send_buffer
-            self._recv_buffers[dtype] = recv_buffer
-            self._peer_partition_numels[dtype] = max_peer_partition_numel
-            buffers_to_register.extend([send_buffer, recv_buffer])
+            max_bytes = max_numel * dtype.itemsize
+            self._dtype_max_bytes[dtype] = max_bytes
+            total_max_bytes += max_bytes
 
-        descs = self._nixl_wrapper.get_reg_descs(buffers_to_register)
+        self._peer_partition_bytes = total_max_bytes
+        total_bytes = self._peer_partition_bytes * self._world_size
+
+        self._send_buffer = torch.empty(
+            total_bytes, device=self._device, dtype=torch.uint8
+        )
+        self._recv_buffer = torch.empty(
+            total_bytes, device=self._device, dtype=torch.uint8
+        )
+
+        descs = self._nixl_wrapper.get_reg_descs([self._send_buffer, self._recv_buffer])
         self._nixl_wrapper.register_memory(descs)
         self._registered_desc = descs
 
     def _exchange_remote_send_meta(self) -> None:
         """Exchange send-buffer metadata so each rank can build dynamic
         descriptors at execute time."""
-        local_meta: dict[torch.dtype, tuple[int, int, int]] = {}
-        for dtype in self._dtypes:
-            send_buffer = self._send_buffers[dtype]
-            peer_partition_numel = self._peer_partition_numels[dtype]
-            local_meta[dtype] = (
-                send_buffer.data_ptr(),
-                peer_partition_numel * send_buffer.element_size(),
-                self._cuda_device_id,
-            )
-        gathered_meta: list[dict[torch.dtype, tuple[int, int, int]] | None] = [
-            None
-        ] * self._world_size
+        local_meta: tuple[int, int, int] = (
+            self._send_buffer.data_ptr(),
+            self._peer_partition_bytes,
+            self._cuda_device_id,
+        )
+        gathered_meta: list[tuple[int, int, int] | None] = [None] * self._world_size
         torch.distributed.all_gather_object(
             gathered_meta, local_meta, group=self._cpu_group
         )
 
-        for dtype in self._dtypes:
-            self._remote_send_meta[dtype] = {}
-            for peer in self._remote_agents:
-                peer_meta = gathered_meta[peer]
-                assert peer_meta is not None
-                self._remote_send_meta[dtype][peer] = peer_meta[dtype]
+        for peer in self._remote_agents:
+            peer_meta = gathered_meta[peer]
+            assert peer_meta is not None
+            self._remote_send_meta[peer] = peer_meta
 
     @staticmethod
     def _pack_send_buffer(
         peer_tensors: list[torch.Tensor],
         send_buffer: torch.Tensor,
-        peer_partition_start: int,
-    ) -> None:
-        offset = peer_partition_start
+        byte_offset: int,
+    ) -> int:
+        """
+        Returns the byte offset after the last written byte.
+        """
         for tensor in peer_tensors:
-            flat = tensor.reshape(-1)
-            if flat.numel() == 0:
+            raw = tensor.reshape(-1).view(torch.uint8)
+            if raw.numel() == 0:
                 continue
-            send_buffer[offset : offset + flat.numel()].copy_(flat, non_blocking=True)
-            offset += flat.numel()
+            send_buffer[byte_offset : byte_offset + raw.numel()].copy_(
+                raw, non_blocking=True
+            )
+            byte_offset += raw.numel()
+        return byte_offset
 
     @staticmethod
     def _unpack_recv_buffer(
         recv_buffer: torch.Tensor,
         peer_tensors: list[torch.Tensor],
-        peer_partition_start: int,
-    ) -> None:
-        offset = peer_partition_start
+        byte_offset: int,
+    ) -> int:
+        """
+        Returns the byte offset after the last read byte.
+        """
         for tensor in peer_tensors:
-            flat = tensor.reshape(-1)
-            if flat.numel() == 0:
+            num_bytes = tensor.numel() * tensor.element_size()
+            if num_bytes == 0:
                 continue
-            flat.copy_(
-                recv_buffer[offset : offset + flat.numel()],
+            tensor.reshape(-1).view(torch.uint8).copy_(
+                recv_buffer[byte_offset : byte_offset + num_bytes],
                 non_blocking=True,
             )
-            offset += flat.numel()
+            byte_offset += num_bytes
+        return byte_offset
 
     def _release_nixl_handles(
         self,
@@ -412,25 +419,26 @@ class NixlEplbCommunicator(EplbCommunicator):
         try:
             # Phase 1: pack send buffers.
             with torch.cuda.stream(self._cuda_stream):
-                for dtype in self._dtypes:
-                    send_per_peer = self._send_tensors.get(
-                        dtype, [[] for _ in range(self._world_size)]
-                    )
-                    peer_partition_numel = self._peer_partition_numels[dtype]
-                    send_buffer = self._send_buffers[dtype]
-
-                    for dst, peer_tensors in enumerate(send_per_peer):
-                        count = sum(t.numel() for t in peer_tensors)
-                        if count == 0:
-                            continue
-                        if count > peer_partition_numel:
+                for dst in range(self._world_size):
+                    byte_offset = dst * self._peer_partition_bytes
+                    for dtype in self._dtypes:
+                        peer_tensors = self._send_tensors.get(
+                            dtype, [[] for _ in range(self._world_size)]
+                        )[dst]
+                        actual_bytes = sum(
+                            t.numel() * t.element_size() for t in peer_tensors
+                        )
+                        if actual_bytes > self._dtype_max_bytes[dtype]:
                             raise RuntimeError(
                                 "NIXL EPLB send overflow for dtype "
-                                f"{dtype}: peer={dst}, required={count}, "
-                                f"capacity={peer_partition_numel}"
+                                f"{dtype}: peer={dst}, "
+                                f"required={actual_bytes}, "
+                                f"capacity={self._dtype_max_bytes[dtype]}"
                             )
-                        self._pack_send_buffer(
-                            peer_tensors, send_buffer, dst * peer_partition_numel
+                        byte_offset = self._pack_send_buffer(
+                            peer_tensors,
+                            self._send_buffer,
+                            byte_offset,
                         )
 
             # Ensure all packed data is visible in device memory before pulls.
@@ -446,72 +454,65 @@ class NixlEplbCommunicator(EplbCommunicator):
                 timeout=timedelta(minutes=5),
             )
 
-            # Phase 2: create descriptors and issue all READs across dtypes.
-            for dtype in self._dtypes:
-                recv_per_peer = self._recv_tensors.get(
-                    dtype, [[] for _ in range(self._world_size)]
+            # Phase 2: create descriptors and issue all READs.
+            recv_base = self._recv_buffer.data_ptr()
+            for src in range(self._world_size):
+                if src == self._rank:
+                    continue
+                actual_total_bytes = 0
+                for dtype in self._dtypes:
+                    peer_tensors = self._recv_tensors.get(
+                        dtype, [[] for _ in range(self._world_size)]
+                    )[src]
+                    actual_total_bytes += sum(
+                        t.numel() * t.element_size() for t in peer_tensors
+                    )
+                if actual_total_bytes == 0:
+                    continue
+
+                local_desc = self._nixl_wrapper.get_xfer_descs(
+                    [
+                        (
+                            recv_base + src * self._peer_partition_bytes,
+                            actual_total_bytes,
+                            self._cuda_device_id,
+                        )
+                    ],
+                    self._nixl_memory_type,
                 )
-                peer_partition_numel = self._peer_partition_numels[dtype]
-                recv_buffer = self._recv_buffers[dtype]
-                element_size = recv_buffer.element_size()
-                partition_bytes = peer_partition_numel * element_size
-                recv_base = recv_buffer.data_ptr()
+                local_handle = self._nixl_wrapper.prep_xfer_dlist(
+                    "NIXL_INIT_AGENT",
+                    local_desc,
+                )
+                dlist_handles.append(local_handle)
 
-                for src, peer_tensors in enumerate(recv_per_peer):
-                    if not peer_tensors:
-                        continue
-                    recv_count = sum(t.numel() for t in peer_tensors)
-                    actual_bytes = recv_count * element_size
+                remote_base, remote_part_bytes, remote_dev = self._remote_send_meta[src]
+                agent_name = self._remote_agents[src]
+                remote_desc = self._nixl_wrapper.get_xfer_descs(
+                    [
+                        (
+                            remote_base + self._rank * remote_part_bytes,
+                            actual_total_bytes,
+                            remote_dev,
+                        )
+                    ],
+                    self._nixl_memory_type,
+                )
+                remote_handle = self._nixl_wrapper.prep_xfer_dlist(
+                    agent_name,
+                    remote_desc,
+                )
+                dlist_handles.append(remote_handle)
 
-                    # Local recv descriptor covering the
-                    # received payload in this rank's recv buffer.
-                    local_desc = self._nixl_wrapper.get_xfer_descs(
-                        [
-                            (
-                                recv_base + src * partition_bytes,
-                                actual_bytes,
-                                self._cuda_device_id,
-                            )
-                        ],
-                        self._nixl_memory_type,
-                    )
-                    local_handle = self._nixl_wrapper.prep_xfer_dlist(
-                        "NIXL_INIT_AGENT",
-                        local_desc,
-                    )
-                    dlist_handles.append(local_handle)
-
-                    remote_base, remote_part_bytes, remote_dev = self._remote_send_meta[
-                        dtype
-                    ][src]
-                    agent_name = self._remote_agents[src]
-                    remote_desc = self._nixl_wrapper.get_xfer_descs(
-                        [
-                            (
-                                remote_base + self._rank * remote_part_bytes,
-                                actual_bytes,
-                                remote_dev,
-                            )
-                        ],
-                        self._nixl_memory_type,
-                    )
-                    remote_handle = self._nixl_wrapper.prep_xfer_dlist(
-                        agent_name,
-                        remote_desc,
-                    )
-                    dlist_handles.append(remote_handle)
-
-                    # Initiate READ from the remote send buffer
-                    # into the local recv buffer.
-                    xfer_handle = self._nixl_wrapper.make_prepped_xfer(
-                        "READ",
-                        local_handle,
-                        [0],
-                        remote_handle,
-                        [0],
-                    )
-                    self._nixl_wrapper.transfer(xfer_handle)
-                    xfer_handles.append(xfer_handle)
+                xfer_handle = self._nixl_wrapper.make_prepped_xfer(
+                    "READ",
+                    local_handle,
+                    [0],
+                    remote_handle,
+                    [0],
+                )
+                self._nixl_wrapper.transfer(xfer_handle)
+                xfer_handles.append(xfer_handle)
 
             # Phase 3: single wait for all in-flight transfers, then unpack.
             self._wait_for_all_transfers(xfer_handles)
@@ -522,19 +523,16 @@ class NixlEplbCommunicator(EplbCommunicator):
             dlist_handles.clear()
 
             with torch.cuda.stream(self._cuda_stream):
-                for dtype in self._dtypes:
-                    recv_per_peer = self._recv_tensors.get(
-                        dtype, [[] for _ in range(self._world_size)]
-                    )
-                    peer_partition_numel = self._peer_partition_numels[dtype]
-                    recv_buffer = self._recv_buffers[dtype]
-                    for src, peer_tensors in enumerate(recv_per_peer):
-                        if not peer_tensors:
-                            continue
-                        self._unpack_recv_buffer(
-                            recv_buffer,
+                for src in range(self._world_size):
+                    byte_offset = src * self._peer_partition_bytes
+                    for dtype in self._dtypes:
+                        peer_tensors = self._recv_tensors.get(
+                            dtype, [[] for _ in range(self._world_size)]
+                        )[src]
+                        byte_offset = self._unpack_recv_buffer(
+                            self._recv_buffer,
                             peer_tensors,
-                            src * peer_partition_numel,
+                            byte_offset,
                         )
         finally:
             self._release_nixl_handles(xfer_handles, dlist_handles)
