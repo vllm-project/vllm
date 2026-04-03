@@ -11,11 +11,16 @@ from tqdm import tqdm
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    graph_capture,
+    is_global_first_rank,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -87,7 +92,10 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+
         self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.is_first_pp_rank = get_pp_group().is_first_rank
+        self.is_last_pp_rank = get_pp_group().is_last_rank
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
@@ -263,15 +271,18 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
+        # Used for FULL CUDA graphs. PW CUDA graphs do not use these.
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
+        self.intermediate_tensors: IntermediateTensors | None = None
 
     def capture(
         self,
         model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
+        intermediate_tensors: IntermediateTensors | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -292,6 +303,19 @@ class ModelCudaGraphManager(CudaGraphManager):
                 if self.dp_size > 1
                 else None
             )
+
+            model_inputs = {
+                "input_ids": input_buffers.input_ids[:num_tokens],
+                "positions": input_buffers.positions[:num_tokens],
+                **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
+            }
+            if not self.is_first_pp_rank:
+                # Update for non-first PP ranks.
+                model_inputs["input_ids"] = None
+                model_inputs["inputs_embeds"] = None
+                assert intermediate_tensors is not None
+                model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
+
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 num_reqs,
                 num_tokens,
@@ -317,12 +341,15 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                 ):
-                    model_inputs = {
-                        "input_ids": input_buffers.input_ids[:num_tokens],
-                        "positions": input_buffers.positions[:num_tokens],
-                        **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
-                    }
                     model_output = model(**model_inputs)
+
+                if cg_mode == CUDAGraphMode.PIECEWISE:
+                    # PW CUDA graph internally handles the model outputs.
+                    # No need to keep track of the hidden states.
+                    return None
+
+                if self.is_last_pp_rank:
+                    # Last PP rank (common case).
                     if self.use_aux_hidden_state_outputs:
                         hidden_states, aux_hidden_states = model_output
                     else:
@@ -330,13 +357,23 @@ class ModelCudaGraphManager(CudaGraphManager):
                         aux_hidden_states = []
                     if self.hidden_states is None:
                         self.hidden_states = torch.empty_like(hidden_states)
+                    self.hidden_states[:num_tokens] = hidden_states
                     if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
                         self.aux_hidden_states = [
                             torch.empty_like(x) for x in aux_hidden_states
                         ]
-                    self.hidden_states[:num_tokens] = hidden_states
                     for i, aux in enumerate(aux_hidden_states):
                         self.aux_hidden_states[i][:num_tokens] = aux
+                else:
+                    # Non-last PP rank.
+                    assert isinstance(model_output, IntermediateTensors)
+                    intermediate_tensors = model_output
+                    if self.intermediate_tensors is None:
+                        self.intermediate_tensors = IntermediateTensors.empty_like(
+                            intermediate_tensors
+                        )
+                    for k, v in intermediate_tensors.tensors.items():
+                        self.intermediate_tensors[k][:num_tokens] = v
 
             return forward_fn
 
@@ -344,9 +381,13 @@ class ModelCudaGraphManager(CudaGraphManager):
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
         super().run_fullgraph(desc)
+        if not self.is_last_pp_rank:
+            assert self.intermediate_tensors is not None
+            return self.intermediate_tensors[: desc.num_tokens]
+
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[: desc.num_tokens]
         if not self.use_aux_hidden_state_outputs:
@@ -384,9 +425,11 @@ def prepare_inputs_to_capture(
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
+        CUDAGraphMode.NONE,
         input_block_tables,
         slot_mappings,
         attn_groups,
         kv_cache_config,
+        for_capture=True,
     )
     return attn_metadata, slot_mappings_by_layer

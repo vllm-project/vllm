@@ -7,7 +7,8 @@
 #include "cuda_utils.h"
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-#include "quantization/vectorization_utils.cuh"
+
+#include "libtorch_stable/quantization/vectorization_utils.cuh"
 #include "concat_mla_q.cuh"
 
 #ifdef USE_ROCM
@@ -23,6 +24,8 @@
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
 typedef __hip_bfloat16 __nv_bfloat16;
+#else
+  #include <cuda.h>
 #endif
 
 #if defined(__gfx942__)
@@ -70,6 +73,59 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     cudaMemcpyAsync(dst_ptr + dst_offset, src_ptr + src_offset,
                     block_size_in_bytes, memcpy_type, stream);
   }
+}
+
+void swap_blocks_batch(const torch::Tensor& src_ptrs,
+                       const torch::Tensor& dst_ptrs,
+                       const torch::Tensor& sizes) {
+  TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
+  TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
+  TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
+  TORCH_CHECK(src_ptrs.dtype() == torch::kInt64, "src_ptrs must be int64");
+  TORCH_CHECK(dst_ptrs.dtype() == torch::kInt64, "dst_ptrs must be int64");
+  TORCH_CHECK(sizes.dtype() == torch::kInt64, "sizes must be int64");
+
+  const int64_t n = src_ptrs.size(0);
+  TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
+  TORCH_CHECK(sizes.size(0) == n, "sizes length must match src_ptrs");
+
+  if (n == 0) return;
+
+  const int64_t* src_data = src_ptrs.data_ptr<int64_t>();
+  const int64_t* dst_data = dst_ptrs.data_ptr<int64_t>();
+  const int64_t* size_data = sizes.data_ptr<int64_t>();
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // Use cuMemcpyBatchAsync (CUDA 12.8+) to submit all copies in a single
+  // driver call, amortizing per-copy submission overhead.
+  // int64_t and CUdeviceptr/size_t are both 8 bytes on 64-bit platforms,
+  // so we reinterpret_cast the tensor data directly to avoid copies.
+  static_assert(sizeof(CUdeviceptr) == sizeof(int64_t));
+  static_assert(sizeof(size_t) == sizeof(int64_t));
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12080
+  CUmemcpyAttributes attr = {};
+  attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+  size_t attrs_idx = 0;
+  size_t fail_idx = 0;
+  CUresult result = cuMemcpyBatchAsync(
+      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(dst_data)),
+      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(src_data)),
+      reinterpret_cast<size_t*>(const_cast<int64_t*>(size_data)),
+      static_cast<size_t>(n), &attr, &attrs_idx, 1, &fail_idx,
+      static_cast<CUstream>(stream));
+  TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed at index ",
+              fail_idx, " with error ", result);
+#else
+  // Fallback for CUDA < 12.8 and ROCm: individual async copies.
+  // cudaMemcpyDefault lets the driver infer direction from pointer types.
+  for (int64_t i = 0; i < n; i++) {
+    cudaMemcpyAsync(reinterpret_cast<void*>(dst_data[i]),
+                    reinterpret_cast<void*>(src_data[i]),
+                    static_cast<size_t>(size_data[i]), cudaMemcpyDefault,
+                    stream);
+  }
+#endif
 }
 
 namespace vllm {
@@ -919,8 +975,8 @@ __global__ void gather_and_maybe_dequant_cache(
 // SCALAR_T is the data type of the destination tensor.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                        \
-  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,      \
+#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, ENTRY_SZ)              \
+  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, ENTRY_SZ, \
                                        thread_block_size>                     \
       <<<grid, block, 0, stream>>>(                                           \
           reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                   \
@@ -930,6 +986,12 @@ __global__ void gather_and_maybe_dequant_cache(
           block_table_stride, cache_block_stride, cache_entry_stride,         \
           dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()), \
           seq_starts_ptr);
+
+#define CALL_GATHER_CACHE_576(SCALAR_T, CACHE_T, KV_DTYPE) \
+  CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 576)
+
+#define CALL_GATHER_CACHE_320(SCALAR_T, CACHE_T, KV_DTYPE) \
+  CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 320)
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -960,9 +1022,10 @@ void gather_and_maybe_dequant_cache(
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
   }
-  TORCH_CHECK(head_dim == 576,
-              "gather_and_maybe_dequant_cache only support the head_dim to 576 "
-              "for better performance")
+  TORCH_CHECK(
+      head_dim == 320 || head_dim == 576,
+      "gather_and_maybe_dequant_cache only support the head_dim to 320 or 576 "
+      "for better performance")
 
   TORCH_CHECK(src_cache.device() == dst.device(),
               "src_cache and dst must be on the same device");
@@ -987,7 +1050,13 @@ void gather_and_maybe_dequant_cache(
   const int32_t* seq_starts_ptr =
       seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
 
-  DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype, CALL_GATHER_CACHE);
+  if (head_dim == 576) {
+    DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype,
+                               CALL_GATHER_CACHE_576);
+  } else {
+    DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype,
+                               CALL_GATHER_CACHE_320);
+  }
 }
 
 namespace vllm {

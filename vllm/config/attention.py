@@ -37,7 +37,7 @@ class AttentionConfig:
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
 
-    disable_flashinfer_prefill: bool = False
+    disable_flashinfer_prefill: bool = True
     """Whether to disable flashinfer prefill."""
 
     disable_flashinfer_q_quantization: bool = False
@@ -56,7 +56,7 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        ignored_factors: list[str] = []
+        ignored_factors: set[str] = set()
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 
