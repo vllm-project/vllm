@@ -311,6 +311,42 @@ class TestSetSteeringVectorsThreeTier:
         # Layer 2 should have the new values
         assert model.layers[2].steering_vector_post_mlp_pre_ln.sum().item() == 8.0
 
+    def test_replace_with_no_new_vectors_clears_all(self, worker, model):
+        """replace=True with no vector arguments clears all existing vectors.
+
+        Regression test: previously the early-return for empty ``all_tiers``
+        fired *before* the ``replace`` check, so calling
+        ``set_steering_vectors(replace=True)`` was a no-op.
+        """
+        # Set some initial values on layers 0 and 1
+        worker.set_steering_vectors(vectors={_HP: {0: [5.0] * 8, 1: [5.0] * 8}})
+        # Verify they are set
+        assert model.layers[0].steering_vector_post_mlp_pre_ln.sum().item() == 40.0
+        assert model.layers[1].steering_vector_post_mlp_pre_ln.sum().item() == 40.0
+
+        # Call replace=True with NO vector arguments
+        result = worker.set_steering_vectors(replace=True)
+
+        # Should return empty (no new layers updated)
+        assert result == []
+        # But all existing vectors should be cleared
+        for layer in model.layers:
+            assert layer.steering_vector_post_mlp_pre_ln.sum().item() == 0.0
+
+    def test_replace_with_no_new_vectors_clears_pending_globals(self, worker, model):
+        """replace=True with no vector arguments also clears pending globals."""
+        # Queue pending globals directly (simulates vectors set before manager init)
+        import torch
+
+        worker.model_runner._pending_steering_globals = [
+            ({"post_mlp_pre_ln": {0: torch.ones(1, 8)}}, "prefill"),
+        ]
+        # Call replace=True with NO vector arguments
+        result = worker.set_steering_vectors(replace=True)
+        assert result == []
+        # Pending globals should be cleared
+        assert worker.model_runner._pending_steering_globals is None
+
     def test_buffer_reflects_base_not_phase_vectors(self, worker, model):
         """When all three tiers target the same layer, the shared buffer
         should only contain the base vector -- prefill/decode values must
