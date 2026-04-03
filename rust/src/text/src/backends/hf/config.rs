@@ -9,9 +9,11 @@ use crate::error::{Error, Result};
 
 /// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct HfTokenizerConfig {
+pub struct HfTokenizerConfig {
+    #[serde(flatten)]
+    pub special_tokens: HfSpecialTokens,
     #[serde(default)]
-    pub eos_token: Option<NamedSpecialToken>,
+    pub chat_template: Option<String>,
     /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some tiktoken-based models
     /// (e.g. DeepSeek, Kimi K2) set this to a value containing "Tiktoken" which can be used as a
     /// hint for backend selection.
@@ -23,17 +25,49 @@ pub(super) struct HfTokenizerConfig {
 /// object carrying the token content.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-pub(super) enum NamedSpecialToken {
+pub enum NamedSpecialToken {
     Text(String),
     WithContent { content: String },
 }
 
+impl From<NamedSpecialToken> for String {
+    fn from(value: NamedSpecialToken) -> Self {
+        match value {
+            NamedSpecialToken::Text(string) => string,
+            NamedSpecialToken::WithContent { content } => content,
+        }
+    }
+}
+
 impl NamedSpecialToken {
-    pub(super) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Text(value) => value,
             Self::WithContent { content } => content,
         }
+    }
+}
+
+/// Minimal set of special-token entries needed by chat/EOS handling.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HfSpecialTokens {
+    #[serde(default)]
+    pub bos_token: Option<NamedSpecialToken>,
+    #[serde(default)]
+    pub eos_token: Option<NamedSpecialToken>,
+    #[serde(default)]
+    pub unk_token: Option<NamedSpecialToken>,
+    #[serde(default)]
+    pub pad_token: Option<NamedSpecialToken>,
+}
+
+impl HfSpecialTokens {
+    /// Returns true if we don't discover any special tokens in the config.
+    pub fn is_empty(&self) -> bool {
+        self.bos_token.is_none()
+            && self.eos_token.is_none()
+            && self.unk_token.is_none()
+            && self.pad_token.is_none()
     }
 }
 
@@ -203,7 +237,7 @@ impl ModelConfig {
 }
 
 /// Load the tokenizer-side EOS metadata if a config file is present.
-pub(super) fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
+pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
     read_json_file(path)
 }
 

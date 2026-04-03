@@ -1,12 +1,7 @@
-use std::path::Path;
-
 use serde::Serialize;
 use serde_json::Value;
-use smg_tokenizer::ChatTemplateState;
-use smg_tokenizer::chat_template::{
-    ChatTemplateContentFormat, ChatTemplateParams, load_chat_template_from_config,
-    load_chat_template_from_file,
-};
+use smg_tokenizer::chat_template::{ChatTemplateContentFormat, ChatTemplateParams};
+use smg_tokenizer::{ChatTemplateState, SpecialTokens};
 use thiserror_ext::AsReport as _;
 use tracing::trace;
 
@@ -19,40 +14,16 @@ use crate::{AssistantMessageExt, Error};
 /// Currently it's a simple wrapper around smg's [`ChatTemplateState`].
 pub struct ChatTemplate {
     inner: ChatTemplateState,
+    special_tokens: Option<SpecialTokens>,
 }
 
 impl ChatTemplate {
-    /// Load a chat template from the given tokenizer config and/or adjacent template file.
-    pub fn load(
-        tokenizer_config_path: Option<&Path>,
-        chat_template_path: Option<&Path>,
-    ) -> Result<Self> {
-        // Match the usual HF precedence: tokenizer_config first, then any
-        // adjacent dedicated chat template file.
-        let mut chat_template = tokenizer_config_path
-            .and_then(|path| path.to_str())
-            .map(load_chat_template_from_config)
-            .transpose()
-            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?
-            .flatten();
-
-        if let Some(chat_template_path) = chat_template_path {
-            chat_template = load_chat_template_from_file(
-                chat_template_path
-                    .to_str()
-                    .expect("chat template path should be valid UTF-8"),
-            )
-            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
-        }
-
-        Self::new(chat_template)
-    }
-
     /// Create a chat template from the given template string.
-    pub fn new(template: Option<String>) -> Result<Self> {
+    pub fn new(template: Option<String>, special_tokens: Option<SpecialTokens>) -> Result<Self> {
         Ok(Self {
             inner: ChatTemplateState::new(template)
                 .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
+            special_tokens,
         })
     }
 
@@ -63,7 +34,8 @@ impl ChatTemplate {
     /// compiled from that string and used instead of the model's default.
     pub fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
         if let Some(override_template) = &request.chat_options.chat_template {
-            let overridden = ChatTemplate::new(Some(override_template.clone()))?;
+            let overridden =
+                ChatTemplate::new(Some(override_template.clone()), self.special_tokens.clone())?;
             return overridden.apply_chat_template_inner(request);
         }
         self.apply_chat_template_inner(request)
@@ -98,6 +70,7 @@ impl ChatTemplate {
                     tools: tools.as_deref(),
                     documents: request.documents.as_deref(),
                     template_kwargs: Some(&merged_template_kwargs),
+                    special_tokens: self.special_tokens.as_ref(),
                 },
             )
             .map_err(|error| {
@@ -248,6 +221,7 @@ fn template_content_to_json(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use smg_tokenizer::SpecialTokens;
 
     use super::ChatTemplate;
     use crate::request::{
@@ -276,7 +250,7 @@ mod tests {
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
-        ChatTemplate::new(template.map(str::to_owned))?.apply_chat_template(request)
+        ChatTemplate::new(template.map(str::to_owned), None)?.apply_chat_template(request)
     }
 
     #[test]
@@ -388,6 +362,25 @@ mod tests {
         let error = render(None, &request).unwrap_err();
 
         assert!(matches!(error, Error::MissingChatTemplate));
+    }
+
+    #[test]
+    fn chat_template_injects_special_tokens_into_context() {
+        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let special_tokens = SpecialTokens {
+            bos_token: Some("<bos>".to_string()),
+            ..Default::default()
+        };
+
+        let rendered = ChatTemplate::new(
+            Some("{{ bos_token }}|{{ bos_token is defined }}".to_string()),
+            Some(special_tokens),
+        )
+        .unwrap()
+        .apply_chat_template(&request)
+        .unwrap();
+
+        assert_eq!(rendered, "<bos>|true");
     }
 
     #[test]

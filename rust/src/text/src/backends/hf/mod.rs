@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use self::config::{
-    GenerationConfig, ModelConfig, load_generation_config, load_model_config, load_tokenizer_config,
+use self::config::{GenerationConfig, ModelConfig, load_generation_config, load_model_config};
+pub use self::config::{
+    HfSpecialTokens, HfTokenizerConfig, NamedSpecialToken, load_tokenizer_config,
 };
 pub use self::model_files::{ResolvedModelFiles, TokenizerSource};
 use crate::backend::{SamplingHints, TextBackend};
@@ -50,6 +51,7 @@ impl HfTextBackend {
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
         let tokenizer = load_tokenizer(&files.tokenizer)?;
         let primary_eos_token_id = tokenizer_config
+            .special_tokens
             .eos_token
             .as_ref()
             .and_then(|token| tokenizer.token_to_id(token.as_str()));

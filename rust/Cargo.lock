@@ -1923,9 +1923,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm-tokenizer"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66a86264885138a8875b8f8b8532fee3c3f0d94054caf535d0ad8c23c6ac92dc"
+checksum = "12ad03a55de903cebce3cd630391efcfd42b75f87d2af5b7ad7e1c42b30961b3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2311,9 +2311,9 @@ dependencies = [
 
 [[package]]
 name = "openai-protocol"
-version = "1.4.0"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14c6a0b3c6a9d2ef232690234e72b207532395ec52a1d4823141814b65b7696d"
+checksum = "7b8d41ed865b7a26b6b2d2a519b774460e5ddc50eeeb4ac2a2409c8817ec2de9"
 dependencies = [
  "axum",
  "bitflags",
@@ -2826,9 +2826,9 @@ dependencies = [
 
 [[package]]
 name = "reasoning-parser"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9669c1560700028a5f8c7cff8110907c57c7c638aa79fc61afca28464b85d23d"
+checksum = "aaa0aac992a56c07b341d74ee164b7dc01c732e4433c8c3eeac0cb46b3c8027b"
 dependencies = [
  "parking_lot",
  "thiserror 2.0.18",
@@ -4042,9 +4042,9 @@ dependencies = [
 
 [[package]]
 name = "tool-parser"
-version = "1.1.2"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc56c3c80796ab2a52c78c6041cfe55c7ac1e152b27e372ed16eb946924f92a2"
+checksum = "7bdcf0aa96d42cfc2ecc8e7b3c10598b9c1a6052f996b5ab574dec72f483d87c"
 dependencies = [
  "async-trait",
  "num-traits",
