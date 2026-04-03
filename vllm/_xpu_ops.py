@@ -105,6 +105,8 @@ def _xpu_ops_deepseek_scaling_rope_fake(
 def _xpu_mxfp8_quantize_impl(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP8_BLOCK_SIZE = 32
+    assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
     if dtype is not None:
         assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
             f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
@@ -116,8 +118,6 @@ def _xpu_mxfp8_quantize_impl(
     finfo = torch.finfo(dtype)
     fp8_min = finfo.min
     fp8_max = finfo.max
-
-    MXFP8_BLOCK_SIZE = 32
     eps = 1e-10
 
     x_q = torch.empty_like(x, device=x.device, dtype=dtype)
@@ -130,22 +130,18 @@ def _xpu_mxfp8_quantize_impl(
     return x_q, x_s
 
 
-def xpu_mxfp8_quantize_fake(
+def _xpu_mxfp8_quantize_fake(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if dtype is not None:
-        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
-            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
-            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
-        )
-    else:
+    if dtype is None:
         dtype = current_platform.fp8_dtype()
 
     MXFP8_BLOCK_SIZE = 32
 
     shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.zeros(shape, device=x.device, dtype=torch.float32)
 
-    return x.to(dtype), torch.zeros(shape, device=x.device, dtype=torch.float32)
+    return x.to(dtype), x_s.to(torch.float8_e8m0fnu)
 
 
 # Global flag to ensure ops are registered only once
@@ -553,7 +549,7 @@ class xpu_ops:
             direct_register_custom_op(
                 op_name="xpu_mxfp8_quantize",
                 op_func=_xpu_mxfp8_quantize_impl,
-                fake_impl=xpu_mxfp8_quantize_fake,
+                fake_impl=_xpu_mxfp8_quantize_fake,
             )
 
             _OPS_REGISTERED = True
