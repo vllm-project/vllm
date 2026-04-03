@@ -8,6 +8,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.tool_parsers.qwen3xml_tool_parser import StreamingXMLToolCallParser
 
 
 class TestQwen3xmlToolParser(ToolParserTests):
@@ -73,3 +74,61 @@ class TestQwen3xmlToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+
+@pytest.mark.parametrize(
+    "param_value,param_type",
+    [
+        ("not_a_number", "int"),
+        ("not_a_number", "integer"),
+        ("not_a_number", "uint"),
+        ("not_a_number", "long"),
+        ("not_a_number", "short"),
+        ("not_a_number", "unsigned"),
+        ("not_a_float", "num"),
+        ("not_a_float", "float"),
+    ],
+)
+def test_convert_param_value_invalid_emits_warning(
+    param_value: str, param_type: str
+) -> None:
+    """_convert_param_value should emit a properly-formatted warning when a
+    value cannot be converted to int or float.
+
+    Previously the logger.warning() calls had 3 '%s' placeholders but only
+    1 argument was passed, causing Python's logging machinery to raise a
+    TypeError internally and print a '--- Logging error ---' traceback to
+    stderr instead of the intended warning message.  After the fix the
+    warning must be emitted without error and the raw value must appear in
+    the message.
+    """
+    import logging
+
+    parser = StreamingXMLToolCallParser()
+
+    # vllm loggers have propagate=False, so we attach a handler directly.
+    vllm_logger = logging.getLogger("vllm.tool_parsers.qwen3xml_tool_parser")
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.WARNING)
+    vllm_logger.addHandler(handler)
+    try:
+        result = parser._convert_param_value(param_value, param_type)
+    finally:
+        vllm_logger.removeHandler(handler)
+
+    # The value should be returned unchanged (degenerate-to-string path)
+    assert result == param_value
+
+    # Exactly one warning must have been captured — not zero (lost to TypeError)
+    warning_records = [r for r in records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1, f"Expected 1 warning, got {len(warning_records)}"
+    # The message must format successfully and contain the raw param value
+    assert param_value in warning_records[0].getMessage(), (
+        f"param_value '{param_value}' not found in warning: "
+        f"'{warning_records[0].getMessage()}'"
+    )

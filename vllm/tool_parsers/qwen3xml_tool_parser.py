@@ -1083,8 +1083,7 @@ class StreamingXMLToolCallParser:
                 return int(param_value)
             except (ValueError, TypeError):
                 logger.warning(
-                    "Parsed value '%s' of parameter '%s' is not an integer "
-                    "in tool '%s', degenerating to string.",
+                    "Parsed value '%s' is not an integer, degenerating to string.",
                     param_value,
                 )
             return param_value
@@ -1098,8 +1097,7 @@ class StreamingXMLToolCallParser:
                 )
             except (ValueError, TypeError):
                 logger.warning(
-                    "Parsed value '%s' of parameter '%s' is not a float "
-                    "in tool '%s', degenerating to string.",
+                    "Parsed value '%s' is not a float, degenerating to string.",
                     param_value,
                 )
             return param_value
