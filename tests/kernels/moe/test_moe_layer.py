@@ -32,6 +32,7 @@ from vllm.config import (
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
+    get_ep_group,
     get_eplb_group,
 )
 from vllm.forward_context import set_forward_context
@@ -1586,10 +1587,26 @@ def _parallel_worker(
             failed = failed + 1
             if verbosity > 0:
                 traceback.print_exc()
-                print(f"\n{str(ex)}\nFAILED")
+                print(f"\n{str(ex)}\nFAILED {ex.__class__}")
             else:
                 print("F", end="")
         finally:
+            # Note: for some reason DeepEP buffers don't seem to be
+            # entirely reusable on B200. In order to work around this
+            # we clear the all2all manager's cache after each testpoint.
+            cap = current_platform.get_device_capability()
+            if (
+                cap is not None
+                and cap.major == 10
+                and (
+                    test_config.backend == "deepep_low_latency"
+                    or test_config.backend == "deepep_high_throughput"
+                )
+            ):
+                torch.accelerator.synchronize()
+                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                if all2all_manager is not None:
+                    all2all_manager.destroy()
             total = total + 1
 
     skipped = total - (passed + failed)
