@@ -17,6 +17,8 @@ The key distinction between (sequence) classification and token classification l
 
 Many classification models support both (sequence) classification and token classification. For further details on token classification, please refer to [this page](token_classify.md).
 
+Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled, please refer to [this page](scoring.md).
+
 ## Typical Use Cases
 
 ### Classification
@@ -54,7 +56,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most classification models can also be used as [cross-encoder models](scoring.md#cross-encoder-models). For more information on cross-encoder models, please refer to [this page](scoring.md).
 
---8<-- "docs/models/pooling_models/scoring.md:supported-score-models"
+--8<-- "docs/models/pooling_models/scoring.md:supported-cross-encoder-models"
 
 ### Reward Models
 
@@ -87,7 +89,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/classify.py](../../../examples/basic/offline_inference/classify.py)
+A code example can be found here: [examples/basic/offline_inference/classify.py](../../../examples/basic/offline_inference/classify.py)
 
 ### `LLM.encode`
 

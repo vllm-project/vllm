@@ -23,14 +23,13 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import is_quantized_kv_cache, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -51,7 +50,7 @@ def unified_kv_cache_update(
     """
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[0]
+    kv_cache = attn_layer.kv_cache
 
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
@@ -288,10 +287,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         )
 
         # Placeholder KV cache (replaced by bind_kv_cache)
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
-        ]
+        self.kv_cache = torch.tensor([])
 
         # Register in compilation context
         compilation_config = vllm_config.compilation_config
