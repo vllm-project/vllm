@@ -332,6 +332,11 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
+# Persist the built wheel in the image so python_only_compile_rocm.sh can
+# reinstall it after removing compilers. The bind-mounted /install contents
+# above are not available once that RUN step completes.
+COPY --from=export_vllm /*.whl /opt/vllm-wheels/
+
 # Verify that PyTorch is the ROCm build, not CUDA
 RUN python3 -c "import torch; assert torch.version.hip is not None, \
     f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
