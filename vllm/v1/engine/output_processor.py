@@ -321,6 +321,7 @@ class RequestState:
         if self.parent_req is None:
             outputs = [output]
         else:
+            child_kv_transfer_params = None
             if kv_transfer_params is None:
                 outputs, finished = self.parent_req.get_outputs(self.request_id, output)
             else:
@@ -328,11 +329,17 @@ class RequestState:
                 output_with_kv_transfer = self.parent_req.aggre_kv_transfer_params(
                     self.request_id, output, kv_transfer_params
                 )
-                # Overwrite kv_transfer_params using the aggregated values from
-                # child requests in the case of parallel sampling.
-                outputs, finished, kv_transfer_params = output_with_kv_transfer
+                outputs, finished, child_kv_transfer_params = output_with_kv_transfer
             if not outputs:
                 return None
+            # In the case of parallel sampling, the final output's kv_transfer_params
+            # is aggregated from all child requests, so we use the aggregated
+            # child_kv_transfer_params if available.
+            kv_transfer_params = (
+                child_kv_transfer_params
+                if child_kv_transfer_params
+                else kv_transfer_params
+            )
             external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(

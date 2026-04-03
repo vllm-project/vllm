@@ -79,8 +79,10 @@ class ParentRequest:
         extra_args = child_sampling_params.extra_args or {}
         kv_transfer = extra_args.get("kv_transfer_params")
         if kv_transfer and isinstance(kv_transfer, list):
-            child_sampling_params.extra_args = copy(extra_args)
-            child_sampling_params.extra_args["kv_transfer_params"] = kv_transfer[index]
+            child_sampling_params.extra_args = {
+                **extra_args,
+                "kv_transfer_params": kv_transfer[index],
+            }
         if seed is None:
             if not no_caching:
                 # Cache child sampling_params for later reuse
