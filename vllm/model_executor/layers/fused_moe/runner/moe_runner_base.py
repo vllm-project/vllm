@@ -16,7 +16,6 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -40,8 +39,6 @@ from vllm.utils.torch_utils import (
     ModuleName,
     direct_register_custom_op,
 )
-
-logger = init_logger(__name__)
 
 
 def get_layer_from_name(layer_name: str) -> torch.nn.Module:
@@ -176,12 +173,12 @@ class MoERunnerBase(MoERunner):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        layer_name: str,
         moe_config: FusedMoEConfig,
         router: FusedMoERouter,
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
-        shared_experts: SharedExperts | None,
+        shared_experts: torch.nn.Module | None,
         quant_method: FusedMoEMethodBase,
         reduce_results: bool,
         enable_dbo: bool,
@@ -191,29 +188,55 @@ class MoERunnerBase(MoERunner):
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.gate = gate
-        self.shared_experts = shared_experts
         self.quant_method = quant_method
         self._reduce_results = reduce_results
         self.enable_dbo = enable_dbo
-        self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
+
+        self._shared_experts: SharedExperts | None = None
+        if shared_experts is not None:
+            self._shared_experts = SharedExperts(
+                shared_experts,
+                moe_config=moe_config,
+                # Note: For now we must pass quant_method along to SharedExperts so it
+                # can property determine where the shared experts are supposed to be
+                # called, i.e. by a MK or by the MoERunner.
+                # Once the MK can be created upfront, we can just pass in the proper
+                # flags derived from the quant_method's MK.
+                reduce_results=reduce_results,
+                quant_method=quant_method,
+                enable_dbo=enable_dbo,
+            )
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
-        self.layer_name = layer.layer_name
+        self.layer_name = layer_name
 
-        self.forward_entry = self._select_forward(layer)
+        self.forward_entry = self._select_forward()
 
-    def _select_forward(self, layer: torch.nn.Module) -> Callable:
+    def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped _forward_impl.
-            return _moe_forward if self.shared_experts is None else _moe_forward_shared
+            return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
         return (
             torch.ops.vllm.moe_forward
-            if self.shared_experts is None
+            if self._shared_experts is None
             else torch.ops.vllm.moe_forward_shared
         )
+
+    @property
+    def shared_experts(self) -> SharedExperts | None:
+        return self._shared_experts
+
+    # TODO(bnell): temporary hack, do not call this method.
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        if self._shared_experts is not None:
+            self._shared_experts._quant_method = quant_method
+        self.quant_method = quant_method
+
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
 
     @property
     @abstractmethod
@@ -273,7 +296,7 @@ class MoERunnerBase(MoERunner):
 
         return (
             hidden_states,
-            hidden_states if self.shared_experts is not None else None,
+            hidden_states if self._shared_experts is not None else None,
         )
 
     def _maybe_reduce_output(
@@ -335,7 +358,7 @@ class MoERunnerBase(MoERunner):
                 value=0.0,
             )
 
-        if self.shared_experts is not None:
+        if self._shared_experts is not None:
             orig_hidden_dims = [shared_experts_hidden_dim, transformed_hidden_dim]
         else:
             orig_hidden_dims = [transformed_hidden_dim]
@@ -347,9 +370,9 @@ class MoERunnerBase(MoERunner):
         shared_experts_input: torch.Tensor | None,
         order: SharedExpertsOrder,
     ):
-        if self.shared_experts is not None:
+        if self._shared_experts is not None:
             assert shared_experts_input is not None
-            self.shared_experts.apply(shared_experts_input, order)
+            self._shared_experts.apply(shared_experts_input, order)
 
     def _apply_quant_method(
         self,
@@ -359,9 +382,10 @@ class MoERunnerBase(MoERunner):
         shared_experts_input: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         # Run this before quant_method to avoid inplace issues.
+        # TODO(bnell): probably not needed anymore since inplace is
+        # disabled when shared experts are present.
         self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.BEFORE_QUANT_METHOD,
+            shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
         if self.quant_method.is_monolithic:
@@ -376,6 +400,8 @@ class MoERunnerBase(MoERunner):
                 router_logits=router_logits,
             )
 
+            # Passing shared_experts_input in case SharedExpertsOrder is
+            # NO_OVERLAP or MK_INTERNAL_OVERLAPPED.
             fused_out = self.quant_method.apply(
                 layer=layer,
                 x=hidden_states,
@@ -386,11 +412,11 @@ class MoERunnerBase(MoERunner):
 
         self._maybe_apply_shared_experts(
             shared_experts_input,
-            SharedExpertsOrder.AFTER_QUANT_METHOD,
+            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
         )
 
         return (
-            self.shared_experts.output if self.shared_experts is not None else None,
+            self._shared_experts.output if self._shared_experts is not None else None,
             fused_out,
         )
 
@@ -402,18 +428,16 @@ class MoERunnerBase(MoERunner):
             else nullcontext()
         )
 
-    def _maybe_gate(
+    def _maybe_sync_shared_experts_stream(
         self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
+        shared_experts_input: torch.Tensor | None,
+    ):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
-        if self.gate is not None:
-            router_logits, _ = self.gate(hidden_states)
-        return router_logits
+        if self._shared_experts is not None:
+            self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def _maybe_add_zero_expert_output(
         self,
@@ -493,12 +517,14 @@ class MoERunnerBase(MoERunner):
         # TODO(bnell): this can be removed after MK migration is complete.
         layer.ensure_moe_quant_config_init()
 
-        router_logits = self._maybe_gate(hidden_states, router_logits)
+        # Sync aux and main stream for shared expert multi-stream overlap.
+        self._maybe_sync_shared_experts_stream(shared_experts_input)
 
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.EXTERNAL,
-        )
+        # If the Runner holds the gate, apply it after the stream sync,
+        # so it can run overlapped with the
+        # NOTE: in future PR, MoE runner will always hold the gate.
+        if self.gate is not None:
+            router_logits, _ = self.gate(hidden_states)
 
         with self._sequence_parallel_context():
             return self._forward_impl(

@@ -7,22 +7,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
 )
-from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import MoERunnerBase
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
-
-logger = init_logger(__name__)
 
 
 class DefaultMoERunner(MoERunnerBase):
@@ -51,30 +36,6 @@ class DefaultMoERunner(MoERunnerBase):
     Eventually, this class may be split into more specialized implementations
     for different configurations (e.g., with/without shared experts, gates, etc.).
     """
-
-    def __init__(
-        self,
-        layer: torch.nn.Module,
-        moe_config: FusedMoEConfig,
-        router: FusedMoERouter,
-        routed_input_transform: torch.nn.Module | None,
-        gate: torch.nn.Module | None,
-        shared_experts: SharedExperts | None,
-        quant_method: FusedMoEMethodBase,
-        reduce_results: bool,
-        enable_dbo: bool,
-    ):
-        super().__init__(
-            layer,
-            moe_config,
-            router,
-            routed_input_transform,
-            gate,
-            shared_experts,
-            quant_method,
-            reduce_results,
-            enable_dbo,
-        )
 
     @property
     def reduce_results(self) -> bool:

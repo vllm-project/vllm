@@ -9,6 +9,7 @@ from typing import final
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -567,6 +568,8 @@ class FusedMoEExperts(ABC):
             )
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
+        elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
+            return False, _make_reason("batch invariance")
         return True, None
 
     @staticmethod
@@ -648,6 +651,15 @@ class FusedMoEExperts(ABC):
         has specific shape requirements.
         """
         return True
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        """
+        Whether the kernel supports batch invariance, i.e. the output does not
+        depend on the order of the tokens in the input batch. This is useful
+        for determining if the kernel can used with VLLM_BATCH_INVARIANT=1.
+        """
+        return False
 
     #
     # Various helpers for accessing quantization parameters from the
@@ -772,8 +784,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         require a specialized implementation, like MarlinExperts, they are free
         to override this function.
         """
-        assert w1.dim() == 3 and w2.dim() == 3
-        E, N, _ = w1.size()
+        assert len(w1.shape) == 3 and len(w2.shape) == 3
+        E, N, _ = w1.shape
         K = a1.size(-1)
 
         if a1.dim() == 2:
@@ -995,12 +1007,17 @@ class FusedMoEKernelModularImpl:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         fused_experts: FusedMoEExpertsModular,
-        shared_experts: SharedExperts | None = None,
+        shared_experts: SharedExperts | None,
         inplace: bool = False,
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
-        self.shared_experts = shared_experts
+        # Only accept shared experts if they can be run w/async.
+        # The MoERunner/SharedExperts class will coordinate with the MK to ensure
+        # that the SharedExperts are executed only once.
+        self.shared_experts = (
+            shared_experts if prepare_finalize.supports_async() else None
+        )
         self.inplace = inplace
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
@@ -1081,7 +1098,7 @@ class FusedMoEKernelModularImpl:
             assert shared_experts_input is not None
             self.shared_experts.apply(
                 shared_experts_input,
-                SharedExpertsOrder.INTERNAL,
+                SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
             )
 
     def _prepare(
@@ -1267,7 +1284,6 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            self._maybe_apply_shared_experts(shared_experts_input)
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,
@@ -1349,7 +1365,7 @@ class FusedMoEKernelModularImpl:
         else:
             output = torch.empty_like(hidden_states)
 
-        local_num_experts = w1.size(0)
+        local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
@@ -1461,7 +1477,6 @@ class FusedMoEKernel:
         inplace: bool = False,
     ):
         super().__init__()
-        self.shared_experts = shared_experts  # NOTE: check if we can remove
 
         # Initialize the implementation (monolithic or modular).
         self.impl: FusedMoEKernelModularImpl | FusedMoEKernelMonolithicImpl
@@ -1478,7 +1493,6 @@ class FusedMoEKernel:
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
         ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            assert shared_experts is None
             assert not inplace
             self.impl = FusedMoEKernelMonolithicImpl(
                 prepare_finalize,
@@ -1493,6 +1507,13 @@ class FusedMoEKernel:
             )
 
         self._post_init_setup()
+
+    @property
+    def owns_shared_experts(self) -> bool:
+        if isinstance(self.impl, FusedMoEKernelModularImpl):
+            return self.impl.shared_experts is not None
+        else:
+            return False
 
     @property
     def is_monolithic(self) -> bool:
