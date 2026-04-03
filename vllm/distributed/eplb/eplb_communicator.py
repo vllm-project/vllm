@@ -446,7 +446,7 @@ class NixlEplbCommunicator(EplbCommunicator):
                 timeout=timedelta(minutes=5),
             )
 
-            # Phase 2: create exact-size descriptors, transfer, unpack.
+            # Phase 2: create descriptors and issue all READs across dtypes.
             for dtype in self._dtypes:
                 recv_per_peer = self._recv_tensors.get(
                     dtype, [[] for _ in range(self._world_size)]
@@ -481,8 +481,6 @@ class NixlEplbCommunicator(EplbCommunicator):
                     )
                     dlist_handles.append(local_handle)
 
-                    # Remote send descriptor pointing at the slice of
-                    # the source rank's send buffer packed for us.
                     remote_base, remote_part_bytes, remote_dev = self._remote_send_meta[
                         dtype
                     ][src]
@@ -515,14 +513,21 @@ class NixlEplbCommunicator(EplbCommunicator):
                     self._nixl_wrapper.transfer(xfer_handle)
                     xfer_handles.append(xfer_handle)
 
-                self._wait_for_all_transfers(xfer_handles)
-                xfer_handles.clear()
+            # Phase 3: single wait for all in-flight transfers, then unpack.
+            self._wait_for_all_transfers(xfer_handles)
+            xfer_handles.clear()
 
-                for h in dlist_handles:
-                    self._nixl_wrapper.release_dlist_handle(h)
-                dlist_handles.clear()
+            for h in dlist_handles:
+                self._nixl_wrapper.release_dlist_handle(h)
+            dlist_handles.clear()
 
-                with torch.cuda.stream(self._cuda_stream):
+            with torch.cuda.stream(self._cuda_stream):
+                for dtype in self._dtypes:
+                    recv_per_peer = self._recv_tensors.get(
+                        dtype, [[] for _ in range(self._world_size)]
+                    )
+                    peer_partition_numel = self._peer_partition_numels[dtype]
+                    recv_buffer = self._recv_buffers[dtype]
                     for src, peer_tensors in enumerate(recv_per_peer):
                         if not peer_tensors:
                             continue
