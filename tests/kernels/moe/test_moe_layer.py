@@ -390,7 +390,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     if (
         config.backend is not None
         and config.backend.startswith("flashinfer_nvlink")
-        and not current_platform.has_device_capability(100)
+        and not current_platform.has_device_capability(90)
     ):
         return False, "flashinfer_nvlink not supported on H100+ GPUs"
 
