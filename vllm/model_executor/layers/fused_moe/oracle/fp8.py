@@ -478,8 +478,7 @@ def convert_to_fp8_moe_kernel_format(
 
     Returns (w13, w2, w13_scale, w2_scale).
     """
-    if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
-        assert experts_cls is not None and issubclass(experts_cls, Fp8MoEPrepMixin)
+    if experts_cls is not None and issubclass(experts_cls, Fp8MoEPrepMixin):
         w13, w2, w13_scale, w2_scale = experts_cls.prepare_fp8_weights(
             layer, w13, w2, w13_scale, w2_scale, block_shape
         )
@@ -558,8 +557,7 @@ def make_fp8_moe_quant_config(
     still use ad-hoc logic and will be migrated in follow-up PRs.
     """
 
-    if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
-        assert experts_cls is not None and issubclass(experts_cls, Fp8MoEPrepMixin)
+    if experts_cls is not None and issubclass(experts_cls, Fp8MoEPrepMixin):
         return experts_cls.make_fp8_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
