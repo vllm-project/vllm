@@ -405,8 +405,5 @@ class IrOpImpl:
         Compile-time hash to uniquely determine whether the implementation has changed.
         Used by vllm-compile hash mechanism and torch.compile lowering pass uuid to
         control the vLLM compile cache and AOTAutograd/Inductor caches respectively.
-
-        Cached at the file level via hash_file: all impls in the same file share
-        one read and one hash computation.
         """
         return hash_file(Path(inspect.getfile(self.impl_fn)))
