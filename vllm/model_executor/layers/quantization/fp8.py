@@ -372,6 +372,14 @@ class Fp8LinearMethod(LinearMethodBase):
             set_weight_attrs(scale, {"scale_type": "input_scale"})
             layer.register_parameter("input_scale", scale)
 
+        # TODO: remove this check once the following RFC is resolved.
+        # https://github.com/vllm-project/vllm/issues/33314
+        # This check is required because Mxfp8OnlineLinearMethod inherits from
+        # Fp8LinearMethod but only calls super().create_weights(), so we must
+        # skip the fp8_linear kernel creation.
+        if not hasattr(self, "mxfp8_linear"):
+            return
+
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
