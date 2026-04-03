@@ -14,7 +14,7 @@ def _hash_file_cached(path: Path, mtime_ns: int) -> str:  # noqa: ARG001
     """Inner cached function keyed on (path, mtime_ns).
     mtime_ns is included so that a modified file gets a cache miss."""
     hasher = hashlib.sha256()
-    hasher.update(path.read_text().encode("utf-8"))
+    hasher.update(path.read_bytes())
     return hasher.hexdigest()
 
 
