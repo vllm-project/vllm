@@ -570,13 +570,6 @@ class MoERunnerBase(MoERunner):
             hidden_states,
         )
 
-        router_logits = self._maybe_gate(hidden_states, router_logits)
-
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.EXTERNAL,
-        )
-
         result = self._forward_entry(
             hidden_states,
             router_logits,
