@@ -583,9 +583,7 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
   // seqLensStride > 0: 2D seqLens, each row has its own pre-computed
   //                    effective seq_len. rowEnd is simply seq_len
   //                    (Python already computed the final length)
-  int seq_len = (seqLensStride == 0)
-                    ? seqLens[batch_idx]
-                    : seqLens[batch_idx * seqLensStride + next_n_idx];
+  int seq_len = (seqLensStride == 0) ? seqLens[batch_idx] : seqLens[rowIdx];
   int rowEnd = (seqLensStride == 0) ? max(0, seq_len - next_n + next_n_idx + 1)
                                     : max(0, seq_len);
 
