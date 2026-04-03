@@ -211,11 +211,6 @@ def test_routed_input_transform_inside_vs_outside(
         hidden_states = torch.randn(num_tokens, hidden_size, device="cuda", dtype=dtype)
         router_logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
 
-        # Clone inputs so any in-place modification by Method A
-        # cannot affect Method B's computation.
-        hidden_states_A = hidden_states.clone()
-        router_logits_A = router_logits.clone()
-
         with set_forward_context(None, vllm_config, num_tokens=num_tokens):
             # Method A: combined output (shared + routed)
             combined_A = moe_with_transform(hidden_states, router_logits)

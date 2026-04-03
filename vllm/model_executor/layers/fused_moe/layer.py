@@ -427,7 +427,7 @@ class FusedMoE(CustomOp):
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
-        self.intermediate_size_per_partition = intermediate_size // self.tp_size
+        intermediate_size_per_partition = intermediate_size // self.tp_size
         self.renormalize = renormalize
 
         # TODO(bnell): these attributes are only used by monolithic kernels.

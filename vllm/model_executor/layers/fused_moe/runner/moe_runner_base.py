@@ -218,7 +218,6 @@ class MoERunnerBase(MoERunner):
                 # called, i.e. by a MK or by the MoERunner.
                 # Once the MK can be created upfront, we can just pass in the proper
                 # flags derived from the quant_method's MK.
-                reduce_results=reduce_results,
                 quant_method=quant_method,
                 enable_dbo=enable_dbo,
             )

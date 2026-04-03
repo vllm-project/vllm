@@ -358,7 +358,6 @@ class BailingMoeV25(nn.Module):
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=self.norm_expert_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
