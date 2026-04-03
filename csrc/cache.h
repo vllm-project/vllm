@@ -10,10 +10,6 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  int64_t block_size_in_bytes,
                  const torch::Tensor& block_mapping);
 
-void swap_blocks_batch(const torch::Tensor& src_ptrs,
-                       const torch::Tensor& dst_ptrs,
-                       const torch::Tensor& sizes);
-
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
                        torch::Tensor& slot_mapping,
