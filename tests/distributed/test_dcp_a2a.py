@@ -59,6 +59,66 @@ class TestDCPCommBackendConfig:
         assert config.dcp_comm_backend == "ag_rs"
 
 
+class TestTPAConfig:
+    """Test --tensor-parallel-size-attention config validation."""
+
+    def test_default_is_none(self):
+        """Default TPA is None (TPA = TP)."""
+        config = ParallelConfig()
+        assert config.tensor_parallel_size_attention is None
+        assert config.tpa_size == config.tensor_parallel_size
+        assert config.kvp_size == 1
+
+    def test_tpa_equals_tp(self):
+        """TPA = TP means no KV parallelism."""
+        config = ParallelConfig(
+            tensor_parallel_size=8,
+            tensor_parallel_size_attention=8,
+        )
+        assert config.tpa_size == 8
+        assert config.kvp_size == 1
+
+    def test_tpa_less_than_tp_requires_dcp(self):
+        """TPA < TP requires DCP = TP / TPA."""
+        config = ParallelConfig(
+            tensor_parallel_size=16,
+            tensor_parallel_size_attention=4,
+            decode_context_parallel_size=4,
+        )
+        assert config.tpa_size == 4
+        assert config.kvp_size == 4
+
+    def test_tpa_must_divide_tp(self):
+        """TPA must evenly divide TP."""
+        with pytest.raises(ValueError, match="must be divisible by"):
+            ParallelConfig(
+                tensor_parallel_size=16,
+                tensor_parallel_size_attention=3,
+            )
+
+    def test_tpa_dcp_mismatch_rejected(self):
+        """DCP must equal TP / TPA when TPA < TP."""
+        with pytest.raises(
+            ValueError,
+            match="decode_context_parallel_size must equal",
+        ):
+            ParallelConfig(
+                tensor_parallel_size=16,
+                tensor_parallel_size_attention=4,
+                decode_context_parallel_size=2,
+            )
+
+    def test_tpa_mla_mode(self):
+        """TPA=1 is valid for MLA (single effective KV head)."""
+        config = ParallelConfig(
+            tensor_parallel_size=8,
+            tensor_parallel_size_attention=1,
+            decode_context_parallel_size=8,
+        )
+        assert config.tpa_size == 1
+        assert config.kvp_size == 8
+
+
 class TestLSEWeightedCombine:
     """Test LSE-weighted combination logic (CPU only, no GPU).
 
