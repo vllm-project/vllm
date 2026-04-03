@@ -3287,6 +3287,20 @@ class NixlConnectorWorker:
             )
             # always store metadata for failure recovery
             self._recving_metadata[req_id] = meta
+
+            # In push mode, D just waits for P to write blocks.
+            if meta.mode == TransferMode.PUSH:
+                if remote_engine_id not in self._block_size:
+                    if meta.remote_block_size is not None:
+                        self._block_size[remote_engine_id] = meta.remote_block_size
+                    if meta.tp_size:
+                        self._tp_size[remote_engine_id] = meta.tp_size
+                logger.info(
+                    "Push mode: D node waiting for P to push blocks for request %s",
+                    req_id,
+                )
+                continue
+
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
