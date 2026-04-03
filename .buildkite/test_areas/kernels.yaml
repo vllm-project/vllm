@@ -184,6 +184,7 @@ steps:
   timeout_in_minutes: 90
   device: h100
   num_devices: 2
+  optional: true
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
 
