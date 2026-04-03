@@ -153,7 +153,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         format = scheme_dict.get("format")
 
         if quant_config._is_mxfp4(weight_quant):
-            return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
+            return CompressedTensorsW4A4MxFp4MoEMethod(layer.moe_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
@@ -234,7 +234,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
 
 
-class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
+class CompressedTensorsW4A4MxFp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(self, moe):
         super().__init__(moe)
         self.group_size = 32

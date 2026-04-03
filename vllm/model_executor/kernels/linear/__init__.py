@@ -51,6 +51,13 @@ from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4 import (
+    MXFP4LinearKernel,
+    MXFP4LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.mxfp4.xpu import (
+    XPUMXFP4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -149,6 +156,12 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CPU: [
         Dynamic4bitLinearKernel,
         CPUWNA16LinearKernel,
+    ],
+}
+
+_POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MXFP4LinearKernel]]] = {
+    PlatformEnum.XPU: [
+        XPUMXFP4LinearKernel,
     ],
 }
 
@@ -367,6 +380,48 @@ def choose_mp_linear_kernel(
     )
 
 
+def choose_mxfp4_linear_kernel(
+    config: MXFP4LinearLayerConfig, compute_capability: int | None = None
+) -> type[MXFP4LinearKernel]:
+    if compute_capability is None:
+        if current_platform is None:
+            raise ValueError("Cannot determine compute capability")
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+
+    failure_reasons = []
+    for kernel in _POSSIBLE_MXFP4_KERNELS[current_platform._enum]:
+        if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel.__name__} disabled by environment variable"
+            )
+            continue
+        if (
+            compute_capability is not None
+            and kernel.get_min_capability() > compute_capability
+        ):
+            failure_reasons.append(
+                f"{kernel.__name__} requires capability "
+                f"{kernel.get_min_capability()}, current compute "
+                f" capability is {compute_capability}"
+            )
+            continue
+
+        can_implement, failure_reason = kernel.can_implement(config)
+        if can_implement:
+            return kernel
+        else:
+            failure_reasons.append(
+                f" {kernel.__name__} cannot implement due to: {failure_reason}"
+            )
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "WNA16 linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
+
+
 def register_linear_kernel(
     kernel_class: type,
     platform: PlatformEnum,
@@ -396,6 +451,10 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "mxfp4":
+        if platform not in _POSSIBLE_MXFP4_KERNELS:
+            _POSSIBLE_MXFP4_KERNELS[platform] = []
+        _POSSIBLE_MXFP4_KERNELS[platform].append(kernel_class)
     else:
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
 
@@ -404,6 +463,7 @@ __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "choose_mp_linear_kernel",
+    "choose_mxfp4_linear_kernel",
     "register_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
@@ -423,6 +483,8 @@ __all__ = [
     "TritonInt8ScaledMMLinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
+    "MXFP4LinearKernel",
+    "MXFP4LinearLayerConfig",
     "AllSparkLinearKernel",
     "ConchLinearKernel",
     "CPUWNA16LinearKernel",

@@ -11,6 +11,7 @@ from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_
 
 logger = init_logger(__name__)
 
+MXFP4_BLOCK_SIZE = 32
 # CK's pre-compiled MXFP4 MoE GEMM kernel instances require the
 # intermediate_size (after TP split) to be a multiple of this value.
 # This arises from FP4 packing (2 values per byte) combined with CK
@@ -162,3 +163,9 @@ try:
     quant_dequant_mxfp4 = torch.ops.vllm.quant_dequant_mxfp4
 except AttributeError as error:
     raise error
+
+
+def xpu_mxfp4_quant(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.xpu_mxfp4_quantize(x)
