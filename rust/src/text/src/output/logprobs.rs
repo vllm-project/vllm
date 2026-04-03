@@ -7,6 +7,8 @@ use crate::tokenizers::Tokenizer;
 /// One decoded token candidate and its logprob metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecodedTokenLogprob {
+    /// Original vocabulary token ID for this candidate.
+    pub token_id: u32,
     /// Best-effort decoded token string for this candidate.
     pub token: String,
     /// Log probability of this token candidate.
@@ -32,6 +34,8 @@ pub struct DecodedLogprobs {
 /// Decoded prompt logprobs for prompt token positions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecodedPromptLogprobs {
+    /// Original vocabulary token ID for the first prompt token.
+    pub first_token_id: u32,
     /// Best-effort decoded string for the first prompt token.
     ///
     /// The first prompt token has no left context to score against, so it is stored separately
@@ -84,6 +88,7 @@ pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
         .try_collect()?;
 
     Ok(DecodedPromptLogprobs {
+        first_token_id,
         first_token,
         scored_positions,
     })
@@ -105,6 +110,7 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
                 tokenizer
                     .decode(&[entry.token_id], skip_special_tokens)
                     .map(|token| DecodedTokenLogprob {
+                        token_id: entry.token_id,
                         token,
                         logprob: entry.logprob,
                         rank: entry.rank,
@@ -169,11 +175,13 @@ mod tests {
                 positions: vec![DecodedPositionLogprobs {
                     entries: vec![
                         DecodedTokenLogprob {
+                            token_id: b'a' as u32,
                             token: "a".to_string(),
                             logprob: -0.1,
                             rank: 3,
                         },
                         DecodedTokenLogprob {
+                            token_id: b'b' as u32,
                             token: "b".to_string(),
                             logprob: -0.2,
                             rank: 1,
@@ -201,9 +209,11 @@ mod tests {
             decode_prompt_logprobs(&tokenizer, &[b'p' as u32, b'x' as u32], &logprobs, false)
                 .unwrap(),
             DecodedPromptLogprobs {
+                first_token_id: b'p' as u32,
                 first_token: "p".to_string(),
                 scored_positions: vec![DecodedPositionLogprobs {
                     entries: vec![DecodedTokenLogprob {
+                        token_id: b'x' as u32,
                         token: "x".to_string(),
                         logprob: -0.4,
                         rank: 1,

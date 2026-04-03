@@ -30,6 +30,10 @@ pub struct PreparedRequest {
     pub chat_request: ChatRequest,
     /// Last assistant-role message content to echo back when `echo=true`.
     pub echo: Option<String>,
+    /// Whether to include token IDs alongside generated text.
+    pub return_token_ids: bool,
+    /// Whether to format logprob tokens as `token_id:{id}`.
+    pub return_tokens_as_token_ids: bool,
 }
 
 /// Validate and lower one OpenAI chat completion request into the internal chat format.
@@ -130,6 +134,8 @@ pub fn prepare_chat_request(
         include_prompt_logprobs,
         chat_request,
         echo,
+        return_token_ids: request.return_token_ids.unwrap_or(false),
+        return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
 

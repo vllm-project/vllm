@@ -280,6 +280,20 @@ impl ChatBackend for FailingDecodeBackend {
     }
 }
 
+/// Skip `LogprobsDelta` events that carry only token_ids (no logprobs),
+/// returning the next semantically interesting event.
+async fn next_semantic<S>(stream: &mut S) -> Option<Result<ChatEvent, vllm_chat::Error>>
+where
+    S: futures::Stream<Item = Result<ChatEvent, vllm_chat::Error>> + Unpin,
+{
+    loop {
+        match stream.next().await {
+            Some(Ok(ChatEvent::LogprobsDelta { logprobs: None, .. })) => continue,
+            other => return other,
+        }
+    }
+}
+
 fn sample_request(request_id: &str) -> ChatRequest {
     ChatRequest {
         messages: vec![
@@ -371,22 +385,28 @@ async fn chat_streams_text_events() {
 
     let mut stream = chat.chat(sample_request("chat-1")).await.unwrap();
 
-    assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+    match next_semantic(&mut stream).await.unwrap().unwrap() {
         ChatEvent::Start {
-            prompt_token_count: "system: You are terse.\nuser: Say hi\nassistant:".len(),
+            prompt_token_ids,
             prompt_logprobs: None,
+        } => {
+            assert_eq!(
+                prompt_token_ids.len(),
+                "system: You are terse.\nuser: Say hi\nassistant:".len()
+            );
+            assert!(!prompt_token_ids.is_empty());
         }
-    );
+        other => panic!("expected Start, got {other:?}"),
+    }
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
             index: 0,
             kind: AssistantBlockKind::Text,
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Text,
@@ -394,7 +414,7 @@ async fn chat_streams_text_events() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Text,
@@ -402,7 +422,7 @@ async fn chat_streams_text_events() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockEnd {
             index: 0,
             block: AssistantContentBlock::Text {
@@ -411,7 +431,7 @@ async fn chat_streams_text_events() {
         }
     );
 
-    match stream.next().await {
+    match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
             output_token_count,
@@ -427,7 +447,7 @@ async fn chat_streams_text_events() {
         }
         other => panic!("unexpected final event: {other:?}"),
     }
-    assert!(stream.next().await.is_none());
+    assert!(next_semantic(&mut stream).await.is_none());
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -478,21 +498,21 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
     let mut stream = chat.chat(sample_request("chat-utf8")).await.unwrap();
 
     assert!(matches!(
-        stream.next().await,
+        next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
     ));
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
             index: 0,
             kind: AssistantBlockKind::Text,
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Text,
@@ -500,7 +520,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockEnd {
             index: 0,
             block: AssistantContentBlock::Text {
@@ -509,7 +529,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
         }
     );
 
-    match stream.next().await {
+    match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
             output_token_count,
@@ -567,21 +587,21 @@ async fn chat_stream_flushes_held_text_on_finish() {
     let mut stream = chat.chat(sample_request("chat-final-flush")).await.unwrap();
 
     assert!(matches!(
-        stream.next().await,
+        next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
     ));
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
             index: 0,
             kind: AssistantBlockKind::Text,
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Text,
@@ -589,7 +609,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockEnd {
             index: 0,
             block: AssistantContentBlock::Text {
@@ -598,7 +618,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
         }
     );
 
-    match stream.next().await {
+    match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
             output_token_count,
@@ -674,7 +694,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
     let mut stream = chat.chat(sample_request("chat-4")).await.unwrap();
     assert_eq!(stream.request_id(), "chat-4");
     assert!(matches!(
-        stream.next().await,
+        next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
@@ -739,21 +759,21 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     let mut stream = chat.chat(request).await.unwrap();
 
     assert!(matches!(
-        stream.next().await,
+        next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
     ));
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
             index: 0,
             kind: AssistantBlockKind::Text,
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Text,
@@ -761,7 +781,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockEnd {
             index: 0,
             block: AssistantContentBlock::Text {
@@ -770,7 +790,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
         }
     );
 
-    match stream.next().await {
+    match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
             output_token_count,
@@ -849,21 +869,21 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     let mut stream = chat.chat(sample_request("chat-reasoning")).await.unwrap();
 
     assert!(matches!(
-        stream.next().await,
+        next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
     ));
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
@@ -871,7 +891,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
@@ -879,7 +899,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockEnd {
             index: 0,
             block: AssistantContentBlock::Reasoning {
@@ -888,14 +908,14 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
             index: 1,
             kind: AssistantBlockKind::Text,
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 1,
             kind: AssistantBlockKind::Text,
@@ -903,7 +923,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockEnd {
             index: 1,
             block: AssistantContentBlock::Text {
@@ -912,7 +932,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
         }
     );
 
-    match stream.next().await {
+    match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
             finish_reason,
@@ -1229,38 +1249,51 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     request.sampling_params.prompt_logprobs = Some(1);
 
     let mut stream = chat.chat(request.clone()).await.unwrap();
-    assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+    match next_semantic(&mut stream).await.unwrap().unwrap() {
         ChatEvent::Start {
-            prompt_token_count: "system: You are terse.\nuser: Say hi\nassistant:".len(),
-            prompt_logprobs: Some(DecodedPromptLogprobs {
-                first_token: "s".to_string(),
-                scored_positions: vec![DecodedPositionLogprobs {
-                    entries: vec![
-                        DecodedTokenLogprob {
-                            token: "i".to_string(),
-                            logprob: -0.3,
-                            rank: 1,
-                        },
-                        DecodedTokenLogprob {
-                            token: "!".to_string(),
-                            logprob: -0.4,
-                            rank: 1,
-                        },
-                    ],
-                }],
-            }),
+            prompt_token_ids,
+            prompt_logprobs,
+        } => {
+            assert_eq!(
+                prompt_token_ids.len(),
+                "system: You are terse.\nuser: Say hi\nassistant:".len()
+            );
+            assert!(!prompt_token_ids.is_empty());
+            assert_eq!(
+                prompt_logprobs,
+                Some(DecodedPromptLogprobs {
+                    first_token_id: b's' as u32,
+                    first_token: "s".to_string(),
+                    scored_positions: vec![DecodedPositionLogprobs {
+                        entries: vec![
+                            DecodedTokenLogprob {
+                                token_id: b'i' as u32,
+                                token: "i".to_string(),
+                                logprob: -0.3,
+                                rank: 1,
+                            },
+                            DecodedTokenLogprob {
+                                token_id: b'!' as u32,
+                                token: "!".to_string(),
+                                logprob: -0.4,
+                                rank: 1,
+                            },
+                        ],
+                    }],
+                })
+            );
         }
-    );
+        other => panic!("expected Start, got {other:?}"),
+    }
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
             index: 0,
             kind: AssistantBlockKind::Text,
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockDelta {
             index: 0,
             kind: AssistantBlockKind::Text,
@@ -1268,27 +1301,33 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
         }
     );
     assert_eq!(
-        stream.next().await.unwrap().unwrap(),
+        next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::LogprobsDelta {
-            logprobs: DecodedLogprobs {
+            logprobs: Some(DecodedLogprobs {
                 positions: vec![DecodedPositionLogprobs {
                     entries: vec![
                         DecodedTokenLogprob {
+                            token_id: b'H' as u32,
                             token: "H".to_string(),
                             logprob: -0.1,
                             rank: 1,
                         },
                         DecodedTokenLogprob {
+                            token_id: b'h' as u32,
                             token: "h".to_string(),
                             logprob: -0.2,
                             rank: 1,
                         },
                     ],
                 }],
-            },
+            }),
+            token_ids: vec![b'H' as u32],
         }
     );
-    while !matches!(stream.next().await, Some(Ok(ChatEvent::Done { .. }))) {}
+    while !matches!(
+        next_semantic(&mut stream).await,
+        Some(Ok(ChatEvent::Done { .. }))
+    ) {}
 
     request.request_id = "chat-logprobs-collect".to_string();
     let collected = chat
@@ -1302,15 +1341,18 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     assert_eq!(
         collected.prompt_logprobs,
         Some(DecodedPromptLogprobs {
+            first_token_id: b's' as u32,
             first_token: "s".to_string(),
             scored_positions: vec![DecodedPositionLogprobs {
                 entries: vec![
                     DecodedTokenLogprob {
+                        token_id: b'i' as u32,
                         token: "i".to_string(),
                         logprob: -0.3,
                         rank: 1,
                     },
                     DecodedTokenLogprob {
+                        token_id: b'!' as u32,
                         token: "!".to_string(),
                         logprob: -0.4,
                         rank: 1,
@@ -1326,11 +1368,13 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
                 DecodedPositionLogprobs {
                     entries: vec![
                         DecodedTokenLogprob {
+                            token_id: b'H' as u32,
                             token: "H".to_string(),
                             logprob: -0.1,
                             rank: 1,
                         },
                         DecodedTokenLogprob {
+                            token_id: b'h' as u32,
                             token: "h".to_string(),
                             logprob: -0.2,
                             rank: 1,
@@ -1340,11 +1384,13 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
                 DecodedPositionLogprobs {
                     entries: vec![
                         DecodedTokenLogprob {
+                            token_id: b'i' as u32,
                             token: "i".to_string(),
                             logprob: -0.1,
                             rank: 1,
                         },
                         DecodedTokenLogprob {
+                            token_id: b'I' as u32,
                             token: "I".to_string(),
                             logprob: -0.2,
                             rank: 1,

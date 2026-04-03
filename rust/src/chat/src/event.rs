@@ -1,4 +1,5 @@
 use std::ops::Deref;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
@@ -111,9 +112,8 @@ impl AssistantMessage {
 pub enum ChatEvent {
     /// The request was accepted, streaming has started, and prompt metadata is ready.
     Start {
-        /// Number of prompt tokens actually sent to the engine after chat
-        /// template rendering and tokenization.
-        prompt_token_count: usize,
+        /// The actual prompt token IDs for this request.
+        prompt_token_ids: Arc<[u32]>,
         /// Once-only prompt logprobs metadata, when requested.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
@@ -128,8 +128,11 @@ pub enum ChatEvent {
         kind: AssistantBlockKind,
         delta: String,
     },
-    /// Token-update-aligned output logprobs for one streamed assistant update.
-    LogprobsDelta { logprobs: DecodedLogprobs },
+    /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
+    LogprobsDelta {
+        logprobs: Option<DecodedLogprobs>,
+        token_ids: Vec<u32>,
+    },
     /// One assistant output block has ended.
     BlockEnd {
         index: usize,

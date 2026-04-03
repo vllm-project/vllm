@@ -21,6 +21,10 @@ pub struct PreparedRequest {
     pub text_request: TextRequest,
     /// Original text prompt that should be echoed back northbound when `echo=true`.
     pub echo: Option<String>,
+    /// Whether to include token IDs alongside generated text.
+    pub return_token_ids: bool,
+    /// Whether to format logprob tokens as `token_id:{id}`.
+    pub return_tokens_as_token_ids: bool,
 }
 
 /// Validate and lower one OpenAI completions request into the internal text-generation format.
@@ -109,6 +113,8 @@ pub fn prepare_completion_request(
         include_usage,
         text_request,
         echo,
+        return_token_ids: request.return_token_ids.unwrap_or(false),
+        return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
 

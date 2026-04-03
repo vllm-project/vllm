@@ -103,25 +103,28 @@ pub(crate) async fn reasoning_event_stream(
     while let Some(event) = decoded_stream.next().await.transpose()? {
         match event {
             DecodedTextEvent::Start {
-                prompt_token_count,
+                prompt_token_ids,
                 prompt_logprobs,
             } => {
                 yield ContentEvent::Start {
-                    prompt_token_count,
+                    prompt_token_ids,
                     prompt_logprobs,
                 }
             }
             DecodedTextEvent::TextDelta {
                 delta,
+                token_ids,
                 logprobs,
                 finished,
-                ..
             } => {
                 for next in state.process_delta(delta) {
                     yield next;
                 }
-                if let Some(logprobs) = logprobs {
-                    yield ContentEvent::LogprobsDelta { logprobs };
+                if logprobs.is_some() || !token_ids.is_empty() {
+                    yield ContentEvent::LogprobsDelta {
+                        logprobs,
+                        token_ids,
+                    };
                 }
                 if let Some(finished) = finished {
                     yield ContentEvent::Done {
@@ -138,6 +141,7 @@ pub(crate) async fn reasoning_event_stream(
 
 #[cfg(test)]
 mod tests {
+
     use futures::{StreamExt as _, stream};
     use reasoning_parser::{ParseError, ParserResult, ReasoningParser};
     use vllm_llm::FinishReason;
@@ -187,7 +191,7 @@ mod tests {
     async fn reasoning_parser_failure_falls_back_to_plain_text() {
         let events = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_count: 3,
+                prompt_token_ids: vec![1, 2, 3].into(),
                 prompt_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
@@ -225,7 +229,7 @@ mod tests {
             events,
             vec![
                 ContentEvent::Start {
-                    prompt_token_count: 3,
+                    prompt_token_ids: vec![1, 2, 3].into(),
                     prompt_logprobs: None,
                 },
                 ContentEvent::TextDelta {
@@ -250,7 +254,7 @@ mod tests {
     async fn reasoning_stream_preserves_logprobs_delta() {
         let events = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_count: 1,
+                prompt_token_ids: vec![1].into(),
                 prompt_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
@@ -259,6 +263,7 @@ mod tests {
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "a".to_string(),
                             logprob: -0.1,
                             rank: 1,
@@ -280,7 +285,7 @@ mod tests {
             collected,
             vec![
                 ContentEvent::Start {
-                    prompt_token_count: 1,
+                    prompt_token_ids: vec![1].into(),
                     prompt_logprobs: None,
                 },
                 ContentEvent::TextDelta {
@@ -288,15 +293,17 @@ mod tests {
                     delta: "abc".to_string(),
                 },
                 ContentEvent::LogprobsDelta {
-                    logprobs: DecodedLogprobs {
+                    logprobs: Some(DecodedLogprobs {
                         positions: vec![DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "a".to_string(),
                                 logprob: -0.1,
                                 rank: 1,
                             }],
                         }],
-                    },
+                    }),
+                    token_ids: vec![],
                 },
             ]
         );

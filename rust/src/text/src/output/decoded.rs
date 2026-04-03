@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures::Stream;
 use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
@@ -50,8 +52,8 @@ pub struct Finished {
 pub enum DecodedTextEvent {
     /// The request has reached the point where prompt-scoped decoding metadata is ready.
     Start {
-        /// Number of prompt tokens for this request.
-        prompt_token_count: usize,
+        /// The actual prompt token IDs for this request.
+        prompt_token_ids: Arc<[u32]>,
         /// Once-only prompt logprobs metadata, when requested.
         ///
         /// The first prompt token is carried separately because it has no left context to score
@@ -88,8 +90,7 @@ pub async fn decoded_text_event_stream(
     intermediate: bool,
 ) {
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
-    let mut started = false;
-    let mut prompt_token_count: Option<usize> = None;
+    let mut prompt_token_count = 0_usize;
     let mut token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut logprobs: Option<DecodedLogprobs> = None;
@@ -98,12 +99,14 @@ pub async fn decoded_text_event_stream(
     for next in raw_stream {
         let mut output = next?;
 
-        let decoder = decoder.get_or_insert_with(|| {
+        // If it's the first output, init states and yield `Start` event.
+        if decoder.is_none() {
             let prompt_token_ids = output
                 .prompt_token_ids()
                 .expect("first llm output must carry prompt token ids");
-            prompt_token_count = Some(prompt_token_ids.len());
-            tokenizer.create_decode_stream(
+            prompt_token_count = prompt_token_ids.len();
+
+            let dec = tokenizer.create_decode_stream(
                 prompt_token_ids,
                 decode_options.skip_special_tokens,
                 // If we are excluding stop strings from output, we need to buffer
@@ -120,30 +123,25 @@ pub async fn decoded_text_event_stream(
                             - 1
                     }
                 },
-            )
-        });
-        let prompt_token_count =
-            prompt_token_count.expect("first llm output must carry prompt token ids");
+            );
+            decoder = Some(dec);
 
-        if !started {
             yield DecodedTextEvent::Start {
-                prompt_token_count,
+                prompt_token_ids: prompt_token_ids.clone(),
                 prompt_logprobs: output
                     .prompt_logprobs()
                     .map(|logprobs| {
                         decode_prompt_logprobs(
                             tokenizer.as_ref(),
-                            output
-                                .prompt_token_ids()
-                                .expect("first llm output must carry prompt token ids"),
+                            prompt_token_ids,
                             logprobs,
                             decode_options.skip_special_tokens,
                         )
                     })
                     .transpose()?,
             };
-            started = true;
-        }
+        };
+        let decoder = decoder.as_mut().unwrap();
 
         let kv_transfer_params = output.take_kv_transfer_params();
         let mut finish_reason = output.finish_reason();

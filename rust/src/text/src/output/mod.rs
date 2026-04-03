@@ -8,6 +8,8 @@ pub use logprobs::{
 mod decoded;
 mod logprobs;
 
+use std::sync::Arc;
+
 use futures::{StreamExt as _, pin_mut};
 
 use crate::{Error, FinishReason, Result, TextOutputStream};
@@ -16,7 +18,7 @@ use crate::{Error, FinishReason, Result, TextOutputStream};
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectedTextOutput {
     pub text: String,
-    pub prompt_token_count: usize,
+    pub prompt_token_ids: Arc<[u32]>,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
@@ -34,15 +36,18 @@ impl<T: TextOutputStream> T {
             let stream = self;
             pin_mut!(stream);
             let mut prompt_logprobs = None;
+            let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
             let mut collected: Option<CollectedTextOutput> = None;
 
             while let Some(event) = stream.next().await.transpose()? {
                 match event {
                     DecodedTextEvent::Start {
                         prompt_logprobs: start_prompt_logprobs,
+                        prompt_token_ids: start_prompt_token_ids,
                         ..
                     } => {
                         prompt_logprobs = start_prompt_logprobs;
+                        prompt_token_ids = start_prompt_token_ids;
                     }
                     DecodedTextEvent::TextDelta {
                         delta,
@@ -63,11 +68,10 @@ impl<T: TextOutputStream> T {
                         } else {
                             collected = Some(CollectedTextOutput {
                                 text: delta,
+                                prompt_token_ids: Arc::clone(&prompt_token_ids),
                                 prompt_logprobs: prompt_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
-                                // These are updated below when finished.
-                                prompt_token_count: 0,
                                 finish_reason: FinishReason::Error,
                                 kv_transfer_params: None,
                             })
@@ -75,7 +79,6 @@ impl<T: TextOutputStream> T {
 
                         if let Some(finished) = finished {
                             let mut collected = collected.unwrap();
-                            collected.prompt_token_count = finished.prompt_token_count;
                             collected.finish_reason = finished.finish_reason;
                             collected.kv_transfer_params = finished.kv_transfer_params;
                             return Ok(collected);
@@ -104,11 +107,13 @@ mod tests {
     async fn collect_output_retains_prompt_and_sample_logprobs() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_count: 2,
+                prompt_token_ids: vec![10, 11].into(),
                 prompt_logprobs: Some(DecodedPromptLogprobs {
+                    first_token_id: 0,
                     first_token: "o".to_string(),
                     scored_positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "p".to_string(),
                             logprob: -0.1,
                             rank: 1,
@@ -123,6 +128,7 @@ mod tests {
                     positions: vec![
                         DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "a".to_string(),
                                 logprob: -0.2,
                                 rank: 1,
@@ -130,6 +136,7 @@ mod tests {
                         },
                         DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "bc".to_string(),
                                 logprob: -0.3,
                                 rank: 1,
@@ -148,13 +155,14 @@ mod tests {
 
         let collected = stream.collect_output().await.unwrap();
         assert_eq!(collected.text, "bc");
-        assert_eq!(collected.prompt_token_count, 2);
         assert_eq!(
             collected.prompt_logprobs,
             Some(DecodedPromptLogprobs {
+                first_token_id: 0,
                 first_token: "o".to_string(),
                 scored_positions: vec![DecodedPositionLogprobs {
                     entries: vec![DecodedTokenLogprob {
+                        token_id: 0,
                         token: "p".to_string(),
                         logprob: -0.1,
                         rank: 1,
@@ -168,6 +176,7 @@ mod tests {
                 positions: vec![
                     DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "a".to_string(),
                             logprob: -0.2,
                             rank: 1,
@@ -175,6 +184,7 @@ mod tests {
                     },
                     DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "bc".to_string(),
                             logprob: -0.3,
                             rank: 1,
@@ -189,7 +199,7 @@ mod tests {
     async fn collect_output_accumulates_intermediate_deltas() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_count: 2,
+                prompt_token_ids: vec![10, 11].into(),
                 prompt_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
@@ -199,6 +209,7 @@ mod tests {
                     positions: vec![
                         DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "h".to_string(),
                                 logprob: -0.1,
                                 rank: 1,
@@ -206,6 +217,7 @@ mod tests {
                         },
                         DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "e".to_string(),
                                 logprob: -0.2,
                                 rank: 1,
@@ -222,6 +234,7 @@ mod tests {
                     positions: vec![
                         DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "l".to_string(),
                                 logprob: -0.3,
                                 rank: 1,
@@ -229,6 +242,7 @@ mod tests {
                         },
                         DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "l".to_string(),
                                 logprob: -0.4,
                                 rank: 1,
@@ -236,6 +250,7 @@ mod tests {
                         },
                         DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "o".to_string(),
                                 logprob: -0.5,
                                 rank: 1,
@@ -254,7 +269,6 @@ mod tests {
 
         let collected = stream.collect_output().await.unwrap();
         assert_eq!(collected.text, "hello");
-        assert_eq!(collected.prompt_token_count, 2);
         assert_eq!(collected.prompt_logprobs, None);
         assert_eq!(collected.token_ids, vec![1, 2, 3, 4, 5]);
         assert_eq!(
@@ -263,6 +277,7 @@ mod tests {
                 positions: vec![
                     DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "h".to_string(),
                             logprob: -0.1,
                             rank: 1,
@@ -270,6 +285,7 @@ mod tests {
                     },
                     DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "e".to_string(),
                             logprob: -0.2,
                             rank: 1,
@@ -277,6 +293,7 @@ mod tests {
                     },
                     DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "l".to_string(),
                             logprob: -0.3,
                             rank: 1,
@@ -284,6 +301,7 @@ mod tests {
                     },
                     DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "l".to_string(),
                             logprob: -0.4,
                             rank: 1,
@@ -291,6 +309,7 @@ mod tests {
                     },
                     DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "o".to_string(),
                             logprob: -0.5,
                             rank: 1,

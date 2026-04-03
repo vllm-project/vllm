@@ -67,9 +67,16 @@ impl StructuredEventState {
         events
     }
 
-    /// Forward one token-update-aligned logprobs delta without attaching it to text blocks.
-    fn process_logprobs_delta(&mut self, logprobs: DecodedLogprobs) -> Vec<ChatEvent> {
-        vec![ChatEvent::LogprobsDelta { logprobs }]
+    /// Forward per-update sample metadata without attaching it to text blocks.
+    fn process_logprobs_delta(
+        &mut self,
+        logprobs: Option<DecodedLogprobs>,
+        token_ids: Vec<u32>,
+    ) -> Vec<ChatEvent> {
+        vec![ChatEvent::LogprobsDelta {
+            logprobs,
+            token_ids,
+        }]
     }
 
     /// Start one new tool call, closing any incompatible open block first.
@@ -233,11 +240,11 @@ pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStre
     while let Some(event) = stream.next().await.transpose()? {
         match event {
             AssistantEvent::Start {
-                prompt_token_count,
+                prompt_token_ids,
                 prompt_logprobs,
             } => {
                 yield ChatEvent::Start {
-                    prompt_token_count,
+                    prompt_token_ids,
                     prompt_logprobs,
                 }
             }
@@ -246,8 +253,11 @@ pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                     yield next;
                 }
             }
-            AssistantEvent::LogprobsDelta { logprobs } => {
-                for next in state.process_logprobs_delta(logprobs) {
+            AssistantEvent::LogprobsDelta {
+                logprobs,
+                token_ids,
+            } => {
+                for next in state.process_logprobs_delta(logprobs, token_ids) {
                     yield next;
                 }
             }

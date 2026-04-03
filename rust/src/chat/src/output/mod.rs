@@ -4,6 +4,8 @@ mod reasoning;
 mod structured;
 mod tool;
 
+use std::sync::Arc;
+
 use futures::Stream;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use subenum::subenum;
@@ -27,7 +29,7 @@ use crate::request::{ChatTool, ChatToolChoice};
 pub(crate) enum AssistantEvent {
     #[subenum(ContentEvent)]
     Start {
-        prompt_token_count: usize,
+        prompt_token_ids: Arc<[u32]>,
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
     #[subenum(ContentEvent)]
@@ -35,9 +37,11 @@ pub(crate) enum AssistantEvent {
         kind: AssistantBlockKind,
         delta: String,
     },
+    /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
     #[subenum(ContentEvent)]
     LogprobsDelta {
-        logprobs: DecodedLogprobs,
+        logprobs: Option<DecodedLogprobs>,
+        token_ids: Vec<u32>,
     },
     ToolCallStart {
         id: String,
@@ -66,17 +70,17 @@ impl ContentEvent {
     fn from_decoded_plain_text(event: DecodedTextEvent) -> Vec<Self> {
         match event {
             DecodedTextEvent::Start {
-                prompt_token_count,
+                prompt_token_ids,
                 prompt_logprobs,
             } => vec![Self::Start {
-                prompt_token_count,
+                prompt_token_ids,
                 prompt_logprobs,
             }],
             DecodedTextEvent::TextDelta {
                 delta,
+                token_ids,
                 logprobs,
                 finished,
-                ..
             } => {
                 let mut events = Vec::new();
                 if !delta.is_empty() {
@@ -85,8 +89,11 @@ impl ContentEvent {
                         delta,
                     });
                 }
-                if let Some(logprobs) = logprobs {
-                    events.push(Self::LogprobsDelta { logprobs });
+                if logprobs.is_some() || !token_ids.is_empty() {
+                    events.push(Self::LogprobsDelta {
+                        logprobs,
+                        token_ids,
+                    });
                 }
                 if let Some(finished) = finished {
                     events.push(Self::Done {

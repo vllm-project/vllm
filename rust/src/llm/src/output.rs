@@ -100,10 +100,8 @@ impl GenerateOutput {
     /// Returns the prompt token IDs when this output carries [`GeneratePromptInfo`].
     ///
     /// Only the first output for a request can return `Some`; all later outputs return `None`.
-    pub fn prompt_token_ids(&self) -> Option<&[u32]> {
-        self.prompt_info
-            .as_ref()
-            .map(|info| info.prompt_token_ids.as_ref())
+    pub fn prompt_token_ids(&self) -> Option<&Arc<[u32]>> {
+        self.prompt_info.as_ref().map(|info| &info.prompt_token_ids)
     }
 
     /// Returns the prompt logprobs when this output carries [`GeneratePromptInfo`].

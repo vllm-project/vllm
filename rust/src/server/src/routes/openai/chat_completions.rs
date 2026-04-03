@@ -76,6 +76,8 @@ pub async fn chat_completions(
             prepared.include_usage,
             prepared.requested_logprobs,
             prepared.echo,
+            prepared.return_token_ids,
+            prepared.return_tokens_as_token_ids,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream);
 
@@ -91,6 +93,8 @@ pub async fn chat_completions(
             prepared.requested_logprobs,
             prepared.include_prompt_logprobs,
             prepared.echo,
+            prepared.return_token_ids,
+            prepared.return_tokens_as_token_ids,
         )
         .await
         {
@@ -110,6 +114,8 @@ async fn collect_chat_completion(
     requested_logprobs: bool,
     include_prompt_logprobs: bool,
     echo: Option<String>,
+    return_token_ids: bool,
+    return_tokens_as_token_ids: bool,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
@@ -120,8 +126,10 @@ async fn collect_chat_completion(
     let CollectedAssistantMessage {
         message,
         prompt_token_count,
+        prompt_token_ids,
         prompt_logprobs,
         logprobs,
+        token_ids,
         output_token_count,
         finish_reason,
         kv_transfer_params,
@@ -145,6 +153,7 @@ async fn collect_chat_completion(
             logprobs.as_ref().ok_or_else(|| {
                 server_error!("chat response requested logprobs but generation returned none")
             })?,
+            return_tokens_as_token_ids,
         )?)
     } else {
         None
@@ -156,6 +165,7 @@ async fn collect_chat_completion(
                     "chat response requested prompt_logprobs but generation returned none"
                 )
             })?,
+            return_tokens_as_token_ids,
         ))
     } else {
         None
@@ -181,10 +191,12 @@ async fn collect_chat_completion(
             logprobs,
             finish_reason: Some(finish_reason),
             stop_reason,
+            token_ids: return_token_ids.then_some(token_ids),
         }],
         usage: Some(usage),
         system_fingerprint: None,
         prompt_logprobs,
+        prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         kv_transfer_params,
     })
 }
@@ -199,18 +211,27 @@ async fn chat_completion_chunk_stream(
     include_usage: bool,
     requested_logprobs: bool,
     echo: Option<String>,
+    return_token_ids: bool,
+    return_tokens_as_token_ids: bool,
 ) {
     let mut tool_call_indices = BTreeMap::<String, u32>::new();
 
-    // If the client requested logprobs, we need to buffer chunks until we receive the separate
-    // `LogprobsDelta` event, so that we can emit one combined chunk with both the semantic delta
-    // and its logprobs.
-    let mut pending_chunk = requested_logprobs.then(PendingChatChunk::default);
+    // If the client requested logprobs or token_ids, we need to buffer chunks until we receive
+    // the separate `LogprobsDelta` event, so that we can emit one combined chunk with both the
+    // semantic delta and its per-update metadata.
+    let mut pending_chunk =
+        (requested_logprobs || return_token_ids).then(PendingChatChunk::default);
 
     while let Some(next) = stream.next().await {
         match next {
-            Ok(ChatEvent::Start { .. }) => {
-                yield start_chunk(&response_id, &response_model, created);
+            Ok(ChatEvent::Start {
+                prompt_token_ids, ..
+            }) => {
+                let mut chunk = start_chunk(&response_id, &response_model, created);
+                if return_token_ids {
+                    chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
+                }
+                yield chunk;
                 // When echo=true, emit the last assistant message content as a delta chunk.
                 if let Some(echo_text) = &echo {
                     yield block_delta_chunk(
@@ -229,16 +250,26 @@ async fn chat_completion_chunk_stream(
                     yield block_delta_chunk(&response_id, &response_model, created, kind, delta)
                 }
             }
-            Ok(ChatEvent::LogprobsDelta { logprobs }) => {
-                let logprobs = decoded_logprobs_to_openai_chat(&logprobs)?;
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs,
+                token_ids,
+            }) => {
+                let openai_logprobs = logprobs
+                    .as_ref()
+                    .map(|lp| decoded_logprobs_to_openai_chat(lp, return_tokens_as_token_ids))
+                    .transpose()?;
+                let openai_token_ids = return_token_ids
+                    .then_some(token_ids)
+                    .filter(|t| !t.is_empty());
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
-                    pending_chunk.logprobs = Some(logprobs);
+                    pending_chunk.logprobs = openai_logprobs;
+                    pending_chunk.token_ids = openai_token_ids;
                     if let Some(chunk) =
                         pending_chunk.take_chunk(&response_id, &response_model, created)
                     {
                         yield chunk;
                     }
-                } else {
+                } else if let Some(logprobs) = openai_logprobs {
                     yield logprobs_only_chunk(&response_id, &response_model, created, logprobs);
                 }
             }
@@ -372,9 +403,10 @@ struct PendingChatChunk {
     /// The currently buffered OpenAI delta payload assembled from one or more
     /// chat semantic events belonging to the same decoded update.
     delta: ChatMessageDelta,
-    /// The token-aligned logprobs for that same decoded update, filled only
-    /// once [`ChatEvent::LogprobsDelta`] arrives.
+    /// The token-aligned logprobs for that same decoded update.
     logprobs: Option<ChatLogProbs>,
+    /// Per-update output token IDs for the same decoded update.
+    token_ids: Option<Vec<u32>>,
 }
 
 impl PendingChatChunk {
@@ -442,7 +474,8 @@ impl PendingChatChunk {
             || self.delta.reasoning.is_some()
             || self.delta.tool_calls.is_some();
         let logprobs = self.logprobs.take();
-        if !has_delta && logprobs.is_none() {
+        let token_ids = self.token_ids.take();
+        if !has_delta && logprobs.is_none() && token_ids.is_none() {
             return None;
         }
 
@@ -450,6 +483,7 @@ impl PendingChatChunk {
         chunk.choices.push(ChatCompletionStreamChoice {
             delta: self.take_delta(),
             logprobs,
+            token_ids,
             ..Default::default()
         });
         Some(chunk)
@@ -766,7 +800,7 @@ mod tests {
     async fn chunk_stream_coalesces_text_delta_with_logprobs() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_count: 1,
+                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -779,15 +813,17 @@ mod tests {
                 delta: "hi".to_string(),
             }),
             Ok(ChatEvent::LogprobsDelta {
-                logprobs: DecodedLogprobs {
+                logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "hi".to_string(),
                             logprob: -0.1,
                             rank: 1,
                         }],
                     }],
-                },
+                }),
+                token_ids: vec![],
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
@@ -806,6 +842,8 @@ mod tests {
             false,
             true,
             None,
+            false,
+            false,
         )
         .collect::<Vec<_>>()
         .await
@@ -824,7 +862,7 @@ mod tests {
     async fn chunk_stream_coalesces_reasoning_delta_with_logprobs() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_count: 1,
+                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -837,15 +875,17 @@ mod tests {
                 delta: "think".to_string(),
             }),
             Ok(ChatEvent::LogprobsDelta {
-                logprobs: DecodedLogprobs {
+                logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "think".to_string(),
                             logprob: -0.1,
                             rank: 1,
                         }],
                     }],
-                },
+                }),
+                token_ids: vec![],
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
@@ -864,6 +904,8 @@ mod tests {
             false,
             true,
             None,
+            false,
+            false,
         )
         .collect::<Vec<_>>()
         .await

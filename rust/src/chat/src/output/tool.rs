@@ -213,11 +213,11 @@ async fn final_only_tool_event_stream(
     while let Some(event) = stream.next().await.transpose()? {
         match event {
             ContentEvent::Start {
-                prompt_token_count,
+                prompt_token_ids,
                 prompt_logprobs,
             } => {
                 yield AssistantEvent::Start {
-                    prompt_token_count,
+                    prompt_token_ids,
                     prompt_logprobs,
                 }
             }
@@ -228,8 +228,14 @@ async fn final_only_tool_event_stream(
                     yield AssistantEvent::TextDelta { kind, delta };
                 }
             }
-            ContentEvent::LogprobsDelta { logprobs } => {
-                yield AssistantEvent::LogprobsDelta { logprobs };
+            ContentEvent::LogprobsDelta {
+                logprobs,
+                token_ids,
+            } => {
+                yield AssistantEvent::LogprobsDelta {
+                    logprobs,
+                    token_ids,
+                };
             }
             ContentEvent::Done {
                 prompt_token_count,
@@ -316,11 +322,11 @@ pub(crate) async fn tool_event_stream(
     while let Some(event) = stream.next().await.transpose()? {
         match event {
             ContentEvent::Start {
-                prompt_token_count,
+                prompt_token_ids,
                 prompt_logprobs,
             } => {
                 yield AssistantEvent::Start {
-                    prompt_token_count,
+                    prompt_token_ids,
                     prompt_logprobs,
                 }
             }
@@ -329,8 +335,14 @@ pub(crate) async fn tool_event_stream(
                     yield next;
                 }
             }
-            ContentEvent::LogprobsDelta { logprobs } => {
-                yield AssistantEvent::LogprobsDelta { logprobs };
+            ContentEvent::LogprobsDelta {
+                logprobs,
+                token_ids,
+            } => {
+                yield AssistantEvent::LogprobsDelta {
+                    logprobs,
+                    token_ids,
+                };
             }
             ContentEvent::Done {
                 prompt_token_count,
@@ -364,6 +376,7 @@ pub(crate) async fn tool_event_stream(
 
 #[cfg(test)]
 mod tests {
+
     use async_trait::async_trait;
     use futures::{StreamExt as _, stream};
     use openai_protocol::common::Tool;
@@ -430,7 +443,7 @@ mod tests {
     async fn tool_parser_failure_falls_back_to_plain_text() {
         let events = stream::iter(vec![
             Ok(ContentEvent::Start {
-                prompt_token_count: 3,
+                prompt_token_ids: vec![1, 2, 3].into(),
                 prompt_logprobs: None,
             }),
             Ok(ContentEvent::TextDelta {
@@ -467,7 +480,7 @@ mod tests {
             events,
             vec![
                 AssistantEvent::Start {
-                    prompt_token_count: 3,
+                    prompt_token_ids: vec![1, 2, 3].into(),
                     prompt_logprobs: None,
                 },
                 AssistantEvent::TextDelta {
@@ -504,19 +517,21 @@ mod tests {
     async fn tool_stream_preserves_logprobs_delta_in_final_only_mode() {
         let events = stream::iter(vec![
             Ok(ContentEvent::Start {
-                prompt_token_count: 1,
+                prompt_token_ids: vec![1].into(),
                 prompt_logprobs: None,
             }),
             Ok(ContentEvent::LogprobsDelta {
-                logprobs: DecodedLogprobs {
+                logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
                             token: "a".to_string(),
                             logprob: -0.2,
                             rank: 1,
                         }],
                     }],
-                },
+                }),
+                token_ids: vec![],
             }),
             Ok(ContentEvent::Done {
                 prompt_token_count: 1,
@@ -541,19 +556,21 @@ mod tests {
             events,
             vec![
                 AssistantEvent::Start {
-                    prompt_token_count: 1,
+                    prompt_token_ids: vec![1].into(),
                     prompt_logprobs: None,
                 },
                 AssistantEvent::LogprobsDelta {
-                    logprobs: DecodedLogprobs {
+                    logprobs: Some(DecodedLogprobs {
                         positions: vec![DecodedPositionLogprobs {
                             entries: vec![DecodedTokenLogprob {
+                                token_id: 0,
                                 token: "a".to_string(),
                                 logprob: -0.2,
                                 rank: 1,
                             }],
                         }],
-                    },
+                    }),
+                    token_ids: vec![],
                 },
                 AssistantEvent::Done {
                     prompt_token_count: 1,
