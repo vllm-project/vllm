@@ -649,7 +649,7 @@ class Indexer(nn.Module):
             # weights_proj does not get quantized,
             # so we run both with quant_config=None
             # wk may be upcasted from the default quant;
-            # experiments show fusion is always aster unless WK proj is in FP4,
+            # experiments show fusion is always faster unless WK proj is in FP4,
             # which is not the case for all known quants.
             self.wk_weights_proj = MergedColumnParallelLinear(
                 hidden_size,
