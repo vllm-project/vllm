@@ -102,6 +102,10 @@ class ElasticEPScalingState:
         self.scale_type = scale_type
         self.reconfig_request = reconfig_request
 
+        self.dead_dp_ranks: set[int] = set()
+        if reconfig_request is not None and reconfig_request.dead_dp_ranks:
+            self.dead_dp_ranks = set(reconfig_request.dead_dp_ranks)
+
         self.state: EngineState
         if scale_type == "scale_up":
             self.state = (
@@ -150,15 +154,25 @@ class ElasticEPScalingState:
         assert self.state == ScaleUpNewEngineState.PREPARE
 
     def _execute_tcp_store_barrier(
-        self, dp_store, group_rank, group_size, barrier_id, timeout=None
+        self,
+        dp_store,
+        group_rank,
+        group_size,
+        barrier_id,
+        timeout=None,
+        skip_ranks: set[int] | None = None,
     ):
+        if skip_ranks is None:
+            skip_ranks = set()
+        expected_count = group_size - len(skip_ranks)
+
         arrival_key = f"arrival_{barrier_id}_{group_rank}"
         dp_store.set(arrival_key, b"1")
 
         start_time = time.time()
         processes_arrived: set[int] = set()
 
-        while len(processes_arrived) < group_size:
+        while len(processes_arrived) < expected_count:
             if (
                 timeout is not None
                 and time.time() - start_time > timeout.total_seconds()
@@ -168,7 +182,7 @@ class ElasticEPScalingState:
                 )
 
             for i in range(group_size):
-                if i in processes_arrived:
+                if i in processes_arrived or i in skip_ranks:
                     continue
 
                 key = f"arrival_{barrier_id}_{i}"
@@ -176,7 +190,7 @@ class ElasticEPScalingState:
                 if present:
                     processes_arrived.add(i)
 
-            if len(processes_arrived) < group_size:
+            if len(processes_arrived) < expected_count:
                 sched_yield()
 
     def _staged_barrier(self, use_new_group: bool, barrier_name: str) -> bool:
@@ -208,21 +222,42 @@ class ElasticEPScalingState:
         # TODO(yongji): figure out appropriate timeout for the barrier
         timeout = None if dp_store.check([sync_key]) else timedelta(seconds=5)
 
+        # When ranks are dead, the gloo-based torch.distributed.barrier
+        # would hang. Use TCP store barrier only for synchronization.
+        has_dead_ranks = len(self.dead_dp_ranks) > 0
+
         try:
             self._execute_tcp_store_barrier(
-                dp_store, group_rank, group_size, barrier_id, timeout=timeout
+                dp_store,
+                group_rank,
+                group_size,
+                barrier_id,
+                timeout=timeout,
+                skip_ranks=self.dead_dp_ranks,
             )
-            torch.distributed.barrier(dp_group)
-            if group_rank == 0:
+            if not has_dead_ranks:
+                torch.distributed.barrier(dp_group)
+
+            alive_rank_0 = self._first_alive_rank()
+            if group_rank == alive_rank_0:
                 dp_store.delete_key(sync_key)
                 for i in range(group_size):
-                    dp_store.delete_key(f"arrival_{barrier_id}_{i}")
+                    if i not in self.dead_dp_ranks:
+                        dp_store.delete_key(f"arrival_{barrier_id}_{i}")
             return True
         except _BarrierTimeoutError as e:
             if timeout is None:
                 raise RuntimeError("Unexpected timeout encountered") from e
             dp_store.compare_set(sync_key, "", b"1")
             return False
+
+    def _first_alive_rank(self) -> int:
+        """Return the lowest-numbered rank that is not dead."""
+        assert self.old_dp_group is not None
+        for i in range(self.old_dp_group.size()):
+            if i not in self.dead_dp_ranks:
+                return i
+        raise RuntimeError("All ranks are dead")
 
     def _progress_existing_engine(self) -> bool:
         state = self.state
@@ -360,11 +395,31 @@ class ElasticEPScalingState:
             assert self.state == ScaleUpNewEngineState.COMPLETE
             return True
 
+    def _alive_group_size(self) -> int:
+        """Number of ranks expected to participate in barriers."""
+        assert self.old_dp_group is not None
+        return self.old_dp_group.size() - len(self.dead_dp_ranks)
+
+    def _abort_eplb_group_for_dead_ranks(self):
+        """Abort the old EPLB NCCL process group so operations involving
+        dead ranks don't hang.  Must be called from the worker via
+        collective_rpc so it runs on every surviving rank."""
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute",
+            args=("abort_eplb_group_for_dead_ranks",),
+        )
+
     def _progress_remaining_engine(self) -> bool:
         state = self.state
         assert self.old_dp_group is not None and self.old_dp_store is not None
 
         if state == ScaleDownRemainingEngineState.PREPARE:
+            if self.dead_dp_ranks:
+                # Abort the old EPLB NCCL process group so that any
+                # pending/future NCCL ops involving the dead rank don't
+                # hang. The standby groups (created later) will provide
+                # a new communicator for the surviving ranks.
+                self._abort_eplb_group_for_dead_ranks()
             self.state = ScaleDownRemainingEngineState.EPLB_RESHUFFLE
             self.old_dp_store.add("eep_barrier_engine_count", 1)
             return True
@@ -372,27 +427,35 @@ class ElasticEPScalingState:
         elif state == ScaleDownRemainingEngineState.EPLB_RESHUFFLE:
             if (
                 int(self.old_dp_store.get("eep_barrier_engine_count"))
-                < self.old_dp_group.size()
+                < self._alive_group_size()
             ):
                 return False
             if not self._staged_barrier(
                 use_new_group=False, barrier_name="eplb_reshuffle"
             ):
                 return False
-            if self.old_dp_group.rank() == 0:
+            alive_rank_0 = self._first_alive_rank()
+            if self.old_dp_group.rank() == alive_rank_0:
                 self.old_dp_store.delete_key("eep_barrier_engine_count")
-            self._eplb_reshuffle_before_scale_down()
+            if self.dead_dp_ranks:
+                # Fault-triggered: old EPLB NCCL group was aborted (dead
+                # rank can't participate). Skip weight reshuffle — experts
+                # on the dead rank are lost. After standby groups are
+                # created the system continues with reduced expert coverage.
+                if self.old_dp_group.rank() == alive_rank_0:
+                    logger.info(
+                        "[Elastic EP] Skipping EPLB reshuffle (fault-"
+                        "triggered, dead ranks: %s)", self.dead_dp_ranks)
+            else:
+                self._eplb_reshuffle_before_scale_down()
             self.state = ScaleDownRemainingEngineState.SWITCH_AND_PREPARE
-            # NOTE(yongji): currently, after EPLB reshuffle
-            # that redistributes experts to remaining workers, workers
-            # to be removed will immediately initiate shutdown;
-            # existing workers can no longer execute forward steps using
-            # the old setup. In the future, we may keep
-            # the removing workers alive a bit longer,
-            # e.g., to drain in-batch requests.
             self._create_standby_groups()
             self._switch_and_prepare()
             self._update_parallel_config()
+            # NOTE: reassign_missing_experts is now called inside
+            # _apply_new_config (before compile_or_warm_up_model) to
+            # avoid crashes during CUDA graph capture when logical
+            # experts are missing from the p2l map.
             self.state = ScaleDownRemainingEngineState.COMPLETE
             return True
 
@@ -412,7 +475,7 @@ class ElasticEPScalingState:
         if state == ScaleDownRemovingEngineState.EPLB_RESHUFFLE:
             if (
                 int(self.old_dp_store.get("eep_barrier_engine_count"))
-                < self.old_dp_group.size()
+                < self._alive_group_size()
             ):
                 return False
             if not self._staged_barrier(
@@ -468,7 +531,12 @@ class ElasticEPScalingState:
             self.new_parallel_config.stateless_init_dp_group(return_store=True)
         )
         self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("create_standby_groups", self.reconfig_request)
+            "elastic_ep_execute",
+            args=(
+                "create_standby_groups",
+                self.reconfig_request,
+                self.dead_dp_ranks or None,
+            ),
         )
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] Created standby communication groups")
@@ -503,11 +571,24 @@ class ElasticEPScalingState:
             logger.info("[Elastic EP] Synced KV cache memory size to new workers")
 
     def _switch_and_prepare(self):
-        self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("switch_and_prepare",)
-        )
-        old_dp_group = self.old_dp_group
-        stateless_destroy_torch_distributed_process_group(old_dp_group)
+        has_dead = len(self.dead_dp_ranks) > 0
+        if has_dead:
+            # Fault-triggered: abort the old groups to avoid NCCL hang.
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute", args=("abort_and_switch",)
+            )
+            from vllm.distributed.utils import (
+                stateless_abort_torch_distributed_process_group,
+            )
+            old_dp_group = self.old_dp_group
+            stateless_abort_torch_distributed_process_group(old_dp_group)
+        else:
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute", args=("switch_and_prepare",)
+            )
+            old_dp_group = self.old_dp_group
+            stateless_destroy_torch_distributed_process_group(old_dp_group)
+
         assert self.new_dp_group is not None
         new_dp_group = self.new_dp_group
         self.engine_core.dp_group = new_dp_group
@@ -542,6 +623,18 @@ class ElasticEPScalingState:
         if self.new_dp_group.rank() == 0:
             logger.info("[Elastic EP] EPLB reshuffle completed")
 
+    def _reload_missing_experts(self):
+        """Reload logical experts that lost all replicas due to a fault."""
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute",
+            args=("reassign_missing_experts",),
+        )
+        assert self.new_dp_group is not None
+        if self.new_dp_group.rank() == 0:
+            logger.info(
+                "[Elastic EP] Missing expert reload completed"
+            )
+
     def _eplb_reshuffle_before_scale_down(self):
         assert self.reconfig_request is not None and self.old_dp_group is not None
         self.model_executor.collective_rpc(
@@ -549,6 +642,7 @@ class ElasticEPScalingState:
             args=(
                 "perform_scale_down_eplb_reshuffle",
                 self.reconfig_request.new_data_parallel_size,
+                self.reconfig_request.dead_dp_ranks or None,
             ),
         )
         if self.old_dp_group.rank() == 0:

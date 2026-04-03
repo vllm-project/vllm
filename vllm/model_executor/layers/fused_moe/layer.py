@@ -1096,7 +1096,31 @@ class FusedMoE(CustomOp):
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
-        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+
+        # When EPLB is active, the logical-to-physical mapping may differ
+        # from the static EP partition in expert_map.  Use l2p to find
+        # the local physical slot for this logical expert.
+        eplb = getattr(self, "eplb_state", None)
+        if (
+            eplb is not None
+            and getattr(eplb, "logical_to_physical_map", None) is not None
+            and global_expert_id < eplb.logical_to_physical_map.shape[0]
+        ):
+            l2p = eplb.logical_to_physical_map
+            replica_count = eplb.logical_replica_count
+            num_replicas = replica_count[global_expert_id].item()
+            local_start = self.ep_rank * self.local_num_experts
+            local_end = local_start + self.local_num_experts
+            expert_id = -1
+            for r in range(num_replicas):
+                phys = l2p[global_expert_id, r].item()
+                if local_start <= phys < local_end:
+                    expert_id = phys - local_start
+                    break
+        else:
+            expert_id = self._map_global_expert_id_to_local_expert_id(
+                global_expert_id
+            )
 
         use_global_sf = (
             getattr(self.quant_method, "use_global_sf", False)

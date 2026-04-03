@@ -4,6 +4,7 @@ import copy
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -31,6 +32,7 @@ from vllm.distributed.elastic_ep.standby_state import (
 )
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.parallel_state import (
+    _abort_and_replace_active_groups,
     _replace_active_groups,
     get_eplb_group,
     prepare_communication_buffer_for_model,
@@ -42,7 +44,72 @@ from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
+if TYPE_CHECKING:
+    from vllm.distributed.eplb.eplb_state import EplbModelState
+
 logger = init_logger(__name__)
+
+
+def dead_dp_to_ep_ranks(
+    dead_dp_ranks: set[int] | list[int],
+    tp_size: int,
+) -> set[int]:
+    """Expand dead DP ranks to the corresponding dead EP ranks."""
+    dead_ep: set[int] = set()
+    for dp_rank in dead_dp_ranks:
+        for tp_offset in range(tp_size):
+            dead_ep.add(dp_rank * tp_size + tp_offset)
+    return dead_ep
+
+
+def strip_dead_columns(
+    p2l: torch.Tensor,
+    dead_ep_ranks: set[int],
+    num_local: int,
+) -> torch.Tensor:
+    """Remove dead EP rank columns from physical_to_logical_map.
+
+    Returns a new contiguous tensor with only the surviving ranks'
+    columns, preserving order.
+    """
+    old_ep_size = p2l.shape[1] // num_local
+    surviving_cols: list[int] = []
+    for ep_r in range(old_ep_size):
+        if ep_r not in dead_ep_ranks:
+            start = ep_r * num_local
+            surviving_cols.extend(range(start, start + num_local))
+    col_idx = torch.tensor(surviving_cols, device=p2l.device)
+    return p2l[:, col_idx].contiguous()
+
+
+def rebuild_eplb_derived_maps(
+    eplb_model_state: "EplbModelState",
+) -> None:
+    """Rebuild logical_to_physical_map and logical_replica_count
+    from physical_to_logical_map.
+
+    Call after any modification to physical_to_logical_map (compaction,
+    reassignment) to keep the derived maps consistent. Modifies the
+    tensors in-place so existing views (held by FusedMoE layers) see
+    the updates.
+    """
+    p2l = eplb_model_state.physical_to_logical_map
+    num_moe_layers, num_physical = p2l.shape
+    eplb_model_state.logical_replica_count.zero_()
+    eplb_model_state.logical_to_physical_map.fill_(-1)
+    for layer_idx in range(num_moe_layers):
+        for phys_idx in range(num_physical):
+            lid = p2l[layer_idx, phys_idx].item()
+            if lid >= 0:
+                c = eplb_model_state.logical_replica_count[
+                    layer_idx, lid
+                ].item()
+                eplb_model_state.logical_to_physical_map[
+                    layer_idx, lid, c
+                ] = phys_idx
+                eplb_model_state.logical_replica_count[
+                    layer_idx, lid
+                ] += 1
 
 
 def batch_transfer_weights(
@@ -173,7 +240,9 @@ class ElasticEPScalingExecutor:
         self._set_eplb_suppressed(True)
 
     def create_standby_groups(
-        self, reconfig_request: ReconfigureDistributedRequest
+        self,
+        reconfig_request: ReconfigureDistributedRequest,
+        dead_dp_ranks: set[int] | None = None,
     ) -> None:
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
@@ -192,6 +261,7 @@ class ElasticEPScalingExecutor:
                 master_ip=reconfig_request.new_data_parallel_master_ip,
                 coord_store_port=reconfig_request.coord_store_port,
                 enable_eplb=updated_config.parallel_config.enable_eplb,
+                dead_dp_ranks=dead_dp_ranks,
             )
         if new_dp_size > old_dp_size:
             self._set_eplb_suppressed(True)
@@ -282,18 +352,45 @@ class ElasticEPScalingExecutor:
         self._release_cuda_graphs()
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
 
+    def abort_and_switch(self) -> None:
+        """Abort old NCCL groups and switch to standby groups.
+
+        Used for fault-triggered scale-down where a peer rank has died
+        and normal collective teardown would hang.  Identical to
+        switch_and_prepare but uses abort instead of destroy.
+        """
+        old_dp_size = get_dp_group().world_size
+        old_ep_size = get_ep_group().world_size
+        logger.debug(
+            "[Elastic EP] abort_and_switch: old EP %d → new EP %d",
+            old_ep_size, old_ep_size - 1,
+        )
+        self._release_cuda_graphs()
+        _abort_and_replace_active_groups(**pop_standby_groups())
+        self._apply_new_config(old_dp_size, old_ep_size)
+
     def switch_and_prepare(self) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
-
         self._release_cuda_graphs()
         _replace_active_groups(**pop_standby_groups())
+        self._apply_new_config(old_dp_size, old_ep_size)
 
+    def _apply_new_config(
+        self, old_dp_size: int, old_ep_size: int
+    ) -> None:
+        """Apply reconfigure request to parallel config, MoE modules,
+        EPLB state, and communication buffers after group replacement."""
         parallel_config = self.worker.vllm_config.parallel_config
         reconfig_request = self.reconfig_request
         assert reconfig_request is not None
         new_dp_size = reconfig_request.new_data_parallel_size
         new_ep_size = get_ep_group().world_size
+
+        logger.debug(
+            "[Elastic EP] _apply_new_config: DP %d→%d, EP %d→%d",
+            old_dp_size, new_dp_size, old_ep_size, new_ep_size,
+        )
 
         parallel_config.data_parallel_size = new_dp_size
         if (
@@ -343,6 +440,11 @@ class ElasticEPScalingExecutor:
                 vllm_parallel_config=parallel_config,
             )
             module.moe_config.moe_parallel_config = module.moe_parallel_config
+            # Rebuild _expert_map for the new EP size/rank. Without this,
+            # the map has the old size (e.g. 96 entries for 3 ranks) and
+            # indexing with new expert IDs causes out-of-bounds access.
+            if hasattr(module, 'update_expert_map') and module._expert_map is not None:
+                module.update_expert_map()
 
         # Update EPLB state
         eplb_state = self.worker.model_runner.eplb_state
@@ -393,6 +495,29 @@ class ElasticEPScalingExecutor:
             ]
             eplb_state.num_valid_physical_experts = num_physical_experts
 
+            # Trim physical_to_logical_map to match the new EP size.
+            # For fault-triggered scale-down, dead rank columns are in
+            # the middle — strip them. For graceful, the highest columns
+            # are removed — simple slice works too.
+            dead_dp = set(
+                reconfig_request.dead_dp_ranks
+            ) if reconfig_request.dead_dp_ranks else set()
+            if dead_dp:
+                dead_ep = dead_dp_to_ep_ranks(
+                    dead_dp, get_tp_group().world_size
+                )
+                eplb_model_state.physical_to_logical_map = (
+                    strip_dead_columns(
+                        old_physical_to_logical, dead_ep, num_local_experts
+                    )
+                )
+            else:
+                eplb_model_state.physical_to_logical_map = (
+                    old_physical_to_logical[:, :num_physical_experts]
+                )
+
+            rebuild_eplb_derived_maps(eplb_model_state)
+
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
         with set_current_vllm_config(self.worker.vllm_config):
@@ -413,6 +538,14 @@ class ElasticEPScalingExecutor:
                     module.quant_method = module.quant_method.old_quant_method
                     module.runner = module._init_runner()
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
+
+        logger.debug(
+            "[Elastic EP] _apply_new_config: p2l=%s, "
+            "num_physical=%d, num_redundant=%d",
+            list(eplb_model_state.physical_to_logical_map.shape),
+            num_physical_experts,
+            parallel_config.eplb_config.num_redundant_experts,
+        )
 
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
@@ -442,6 +575,15 @@ class ElasticEPScalingExecutor:
                 (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
             )
         multi_block_table.clear()
+
+        # For fault-triggered scale-down, reassign missing experts
+        # BEFORE warmup. The warmup does a real forward pass (for CUDA
+        # graph capture), which will crash if logical experts are missing
+        # from the p2l map (router produces expert IDs that map to -1).
+        reconfig_request = self.reconfig_request
+        if (reconfig_request and reconfig_request.dead_dp_ranks
+                and new_dp_size < old_dp_size):
+            self.reassign_missing_experts()
 
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
@@ -487,16 +629,238 @@ class ElasticEPScalingExecutor:
         self._perform_eplb_reshuffle()
         self._set_eplb_suppressed(False)
 
-    def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
+    def reassign_missing_experts(self) -> None:
+        """Reassign logical experts that lost all replicas after a fault.
+
+        After a fault-triggered scale-down, _apply_new_config has already
+        compacted physical_to_logical_map (stripped dead rank columns).
+        This method:
+        1. Identifies which logical experts have zero replicas.
+        2. Replaces the most-redundant replicas with missing experts.
+        3. Rebuilds the derived EPLB maps in-place.
+        4. Transfers actual expert weights via NCCL P2P.
+
+        All tensors are already sized for the new EP topology when this
+        method runs (p2l, expert_load_pass, expert_load_window all have
+        new_ep_size * num_local columns).
+        """
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is None:
+            return
+
+        model_config = self.worker.model_runner.model_config
+        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        p2l = eplb_model_state.physical_to_logical_map
+        num_moe_layers = p2l.shape[0]
+        num_physical = p2l.shape[1]
+        num_logical = eplb_model_state.logical_replica_count.shape[1]
+
+        ep_group = get_ep_group()
+        ep_rank = ep_group.rank
+        new_ep_size = ep_group.world_size
+
+        # Save the current map — this reflects the true state of expert
+        # weights in GPU memory (before reassignment modifies it).
+        old_p2l = p2l.clone()
+
+        logger.debug(
+            "[Elastic EP] reassign_missing_experts: p2l shape=%s, "
+            "%d logical experts, %d physical slots",
+            list(p2l.shape), num_logical, num_physical,
+        )
+
+        # --- 1 & 2. Identify missing experts and reassign -----------------
+        all_logical = set(range(num_logical))
+        any_reassigned = False
+
+        for layer_idx in range(num_moe_layers):
+            layer_map = p2l[layer_idx]
+
+            replica_count: dict[int, int] = {}
+            global_redundant: list[tuple[int, int]] = []
+            for phys_idx in range(num_physical):
+                lid = layer_map[phys_idx].item()
+                if lid >= 0:
+                    replica_count[lid] = replica_count.get(lid, 0) + 1
+
+            missing = sorted(all_logical - set(replica_count.keys()))
+            if not missing:
+                continue
+
+            any_reassigned = True
+
+            for phys_idx in range(num_physical):
+                lid = layer_map[phys_idx].item()
+                if lid >= 0 and replica_count.get(lid, 0) > 1:
+                    global_redundant.append((replica_count[lid], phys_idx))
+            global_redundant.sort(reverse=True)
+
+            slot_iter = iter(global_redundant)
+            for logical_id in missing:
+                # Find a redundant slot whose donor still has >1 replica.
+                placed = False
+                while True:
+                    candidate = next(slot_iter, None)
+                    if candidate is None:
+                        raise RuntimeError(
+                            f"[Fault Tolerance] Layer {layer_idx}: no "
+                            f"redundant slot available to place missing "
+                            f"logical expert {logical_id}. This should "
+                            f"not happen — the capacity check in "
+                            f"_on_engine_process_died should have "
+                            f"prevented scale-down."
+                        )
+                    _, global_slot = candidate
+                    old_lid = layer_map[global_slot].item()
+                    if replica_count.get(old_lid, 0) > 1:
+                        p2l[layer_idx, global_slot] = logical_id
+                        replica_count[old_lid] -= 1
+                        placed = True
+                        break
+                if not placed:
+                    raise RuntimeError(
+                        f"[Fault Tolerance] Layer {layer_idx}: failed "
+                        f"to place missing logical expert {logical_id}."
+                    )
+
+        if not any_reassigned:
+            if ep_rank == 0:
+                logger.info(
+                    "[Fault Tolerance] All %d logical experts have at "
+                    "least one replica in every layer — no "
+                    "reassignment needed.",
+                    num_logical,
+                )
+            return
+
+        if ep_rank == 0:
+            logger.info(
+                "[Fault Tolerance] Replaced redundant expert slots "
+                "with missing experts across %d layers.",
+                num_moe_layers,
+            )
+
+        # --- 3. Rebuild derived maps in-place --------------------------------
+        rebuild_eplb_derived_maps(eplb_model_state)
+
+        # --- 4. Transfer actual expert weights via NCCL P2P ---------------
+        # old_p2l reflects what's actually in GPU memory (pre-reassignment).
+        # p2l reflects the desired state (post-reassignment).
+        # rearrange_expert_weights_inplace sees the diff and transfers
+        # weights from ranks that hold the needed expert.
+        #
+        # Split experts into two groups:
+        # - reachable: have a surviving replica in old_p2l → NCCL P2P
+        # - unreachable: no surviving replica → reload from disk
+        old_present = set(old_p2l[old_p2l >= 0].tolist())
+        new_required = set(p2l[p2l >= 0].tolist())
+        unreachable = new_required - old_present
+
+        from vllm.distributed.eplb.rebalance_execute import (
+            rearrange_expert_weights_inplace,
+        )
+
+        model = self.worker.model_runner.get_model()
+        ep_group_pg = get_ep_group().device_group
+        rearrange_expert_weights_inplace(
+            old_global_expert_indices=old_p2l,
+            new_global_expert_indices=p2l,
+            expert_weights=model.expert_weights,
+            ep_group=ep_group_pg,
+            communicator=eplb_model_state.communicator,
+        )
+
+        # Reload unreachable experts from disk.
+        if unreachable:
+            if ep_rank == 0:
+                logger.info(
+                    "[Fault Tolerance] Reloading %d experts from disk: %s",
+                    len(unreachable),
+                    sorted(unreachable),
+                )
+            self._reload_expert_weights_from_disk(unreachable)
+
+        if ep_rank == 0:
+            logger.info(
+                "[Fault Tolerance] Expert weight transfer complete. "
+                "%d physical experts across %d EP ranks.",
+                num_physical, new_ep_size,
+            )
+
+    def _reload_expert_weights_from_disk(
+        self, unreachable_experts: set[int]
+    ) -> None:
+        """Reload expert weights from the model checkpoint for experts
+        that have no surviving replica in GPU memory.
+
+        Uses the existing model.load_weights() pipeline. The FusedMoE
+        weight_loader consults logical_to_physical_map (already updated
+        by reassign_missing_experts) to route each expert's weights to
+        the correct reassigned physical slot.
+        """
+        from vllm.model_executor.model_loader.default_loader import (
+            DefaultModelLoader,
+        )
+        from vllm.model_executor.model_loader.ep_weight_filter import (
+            parse_expert_id,
+        )
+
+        model = self.worker.model_runner.get_model()
+        model_config = self.worker.model_runner.model_config
+        load_config = self.worker.vllm_config.load_config
+
+        loader = DefaultModelLoader(load_config)
+        all_weights = loader.get_all_weights(model_config, model)
+        filtered = (
+            (name, tensor)
+            for name, tensor in all_weights
+            if parse_expert_id(name) in unreachable_experts
+        )
+        model.load_weights(filtered)
+
+    def abort_eplb_group_for_dead_ranks(self) -> None:
+        """Abort the EPLB NCCL process group so that pending/future NCCL
+        ops involving dead ranks don't hang indefinitely.  After this call
+        the old EPLB communicator is unusable — a new standby group must be
+        created before any further EPLB operations."""
+        from vllm.distributed.parallel_state import get_eplb_group
+        eplb_group = get_eplb_group()
+        logger.info(
+            "[Elastic EP] Aborting old EPLB process group (rank %d) "
+            "to unblock operations involving dead ranks.",
+            eplb_group.rank,
+        )
+        eplb_group.device_group.abort()
+
+    def perform_scale_down_eplb_reshuffle(
+        self,
+        new_dp_size: int,
+        dead_dp_ranks: list[int] | None = None,
+    ) -> None:
         self._set_eplb_suppressed(True)
         parallel_config = self.worker.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
         old_ep_size = parallel_config.data_parallel_size * tp_size
         new_ep_size = new_dp_size * tp_size
-        rank_mapping = {
-            old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
-            for old_ep_rank in range(old_ep_size)
-        }
+
+        if dead_dp_ranks:
+            # Fault-triggered: map dead ranks' experts to -1, compact
+            # surviving ranks to contiguous 0..new_ep_size-1.
+            dead_ep = dead_dp_to_ep_ranks(dead_dp_ranks, tp_size)
+            rank_mapping = {}
+            new_rank = 0
+            for old_ep_rank in range(old_ep_size):
+                if old_ep_rank in dead_ep:
+                    rank_mapping[old_ep_rank] = -1
+                else:
+                    rank_mapping[old_ep_rank] = new_rank
+                    new_rank += 1
+        else:
+            # Graceful: remove the highest-ranked engines.
+            rank_mapping = {
+                old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
+                for old_ep_rank in range(old_ep_size)
+            }
         self._perform_eplb_reshuffle(rank_mapping=rank_mapping)
 
     def receive_weights(self) -> None:

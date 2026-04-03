@@ -182,6 +182,44 @@ class CoreEngineProcManager:
 
         self.shutdown()
 
+    def monitor_engine_liveness_fault_tolerant(
+        self,
+        on_engine_died: Callable[[str, int], bool],
+    ) -> None:
+        """Monitor engine liveness, reporting individual failures.
+
+        Args:
+            on_engine_died: Called with (proc_name, dp_rank) when a process
+                dies unexpectedly. Return True to continue monitoring
+                surviving engines, False to stop.
+        """
+        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+        sentinels = set(sentinel_to_proc.keys())
+
+        while sentinels and not self.manager_stopped.is_set():
+            died_sentinels = connection.wait(sentinels, timeout=1)
+
+            for sentinel in died_sentinels:
+                sentinels.discard(cast(int, sentinel))
+                proc = sentinel_to_proc.pop(cast(int, sentinel))
+                exitcode = proc.exitcode or 0
+                if exitcode != 0 and not self.manager_stopped.is_set():
+                    self.failed_proc_name = proc.name
+                    dp_rank = self._dp_rank_from_proc_name(proc.name)
+                    should_continue = on_engine_died(proc.name, dp_rank)
+                    if not should_continue:
+                        self.shutdown()
+                        return
+
+        self.shutdown()
+
+    @staticmethod
+    def _dp_rank_from_proc_name(name: str) -> int:
+        prefix = "EngineCore_DP"
+        if name.startswith(prefix):
+            return int(name[len(prefix) :])
+        return -1
+
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
 
@@ -419,10 +457,13 @@ class CoreEngineActorManager:
         ray.get(refs)
         self.run_refs = []
         self.actor_run_ref_dict = dict()
-        for actor in self.local_engine_actors + self.remote_engine_actors:
+        self.run_ref_to_dp_rank: dict = {}
+        all_actors = self.local_engine_actors + self.remote_engine_actors
+        for dp_rank_idx, actor in enumerate(all_actors):
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
+            self.run_ref_to_dp_rank[ref] = dp_rank_idx
 
     @staticmethod
     def create_dp_placement_groups(
@@ -814,9 +855,29 @@ class CoreEngineActorManager:
                 new_local_engines
             )
 
+    def _actor_at_rank(self, dp_rank: int):
+        """Return the actor at the given DP rank."""
+        is_local = self.placement_group_is_local[dp_rank]
+        if is_local:
+            local_idx = sum(
+                1 for i in range(dp_rank)
+                if self.placement_group_is_local[i]
+            )
+            return self.local_engine_actors[local_idx]
+        else:
+            remote_idx = sum(
+                1 for i in range(dp_rank)
+                if not self.placement_group_is_local[i]
+            )
+            return self.remote_engine_actors[remote_idx]
+
     def scale_down_elastic_ep(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
-    ) -> None:
+        self,
+        cur_data_parallel_size: int,
+        new_data_parallel_size: int,
+        removed_dp_ranks: set[int] | None = None,
+    ) -> int:
+        """Remove engines for scale-down. Returns count of local engines removed."""
         import ray
 
         assert cur_data_parallel_size > new_data_parallel_size, (
@@ -824,30 +885,63 @@ class CoreEngineActorManager:
             f"than new_data_parallel_size {new_data_parallel_size} "
             "for scale down"
         )
-        for _ in range(cur_data_parallel_size - new_data_parallel_size):
-            pg = self.created_placement_groups.pop()
-            is_local = self.placement_group_is_local.pop()
-            if is_local:
-                self.local_engine_actors.pop()
-            else:
-                self.remote_engine_actors.pop()
-            ray.util.remove_placement_group(pg)
+        if removed_dp_ranks is None:
+            removed_dp_ranks = set(
+                range(new_data_parallel_size, cur_data_parallel_size)
+            )
 
-    def remove_run_refs_for_scale_down(self, removed_dp_size: int) -> None:
+        local_removed = 0
+        # Remove in reverse order so indices remain valid.
+        for rank in sorted(removed_dp_ranks, reverse=True):
+            pg = self.created_placement_groups.pop(rank)
+            is_local = self.placement_group_is_local.pop(rank)
+            if is_local:
+                local_removed += 1
+                local_idx = sum(
+                    1 for i in range(rank)
+                    if self.placement_group_is_local[i]
+                )
+                self.local_engine_actors.pop(local_idx)
+            else:
+                remote_idx = sum(
+                    1 for i in range(rank)
+                    if not self.placement_group_is_local[i]
+                )
+                self.remote_engine_actors.pop(remote_idx)
+            ray.util.remove_placement_group(pg)
+        return local_removed
+
+    def remove_run_refs_for_scale_down(
+        self,
+        removed_dp_size: int,
+        ranks_to_remove: set[int] | None = None,
+    ) -> None:
         if removed_dp_size <= 0:
             return
-        flags = self.placement_group_is_local[-removed_dp_size:]
-        li = len(self.local_engine_actors) - 1
-        ri = len(self.remote_engine_actors) - 1
-        for is_local in reversed(flags):
-            if is_local:
-                actor = self.local_engine_actors[li]
-                li -= 1
-            else:
-                actor = self.remote_engine_actors[ri]
-                ri -= 1
-            ref = self.actor_run_ref_dict.pop(actor)
-            self.run_refs.remove(ref)
+
+        if ranks_to_remove is None:
+            # Default: remove from the end (graceful scale-down).
+            flags = self.placement_group_is_local[-removed_dp_size:]
+            li = len(self.local_engine_actors) - 1
+            ri = len(self.remote_engine_actors) - 1
+            for is_local in reversed(flags):
+                if is_local:
+                    actor = self.local_engine_actors[li]
+                    li -= 1
+                else:
+                    actor = self.remote_engine_actors[ri]
+                    ri -= 1
+                ref = self.actor_run_ref_dict.pop(actor)
+                self.run_refs.remove(ref)
+                self.run_ref_to_dp_rank.pop(ref, None)
+        else:
+            # Fault-triggered: remove specific ranks.
+            for rank in sorted(ranks_to_remove, reverse=True):
+                actor = self._actor_at_rank(rank)
+                ref = self.actor_run_ref_dict.pop(actor, None)
+                if ref is not None:
+                    self.run_refs.remove(ref)
+                    self.run_ref_to_dp_rank.pop(ref, None)
 
     def get_run_refs(self):
         return self.run_refs
@@ -879,6 +973,46 @@ class CoreEngineActorManager:
 
             if unexpected_failure:
                 break
+
+        self.shutdown()
+
+    def monitor_engine_liveness_fault_tolerant(
+        self,
+        on_engine_died: Callable[[str, int], bool],
+    ) -> None:
+        """Monitor engine liveness, reporting individual failures.
+
+        Args:
+            on_engine_died: Called with (actor_name, dp_rank) when an actor
+                dies unexpectedly. Return True to continue monitoring
+                surviving engines, False to stop.
+        """
+        import ray
+
+        while not self.manager_stopped.is_set():
+            actor_run_refs = list(self.get_run_refs())
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently. "
+                    "The monitoring function is about to terminate."
+                )
+                break
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            for actor_ref in actor_done_refs:
+                if self.manager_stopped.is_set():
+                    break
+                if actor_ref not in self.get_run_refs():
+                    continue
+                try:
+                    ray.get(actor_ref)
+                except ray.exceptions.RayActorError:
+                    actor_name = f"Actor {actor_ref}"
+                    self.failed_proc_name = actor_name
+                    dp_rank = self.run_ref_to_dp_rank.get(actor_ref, -1)
+                    should_continue = on_engine_died(actor_name, dp_rank)
+                    if not should_continue:
+                        self.shutdown()
+                        return
 
         self.shutdown()
 
