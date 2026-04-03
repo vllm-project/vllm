@@ -1,24 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import random
 
-import numpy as np
 import pytest
 import torch
 from transformers import AutoModelForTokenClassification
 
 from tests.models.utils import softmax
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.fixture(autouse=True)
 def seed_everything():
     """Seed all random number generators for reproducibility."""
     seed = 0
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    current_platform.manual_seed_all(seed)
+    set_random_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     yield
