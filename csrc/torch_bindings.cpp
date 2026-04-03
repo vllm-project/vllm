@@ -36,31 +36,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
            &get_cuda_view_from_cpu_tensor);
 
-#ifndef USE_ROCM
-  ops.def(
-      "convert_vertical_slash_indexes("
-      "   Tensor! block_count, Tensor! block_offset, "
-      "   Tensor! column_count, Tensor! column_index, "
-      "   Tensor q_seqlens, Tensor q_seqlens, "
-      "   Tensor vertical_indexes, Tensor slash_indexes, "
-      "   int context_size, int block_size_M, int block_size_N, "
-      "   bool causal) -> ()");
-  ops.impl("convert_vertical_slash_indexes", torch::kCUDA,
-           &convert_vertical_slash_indexes);
-
-  ops.def(
-      "convert_vertical_slash_indexes_mergehead("
-      "   Tensor! block_count, Tensor! block_offset, "
-      "   Tensor! column_count, Tensor! column_index, "
-      "   Tensor q_seqlens, Tensor q_seqlens, "
-      "   Tensor vertical_indexes, Tensor slash_indexes, "
-      "   Tensor vertical_indices_count, Tensor slash_indices_count, "
-      "   int context_size, int block_size_M, int block_size_N, "
-      "   bool causal) -> ()");
-  ops.impl("convert_vertical_slash_indexes_mergehead", torch::kCUDA,
-           &convert_vertical_slash_indexes_mergehead);
-#endif
-
   // Activation ops (quantized only — basic ops moved to _C_stable_libtorch)
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");

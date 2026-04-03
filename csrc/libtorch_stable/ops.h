@@ -153,6 +153,31 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // AllSpark ops: declarations are in the source files
 // (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 
+void convert_vertical_slash_indexes(
+    torch::stable::Tensor& block_count,   // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& block_offset,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::stable::Tensor& column_count,  // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& column_index,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::stable::Tensor q_seqlens,      // [BATCH, ]
+    torch::stable::Tensor kv_seqlens,     // [BATCH, ]
+    torch::stable::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
+    torch::stable::Tensor slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
+    int64_t context_size, int64_t block_size_M, int64_t block_size_N,
+    bool causal);
+
+void convert_vertical_slash_indexes_mergehead(
+    torch::stable::Tensor& block_count,   // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& block_offset,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::stable::Tensor& column_count,  // [BATCH, N_HEADS, NUM_ROWS]
+    torch::stable::Tensor& column_index,  // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::stable::Tensor q_seqlens,      // [BATCH, ]
+    torch::stable::Tensor kv_seqlens,     // [BATCH, ]
+    torch::stable::Tensor vertical_indexes,        // [BATCH, N_HEADS, NNZ_V]
+    torch::stable::Tensor slash_indexes,           // [BATCH, N_HEADS, NNZ_S]
+    torch::stable::Tensor vertical_indices_count,  // [N_HEADS, ]
+    torch::stable::Tensor slash_indices_count, int64_t context_size,
+    int64_t block_size_M, int64_t block_size_N, bool causal);
+
 #endif
 
 // Attention kernels (shared CUDA/ROCm)

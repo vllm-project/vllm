@@ -242,6 +242,25 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? b_qzeros, "
       "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
+
+  ops.def(
+      "convert_vertical_slash_indexes("
+      "   Tensor! block_count, Tensor! block_offset, "
+      "   Tensor! column_count, Tensor! column_index, "
+      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor vertical_indexes, Tensor slash_indexes, "
+      "   int context_size, int block_size_M, int block_size_N, "
+      "   bool causal) -> ()");
+
+  ops.def(
+      "convert_vertical_slash_indexes_mergehead("
+      "   Tensor! block_count, Tensor! block_offset, "
+      "   Tensor! column_count, Tensor! column_index, "
+      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor vertical_indexes, Tensor slash_indexes, "
+      "   Tensor vertical_indices_count, Tensor slash_indices_count, "
+      "   int context_size, int block_size_M, int block_size_N, "
+      "   bool causal) -> ()");
 #endif
 
   // Merge attn states
@@ -521,6 +540,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // AllSpark ops: conditionally compiled so impl registrations are in source
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
+
+  ops.impl("convert_vertical_slash_indexes",
+           TORCH_BOX(&convert_vertical_slash_indexes));
+  ops.impl("convert_vertical_slash_indexes_mergehead",
+           TORCH_BOX(&convert_vertical_slash_indexes_mergehead));
 #endif
 
   ops.impl("merge_attn_states", TORCH_BOX(&merge_attn_states));
