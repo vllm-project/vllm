@@ -66,6 +66,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    scaled_dequantize,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -640,9 +644,7 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.wq_b",
         )
         # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # weights_proj does not get quantized, so we run both with quant_config=None
-        # wk may be upcasted from the default quant; experiments show fusion is always
-        # faster unless WK proj is in FP4, which is not the case for all known quants.
+        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
         self.wk_weights_proj = MergedColumnParallelLinear(
             hidden_size,
             [self.head_dim, self.n_head],
@@ -731,6 +733,46 @@ class Indexer(nn.Module):
         weights = weights.squeeze(-1)
 
         return self.indexer_op(hidden_states, q_fp8, k, weights)
+
+
+def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
+    """
+    We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
+    in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
+    Upcasting to BF16 during loading enables the fusion. This function loads the FP8 WK
+    weights and scale, and when both are available, dequantizes to BF16 and stores into
+    the fused wk_weights_proj.weight parameter.
+    """
+    if "indexer.wk." not in name or "wk_weights" in name:
+        return False  # Weight is not an isolated WK weight for the indexer, ignore.
+    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
+    is_scale = "weight_scale_inv" in name
+    if not is_weight and not is_scale:
+        return False  # WK is not in FP8 format, ignore.
+    # Buffer this tensor (weight or scale) until both have arrived.
+    layer_prefix = name.rsplit(".wk.", 1)[0]  # e.g. "model.layers.0.self_attn.indexer"
+    entry = buf.setdefault(layer_prefix, {})
+    entry["weight" if is_weight else "scale"] = tensor
+    if "weight" not in entry or "scale" not in entry:
+        return True  # still waiting for the other param
+
+    # We have both weight and scale: dequantize FP8 to BF16.
+    weight_fp8, scale_inv = entry["weight"], entry["scale"]
+    del buf[layer_prefix]
+    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+    weight_bf16 = scaled_dequantize(
+        weight_fp8,
+        scale_inv,
+        group_shape=GroupShape(block_size, block_size),
+        out_dtype=torch.bfloat16,
+    )
+
+    # Load the dequantized weight into shard 0 of the fused buffer.
+    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
+    param = params_dict[fused_name]
+    param.weight_loader(param, weight_bf16, 0)
+    loaded_params.add(fused_name)
+    return True
 
 
 def _min_latency_fused_qkv_a_proj_impl(
@@ -1440,6 +1482,7 @@ class DeepseekV2ForCausalLM(
             ("qkv_proj", "v_proj", "v"),
         ]
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        _pending_wk_fp8: dict = {}  # When WK is in FP8, we dequant to BF16 for fusion
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
@@ -1480,6 +1523,11 @@ class DeepseekV2ForCausalLM(
             is_fusion_moe_shared_experts_layer = (
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
+
+            if _try_load_fp8_indexer_wk(
+                name, loaded_weight, _pending_wk_fp8, params_dict, loaded_params
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
