@@ -12,7 +12,6 @@ use super::logprobs::{
 };
 use crate::error::Error;
 use crate::incremental::IncrementalDecoder;
-use crate::take;
 use crate::tokenizers::DynTokenizer;
 
 /// Request-neutral options for incremental text decoding.
@@ -97,7 +96,7 @@ pub async fn decoded_text_event_stream(
 
     #[for_await]
     for next in raw_stream {
-        let mut output = next?;
+        let output = next?;
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -143,8 +142,8 @@ pub async fn decoded_text_event_stream(
         };
         let decoder = decoder.as_mut().unwrap();
 
-        let kv_transfer_params = output.take_kv_transfer_params();
-        let mut finish_reason = output.finish_reason();
+        let kv_transfer_params = output.kv_transfer_params;
+        let mut finish_reason = output.finish_reason;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
             && !decode_options.include_stop_str_in_output;
         let decodable_token_ids = if suppress_terminal_stop_token {
@@ -187,20 +186,20 @@ pub async fn decoded_text_event_stream(
             }
         }
 
-        let mut new_token_ids = take(&mut output.token_ids);
+        let mut new_token_ids = output.token_ids;
+        let mut new_logprobs = output.logprobs;
 
         // Trim tokens and logprobs if we matched stop string.
         if let Some(num_tokens) = truncate_tokens_to {
             new_token_ids.truncate(num_tokens);
-            if let Some(logprobs) = &mut output.logprobs {
+            if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
             }
         }
 
         output_token_count += new_token_ids.len();
 
-        let decoded_logprobs = output
-            .logprobs
+        let decoded_logprobs = new_logprobs
             .as_ref()
             .map(|logprobs| {
                 decode_logprobs(
@@ -298,7 +297,6 @@ mod tests {
     use std::sync::Arc;
 
     use futures::stream;
-    use vllm_engine_core_client::protocol::EngineCoreFinishReason;
     use vllm_llm::GenerateOutput;
 
     use super::*;
@@ -336,7 +334,7 @@ mod tests {
         let raw_stream = stream::iter(vec![Ok(GenerateOutput::for_test(
             Some(prompt),
             token_ids,
-            Some(EngineCoreFinishReason::Length),
+            Some(FinishReason::Length),
         ))]);
         let tokenizer: DynTokenizer = Arc::new(ByteTokenizer);
         decoded_text_event_stream("test".into(), tokenizer, raw_stream, decode_options, false)

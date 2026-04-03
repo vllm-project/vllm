@@ -79,7 +79,7 @@ async fn wait_for_request_completion(mut stream: GenerateOutputStream) -> Result
     );
 
     let finish_reason = output
-        .finish_reason()
+        .finish_reason
         .expect("final-only output must have a finish reason");
     let token_ids = output.token_ids;
 

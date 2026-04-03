@@ -293,7 +293,7 @@ async fn generate_streams_outputs() {
         first.logprobs,
         Some(logprobs_for_position(1, -0.3, 4, 9, -0.1))
     );
-    assert_eq!(first.finish_reason(), None);
+    assert_eq!(first.finish_reason, None);
 
     let second = stream.next().await.unwrap().unwrap();
     assert_eq!(second.prompt_info, None);
@@ -302,7 +302,7 @@ async fn generate_streams_outputs() {
         second.logprobs,
         Some(logprobs_for_position(3, -0.4, 5, 10, -0.2))
     );
-    assert_eq!(second.finish_reason(), Some(FinishReason::Length));
+    assert_eq!(second.finish_reason, Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());
@@ -646,7 +646,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
     let final_output = stream.next().await.unwrap().unwrap();
     assert_eq!(final_output.token_ids, vec![2, 3]);
-    assert_eq!(final_output.finish_reason(), Some(FinishReason::Length));
+    assert_eq!(final_output.finish_reason, Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
 
     let rendered = METRICS.render().unwrap();
