@@ -231,6 +231,7 @@ class NemotronHMoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             routed_input_transform=self.fc1_latent_proj,
+            router_logits_dtype=self.gate.out_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
