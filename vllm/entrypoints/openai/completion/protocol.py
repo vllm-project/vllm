@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
+from vllm.config.steering_types import SteeringVectorSpec
 from vllm.config.utils import replace
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
@@ -177,12 +178,24 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    steering_vectors: dict[str, dict[int, list[float]]] | None = Field(
+    steering_vectors: SteeringVectorSpec | None = Field(
         default=None,
         description="Per-request activation steering vectors keyed by hook "
         "point name (pre_attn, post_attn, post_mlp_pre_ln, "
-        "post_mlp_post_ln), then layer index. Values are vectors of "
-        "length hidden_size.",
+        "post_mlp_post_ln), then layer index. Values are either bare "
+        'list[float] (scale=1.0) or {"vector": [...], "scale": float}.',
+    )
+
+    prefill_steering_vectors: SteeringVectorSpec | None = Field(
+        default=None,
+        description="Phase-specific steering vectors added to base during "
+        "prefill only. Same format as steering_vectors.",
+    )
+
+    decode_steering_vectors: SteeringVectorSpec | None = Field(
+        default=None,
+        description="Phase-specific steering vectors added to base during "
+        "decode only. Same format as steering_vectors.",
     )
 
     # --8<-- [end:completion-extra-params]
@@ -331,6 +344,8 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             steering_vectors=self.steering_vectors,
+            prefill_steering_vectors=self.prefill_steering_vectors,
+            decode_steering_vectors=self.decode_steering_vectors,
         )
 
     @model_validator(mode="before")

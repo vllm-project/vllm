@@ -185,11 +185,15 @@ outputs = llm.generate(
 
 ### Per-Request Steering (OpenAI Client)
 
+All three steering tiers and the scaled vector format are available via
+`extra_body`:
+
 ```python
 from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
 
+# Base steering (applies to both prefill and decode)
 response = client.chat.completions.create(
     model="google/gemma-3-4b-it",
     messages=[{"role": "user", "content": "Hello"}],
@@ -197,6 +201,36 @@ response = client.chat.completions.create(
         "steering_vectors": {
             "pre_attn": {15: [0.1, 0.2, ...]},
             "post_mlp_pre_ln": {15: [0.3, 0.4, ...]},
+        },
+    },
+)
+
+# Co-located scale factor
+response = client.chat.completions.create(
+    model="google/gemma-3-4b-it",
+    messages=[{"role": "user", "content": "Hello"}],
+    extra_body={
+        "steering_vectors": {
+            "post_mlp_pre_ln": {
+                15: {"vector": [0.1, 0.2, ...], "scale": 2.0}
+            }
+        },
+    },
+)
+
+# Phase-specific: different steering for prefill vs decode
+response = client.chat.completions.create(
+    model="google/gemma-3-4b-it",
+    messages=[{"role": "user", "content": "Hello"}],
+    extra_body={
+        "steering_vectors": {
+            "post_mlp_pre_ln": {15: [0.1, 0.2, ...]}
+        },
+        "prefill_steering_vectors": {
+            "pre_attn": {15: [0.5, 0.6, ...]}
+        },
+        "decode_steering_vectors": {
+            "pre_attn": {15: [0.3, 0.4, ...]}
         },
     },
 )
@@ -446,6 +480,8 @@ those vectors have been set via the `prefill_vectors` or
 | SamplingParams field           | `vllm/sampling_params.py`                                           |
 | Request hash                   | `vllm/v1/request.py`                                                |
 | CLI args                       | `vllm/engine/arg_utils.py`                                          |
+| OpenAI chat protocol           | `vllm/entrypoints/openai/chat_completion/protocol.py`               |
+| OpenAI completion protocol     | `vllm/entrypoints/openai/completion/protocol.py`                    |
 | Prefix cache key integration   | `vllm/v1/core/kv_cache_utils.py` (`_gen_steering_extra_hash_keys`)  |
 
 ## Prefix Cache Key Integration
