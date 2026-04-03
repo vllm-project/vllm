@@ -630,6 +630,8 @@ class Indexer(nn.Module):
             self.quant_config is not None
             and self.quant_config.get_name() == "modelopt_fp4"
         )
+        print(self.quant_config.get_name())
+        print(self.is_fp4_ckpt)
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
@@ -644,22 +646,7 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        if self.quant_config is not None and self.quant_config.get_name() == "fp8":
-            self.wk = ReplicatedLinear(
-                hidden_size,
-                self.head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.wk",
-            )
-            self.weights_proj = ReplicatedLinear(
-                hidden_size,
-                self.n_head,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.weights_proj",
-            )
-        else:
+        if self.is_fp4_ckpt:
             # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
             # weights_proj does not get quantized,
             # so we run both with quant_config=None
@@ -673,6 +660,21 @@ class Indexer(nn.Module):
                 quant_config=None,
                 disable_tp=True,
                 prefix=f"{prefix}.wk_weights_proj",
+            )
+        else:
+            self.wk = ReplicatedLinear(
+                hidden_size,
+                self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.wk",
+            )
+            self.weights_proj = ReplicatedLinear(
+                hidden_size,
+                self.n_head,
+                bias=False,
+                quant_config=None,
+                prefix=f"{prefix}.weights_proj",
             )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
@@ -715,13 +717,13 @@ class Indexer(nn.Module):
             q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
         if self.is_fp4_ckpt:
-            k, _ = self.wk(hidden_states)
-            weights, _ = self.weights_proj(hidden_states)
-        else:
             # Fused wk + weights_proj: one GEMM, then split
             kw, _ = self.wk_weights_proj(hidden_states)
             k = kw[:, : self.head_dim]
             weights = kw[:, self.head_dim :]
+        else:
+            k, _ = self.wk(hidden_states)
+            weights, _ = self.weights_proj(hidden_states)
 
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(
