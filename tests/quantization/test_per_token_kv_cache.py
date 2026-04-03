@@ -220,10 +220,10 @@ def test_reshape_and_cache_per_token_head(
         kv_quant_mode=qcfg.kv_quant_mode,
     )
 
-    # INT4 uses asymmetric quantization with optimal clipping — no simple
-    # PyTorch reference exists, so we only check dequantized round-trip.
-    # INT8/FP8 use symmetric quantization: we verify both dequantized values
-    # AND per-head scales against the PyTorch reference implementation.
+    # INT4 uses asymmetric quantization with steganographic zero-point —
+    # no simple PyTorch reference exists, so we only check dequantized
+    # round-trip.  INT8/FP8 use symmetric quantization: we verify both
+    # dequantized values AND per-head scales against the PyTorch reference.
     if not is_int4:
         # Reference
         ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, qcfg)
