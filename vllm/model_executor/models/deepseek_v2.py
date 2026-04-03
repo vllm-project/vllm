@@ -626,6 +626,10 @@ class Indexer(nn.Module):
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
+        self.is_fp4_ckpt = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "modelopt_fp4"
+        )
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
@@ -710,7 +714,7 @@ class Indexer(nn.Module):
         q_pe, q_nope = torch.split(
             q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
-        if self.quant_config is not None and self.quant_config.get_name() == "fp8":
+        if self.is_fp4_ckpt:
             k, _ = self.wk(hidden_states)
             weights, _ = self.weights_proj(hidden_states)
         else:
@@ -1336,6 +1340,10 @@ class DeepseekV2ForCausalLM(
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.is_fp4_ckpt = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "modelopt_fp4"
+        )
 
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
         qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
@@ -1461,7 +1469,7 @@ class DeepseekV2ForCausalLM(
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
-        if self.quant_config is not None and self.quant_config.get_name() == "fp8":
+        if self.is_fp4_ckpt:
             # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
             indexer_fused_mapping = [
                 ("wk_weights_proj", "wk", 0),
