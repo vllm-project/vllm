@@ -2310,13 +2310,7 @@ class NixlConnectorWorker:
         assert self.enable_heterogeneous_attn_post_process
 
         indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
-        try:
-            first_cache = next(iter(self.device_kv_caches.values()))
-        except StopIteration:
-            return
 
-        # For CPU_ATTN, the shape is [2, N, num_kv_heads, block_size, head_size]
-        _, _, n_kv_heads, block_size, head_size = first_cache.shape
         for _, cache_or_caches in self.device_kv_caches.items():
             blocks_to_update = cache_or_caches.index_select(1, indices)
             current_platform.pack_kv_cache(
@@ -2326,9 +2320,6 @@ class NixlConnectorWorker:
                 value_cache=cache_or_caches[1],
                 block_ids=block_ids,
                 indices=indices,
-                block_size=block_size,
-                head_size=head_size,
-                num_kv_heads=n_kv_heads,
             )
 
     def get_finished(self) -> tuple[set[str], set[str]]:

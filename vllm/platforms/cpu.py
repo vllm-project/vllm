@@ -543,9 +543,6 @@ class CpuPlatform(Platform):
         value_cache: torch.Tensor,
         block_ids: list[int],
         indices: torch.Tensor,
-        block_size: int,
-        head_size: int,
-        num_kv_heads: int,
     ) -> None:
         """
         Rewrite the kv cache shape for the current platform.
@@ -556,6 +553,8 @@ class CpuPlatform(Platform):
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 
         dtype = key.dtype
+        # For CPU_ATTN, the shape is [N, num_kv_heads, block_size, head_size]
+        _, _, block_size, head_size = key_cache.shape
         key = key.permute(0, 2, 1, 3).flatten(0, 1)
         value = value.permute(0, 2, 1, 3).flatten(0, 1)
 
