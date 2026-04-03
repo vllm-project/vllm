@@ -31,14 +31,20 @@ Please refer to [this guide](https://llama-stack.readthedocs.io/en/latest/provid
 
 ## File search (Llama Stack integration)
 
-If you want `file_search` to use Llama Stack, start the Llama Stack server and
-point vLLM at a handler in your environment. You must first allowlist the
-handler module in `vllm/entrypoints/openai/responses/context.py` and restart
-the server (an example entry is commented there).
+If you want `file_search` to use Llama Stack, install the handler as a vLLM
+plugin and start the Llama Stack server.
+
+Register the handler in your `pyproject.toml`:
+
+```toml
+[project.entry-points."vllm.file_search_plugins"]
+llama_stack = "vllm.plugins.file_search.llama_stack_handler:create_handler"
+```
+
+Then set the Llama Stack server URL:
 
 ```bash
 export LLAMA_STACK_URL="http://localhost:8321"
-export VLLM_GPT_OSS_FILE_SEARCH_HANDLER="tools.llama_stack_file_search_demo:handle"
 ```
 
 The handler should accept a `dict` of tool arguments (e.g., `query`,
@@ -117,7 +123,6 @@ running pytest:
 
 ```bash
 LLAMA_STACK_URL="http://localhost:8321" \
-VLLM_GPT_OSS_FILE_SEARCH_HANDLER="tools.llama_stack_file_search_demo:handle" \
 VLLM_RUN_GPT_OSS_FILE_SEARCH_IT=1 \
 VLLM_TEST_VECTOR_STORE_ID="<your_vector_store_id>" \
 VLLM_TEST_FILE_SEARCH_MAX_RESULTS=3 \
@@ -126,10 +131,15 @@ pytest -q tests/entrypoints/openai/responses/test_harmony.py -k file_search_inte
 
 ### Custom handlers
 
-The `tools.llama_stack_file_search_demo` handler works with Llama Stack, but is
-disabled by default because no modules are allowlisted. To use a different file
-search system, you can implement a custom handler. Custom handlers must be added
-to `_ALLOWED_FILE_SEARCH_HANDLER_MODULES` in the vLLM source code.
+The `tools.llama_stack_file_search_demo` handler works with Llama Stack. To use
+a different file search backend, implement a custom handler by subclassing
+`vllm.plugins.file_search.FileSearchHandler` and registering it as a plugin
+in your `pyproject.toml`:
+
+```toml
+[project.entry-points."vllm.file_search_plugins"]
+my_handler = "my_package.my_module:create_handler"
+```
 
 ## Inference using Embedded vLLM
 

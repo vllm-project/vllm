@@ -210,7 +210,6 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
-    VLLM_GPT_OSS_FILE_SEARCH_HANDLER: str | None = None
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_SYSTEM_START_DATE: str | None = None
@@ -1477,11 +1476,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
         default=[],
         choices=["container", "code_interpreter", "web_search_preview"],
-    ),
-    # Optional handler for gpt-oss file_search tool calls.
-    # Format: module.submodule:callable
-    "VLLM_GPT_OSS_FILE_SEARCH_HANDLER": lambda: os.getenv(
-        "VLLM_GPT_OSS_FILE_SEARCH_HANDLER", None
     ),
     # Allows harmony instructions to be injected on system messages
     "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": lambda: bool(

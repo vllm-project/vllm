@@ -3,8 +3,6 @@
 import asyncio
 import contextlib
 import copy
-import importlib
-import inspect
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -64,13 +62,6 @@ _TOOL_NAME_TO_TYPE_MAP = {
     "container": "container",
 }
 
-# Allowlist of handler modules that can be safely imported.
-# This prevents arbitrary code execution via VLLM_GPT_OSS_FILE_SEARCH_HANDLER.
-# Add your handler module here if needed, for example:
-# "tools.llama_stack_file_search_demo",
-_ALLOWED_FILE_SEARCH_HANDLER_MODULES: set[str] = set()
-
-
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
     if tool_name not in _TOOL_NAME_TO_TYPE_MAP:
         available_tools = ", ".join(_TOOL_NAME_TO_TYPE_MAP.keys())
@@ -85,47 +76,20 @@ def _file_search_placeholder_payload() -> dict:
     return {"results": []}
 
 
-def _load_file_search_handler() -> Callable[[dict], object] | None:
-    handler_path = envs.VLLM_GPT_OSS_FILE_SEARCH_HANDLER
-    if not handler_path:
-        return None
-    if ":" not in handler_path:
-        logger.error(
-            "Invalid VLLM_GPT_OSS_FILE_SEARCH_HANDLER format: %s", handler_path
-        )
-        return None
-    module_path, attr_name = handler_path.split(":", 1)
-
-    # Security check: only allow importing from approved modules
-    if module_path not in _ALLOWED_FILE_SEARCH_HANDLER_MODULES:
-        available_modules = ", ".join(sorted(_ALLOWED_FILE_SEARCH_HANDLER_MODULES))
-        logger.error(
-            "file_search handler module '%s' not in allowlist. Available modules: %s",
-            module_path,
-            available_modules,
-        )
-        return None
-
-    try:
-        module = importlib.import_module(module_path)
-    except Exception:
-        logger.exception("Failed to import file_search handler module: %s", module_path)
-        return None
-    handler = getattr(module, attr_name, None)
-    if not callable(handler):
-        logger.error("file_search handler is not callable: %s", handler_path)
-        return None
-    return handler
-
-
 async def _run_file_search_handler(args: dict) -> dict:
-    handler = _load_file_search_handler()
+    from vllm.plugins.file_search import get_file_search_handler
+
+    handler = get_file_search_handler()
     if handler is None:
         return _file_search_placeholder_payload()
     try:
-        result = handler(args)
-        if inspect.isawaitable(result):
-            result = await result
+        result = await handler.search(
+            query=args.get("query", ""),
+            vector_store_ids=args.get("vector_store_ids"),
+            filters=args.get("filters"),
+            max_num_results=args.get("max_num_results"),
+            ranking_options=args.get("ranking_options"),
+        )
     except Exception:
         logger.exception("file_search handler raised an exception")
         return _file_search_placeholder_payload()

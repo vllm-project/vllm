@@ -46,6 +46,9 @@ vllm = "vllm.entrypoints.cli.main:main"
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver"
 
+[project.entry-points."vllm.file_search_plugins"]
+llama_stack = "vllm.plugins.file_search.llama_stack_handler:create_handler"
+
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
 

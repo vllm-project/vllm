@@ -160,6 +160,14 @@ def server():
             "code_interpreter,container,web_search_preview"
         ),
         "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": "1",
+        **{
+            k: v
+            for k, v in {
+                "TIKTOKEN_ENCODINGS_BASE": os.getenv("TIKTOKEN_ENCODINGS_BASE"),
+                "LLAMA_STACK_URL": os.getenv("LLAMA_STACK_URL"),
+            }.items()
+            if v is not None
+        },
     }
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server

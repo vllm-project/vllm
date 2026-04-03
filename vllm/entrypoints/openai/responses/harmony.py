@@ -11,6 +11,7 @@ Handles two directions:
 import json
 
 from openai.types.responses import (
+    ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -299,6 +300,38 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
     return output_items
 
 
+def _parse_file_search_call(message: Message) -> list[ResponseOutputItem]:
+    """Parse file_search function calls into file_search tool call items."""
+    output_items: list[ResponseOutputItem] = []
+    for content in message.content:
+        queries = _parse_file_search_queries(content.text)
+        output_items.append(
+            ResponseFileSearchToolCall(
+                type="file_search_call",
+                id=f"fs_{random_uuid()}",
+                queries=queries,
+                results=None,
+                status="completed",
+            )
+        )
+    return output_items
+
+
+def _parse_file_search_queries(text: str) -> list[str]:
+    """Extract query strings from file_search tool call arguments."""
+    try:
+        args = json.loads(text)
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        return []
+    if isinstance(args.get("queries"), list):
+        return args["queries"]
+    if "query" in args:
+        return [args["query"]]
+    return []
+
+
 def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
     """Parse reasoning/analysis content into reasoning items."""
     output_items = []
@@ -418,6 +451,10 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
         # Browser tool calls (browser.search, browser.open, browser.find)
         if recipient.startswith("browser."):
             output_items.append(_parse_browser_tool_call(message, recipient))
+
+        # file_search tool calls
+        elif recipient == "functions.file_search":
+            output_items.extend(_parse_file_search_call(message))
 
         # Function calls (should only happen on commentary channel)
         elif message.channel == "commentary" and recipient.startswith("functions."):
