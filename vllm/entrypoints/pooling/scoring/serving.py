@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
+from vllm import PoolingParams
 from vllm.config import ModelConfig
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
@@ -11,6 +13,10 @@ from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.renderers import BaseRenderer
+from vllm.v1.pool.late_interaction import (
+    build_late_interaction_doc_params,
+    build_late_interaction_query_params,
+)
 
 from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
@@ -31,13 +37,30 @@ logger = init_logger(__name__)
 class ServingScores(PoolingServing):
     request_id_prefix = "score"
 
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        *args,
+        enable_flash_late_interaction: bool = True,
+        **kwargs,
+    ):
+        self.score_type = engine_client.model_config.score_type
+        self.enable_flash_late_interaction = (
+            self.score_type == "late-interaction" and enable_flash_late_interaction
+        )
+
+        super().__init__(engine_client, *args, **kwargs)
+
     def init_io_processor(
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
     ) -> PoolingIOProcessor:
-        score_type = model_config.score_type
+        score_type: str = model_config.score_type
+        if self.enable_flash_late_interaction:
+            score_type = "flash-late-interaction"
+
         assert score_type in ScoringIOProcessors
         processor_cls = ScoringIOProcessors[score_type]
         return processor_cls(
@@ -45,6 +68,12 @@ class ServingScores(PoolingServing):
             renderer=renderer,
             chat_template_config=chat_template_config,
         )
+
+    async def __call__(self, *args, **kwargs) -> Response:
+        if not self.enable_flash_late_interaction:
+            return await super().__call__(*args, **kwargs)
+
+        return await self.flash_late_interaction(*args, **kwargs)
 
     async def _build_response(
         self,
@@ -158,3 +187,106 @@ class ServingScores(PoolingServing):
         )
 
         return JSONResponse(content=response.model_dump())
+
+    ###################################################################################
+    ### Run pooling score MaxSim on worker side (GPU) in the API server process
+    ### Can significantly improve late-interaction scoring performance.
+
+    async def flash_late_interaction(self, *args, **kwargs) -> Response:
+        ctx = await self._init_ctx(*args, **kwargs)
+        ctx.pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        await self.io_processor.pre_process_online_async(ctx)
+
+        # stage 1: encode queries and cache token embeddings on workers.
+        await self._flash_late_interaction_encode_queries(ctx)
+        # stage 2: encode docs and return scalar scores from workers.
+        await self._flash_late_interaction_encode_docs(ctx)
+
+        await self.io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)
+
+    async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
+        assert ctx.n_queries is not None
+        assert ctx.engine_inputs is not None
+        assert isinstance(ctx.pooling_params, PoolingParams)
+
+        n_queries = ctx.n_queries
+        n_docs = len(ctx.engine_inputs) - n_queries
+        query_engine_inputs = ctx.engine_inputs[:n_queries]
+
+        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        query_uses = [n_docs if n_queries == 1 else 1] * n_queries
+
+        query_pooling_params_list = []
+        for i in range(n_queries):
+            pooling_params = ctx.pooling_params.clone()
+            pooling_params.late_interaction_params = (
+                build_late_interaction_query_params(
+                    query_key=query_keys[i],
+                    query_uses=query_uses[i],
+                )
+            )
+            query_pooling_params_list.append(pooling_params)
+
+        assert (
+            n_queries
+            == len(query_pooling_params_list)
+            == len(query_engine_inputs)
+            == len(query_keys)
+        )
+
+        query_ctx = ScoringServeContext(
+            request=ctx.request,
+            raw_request=ctx.raw_request,
+            model_name=ctx.model_name,
+            request_id=ctx.request_id,
+            pooling_params=query_pooling_params_list,
+            prompt_request_ids=query_keys,
+            engine_inputs=query_engine_inputs,
+        )
+
+        await self._prepare_generators(query_ctx)
+        await self._collect_batch(query_ctx)
+
+    async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
+        assert ctx.n_queries is not None
+        assert ctx.engine_inputs is not None
+        assert isinstance(ctx.pooling_params, PoolingParams)
+
+        n_queries = ctx.n_queries
+        n_docs = len(ctx.engine_inputs) - n_queries
+        doc_engine_inputs = ctx.engine_inputs[n_queries:]
+
+        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+
+        doc_pooling_params_list = []
+        for i in range(n_docs):
+            query_idx = 0 if n_queries == 1 else i
+            pooling_params = ctx.pooling_params.clone()
+            pooling_params.late_interaction_params = build_late_interaction_doc_params(
+                query_key=query_keys[query_idx]
+            )
+            doc_pooling_params_list.append(pooling_params)
+
+        assert (
+            n_docs
+            == len(doc_pooling_params_list)
+            == len(doc_engine_inputs)
+            == len(doc_keys)
+        )
+
+        doc_ctx = ScoringServeContext(
+            request=ctx.request,
+            raw_request=ctx.raw_request,
+            model_name=ctx.model_name,
+            request_id=ctx.request_id,
+            pooling_params=doc_pooling_params_list,
+            prompt_request_ids=doc_keys,
+            engine_inputs=doc_engine_inputs,
+        )
+
+        await self._prepare_generators(doc_ctx)
+        await self._collect_batch(doc_ctx)
+
+        ctx.final_res_batch = doc_ctx.final_res_batch
