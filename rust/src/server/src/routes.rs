@@ -3,7 +3,7 @@ mod health;
 mod inference;
 mod load;
 mod metrics;
-mod openai;
+pub(crate) mod openai;
 mod sleep;
 
 use std::sync::Arc;

@@ -1,5 +1,4 @@
 use axum::http::HeaderMap;
-use openai_protocol::common::StringOrArray;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
@@ -66,11 +65,6 @@ pub(crate) fn prepare_completion_request(
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
 
-    let stop_strings = request.stop.map(|stop| match stop {
-        StringOrArray::String(string) => vec![string],
-        StringOrArray::Array(arr) => arr,
-    });
-
     let text_request = TextRequest {
         request_id: request_id.clone(),
         prompt: request.prompt,
@@ -101,7 +95,7 @@ pub(crate) fn prepare_completion_request(
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: request.include_stop_str_in_output,
-            stop_strings,
+            stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,

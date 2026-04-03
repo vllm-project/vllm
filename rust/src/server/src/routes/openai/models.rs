@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use openai_protocol::models::{ListModelsResponse, ModelObject};
 
+use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject};
 use crate::state::AppState;
 
 /// Return the single configured model in OpenAI `list models` format.

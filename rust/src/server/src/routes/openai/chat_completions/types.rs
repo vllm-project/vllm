@@ -1,18 +1,15 @@
 use std::collections::HashMap;
 
-use openai_protocol::chat::{ChatMessage, MessageContent};
-use openai_protocol::common::{
-    StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference,
-    default_true, validate_stop,
-};
-use openai_protocol::sampling_params::validate_top_p_value;
-use openai_protocol::validated::Normalizable;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
-use crate::routes::openai::utils::types::{ChatLogProbs, StreamOptions, Usage};
+use crate::routes::openai::utils::types::{
+    ChatLogProbs, ChatMessage, MessageContent, Normalizable, StreamOptions, StringOrArray, Tool,
+    ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
+    default_true, validate_stop, validate_top_p_value,
+};
 
 /// vLLM-compatible request type for the Chat Completions API.
 ///
@@ -409,7 +406,7 @@ pub(super) struct ChatMessageDelta {
 }
 
 fn default_model() -> String {
-    openai_protocol::UNKNOWN_MODEL_ID.to_string()
+    UNKNOWN_MODEL_ID.to_string()
 }
 
 /// Validates messages array is not empty and has valid content

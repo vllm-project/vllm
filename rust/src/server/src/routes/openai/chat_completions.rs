@@ -13,8 +13,6 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use openai_protocol::common::{FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta};
-use openai_protocol::validated::ValidatedJson;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
@@ -33,7 +31,10 @@ use crate::routes::openai::chat_completions::types::{
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, decoded_prompt_logprobs_to_maps,
 };
-use crate::routes::openai::utils::types::{ChatLogProbs, Usage};
+use crate::routes::openai::utils::types::{
+    ChatLogProbs, FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
+};
+use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::unix_timestamp;
 

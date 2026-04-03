@@ -1,7 +1,6 @@
-use openai_protocol::common::{ToolChoice, ToolChoiceValue};
-
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::types::{ToolChoice, ToolChoiceValue};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -177,13 +176,15 @@ fn reject_non_default<T>(
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::chat::{ChatMessage, MessageContent};
-    use openai_protocol::common::{FunctionChoice, Tool, ToolChoice, ToolReference};
     use serde_json::json;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
+    use crate::routes::openai::utils::types::{
+        ChatMessage, Function, FunctionChoice, MessageContent, StringOrArray, Tool, ToolChoice,
+        ToolChoiceValue, ToolReference,
+    };
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
@@ -200,9 +201,7 @@ mod tests {
     #[test]
     fn validate_request_compat_accepts_stop() {
         let request = ChatCompletionRequest {
-            stop: Some(openai_protocol::common::StringOrArray::String(
-                "stop".to_string(),
-            )),
+            stop: Some(StringOrArray::String("stop".to_string())),
             ..base_request()
         };
 
@@ -226,7 +225,7 @@ mod tests {
         let request = ChatCompletionRequest {
             tools: Some(vec![Tool {
                 tool_type: "function".to_string(),
-                function: openai_protocol::common::Function {
+                function: Function {
                     name: "tool".to_string(),
                     description: None,
                     parameters: json!({}),
@@ -303,9 +302,7 @@ mod tests {
     #[test]
     fn validate_request_compat_accepts_noop_tool_choice_none() {
         let request = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Value(
-                openai_protocol::common::ToolChoiceValue::None,
-            )),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::None)),
             ..base_request()
         };
 
@@ -316,9 +313,7 @@ mod tests {
     #[test]
     fn validate_request_compat_rejects_required_and_named_tool_choices() {
         let required = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Value(
-                openai_protocol::common::ToolChoiceValue::Required,
-            )),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
             ..base_request()
         };
         assert!(validate_request_compat(&required, "Qwen/Qwen1.5-0.5B-Chat").is_err());

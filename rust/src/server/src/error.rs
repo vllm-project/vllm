@@ -1,8 +1,9 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use openai_protocol::common::{ErrorDetail, ErrorResponse};
 use thiserror_ext::{Construct, Macro};
+
+use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 
 /// Small OpenAI-style error family used by the minimal HTTP layer.
 #[derive(Debug, Construct, Macro)]
@@ -14,6 +15,8 @@ pub enum ApiError {
     },
     /// The requested model name does not match the single configured model.
     ModelNotFound { model: String },
+    /// The request body could not be parsed as valid JSON.
+    JsonParseError { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
 }
@@ -25,40 +28,40 @@ impl ApiError {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
         }
     }
 
     /// Convert this error into the standard OpenAI-compatible JSON error payload.
     pub fn to_error_response(&self) -> ErrorResponse {
-        let (error_type, message, param, code) = match self {
-            Self::InvalidRequest { message, param } => (
-                "invalid_request_error",
-                message.clone(),
-                param.map(|p| p.to_string()),
-                Some("invalid_request_error".to_string()),
-            ),
-            Self::ModelNotFound { model } => (
-                "invalid_request_error",
-                format!("The model `{model}` does not exist."),
-                Some("model".to_string()),
-                Some("model_not_found".to_string()),
-            ),
-            Self::ServerError { message } => (
-                "server_error",
-                message.clone(),
-                None,
-                Some("server_error".to_string()),
-            ),
+        let error = match self {
+            Self::InvalidRequest { message, param } => ErrorDetail {
+                message: message.clone(),
+                error_type: "invalid_request_error".to_string(),
+                param: param.map(|p| p.to_string()),
+                code: Some("invalid_request_error".to_string()),
+            },
+            Self::ModelNotFound { model } => ErrorDetail {
+                message: format!("The model `{model}` does not exist."),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("model".to_string()),
+                code: Some("model_not_found".to_string()),
+            },
+            Self::ServerError { message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "server_error".to_string(),
+                param: None,
+                code: Some("server_error".to_string()),
+            },
+            Self::JsonParseError { message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "invalid_request_error".to_string(),
+                param: None,
+                code: Some("json_parse_error".to_string()),
+            },
         };
 
-        ErrorResponse {
-            error: ErrorDetail {
-                message,
-                error_type: error_type.to_string(),
-                param,
-                code,
-            },
-        }
+        ErrorResponse { error }
     }
 }
 

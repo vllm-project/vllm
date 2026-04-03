@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
-use openai_protocol::validated::Normalizable;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::ChatLogProbs;
+use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable};
 
 /// vLLM-compatible request type for the token-in/token-out generate API.
 #[serde_with::skip_serializing_none]

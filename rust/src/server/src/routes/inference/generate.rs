@@ -9,7 +9,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use openai_protocol::validated::ValidatedJson;
 use thiserror_ext::AsReport as _;
 use tracing::info;
 use vllm_engine_core_client::protocol::{Logprobs, PositionLogprobs};
@@ -20,6 +19,7 @@ use self::types::{GenerateLogprob, GenerateRequest, GenerateResponse, GenerateRe
 use crate::error::{ApiError, server_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb};
+use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 
 /// Validate one token-in/token-out request and proxy it into the shared `vllm-text` stack.

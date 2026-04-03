@@ -12,8 +12,6 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use openai_protocol::common::LogProbs;
-use openai_protocol::validated::ValidatedJson;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
 use vllm_text::{DecodedTextEvent, FinishReason, TextOutputStream, TextOutputStreamExt as _};
@@ -29,6 +27,8 @@ use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
 };
+use crate::routes::openai::utils::types::LogProbs;
+use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::unix_timestamp;
 
