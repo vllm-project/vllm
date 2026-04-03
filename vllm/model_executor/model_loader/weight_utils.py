@@ -1288,8 +1288,8 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
         if param.numel() == 1 and loaded_weight.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
-            # "broadcast" instead of copy
-            param.data.fill_(loaded_weight.item())
+            # reshape to match before copying
+            param.data.copy_(loaded_weight.view(param.shape))
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
