@@ -256,6 +256,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_HANDSHAKE_TIMEOUT_MINS: int = 5
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
 
 
@@ -1696,6 +1697,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+    ),
+    # Timeout in minutes for the handshake between engine core and front-end.
+    # Default is 5 minutes.
+    "VLLM_HANDSHAKE_TIMEOUT_MINS": lambda: int(
+        os.getenv("VLLM_HANDSHAKE_TIMEOUT_MINS", "5")
     ),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
