@@ -6,6 +6,7 @@ EPLB communicator implementations and factory.
 
 import contextlib
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from datetime import timedelta
@@ -21,7 +22,11 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
-from vllm.distributed.parallel_state import GroupCoordinator, is_local_first_rank
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_pp_group,
+    is_local_first_rank,
+)
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -217,14 +222,12 @@ class NixlEplbCommunicator(EplbCommunicator):
             if tensor.dtype not in self._dtypes:
                 self._dtypes.append(tensor.dtype)
 
-        nixl_backends = ("UCX",)
-        self._nixl_backends = nixl_backends
         config = (
-            nixl_agent_config(backends=nixl_backends, capture_telemetry=False)
+            nixl_agent_config(capture_telemetry=False)
             if nixl_agent_config is not None
             else None
         )
-        self._nixl_wrapper = NixlWrapper(f"eplb-{self._rank}", config)
+        self._nixl_wrapper = NixlWrapper(self._make_agent_name(), config)
         self._nixl_memory_type = "VRAM"
         self._registered_desc: object | None = None
         self._remote_agents: dict[int, str] = {}
@@ -246,6 +249,13 @@ class NixlEplbCommunicator(EplbCommunicator):
         except Exception as exc:
             raise RuntimeError("NIXL EPLB init failed: send meta") from exc
         self._log_initialized()
+
+    def _make_agent_name(self) -> str:
+        """Build a deployment-unique nixl agent name."""
+        pp_size = get_pp_group().world_size
+        pp_suffix = f"-pp{get_pp_group().rank_in_group}" if pp_size > 1 else ""
+        uid = uuid.uuid4().hex[:8]
+        return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
     def _get_peer_buckets(
         self,
@@ -292,7 +302,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             )
 
     def _init_registered_buffers(self, expert_weights: Sequence[torch.Tensor]) -> None:
-        registered_partitions: list[tuple[int, int, int, str]] = []
+        buffers_to_register: list[torch.Tensor] = []
         for dtype in self._dtypes:
             max_peer_partition_numel = max(
                 sum(t.numel() for t in expert_weights if t.dtype == dtype), 1
@@ -303,27 +313,10 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._send_buffers[dtype] = send_buffer
             self._recv_buffers[dtype] = recv_buffer
             self._peer_partition_numels[dtype] = max_peer_partition_numel
-            registered_partitions.extend(
-                [
-                    (
-                        send_buffer.data_ptr(),
-                        send_buffer.numel() * send_buffer.element_size(),
-                        self._cuda_device_id,
-                        "",
-                    ),
-                    (
-                        recv_buffer.data_ptr(),
-                        recv_buffer.numel() * recv_buffer.element_size(),
-                        self._cuda_device_id,
-                        "",
-                    ),
-                ]
-            )
+            buffers_to_register.extend([send_buffer, recv_buffer])
 
-        descs = self._nixl_wrapper.get_reg_descs(
-            registered_partitions, self._nixl_memory_type
-        )
-        self._nixl_wrapper.register_memory(descs, backends=self._nixl_backends)
+        descs = self._nixl_wrapper.get_reg_descs(buffers_to_register)
+        self._nixl_wrapper.register_memory(descs)
         self._registered_desc = descs
 
     def _exchange_remote_send_meta(self) -> None:
@@ -590,6 +583,24 @@ def create_eplb_communicator(
     backend: str | None,
     expert_weights: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
+    """Create an EPLB communicator for the given backend.
+
+    Args:
+        group_coordinator: Process-group coordinator that provides the
+            device and CPU communication groups.
+        backend: Communicator backend name (``"torch_nccl"``,
+            ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
+            Falls back to ``"torch_nccl"`` when *None*.
+            Stateless (elastic EP) groups only support ``"torch_nccl"``
+            and ``"pynccl"``; ``"torch_nccl"`` is silently promoted to
+            ``"pynccl"`` in that case.  When tensors reside on CPU,
+            ``"torch_gloo"`` or ``"torch_nccl"`` are used via the CPU
+            process group.
+        expert_weights: Expert weight tensors from *one* MoE layer.
+            NixlEplbCommunicator pre-allocates send/recv buffers sized
+            to this layer, so all other MoE layers must have the same
+            tensor count, shapes, and dtypes.
+    """
     # Keep a safe default for callers that have not resolved communicator yet.
     if backend is None:
         backend = "torch_nccl"
