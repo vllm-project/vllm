@@ -377,7 +377,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # This check is required because Mxfp8OnlineLinearMethod inherits from
         # Fp8LinearMethod but only calls super().create_weights(), so we must
         # skip the fp8_linear kernel creation.
-        if not hasattr(self, "mxfp8_linear"):
+        if hasattr(self, "mxfp8_linear"):
             return
 
         self.fp8_linear = init_fp8_linear_kernel(
