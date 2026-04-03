@@ -134,16 +134,36 @@ class TestGenSteeringExtraHashKeys:
         assert result == [111, 222]
 
     def test_boundary_block_prefill_only(self):
-        """Boundary block with only prefill steering returns just prefill hash."""
+        """Boundary block with only prefill steering returns [prefill, 0]."""
         req = make_mock_request(prefill_hash=111, decode_hash=0, num_prompt_tokens=10)
         result = _gen_steering_extra_hash_keys(req, start_token_idx=5, end_token_idx=15)
-        assert result == [111]
+        assert result == [111, 0]
 
     def test_boundary_block_decode_only(self):
-        """Boundary block with only decode steering returns just decode hash."""
+        """Boundary block with only decode steering returns [0, decode]."""
         req = make_mock_request(prefill_hash=0, decode_hash=222, num_prompt_tokens=10)
         result = _gen_steering_extra_hash_keys(req, start_token_idx=5, end_token_idx=15)
-        assert result == [222]
+        assert result == [0, 222]
+
+    def test_boundary_block_prefill_only_vs_decode_only_are_distinct(self):
+        """prefill_hash=X, decode_hash=0 must produce different keys than
+        prefill_hash=0, decode_hash=X to prevent false cache sharing."""
+        X = 42
+        req_prefill = make_mock_request(
+            prefill_hash=X, decode_hash=0, num_prompt_tokens=10
+        )
+        req_decode = make_mock_request(
+            prefill_hash=0, decode_hash=X, num_prompt_tokens=10
+        )
+        keys_prefill = _gen_steering_extra_hash_keys(
+            req_prefill, start_token_idx=5, end_token_idx=15
+        )
+        keys_decode = _gen_steering_extra_hash_keys(
+            req_decode, start_token_idx=5, end_token_idx=15
+        )
+        assert keys_prefill == [X, 0]
+        assert keys_decode == [0, X]
+        assert keys_prefill != keys_decode
 
     def test_boundary_block_no_steering(self):
         """Boundary block with no steering returns empty list."""
