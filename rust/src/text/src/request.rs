@@ -135,6 +135,20 @@ pub struct TextRequest {
 }
 
 impl TextRequest {
+    /// Return one minimal valid request fixture for tests.
+    pub fn for_test() -> Self {
+        Self {
+            request_id: "test-request".to_string(),
+            prompt: Prompt::Text("test".to_string()),
+            sampling_params: SamplingParams::default(),
+            decode_options: TextDecodeOptions::default(),
+            intermediate: true,
+            priority: 0,
+            cache_salt: None,
+            add_special_tokens: false,
+        }
+    }
+
     /// Validate the minimum invariants before tokenization or request lowering.
     pub fn validate(&self) -> Result<()> {
         if matches!(&self.prompt, Prompt::TokenIds(ids) if ids.is_empty()) {

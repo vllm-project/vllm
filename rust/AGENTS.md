@@ -25,6 +25,7 @@ This project aims to implement an alternative frontend to the vLLM Engine in Rus
 - Prefer snapshot testing with the `expect-test` crate over writing multiple `assert_eq!` statements on individual fields. Use `expect_test::expect![[...]].assert_debug_eq(...)` to snapshot the `Debug` output of the entire struct.
   - Write `expect![[""]]` as a placeholder first, then run `UPDATE_EXPECT=1 cargo test` to auto-fill the snapshot content.
   - For values containing non-deterministic data (e.g., UUIDs), set them to a fixed value like `"<placeholder>"` before snapshotting.
+- In tests, avoid hand-writing full request struct literals when only a few fields matter. Prefer test fixtures such as `for_test()` with struct update syntax, so newly added fields do not force mechanical edits across many tests.
 - Prefer deterministic synchronization in async and integration tests, such as channels, barriers, explicit handshakes, or observable state transitions, instead of `sleep`-based timing assumptions.
   - Use `sleep` only as a last resort when there is no better observable synchronization point.
 - Always run test with `cargo nextest run` instead of `cargo test`, if available, as it's much faster.

@@ -225,8 +225,7 @@ mod tests {
 
     use super::ChatTemplate;
     use crate::request::{
-        ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        SamplingParams,
+        ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
     };
     use crate::{AssistantContentBlock, Error, Result};
 
@@ -234,18 +233,9 @@ mod tests {
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
-            request_id: "render-test".to_string(),
             messages,
-            sampling_params: SamplingParams::default(),
-            chat_options: ChatOptions::default(),
-            tools: Vec::new(),
-            tool_choice: ChatToolChoice::None,
-            decode_options: Default::default(),
-            intermediate: true,
-            priority: 0,
-            documents: None,
-            cache_salt: None,
-            add_special_tokens: false,
+            request_id: "render-test".to_string(),
+            ..ChatRequest::for_test()
         }
     }
 

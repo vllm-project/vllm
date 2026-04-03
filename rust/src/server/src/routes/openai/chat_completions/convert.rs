@@ -291,6 +291,12 @@ mod tests {
     use openai_protocol::chat::{ChatMessage, MessageContent};
     use openai_protocol::common::{ContentPart, Tool, ToolChoice};
     use serde_json::json;
+    use vllm_chat::{
+        AssistantContentBlock, AssistantToolCall, ChatContentPart as VllmChatContentPart,
+        ChatMessage as VllmChatMessage, ChatTool as VllmChatTool, ChatToolChoice,
+        SamplingParams as VllmSamplingParams,
+    };
+    use vllm_text::output::TextDecodeOptions;
 
     use super::prepare_chat_request;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
@@ -321,132 +327,66 @@ mod tests {
         request.skip_special_tokens = false;
         request.chat_template_kwargs = Some(HashMap::from([("foo".to_string(), json!("bar"))]));
 
-        let mut prepared =
+        let prepared =
             prepare_chat_request(request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
 
         assert!(prepared.response_id.starts_with("chatcmpl-"));
-        prepared.chat_request.request_id = "<placeholder>".to_string();
-        expect_test::expect![[r#"
-            ChatRequest {
-                request_id: "<placeholder>",
-                messages: [
-                    User {
-                        content: Parts(
-                            [
-                                Text {
-                                    text: "hello",
-                                },
-                            ],
-                        ),
-                    },
-                ],
-                sampling_params: SamplingParams {
-                    temperature: None,
-                    top_p: None,
-                    top_k: None,
-                    seed: None,
-                    max_tokens: None,
-                    min_tokens: None,
-                    logprobs: None,
-                    prompt_logprobs: None,
-                    min_p: None,
-                    frequency_penalty: None,
-                    presence_penalty: None,
-                    repetition_penalty: None,
-                    stop_token_ids: None,
-                    ignore_eos: false,
-                    logit_bias: None,
-                    allowed_token_ids: None,
-                    bad_words: None,
-                    structured_outputs: None,
-                    vllm_xargs: None,
-                },
-                chat_options: ChatOptions {
-                    add_generation_prompt: false,
-                    continue_final_message: true,
-                    chat_template: None,
-                    template_kwargs: {
-                        "foo": String("bar"),
-                    },
-                },
-                tools: [],
-                tool_choice: Auto,
-                decode_options: TextDecodeOptions {
-                    skip_special_tokens: false,
-                    include_stop_str_in_output: false,
-                    stop_strings: None,
-                    min_tokens: 0,
-                },
-                intermediate: true,
-                priority: 0,
-                documents: None,
-                cache_salt: None,
-                add_special_tokens: false,
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![VllmChatContentPart::text(
+                "hello"
+            )])]
+        );
+        assert_eq!(
+            prepared.chat_request.sampling_params,
+            VllmSamplingParams::default()
+        );
+        assert!(!prepared.chat_request.chat_options.add_generation_prompt);
+        assert!(prepared.chat_request.chat_options.continue_final_message);
+        assert_eq!(
+            prepared.chat_request.chat_options.template_kwargs,
+            HashMap::from([("foo".to_string(), json!("bar"))])
+        );
+        assert_eq!(
+            prepared.chat_request.decode_options,
+            TextDecodeOptions {
+                skip_special_tokens: false,
+                include_stop_str_in_output: false,
+                stop_strings: None,
+                min_tokens: 0,
             }
-        "#]]
-        .assert_debug_eq(&prepared.chat_request);
+        );
+        assert!(prepared.chat_request.tools.is_empty());
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
     }
 
     #[test]
     fn prepare_chat_request_keeps_optional_sampling_fields_unset() {
-        let mut prepared = prepare_chat_request(base_request(), "Qwen/Qwen1.5-0.5B-Chat")
+        let prepared = prepare_chat_request(base_request(), "Qwen/Qwen1.5-0.5B-Chat")
             .expect("request is valid");
 
         assert!(prepared.response_id.starts_with("chatcmpl-"));
-        prepared.chat_request.request_id = "<placeholder>".to_string();
-        expect_test::expect![[r#"
-            ChatRequest {
-                request_id: "<placeholder>",
-                messages: [
-                    User {
-                        content: Text(
-                            "hello",
-                        ),
-                    },
-                ],
-                sampling_params: SamplingParams {
-                    temperature: None,
-                    top_p: None,
-                    top_k: None,
-                    seed: None,
-                    max_tokens: None,
-                    min_tokens: None,
-                    logprobs: None,
-                    prompt_logprobs: None,
-                    min_p: None,
-                    frequency_penalty: None,
-                    presence_penalty: None,
-                    repetition_penalty: None,
-                    stop_token_ids: None,
-                    ignore_eos: false,
-                    logit_bias: None,
-                    allowed_token_ids: None,
-                    bad_words: None,
-                    structured_outputs: None,
-                    vllm_xargs: None,
-                },
-                chat_options: ChatOptions {
-                    add_generation_prompt: true,
-                    continue_final_message: false,
-                    chat_template: None,
-                    template_kwargs: {},
-                },
-                tools: [],
-                tool_choice: Auto,
-                decode_options: TextDecodeOptions {
-                    skip_special_tokens: true,
-                    include_stop_str_in_output: false,
-                    stop_strings: None,
-                    min_tokens: 0,
-                },
-                intermediate: true,
-                priority: 0,
-                documents: None,
-                cache_salt: None,
-                add_special_tokens: false,
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user("hello")]
+        );
+        assert_eq!(
+            prepared.chat_request.sampling_params,
+            VllmSamplingParams::default()
+        );
+        assert!(prepared.chat_request.chat_options.add_generation_prompt);
+        assert!(!prepared.chat_request.chat_options.continue_final_message);
+        assert_eq!(
+            prepared.chat_request.decode_options,
+            TextDecodeOptions {
+                skip_special_tokens: true,
+                include_stop_str_in_output: false,
+                stop_strings: None,
+                min_tokens: 0,
             }
-        "#]]
-        .assert_debug_eq(&prepared.chat_request);
+        );
+        assert!(prepared.chat_request.tools.is_empty());
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
     }
 
     #[test]
@@ -460,72 +400,17 @@ mod tests {
             ..base_request()
         };
 
-        let mut prepared =
+        let prepared =
             prepare_chat_request(request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
-        prepared.chat_request.request_id = "<placeholder>".to_string();
-        expect_test::expect![[r#"
-            ChatRequest {
-                request_id: "<placeholder>",
-                messages: [
-                    User {
-                        content: Text(
-                            "hello",
-                        ),
-                    },
-                ],
-                sampling_params: SamplingParams {
-                    temperature: None,
-                    top_p: None,
-                    top_k: None,
-                    seed: Some(
-                        42,
-                    ),
-                    max_tokens: None,
-                    min_tokens: None,
-                    logprobs: None,
-                    prompt_logprobs: None,
-                    min_p: Some(
-                        0.2,
-                    ),
-                    frequency_penalty: Some(
-                        0.3,
-                    ),
-                    presence_penalty: Some(
-                        0.4,
-                    ),
-                    repetition_penalty: Some(
-                        1.1,
-                    ),
-                    stop_token_ids: None,
-                    ignore_eos: false,
-                    logit_bias: None,
-                    allowed_token_ids: None,
-                    bad_words: None,
-                    structured_outputs: None,
-                    vllm_xargs: None,
-                },
-                chat_options: ChatOptions {
-                    add_generation_prompt: true,
-                    continue_final_message: false,
-                    chat_template: None,
-                    template_kwargs: {},
-                },
-                tools: [],
-                tool_choice: Auto,
-                decode_options: TextDecodeOptions {
-                    skip_special_tokens: true,
-                    include_stop_str_in_output: false,
-                    stop_strings: None,
-                    min_tokens: 0,
-                },
-                intermediate: true,
-                priority: 0,
-                documents: None,
-                cache_salt: None,
-                add_special_tokens: false,
-            }
-        "#]]
-        .assert_debug_eq(&prepared.chat_request);
+        let expected = VllmSamplingParams {
+            seed: Some(42),
+            min_p: Some(0.2),
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(0.4),
+            repetition_penalty: Some(1.1),
+            ..VllmSamplingParams::default()
+        };
+        assert_eq!(prepared.chat_request.sampling_params, expected);
     }
 
     #[test]
@@ -572,67 +457,21 @@ mod tests {
             ..base_request()
         };
 
-        let mut prepared =
+        let prepared =
             prepare_chat_request(request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
-        prepared.chat_request.request_id = "<placeholder>".to_string();
-        expect_test::expect![[r#"
-            ChatRequest {
-                request_id: "<placeholder>",
-                messages: [
-                    Assistant {
-                        content: [
-                            Reasoning {
-                                text: "inner",
-                            },
-                            Text {
-                                text: "answer",
-                            },
-                        ],
-                    },
-                ],
-                sampling_params: SamplingParams {
-                    temperature: None,
-                    top_p: None,
-                    top_k: None,
-                    seed: None,
-                    max_tokens: None,
-                    min_tokens: None,
-                    logprobs: None,
-                    prompt_logprobs: None,
-                    min_p: None,
-                    frequency_penalty: None,
-                    presence_penalty: None,
-                    repetition_penalty: None,
-                    stop_token_ids: None,
-                    ignore_eos: false,
-                    logit_bias: None,
-                    allowed_token_ids: None,
-                    bad_words: None,
-                    structured_outputs: None,
-                    vllm_xargs: None,
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "inner".to_string(),
                 },
-                chat_options: ChatOptions {
-                    add_generation_prompt: true,
-                    continue_final_message: false,
-                    chat_template: None,
-                    template_kwargs: {},
+                AssistantContentBlock::Text {
+                    text: "answer".to_string(),
                 },
-                tools: [],
-                tool_choice: Auto,
-                decode_options: TextDecodeOptions {
-                    skip_special_tokens: true,
-                    include_stop_str_in_output: false,
-                    stop_strings: None,
-                    min_tokens: 0,
-                },
-                intermediate: true,
-                priority: 0,
-                documents: None,
-                cache_salt: None,
-                add_special_tokens: false,
-            }
-        "#]]
-        .assert_debug_eq(&prepared.chat_request);
+            ])]
+        );
+        assert!(prepared.chat_request.tools.is_empty());
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
     }
 
     #[test]
@@ -675,90 +514,34 @@ mod tests {
             ..base_request()
         };
 
-        let mut prepared =
+        let prepared =
             prepare_chat_request(request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
-        prepared.chat_request.request_id = "<placeholder>".to_string();
-        expect_test::expect![[r#"
-            ChatRequest {
-                request_id: "<placeholder>",
-                messages: [
-                    Assistant {
-                        content: [
-                            ToolCall(
-                                AssistantToolCall {
-                                    id: "call_1",
-                                    name: "get_weather",
-                                    arguments: "{\"city\":\"Paris\"}",
-                                },
-                            ),
-                        ],
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![
+                VllmChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                    AssistantToolCall {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        arguments: r#"{"city":"Paris"}"#.to_string(),
                     },
-                    ToolResponse {
-                        content: Text(
-                            "Sunny",
-                        ),
-                        tool_call_id: "call_1",
-                    },
-                ],
-                sampling_params: SamplingParams {
-                    temperature: None,
-                    top_p: None,
-                    top_k: None,
-                    seed: None,
-                    max_tokens: None,
-                    min_tokens: None,
-                    logprobs: None,
-                    prompt_logprobs: None,
-                    min_p: None,
-                    frequency_penalty: None,
-                    presence_penalty: None,
-                    repetition_penalty: None,
-                    stop_token_ids: None,
-                    ignore_eos: false,
-                    logit_bias: None,
-                    allowed_token_ids: None,
-                    bad_words: None,
-                    structured_outputs: None,
-                    vllm_xargs: None,
-                },
-                chat_options: ChatOptions {
-                    add_generation_prompt: true,
-                    continue_final_message: false,
-                    chat_template: None,
-                    template_kwargs: {},
-                },
-                tools: [
-                    ChatTool {
-                        name: "get_weather",
-                        description: Some(
-                            "Get weather",
-                        ),
-                        parameters: Object {
-                            "type": String("object"),
-                            "properties": Object {
-                                "city": Object {
-                                    "type": String("string"),
-                                },
-                            },
-                        },
-                        strict: None,
-                    },
-                ],
-                tool_choice: None,
-                decode_options: TextDecodeOptions {
-                    skip_special_tokens: true,
-                    include_stop_str_in_output: false,
-                    stop_strings: None,
-                    min_tokens: 0,
-                },
-                intermediate: true,
-                priority: 0,
-                documents: None,
-                cache_salt: None,
-                add_special_tokens: false,
-            }
-        "#]]
-        .assert_debug_eq(&prepared.chat_request);
+                )]),
+                VllmChatMessage::tool_response("Sunny", "call_1"),
+            ]
+        );
+        assert_eq!(
+            prepared.chat_request.tools,
+            vec![VllmChatTool {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                }),
+                strict: None,
+            }]
+        );
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::None);
     }
 
     #[test]

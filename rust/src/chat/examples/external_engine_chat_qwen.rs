@@ -5,8 +5,8 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tracing_subscriber::EnvFilter;
 use vllm_chat::{
-    AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatLlm, ChatMessage, ChatOptions,
-    ChatRequest, ChatRole, ChatToolChoice, SamplingParams, load_model_backends,
+    AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatLlm, ChatMessage, ChatRequest,
+    ChatRole, SamplingParams, load_model_backends,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
@@ -84,21 +84,13 @@ async fn main() -> Result<()> {
     let chat = ChatLlm::new(TextLlm::new(llm, text_backend), chat_backend);
 
     let request = ChatRequest {
-        request_id: request_id.clone(),
         messages: vec![ChatMessage::text(ChatRole::User, args.prompt.clone())],
         sampling_params: SamplingParams {
             temperature: Some(0.0),
             ..Default::default()
         },
-        chat_options: ChatOptions::default(),
-        tools: Vec::new(),
-        tool_choice: ChatToolChoice::None,
-        decode_options: Default::default(),
-        intermediate: true,
-        priority: 0,
-        documents: None,
-        cache_salt: None,
-        add_special_tokens: false,
+        request_id: request_id.clone(),
+        ..ChatRequest::for_test()
     };
 
     println!("request_id={request_id}");

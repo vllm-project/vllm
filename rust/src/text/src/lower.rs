@@ -258,14 +258,9 @@ mod tests {
 
     fn sample_request() -> TextRequest {
         TextRequest {
-            request_id: "text-1".to_string(),
             prompt: Prompt::TokenIds(vec![1, 2, 3]),
-            sampling_params: SamplingParams::default(),
-            decode_options: Default::default(),
-            intermediate: true,
-            priority: 0,
-            cache_salt: None,
-            add_special_tokens: false,
+            request_id: "text-1".to_string(),
+            ..TextRequest::for_test()
         }
     }
 

@@ -293,6 +293,24 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
+    /// Return one minimal valid request fixture for tests.
+    pub fn for_test() -> Self {
+        Self {
+            request_id: "test-request".to_string(),
+            messages: vec![ChatMessage::text(ChatRole::User, "test")],
+            sampling_params: SamplingParams::default(),
+            chat_options: ChatOptions::default(),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::None,
+            decode_options: TextDecodeOptions::default(),
+            intermediate: true,
+            priority: 0,
+            documents: None,
+            cache_salt: None,
+            add_special_tokens: false,
+        }
+    }
+
     /// Validate basic request invariants before rendering.
     pub fn validate(&self) -> Result<()> {
         if self.messages.is_empty() {

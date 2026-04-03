@@ -7,8 +7,8 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
-    ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, FinishReason, SamplingParams,
+    ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatTextBackend, ChatTool, ChatToolChoice,
+    FinishReason, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
@@ -282,7 +282,6 @@ impl ChatBackend for FailingDecodeBackend {
 
 fn sample_request(request_id: &str) -> ChatRequest {
     ChatRequest {
-        request_id: request_id.to_string(),
         messages: vec![
             ChatMessage::text(ChatRole::System, "You are terse."),
             ChatMessage::text(ChatRole::User, "Say hi"),
@@ -291,15 +290,8 @@ fn sample_request(request_id: &str) -> ChatRequest {
             max_tokens: Some(8),
             ..Default::default()
         },
-        chat_options: ChatOptions::default(),
-        tools: Vec::new(),
-        tool_choice: ChatToolChoice::None,
-        decode_options: Default::default(),
-        intermediate: true,
-        priority: 0,
-        documents: None,
-        cache_salt: None,
-        add_special_tokens: false,
+        request_id: request_id.to_string(),
+        ..ChatRequest::for_test()
     }
 }
 
