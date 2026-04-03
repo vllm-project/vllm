@@ -250,7 +250,7 @@ except OSError:
 #
 # VLLM_ROCM_CI_RESET_CACHE_L2       Wipe ALL L2 (NFS/PVC) cache data.
 #                                    Affects all pods on all nodes. Use
-#                                    with caution -- every pod starts cold
+#                                    with caution. Every pod starts cold
 #                                    until caches are rebuilt.
 #
 # VLLM_ROCM_CI_RESET_DOCKER         Run docker system prune --all --force.
@@ -414,10 +414,12 @@ RESULTS_MOUNT = "/tmp/vllm-ci-results"
 # ---------------------------------------------------------------------------
 
 # Hot tier: fast local storage. Container mounts point here.
+DEFAULT_CACHE_ROOT = Path.home() / "vllm-ci-cache"
+TMP_CACHE_ROOT = Path(tempfile.gettempdir()) / f"vllm-ci-cache-{os.getuid()}"
 CACHE_ROOT = Path(
     os.environ.get(
         "VLLM_CI_CACHE_ROOT",
-        str(Path.home() / "vllm-ci-cache"),
+        str(DEFAULT_CACHE_ROOT),
     )
 )
 
@@ -436,6 +438,64 @@ CACHE_OVERLAY_WORK = CACHE_ROOT.parent / "vllm-ci-cache-work"
 # has been accessed across jobs. Used to prioritize seeding when
 # OverlayFS is not available.
 ACCESS_LOG_FILE = CACHE_ROOT / ".access_counts"
+
+
+def _set_cache_root(path):
+    # type: (Path) -> None
+    """Rebind all derived cache paths when the hot tier root changes."""
+    global CACHE_ROOT, CACHE_OVERLAY_ROOT, CACHE_OVERLAY_WORK, ACCESS_LOG_FILE
+    CACHE_ROOT = path
+    CACHE_OVERLAY_ROOT = CACHE_ROOT.parent / "vllm-ci-cache-merged"
+    CACHE_OVERLAY_WORK = CACHE_ROOT.parent / "vllm-ci-cache-work"
+    ACCESS_LOG_FILE = CACHE_ROOT / ".access_counts"
+
+
+def _probe_writable_dir(path):
+    # type: (Path) -> Exception | None
+    """Return None when a directory is creatable and writable, else the error."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=str(path),
+            prefix=".cache-write-probe-",
+        ):
+            pass
+        return None
+    except Exception as exc:
+        return exc
+
+
+def normalize_cache_root():
+    # type: () -> None
+    """Prefer the configured cache root, but fall back to a writable local path."""
+    global ENABLE_CACHE
+
+    if not ENABLE_CACHE:
+        return
+
+    configured_root = CACHE_ROOT
+    configured_err = _probe_writable_dir(configured_root)
+    if configured_err is None:
+        return
+
+    warn(f"Configured cache root {configured_root} is not writable: {configured_err}")
+
+    fallback_roots = []
+    for candidate in [DEFAULT_CACHE_ROOT, TMP_CACHE_ROOT]:
+        if candidate not in fallback_roots and candidate != configured_root:
+            fallback_roots.append(candidate)
+
+    for fallback in fallback_roots:
+        fallback_err = _probe_writable_dir(fallback)
+        if fallback_err is None:
+            warn(f"Falling back to cache root: {fallback}")
+            _set_cache_root(fallback)
+            os.environ["VLLM_CI_CACHE_ROOT"] = str(fallback)
+            return
+
+    warn("No writable cache root found; disabling persistent caches for this run")
+    ENABLE_CACHE = False
+
 
 # Cache registry: each entry defines one persistent cache.
 #
@@ -6576,6 +6636,7 @@ def main():
 
     # -- Phase 1: Environment + config --
     section("Environment")
+    normalize_cache_root()
     with best_effort("K8s context logging"):
         log_k8s_context()
     with best_effort("config logging"):
