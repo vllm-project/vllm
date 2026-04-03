@@ -365,10 +365,10 @@ class cmake_build_ext(build_ext):
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
-        if _is_cuda() or _is_hip():
+        if _is_cuda():
             # copy vllm/third_party/triton_kernels/**/*.py from self.build_lib
             # to current directory so that they can be included in the editable
-            # build
+            # build (skipped for HIP -- triton_kernels not built for ROCm)
             print(
                 f"Copying {self.build_lib}/vllm/third_party/triton_kernels "
                 "to vllm/third_party/triton_kernels"
@@ -960,7 +960,9 @@ if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
     # Optional since this doesn't get built (produce an .so file). This is just
     # copying the relevant .py files from the source repository.
-    ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
+    # Skipped for HIP: triton_kernels not built for ROCm (expensive git clone).
+    if not _is_hip():
+        ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))

@@ -1215,8 +1215,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif()
 
-# For CUDA and HIP builds also build the triton_kernels external package.
-if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
+# For CUDA builds also build the triton_kernels external package.
+# Skipped for HIP/ROCm: the git clone of the full triton repo is expensive
+# and triton_kernels is optional at runtime with a graceful fallback.
+if(VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/triton_kernels.cmake)
 endif()
 

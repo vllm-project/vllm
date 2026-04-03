@@ -1,5 +1,11 @@
-group: Hardware - AMD Build 
+group: Hardware - AMD Build
 steps:
+  # Single ROCm CI image: compiles for all supported GPU architectures in one image.
+  # The ci_base layer (RIXL, DeepEP, torchcodec, etc.) is pre-built weekly
+  # and pulled here as CI_BASE_IMAGE. Only the vLLM wheel layer is rebuilt per-PR.
+  # All builds publish a commit-scoped cache and refresh the shared
+  # rocm-latest cache tag for cross-branch cache hits. Only main updates the
+  # convenience rocm/vllm-ci:latest image tag.
   - label: "AMD: :docker: build image"
     key: image-build-amd
     depends_on: []
@@ -7,17 +13,19 @@ steps:
     no_plugin: true
     soft_fail: true
     commands:
-    - >
-      docker build
-      --build-arg max_jobs=16
-      --build-arg REMOTE_VLLM=1
-      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
-      --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-      --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
-      -f docker/Dockerfile.rocm
-      --target test
-      --no-cache
-      --progress plain .
-    - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+      - export IMAGE_TAG="rocm/vllm-ci:$BUILDKITE_COMMIT"
+      - export VLLM_BAKE_FILE="docker/docker-bake-rocm.hcl"
+      - export CI_HCL_URL="https://raw.githubusercontent.com/vllm-project/ci-infra/${VLLM_CI_BRANCH:-main}/docker/ci-rocm.hcl"
+      - export PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950"
+      - export CI_BASE_IMAGE="rocm/vllm-dev:ci_base"
+      - export REMOTE_VLLM=1
+      - export VLLM_BRANCH="$BUILDKITE_COMMIT"
+      - export DOCKERHUB_CACHE_TO="rocm/vllm-ci-cache:rocm-latest"
+      - |
+        if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
+          export IMAGE_TAG_LATEST="rocm/vllm-ci:latest"
+        fi
+      - docker pull rocm/vllm-dev:ci_base
+      - bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
     env:
       DOCKER_BUILDKIT: "1"
