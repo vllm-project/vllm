@@ -235,8 +235,9 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     )
     # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
     topk = torch.tensor([[1, 2]], dtype=torch.int32)
-    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        with pytest.raises(AssertionError,
-                           match="unexpected topk_ids batch dim"):
-            capturer.capture(layer_id=0, topk_ids=topk)
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
+    ):
+        capturer.capture(layer_id=0, topk_ids=topk)
     assert capturer._device_buffer[0, 0, 0].item() == -1
