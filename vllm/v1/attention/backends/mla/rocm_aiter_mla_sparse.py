@@ -311,9 +311,8 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
 
         # AITER MLA decode kernel requires num_heads >= 16.
-        # For smaller head counts (e.g. num_heads=8 with TP=8 on a 64-head
-        # model like GLM-5), we repeat query heads to reach 16 and undo the
-        # repeat on the output. See also AiterMLAImpl in rocm_aiter_mla.py.
+        # Upstream tracker: https://github.com/ROCm/aiter/issues/726
+        # Matches the existing workaround in AiterMLAImpl (rocm_aiter_mla.py).
         _valid_heads = num_heads in (4, 8) or (
             num_heads % 16 == 0 and 16 <= num_heads <= 128
         )
@@ -325,6 +324,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         )
         self._needs_head_repeat = num_heads < 16
         self._head_repeat_factor = 16 // num_heads if num_heads < 16 else 1
+        self._kernel_num_heads = 16 if self._needs_head_repeat else num_heads
 
     def _forward_bf16_kv(
         self,
@@ -337,12 +337,9 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
 
         if self._needs_head_repeat:
             q = q.repeat_interleave(self._head_repeat_factor, dim=1)
-            kernel_num_heads = 16
-        else:
-            kernel_num_heads = self.num_heads
 
         output = torch.empty(
-            [num_tokens, kernel_num_heads, self.kv_lora_rank],
+            [num_tokens, self._kernel_num_heads, self.kv_lora_rank],
             dtype=q.dtype,
             device=q.device,
         )
