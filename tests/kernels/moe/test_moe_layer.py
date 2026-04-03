@@ -386,13 +386,13 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     ):
         return False, "modelopt_fp4 not supported on H100+ GPUs"
 
-    # Skip flashinfer_nvlink if not on B100+ (compute capability 10.0+)
+    # Skip flashinfer_nvlink if not on H100+ (compute capability 10.0+)
     if (
         config.backend is not None
         and config.backend.startswith("flashinfer_nvlink")
         and not current_platform.has_device_capability(90)
     ):
-        return False, "flashinfer_nvlink not supported on H100+ GPUs"
+        return False, "flashinfer_nvlink needs an H100+ GPUs"
 
     # reduce_results incompatibilities
     if config.reduce_results and config.use_shared_experts:
