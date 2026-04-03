@@ -1633,7 +1633,8 @@ class Qwen3VLForConditionalGeneration(
         vllm_config,
     ) -> tuple[int, int]:
         # Min: estimated smallest possible encoder input.
-        # 224x224 image → 14x14 patches, spatial_merge_size=2 → 8x8 = 64 tokens
+        # 224x224 image → 16x16 patches (patch_size=14)
+        #                 spatial_merge_size=2 → 8x8 = 64 tokens
         min_budget = 64
         # Max: capped by max_num_batched_tokens
         max_budget = vllm_config.scheduler_config.max_num_batched_tokens
