@@ -107,6 +107,16 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
   CUmemcpyAttributes attr = {};
   attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
   size_t attrs_idx = 0;
+  #if defined(CUDA_VERSION) && CUDA_VERSION >= 13000
+  CUresult result = cuMemcpyBatchAsync(
+      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(dst_data)),
+      reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(src_data)),
+      reinterpret_cast<size_t*>(const_cast<int64_t*>(size_data)),
+      static_cast<size_t>(n), &attr, &attrs_idx, 1,
+      static_cast<CUstream>(stream));
+  TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed with error ",
+              result);
+  #else
   size_t fail_idx = 0;
   CUresult result = cuMemcpyBatchAsync(
       reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(dst_data)),
@@ -116,6 +126,7 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
       static_cast<CUstream>(stream));
   TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed at index ",
               fail_idx, " with error ", result);
+  #endif
 #else
   // Fallback for CUDA < 12.8 and ROCm: individual async copies.
   // cudaMemcpyDefault lets the driver infer direction from pointer types.
