@@ -573,7 +573,7 @@ class EplbState:
                 if self._all_ranks_result_ready(eplb_model_state):
                     _move_to_workspace(
                         model_state=eplb_model_state,
-                        ep_group=ep_group,
+                        ep_rank=ep_group.rank(),
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -1127,7 +1127,7 @@ def _commit_eplb_maps(
 
 def _move_to_workspace(
     model_state: EplbModelState,
-    ep_group: ProcessGroup,
+    ep_rank: int,
 ) -> None:
     result = model_state.pending_result
     assert result is not None
@@ -1138,7 +1138,7 @@ def _move_to_workspace(
         is_received_locally=result.is_received_locally,
         recv_metadata=result.recv_metadata,
         new_indices=result.new_physical_to_logical_map.numpy(),
-        ep_rank=ep_group.rank(),
+        ep_rank=ep_rank,
     )
 
     _commit_eplb_maps_for_layer(
@@ -1149,7 +1149,7 @@ def _move_to_workspace(
     logger.debug(
         "model %s successfully move_to_workspace layer %d",
         model_state.model_name,
-        ep_group.rank(),
+        ep_rank,
     )
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
