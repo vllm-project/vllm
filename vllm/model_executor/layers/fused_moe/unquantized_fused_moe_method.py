@@ -6,7 +6,6 @@ from collections.abc import Callable
 import torch
 import torch.nn.functional as F
 from torch.nn import Module
-from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -148,58 +147,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         return weight
 
-    @staticmethod
-    def _maybe_pad_intermediate_for_aiter(
-        w13_weight: Parameter,
-        w2_weight: Parameter,
-        is_act_and_mul: bool,
-    ) -> tuple[Parameter, Parameter]:
-        """Pad the MoE intermediate dimension to a multiple of 128 for AITER
-        CK GEMM compatibility. Some models (e.g.
-        expert_intermediate_size=704) have intermediate sizes not aligned to
-        CK's device_gemm tile requirements, causing runtime errors like
-        'device_gemm does not support this GEMM problem'.
-
-        Zero-padding is mathematically safe: the extra w1 outputs are zero
-        (from zero-padded weights), activation(0)*0=0 for gated activations
-        (SiLU/GELU), and the extra w2 input columns are also zero.
-        """
-        AITER_MOE_ALIGN = 128
-        inter = w2_weight.shape[-1]  # intermediate_size_per_partition
-        padded_inter = (
-            (inter + AITER_MOE_ALIGN - 1) // AITER_MOE_ALIGN
-        ) * AITER_MOE_ALIGN
-        if padded_inter == inter:
-            return w13_weight, w2_weight
-
-        pad_amount = padded_inter - inter
-        logger.info_once(
-            "Padding MoE intermediate dimension from %d to %d "
-            "for AITER CK GEMM alignment.",
-            inter,
-            padded_inter,
-        )
-
-        # w13: (E, [2*]inter, hidden) -> (E, [2*]padded_inter, hidden)
-        # F.pad spec: (last_dim_left, last_dim_right, second_last_left, ...)
-        if is_act_and_mul:
-            # Split gate and up projections, pad each, recombine so that
-            # the zero-padding sits at the end of each half, not in between.
-            gate, up = w13_weight.data.chunk(2, dim=1)
-            gate = F.pad(gate, (0, 0, 0, pad_amount))
-            up = F.pad(up, (0, 0, 0, pad_amount))
-            w13_padded = torch.cat([gate, up], dim=1).contiguous()
-        else:
-            w13_padded = F.pad(w13_weight.data, (0, 0, 0, pad_amount)).contiguous()
-
-        # w2: (E, hidden, inter) -> (E, hidden, padded_inter)
-        w2_padded = F.pad(w2_weight.data, (0, pad_amount)).contiguous()
-
-        return (
-            Parameter(w13_padded, requires_grad=False),
-            Parameter(w2_padded, requires_grad=False),
-        )
-
     def _setup_kernel(
         self,
         layer: Module,
@@ -242,20 +189,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ]:
             # OOT handles internally.
             return
-
-        # Pad intermediate dimension for AITER CK GEMM alignment
-        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
-            w13, w2 = self._maybe_pad_intermediate_for_aiter(
-                layer.w13_weight, layer.w2_weight, self.moe.is_act_and_mul
-            )
-            replace_parameter(layer, "w13_weight", w13)
-            replace_parameter(layer, "w2_weight", w2)
-            torch.accelerator.empty_cache()
-            # Update moe_config so rocm_aiter_fused_experts computes the
-            # correct intermediate_pad = padded - unpadded.
-            padded_inter = w2.shape[-1]  # (E, hidden, padded_inter)
-            if padded_inter != self.moe.intermediate_size_per_partition:
-                self.moe.intermediate_size_per_partition = padded_inter
 
         if self.unquantized_backend == UnquantizedMoeBackend.CPU:
             # CPU stays on the old path — no oracle, no moe_kernel.
