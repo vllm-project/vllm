@@ -607,4 +607,114 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
   ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
 }
 
+// Cache ops
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
+  // Swap in (out) the cache blocks from src to dst.
+  ops.def(
+      "swap_blocks(Tensor src, Tensor! dst,"
+      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
+
+  // Batch swap: submit all block copies in a single driver call.
+  ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes) -> ()");
+
+  // Reshape the key and value tensors and cache them.
+  ops.def(
+      "reshape_and_cache(Tensor key, Tensor value,"
+      "                  Tensor! key_cache, Tensor! value_cache,"
+      "                  Tensor slot_mapping,"
+      "                  str kv_cache_dtype,"
+      "                  Tensor k_scale, Tensor v_scale) -> ()");
+
+  // Reshape the key and value tensors and cache them.
+  ops.def(
+      "reshape_and_cache_flash(Tensor key, Tensor value,"
+      "                        Tensor! key_cache,"
+      "                        Tensor! value_cache,"
+      "                        Tensor slot_mapping,"
+      "                        str kv_cache_dtype,"
+      "                        Tensor k_scale, Tensor v_scale) -> ()");
+
+  // Concat kv_c and k_pe and cache them.
+  ops.def(
+      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
+      "                     Tensor! kv_cache,"
+      "                     Tensor slot_mapping,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor scale) -> ()");
+
+  // Rotate Q and K, then write to kv cache for MLA
+  ops.def(
+      "concat_and_cache_mla_rope_fused("
+      "                     Tensor positions,"
+      "                     Tensor! q_pe,"
+      "                     Tensor! k_pe,"
+      "                     Tensor kv_c,"
+      "                     Tensor cos_sin_cache,"
+      "                     bool is_neox,"
+      "                     Tensor slot_mapping,"
+      "                     Tensor! kv_cache,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor kv_cache_scale) -> ()");
+
+  // Convert the key and value cache to fp8 data type.
+  ops.def(
+      "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
+      "str kv_cache_dtype) -> ()");
+
+  // Gather cache blocks from src_cache to dst, dequantizing from
+  // src_cache's dtype to dst's dtype if necessary.
+  ops.def(
+      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
+      "                               Tensor block_table, Tensor cu_seq_lens, "
+      "                               Tensor token_to_seq, "
+      "                               int num_tokens, "
+      "                               str kv_cache_dtype, "
+      "                               Tensor scale, Tensor? seq_starts) -> ()");
+
+  ops.def(
+      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
+
+  ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
+      "batch_size) -> ()");
+
+  ops.def(
+      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
+      "slot_mapping, "
+      "int quant_block_size, str kv_cache_dtype) -> ()");
+
+  ops.def("concat_mla_q(Tensor ql_nope, Tensor q_pe, Tensor! q_out) -> ()");
+
+  ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
+      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CPU, ops) {
+  ops.impl("swap_blocks_batch", TORCH_BOX(&swap_blocks_batch));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
+  ops.impl("swap_blocks", TORCH_BOX(&swap_blocks));
+  ops.impl("reshape_and_cache", TORCH_BOX(&reshape_and_cache));
+  ops.impl("reshape_and_cache_flash", TORCH_BOX(&reshape_and_cache_flash));
+  ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
+  ops.impl("concat_and_cache_mla_rope_fused",
+           TORCH_BOX(&concat_and_cache_mla_rope_fused));
+  ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));
+  ops.impl("gather_and_maybe_dequant_cache",
+           TORCH_BOX(&gather_and_maybe_dequant_cache));
+  ops.impl("cp_gather_cache", TORCH_BOX(&cp_gather_cache));
+  ops.impl("cp_gather_and_upconvert_fp8_kv_cache",
+           TORCH_BOX(&cp_gather_and_upconvert_fp8_kv_cache));
+  ops.impl("indexer_k_quant_and_cache", TORCH_BOX(&indexer_k_quant_and_cache));
+  ops.impl("concat_mla_q", TORCH_BOX(&concat_mla_q));
+  ops.impl("cp_gather_indexer_k_quant_cache",
+           TORCH_BOX(&cp_gather_indexer_k_quant_cache));
+}
+
 REGISTER_EXTENSION(_C_stable_libtorch)
