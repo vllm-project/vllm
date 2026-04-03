@@ -1043,7 +1043,6 @@ class EngineCoreProc(EngineCore):
 
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
-        exitcode = 0
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1105,7 +1104,6 @@ class EngineCoreProc(EngineCore):
             logger.debug("EngineCore exiting.")
             raise
         except Exception as e:
-            exitcode = 1
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
             else:
@@ -1119,7 +1117,6 @@ class EngineCoreProc(EngineCore):
                 signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
-            os._exit(exitcode)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
