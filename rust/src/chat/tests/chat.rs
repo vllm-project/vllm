@@ -147,7 +147,10 @@ async fn connect_chat_llm_with_ipc(
     )
     .await
     .unwrap();
-    ChatLlm::from_shared_backend(Llm::new(client), backend)
+    ChatLlm::from_shared_backend(
+        Llm::new(client).with_request_id_randomization(false),
+        backend,
+    )
 }
 
 #[derive(Clone)]

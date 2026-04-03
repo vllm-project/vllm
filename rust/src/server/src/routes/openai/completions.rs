@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
@@ -23,7 +24,7 @@ use super::utils::logprobs::{
 };
 use super::utils::types::Usage;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::completions::convert::prepare_completion_request;
+use crate::routes::openai::completions::convert::prepare_completion_request_with_request_id_header;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
@@ -34,12 +35,20 @@ use crate::utils::unix_timestamp;
 /// Validate one completions request and proxy it into the shared `vllm-text` stack.
 pub async fn completions(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     let stream = body.stream;
     let logprobs = body.logprobs;
+    let request_id_header = headers
+        .get("X-Request-Id")
+        .and_then(|value| value.to_str().ok());
 
-    let prepared = match prepare_completion_request(body, &state.model_id) {
+    let prepared = match prepare_completion_request_with_request_id_header(
+        body,
+        &state.model_id,
+        request_id_header,
+    ) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
@@ -51,7 +60,7 @@ pub async fn completions(
         .prompt_logprobs
         .is_some();
     info!(
-        request_id = %prepared.response_id,
+        request_id = %prepared.request_id,
         model = %prepared.response_model,
         stream,
         "completion"
@@ -71,7 +80,7 @@ pub async fn completions(
     if stream {
         let chunk_stream = completion_chunk_stream(
             text_stream,
-            prepared.response_id,
+            prepared.request_id,
             prepared.response_model,
             created,
             prepared.include_usage,
@@ -88,7 +97,7 @@ pub async fn completions(
     } else {
         let response = match collect_completion(
             text_stream,
-            prepared.response_id,
+            prepared.request_id,
             prepared.response_model,
             created,
             prepared.echo,
@@ -109,7 +118,7 @@ pub async fn completions(
 
 async fn collect_completion(
     stream: impl TextOutputStream,
-    response_id: String,
+    request_id: String,
     response_model: String,
     created: u64,
     echo: Option<String>,
@@ -159,7 +168,7 @@ async fn collect_completion(
     };
 
     Ok(CompletionResponse {
-        id: response_id,
+        id: request_id,
         object: "text_completion".to_string(),
         created,
         model: response_model,
@@ -186,7 +195,7 @@ async fn collect_completion(
 #[try_stream(ok = CompletionSseChunk, error = ApiError)]
 async fn completion_chunk_stream(
     stream: impl TextOutputStream,
-    response_id: String,
+    request_id: String,
     response_model: String,
     created: u64,
     include_usage: bool,
@@ -204,11 +213,11 @@ async fn completion_chunk_stream(
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids, ..
             }) => {
-                debug!(request_id = %response_id, "completion stream started");
+                debug!(%request_id, "completion stream started");
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
                     let mut chunk =
-                        delta_chunk(&response_id, &response_model, created, prompt.clone(), None);
+                        delta_chunk(&request_id, &response_model, created, prompt.clone(), None);
                     if return_token_ids && first_chunk {
                         if let Some(choice) = chunk.choices.first_mut() {
                             choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
@@ -219,7 +228,7 @@ async fn completion_chunk_stream(
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
                     let mut chunk =
-                        delta_chunk(&response_id, &response_model, created, String::new(), None);
+                        delta_chunk(&request_id, &response_model, created, String::new(), None);
                     if let Some(choice) = chunk.choices.first_mut() {
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
@@ -248,8 +257,7 @@ async fn completion_chunk_stream(
                 } else {
                     None
                 };
-                let mut chunk =
-                    delta_chunk(&response_id, &response_model, created, delta, logprobs);
+                let mut chunk = delta_chunk(&request_id, &response_model, created, delta, logprobs);
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
                     choice.token_ids = Some(token_ids);
                 }
@@ -258,7 +266,7 @@ async fn completion_chunk_stream(
 
                 if let Some(finished) = finished {
                     yield CompletionSseChunk::Chunk(final_chunk(
-                        &response_id,
+                        &request_id,
                         &response_model,
                         created,
                         finished.finish_reason,
@@ -266,7 +274,7 @@ async fn completion_chunk_stream(
 
                     if include_usage {
                         yield CompletionSseChunk::Usage(usage_chunk(
-                            &response_id,
+                            &request_id,
                             &response_model,
                             created,
                             Usage::from_counts(
@@ -279,7 +287,7 @@ async fn completion_chunk_stream(
             }
             Err(error) => {
                 error!(
-                    request_id = %response_id,
+                    %request_id,
                     error = %error.as_report(),
                     "completion stream failed"
                 );
@@ -290,13 +298,13 @@ async fn completion_chunk_stream(
 }
 
 fn delta_chunk(
-    response_id: &str,
+    request_id: &str,
     response_model: &str,
     created: u64,
     text: String,
     logprobs: Option<LogProbs>,
 ) -> CompletionStreamResponse {
-    let mut chunk = CompletionStreamResponse::new(response_id, response_model, created);
+    let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(CompletionStreamChoice {
         text,
         logprobs,
@@ -306,14 +314,14 @@ fn delta_chunk(
 }
 
 fn final_chunk(
-    response_id: &str,
+    request_id: &str,
     response_model: &str,
     created: u64,
     finish_reason: FinishReason,
 ) -> Result<CompletionStreamResponse, ApiError> {
     let finish_reason = completion_finish_reason_to_openai(finish_reason)?;
 
-    let mut chunk = CompletionStreamResponse::new(response_id, response_model, created);
+    let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(CompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
         ..Default::default()
@@ -334,12 +342,12 @@ fn completion_finish_reason_to_openai(
 }
 
 fn usage_chunk(
-    response_id: &str,
+    request_id: &str,
     response_model: &str,
     created: u64,
     usage: Usage,
 ) -> CompletionStreamResponse {
-    let mut chunk = CompletionStreamResponse::new(response_id, response_model, created);
+    let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.usage = Some(usage);
     chunk
 }

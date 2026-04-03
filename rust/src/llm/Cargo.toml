@@ -14,6 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-metrics.workspace = true
 

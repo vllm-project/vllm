@@ -240,7 +240,7 @@ pub async fn decoded_text_event_stream(
             let text_len = text.len();
 
             info!(
-                request_id = %request_id,
+                %request_id,
                 finish_reason = ?reason,
                 text_length_bytes = text_len,
                 output_token_count = output_token_count,

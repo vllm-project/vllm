@@ -9,7 +9,7 @@ use crate::utils::merge_kv_transfer_params;
 /// Lowered generate request plus the response request ID.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRequest {
-    pub response_id: String,
+    pub request_id: String,
     pub text_request: TextRequest,
     pub include_logprobs: bool,
     pub include_prompt_logprobs: bool,
@@ -22,7 +22,7 @@ pub fn prepare_generate_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, configured_model)?;
 
-    let response_id = request
+    let request_id = request
         .request_id
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let include_logprobs = request.sampling_params.logprobs.is_some();
@@ -34,7 +34,7 @@ pub fn prepare_generate_request(
     );
 
     let text_request = TextRequest {
-        request_id: response_id.clone(),
+        request_id: request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
         sampling_params,
         decode_options: TextDecodeOptions::default(),
@@ -45,7 +45,7 @@ pub fn prepare_generate_request(
     };
 
     Ok(PreparedRequest {
-        response_id,
+        request_id,
         text_request,
         include_logprobs,
         include_prompt_logprobs,

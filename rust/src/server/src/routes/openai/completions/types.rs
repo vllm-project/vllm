@@ -138,6 +138,9 @@ pub struct CompletionRequest {
     /// Request scheduling priority (lower means earlier; default 0)
     pub priority: Option<i32>,
 
+    /// External request ID used for response correlation.
+    pub request_id: Option<String>,
+
     /// Tokens represented as strings of the form 'token_id:{token_id}' in logprobs
     pub return_tokens_as_token_ids: Option<bool>,
 

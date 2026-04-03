@@ -1,6 +1,5 @@
 use openai_protocol::chat::{ChatMessage, MessageContent};
 use openai_protocol::common::{ContentPart, StringOrArray, ToolChoice, ToolChoiceValue};
-use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
@@ -10,14 +9,15 @@ use vllm_chat::{
 use super::types::ChatCompletionRequest;
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::request_id::resolve_base_request_id;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::utils::{convert_logit_bias, merge_kv_transfer_params};
 
 /// Lowered chat request plus the public response metadata carried by every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRequest {
-    /// Stable OpenAI-style response ID, also reused as the internal chat request ID.
-    pub response_id: String,
+    /// Stable OpenAI-style request ID, reused as the external chat request ID.
+    pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
     /// Whether the caller asked for the final streamed usage chunk.
@@ -37,13 +37,25 @@ pub struct PreparedRequest {
 }
 
 /// Validate and lower one OpenAI chat completion request into the internal chat format.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn prepare_chat_request(
     request: ChatCompletionRequest,
     configured_model: &str,
 ) -> Result<PreparedRequest, ApiError> {
+    prepare_chat_request_with_request_id_header(request, configured_model, None)
+}
+
+pub(crate) fn prepare_chat_request_with_request_id_header(
+    request: ChatCompletionRequest,
+    configured_model: &str,
+    request_id_header: Option<&str>,
+) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, configured_model)?;
 
-    let response_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let request_id = format!(
+        "chatcmpl-{}",
+        resolve_base_request_id(request_id_header, request.request_id.as_deref())
+    );
     let echo = request
         .echo
         .then(|| extract_last_assistant_content(&request.messages))
@@ -79,7 +91,7 @@ pub fn prepare_chat_request(
     });
 
     let chat_request = ChatRequest {
-        request_id: response_id.clone(),
+        request_id: request_id.clone(),
         messages,
         sampling_params: SamplingParams {
             temperature: request.temperature,
@@ -127,7 +139,7 @@ pub fn prepare_chat_request(
     };
 
     Ok(PreparedRequest {
-        response_id,
+        request_id,
         response_model: configured_model.to_string(),
         include_usage,
         requested_logprobs,
@@ -336,7 +348,7 @@ mod tests {
         let prepared =
             prepare_chat_request(request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
 
-        assert!(prepared.response_id.starts_with("chatcmpl-"));
+        assert!(prepared.request_id.starts_with("chatcmpl-"));
         assert_eq!(
             prepared.chat_request.messages,
             vec![VllmChatMessage::user(vec![VllmChatContentPart::text(
@@ -371,7 +383,7 @@ mod tests {
         let prepared = prepare_chat_request(base_request(), "Qwen/Qwen1.5-0.5B-Chat")
             .expect("request is valid");
 
-        assert!(prepared.response_id.starts_with("chatcmpl-"));
+        assert!(prepared.request_id.starts_with("chatcmpl-"));
         assert_eq!(
             prepared.chat_request.messages,
             vec![VllmChatMessage::user("hello")]

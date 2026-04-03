@@ -137,12 +137,6 @@ impl ChatLlm {
         ))
     }
 
-    /// Abort one in-flight chat request by request ID.
-    pub async fn abort(&self, request_id: &str) -> Result<()> {
-        self.text.abort(request_id).await?;
-        Ok(())
-    }
-
     /// Shut down the underlying LLM client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
         self.text.shutdown().await?;

@@ -193,6 +193,11 @@ impl GenerateOutputStream {
             request_metrics,
         }
     }
+
+    /// Return the internal engine request ID bound to this stream.
+    pub fn request_id(&self) -> &str {
+        self.raw_stream.request_id()
+    }
 }
 
 impl Stream for GenerateOutputStream {

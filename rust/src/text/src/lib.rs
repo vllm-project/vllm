@@ -124,12 +124,6 @@ impl TextLlm {
         Ok((text_request, raw_stream))
     }
 
-    /// Abort one in-flight request by request ID.
-    pub async fn abort(&self, request_id: &str) -> Result<()> {
-        self.llm.abort(request_id).await?;
-        Ok(())
-    }
-
     /// Shut down the underlying LLM client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
         self.llm.shutdown().await?;

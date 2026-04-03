@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use uuid::Uuid;
 use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams, OpaqueValue};
 
 use crate::error::{Error, Result};
@@ -39,7 +40,7 @@ pub(crate) struct PreparedGenerateRequest {
 
 impl GenerateRequest {
     /// Validate and lower this request into the raw engine-core request format.
-    pub(crate) fn prepare(self) -> Result<PreparedGenerateRequest> {
+    pub(crate) fn prepare(self, randomize_request_id: bool) -> Result<PreparedGenerateRequest> {
         if self.prompt_token_ids.is_empty() {
             return Err(Error::EmptyPromptTokenIds {
                 request_id: self.request_id,
@@ -58,9 +59,17 @@ impl GenerateRequest {
             lora_request,
         } = self;
 
+        let external_request_id = request_id;
+        let engine_request_id = if randomize_request_id {
+            let random_suffix = Uuid::new_v4().simple().to_string();
+            format!("{external_request_id}-{}", &random_suffix[..8])
+        } else {
+            external_request_id.clone()
+        };
+
         Ok(PreparedGenerateRequest {
             engine_request: EngineCoreRequest {
-                request_id,
+                request_id: engine_request_id,
                 prompt_token_ids: Some(prompt_token_ids),
                 mm_features: None,
                 sampling_params: Some(sampling_params),
@@ -75,7 +84,7 @@ impl GenerateRequest {
                 priority,
                 trace_headers,
                 resumable: false,
-                external_req_id: None,
+                external_req_id: Some(external_request_id),
                 reasoning_ended,
             },
         })
@@ -128,72 +137,26 @@ mod tests {
 
     #[test]
     fn prepare_builds_engine_core_request() {
-        let prepared = sample_request().prepare().unwrap();
+        let prepared = sample_request().prepare(true).unwrap();
 
         assert_eq!(prepared.prompt_token_ids(), &[11, 22, 33]);
 
         let request = prepared.engine_request;
-        expect_test::expect![[r#"
-            EngineCoreRequest {
-                request_id: "req-1",
-                prompt_token_ids: Some(
-                    [
-                        11,
-                        22,
-                        33,
-                    ],
-                ),
-                mm_features: None,
-                sampling_params: Some(
-                    EngineCoreSamplingParams {
-                        temperature: 1.0,
-                        top_p: 1.0,
-                        top_k: 0,
-                        seed: None,
-                        max_tokens: 65536,
-                        min_tokens: 0,
-                        logprobs: None,
-                        prompt_logprobs: None,
-                        min_p: 0.0,
-                        frequency_penalty: 0.0,
-                        presence_penalty: 0.0,
-                        repetition_penalty: 1.0,
-                        stop_token_ids: [],
-                        eos_token_id: None,
-                        all_stop_token_ids: {},
-                        logit_bias: None,
-                        allowed_token_ids: None,
-                        bad_words_token_ids: None,
-                        structured_outputs: None,
-                        extra_args: None,
-                    },
-                ),
-                pooling_params: None,
-                arrival_time: 42.5,
-                lora_request: None,
-                cache_salt: Some(
-                    "salt",
-                ),
-                data_parallel_rank: Some(
-                    2,
-                ),
-                prompt_embeds: None,
-                client_index: 0,
-                current_wave: 0,
-                priority: 3,
-                trace_headers: Some(
-                    {
-                        "x-trace-id": "abc",
-                    },
-                ),
-                resumable: false,
-                external_req_id: None,
-                reasoning_ended: Some(
-                    true,
-                ),
-            }
-        "#]]
-        .assert_debug_eq(&request);
+        assert_eq!(request.external_req_id.as_deref(), Some("req-1"));
+        assert!(request.request_id.starts_with("req-1-"));
+        assert_ne!(request.request_id, "req-1");
+        assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22, 33][..]));
+        assert_eq!(request.arrival_time, 42.5);
+        assert_eq!(request.cache_salt.as_deref(), Some("salt"));
+        assert_eq!(request.data_parallel_rank, Some(2));
+        assert_eq!(
+            request.trace_headers,
+            Some(BTreeMap::from([(
+                "x-trace-id".to_string(),
+                "abc".to_string(),
+            )]))
+        );
+        assert_eq!(request.reasoning_ended, Some(true));
     }
 
     #[test]
@@ -201,10 +164,19 @@ mod tests {
         let mut request = sample_request();
         request.prompt_token_ids.clear();
 
-        let error = request.prepare().unwrap_err();
+        let error = request.prepare(true).unwrap_err();
         assert!(matches!(
             error,
             Error::EmptyPromptTokenIds { request_id } if request_id == "req-1"
         ));
+    }
+
+    #[test]
+    fn prepare_can_preserve_external_request_id() {
+        let prepared = sample_request().prepare(false).unwrap();
+
+        let request = prepared.engine_request;
+        assert_eq!(request.external_req_id.as_deref(), Some("req-1"));
+        assert_eq!(request.request_id, "req-1");
     }
 }

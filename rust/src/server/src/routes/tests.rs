@@ -228,6 +228,10 @@ fn engine_outputs_for_request(
     }
 }
 
+fn test_llm(client: EngineCoreClient) -> Llm {
+    Llm::new(client).with_request_id_randomization(false)
+}
+
 fn sample_logprobs_for_token(token_id: u32, alternate_token_id: u32) -> Logprobs {
     Logprobs {
         positions: vec![PositionLogprobs {
@@ -532,7 +536,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     .expect("connect client");
 
     (
-        ChatLlm::from_shared_backend(Llm::new(client), backend),
+        ChatLlm::from_shared_backend(test_llm(client), backend),
         engine_task,
     )
 }
@@ -591,7 +595,7 @@ where
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let state = Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat));
     (build_router(state.clone()), state, engine_task)
 }
@@ -618,7 +622,7 @@ where
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
         build_router_with_dev_mode(
             Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)),
@@ -967,7 +971,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
 
     let response = app
@@ -1645,7 +1649,7 @@ async fn non_stream_completions_include_logprobs() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
 
     let response = app
@@ -1746,7 +1750,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
 
     let response = app
@@ -1831,7 +1835,7 @@ async fn non_stream_chat_completions_still_succeed() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
 
     let response = app
@@ -1888,7 +1892,7 @@ async fn non_stream_completions_still_succeed() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
 
     let response = app
@@ -1916,6 +1920,77 @@ async fn non_stream_completions_still_succeed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_completions_header_request_id_takes_precedence() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-chat-request-id-precedence".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                assert_eq!(
+                    request.external_req_id.as_deref(),
+                    Some("chatcmpl-header-req")
+                );
+                assert!(request.request_id.starts_with("chatcmpl-header-req-"));
+                assert_ne!(request.request_id, "chatcmpl-header-req");
+
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("X-Request-Id", "header-req")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["id"], "chatcmpl-header-req");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_raw_generate_returns_token_output_envelope() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -1930,6 +2005,9 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22][..]));
+                assert_eq!(request.external_req_id.as_deref(), Some("raw-req"));
+                assert!(request.request_id.starts_with("raw-req-"));
+                assert_ne!(request.request_id, "raw-req");
 
                 send_outputs(
                     push,
@@ -2527,7 +2605,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(
-        Llm::new(client),
+        test_llm(client),
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
     );
     let app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
