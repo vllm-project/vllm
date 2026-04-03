@@ -42,6 +42,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+    XPUFp8BlockScaledMMKernel,
+)
 
 __all__ = [
     "FP8ScaledMMLinearKernel",
@@ -64,4 +67,5 @@ __all__ = [
     "ZentorchInt8ScaledMMLinearKernel",
     "Fp8BlockScaledMMLinearKernel",
     "CPUFp8BlockScaledMMKernel",
+    "XPUFp8BlockScaledMMKernel",
 ]

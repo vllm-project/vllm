@@ -5,16 +5,15 @@ from collections.abc import Sequence
 
 import torch
 
-from vllm.model_executor.kernels.linear import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
+from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
 
 class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -84,3 +83,32 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         pass
+
+
+class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_xpu():
+            return False, "XPUFp8BlockScaledMM only support on XPU"
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        block_n, block_k = self.weight_group_shape
+        return torch.ops._xpu_C.fp8_block_scaled_gemm(
+            A,
+            B,
+            As,
+            Bs,
+            int(block_n),
+            int(block_k),
+            self.config.out_dtype,
+            None,
+        )
