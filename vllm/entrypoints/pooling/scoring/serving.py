@@ -44,10 +44,18 @@ class ServingScores(PoolingServing):
         enable_flash_late_interaction: bool = True,
         **kwargs,
     ):
-        self.score_type = engine_client.model_config.score_type
+        self.io_processor_name: str = engine_client.model_config.score_type
         self.enable_flash_late_interaction = (
-            self.score_type == "late-interaction" and enable_flash_late_interaction
+            self.io_processor_name == "late-interaction"
+            and enable_flash_late_interaction
         )
+
+        if self.enable_flash_late_interaction:
+            self.io_processor_name = "flash-late-interaction"
+
+        if engine_client.model_config.architecture == "JinaForRanking":
+            self.io_processor_name = "jina-reranking-scoring"
+            self.enable_flash_late_interaction = False
 
         super().__init__(engine_client, *args, **kwargs)
 
@@ -57,12 +65,8 @@ class ServingScores(PoolingServing):
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
     ) -> PoolingIOProcessor:
-        score_type: str = model_config.score_type
-        if self.enable_flash_late_interaction:
-            score_type = "flash-late-interaction"
-
-        assert score_type in ScoringIOProcessors
-        processor_cls = ScoringIOProcessors[score_type]
+        assert self.io_processor_name in ScoringIOProcessors
+        processor_cls = ScoringIOProcessors[self.io_processor_name]
         return processor_cls(
             model_config=model_config,
             renderer=renderer,

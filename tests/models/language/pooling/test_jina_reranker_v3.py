@@ -2,7 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 import pytest
+import requests
+import torch
 import torch.nn.functional as F
+
+from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
+from vllm.entrypoints.pooling.scoring.protocol import ScoreResponse
 
 model_name = "jinaai/jina-reranker-v3"
 query = "What are the health benefits of green tea?"
@@ -101,3 +107,103 @@ def test_offline(vllm_runner):
         _test_offline_1_v_1(llm)
         _test_offline_1_v_n(llm)
         _test_offline_n_v_n(llm)
+
+
+def _get_scores(server, query, document):
+    score_response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": model_name,
+            "queries": query,
+            "documents": document,
+        },
+    )
+
+    score_response.raise_for_status()
+    score = ScoreResponse.model_validate(score_response.json())
+
+    return [d.score for d in score.data]
+
+
+def _get_embeds(server, prompts: list[str]):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "task": "token_embed",
+            "input": prompts,
+            "encoding_format": "float",
+        },
+    )
+    response.raise_for_status()
+    poolings = PoolingResponse.model_validate(response.json())
+
+    return torch.as_tensor([d.data for d in poolings.data]).float()
+
+
+def _test_online_1_v_1(server):
+    # test scoring api
+    scores = _get_scores(server, query, documents[0])
+    assert len(scores) == 1
+    assert scores[0] == pytest.approx(REFERENCE_1_VS_1[0], abs=TOL)
+
+    """
+    # test pooling api
+    embeds = _get_embeds(server, documents[:1] + [query])
+
+    doc_embeds = embeds[:-1]
+    query_embeds = embeds[-1]
+
+    scores = F.cosine_similarity(query_embeds, doc_embeds)
+    assert scores[0] == pytest.approx(REFERENCE_1_VS_1[0], abs=TOL)
+    """
+
+
+def _test_online_1_v_n(server):
+    # test scoring api
+    scores = _get_scores(server, query, documents)
+    assert len(scores) == len(documents)
+
+    for expected, actual in zip(REFERENCE_1_VS_N, scores):
+        assert actual == pytest.approx(expected, abs=TOL)
+
+    """
+    # test pooling api
+    outputs = llm.encode(documents + [query], pooling_task="token_embed")
+    embeds = outputs[0].outputs.data.float()
+
+    doc_embeds = embeds[:-1]
+    query_embeds = embeds[-1]
+
+    scores = F.cosine_similarity(query_embeds, doc_embeds)
+
+    for expected, actual in zip(REFERENCE_1_VS_N, scores):
+        assert actual == pytest.approx(expected, abs=TOL)
+    """
+
+
+def _test_online_n_v_n(server):
+    # test scoring api
+    scores = _get_scores(server, [query] * len(documents), documents)
+    assert len(scores) == len(documents)
+
+    for expected, actual in zip(REFERENCE_1_VS_1, scores):
+        assert actual == pytest.approx(expected, abs=TOL)
+
+    """
+    # test pooling api
+    for doc, expected in zip(documents, REFERENCE_1_VS_1):
+        outputs = llm.encode([doc, query], pooling_task="token_embed")
+        embeds = outputs[0].outputs.data.float()
+
+        doc_embeds = embeds[:-1]
+        query_embeds = embeds[-1]
+
+        scores = F.cosine_similarity(query_embeds, doc_embeds)
+        assert scores[0] == pytest.approx(expected, abs=TOL)
+    """
+
+
+def test_online():
+    with RemoteOpenAIServer(model_name, ["--runner", "pooling"]) as server:
+        _test_online_1_v_1(server)
