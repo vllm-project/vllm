@@ -5,36 +5,20 @@ from transformers import Qwen2VLConfig
 
 class Tarsier2Config(Qwen2VLConfig):
     """
-    Tarsier2's config.json is written such that AutoConfig.from_pretrained will create
-    a deeply nested config consisting of:
+    Config class for Tarsier2 models.
 
-    - LlavaConfig
-      - Qwen2VLConfig
-        - Qwen2VLTextConfig
-        - Qwen2VLVisionConfig
-      - Qwen2VLConfig
-        - Qwen2VLTextConfig
-        - Qwen2VLVisionConfig
+    Tarsier2's config.json reports ``model_type: "llava"``, which causes
+    ``AutoConfig.from_pretrained`` to instantiate ``LlavaConfig`` instead of
+    ``Qwen2VLConfig``. ``LlavaConfig.get_text_config()`` returns a
+    ``Qwen2VLConfig`` sub-object that does not expose ``num_attention_heads``
+    directly (it is delegated to the inner ``Qwen2VLTextConfig``), triggering
+    the ``ValueError`` in ``get_hf_text_config``.
 
-    When it should really just be a single Qwen2VLConfig.
-
-    This class is a hack to stop AutoConfig from creating the nested config structure.
-    In Transformers v5, Qwen2VLConfig creates a proper Qwen2VLTextConfig sub-object
-    inside __post_init__.  When the malformed config.json is loaded, self.text_config
-    is a Qwen2VLConfig-like dict that itself contains a nested text_config sub-dict
-    with the actual text parameters.  Without unwrapping, __post_init__ would call
-    Qwen2VLTextConfig(**outer_dict), which silently loses the real field values
-    (num_attention_heads, hidden_size, etc.) because they are one level too deep.
+    Registering this subclass and loading via ``config_class.from_pretrained``
+    (see ``HFConfigParser.parse``) bypasses the ``model_type`` mismatch.
+    ``Qwen2VLConfig.__post_init__`` then correctly converts the flat
+    ``text_config`` dict into a ``Qwen2VLTextConfig`` with all fields intact
+    (``num_attention_heads=28``, ``hidden_size=3584``, etc.).
     """
 
     model_type = "tarsier2"
-
-    def __post_init__(self, **kwargs):
-        # Unwrap the doubly-nested text_config before the parent processes it.
-        # Tarsier2's config stores the real Qwen2VLTextConfig parameters inside
-        # text_config["text_config"], not at the top level of text_config.
-        if isinstance(self.text_config, dict):
-            nested = self.text_config.get("text_config")
-            if isinstance(nested, dict):
-                self.text_config = nested
-        super().__post_init__(**kwargs)

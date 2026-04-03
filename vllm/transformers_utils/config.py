@@ -202,38 +202,47 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
+            kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
             if model_type in _CONFIG_REGISTRY:
-                # Register the config class to AutoConfig to ensure it's used in future
-                # calls to `from_pretrained`
+                # Use config_class.from_pretrained directly so the registered
+                # class is always used, even when config.json reports a different
+                # model_type (e.g. Tarsier2's config.json says "llava" but we
+                # want Tarsier2Config, a Qwen2VLConfig subclass).
+                # Also register with AutoConfig for any future downstream calls.
                 config_class = _CONFIG_REGISTRY[model_type]
                 config_class.model_type = model_type
                 AutoConfig.register(model_type, config_class, exist_ok=True)
-                # Now that it is registered, it is not considered remote code anymore
-                trust_remote_code = False
-            try:
-                kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
+                config = config_class.from_pretrained(
                     model,
-                    trust_remote_code=trust_remote_code,
+                    trust_remote_code=False,
                     revision=revision,
                     code_revision=code_revision,
                     **kwargs,
                 )
-            except ValueError as e:
-                if (
-                    not trust_remote_code
-                    and "requires you to execute the configuration file" in str(e)
-                ):
-                    err_msg = (
-                        "Failed to load the model config. If the model "
-                        "is a custom model not yet available in the "
-                        "HuggingFace transformers library, consider setting "
-                        "`trust_remote_code=True` in LLM or using the "
-                        "`--trust-remote-code` flag in the CLI."
+            else:
+                try:
+                    config = AutoConfig.from_pretrained(
+                        model,
+                        trust_remote_code=trust_remote_code,
+                        revision=revision,
+                        code_revision=code_revision,
+                        **kwargs,
                     )
-                    raise RuntimeError(err_msg) from e
-                else:
-                    raise e
+                except ValueError as e:
+                    if (
+                        not trust_remote_code
+                        and "requires you to execute the configuration file" in str(e)
+                    ):
+                        err_msg = (
+                            "Failed to load the model config. If the model "
+                            "is a custom model not yet available in the "
+                            "HuggingFace transformers library, consider setting "
+                            "`trust_remote_code=True` in LLM or using the "
+                            "`--trust-remote-code` flag in the CLI."
+                        )
+                        raise RuntimeError(err_msg) from e
+                    else:
+                        raise e
         config = _maybe_remap_hf_config_attrs(config)
         return config_dict, config
 
