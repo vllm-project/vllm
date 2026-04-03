@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field, fields
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -281,9 +281,9 @@ class PassConfig:
         TODO also log the compile ranges for which this is enabled.
         """
         enabled_fusions = [
-            f.name[len("fuse_") :]
-            for f in fields(self)
-            if getattr(self, f.name) and f.name.startswith("fuse_")
+            name[len("fuse_") :]
+            for name, value in vars(self).items()
+            if value and name.startswith("fuse_")
         ]
 
         if enabled_fusions:
@@ -1025,8 +1025,8 @@ class CompilationConfig:
         computed_compile_sizes: list[int] = []
         if self.compile_sizes is not None:
             # de-duplicate the sizes provided by the config
-            self.compile_sizes = list(set(self.compile_sizes))
-            for x in self.compile_sizes:
+            dedup_compile_sizes = list(set(self.compile_sizes))
+            for x in dedup_compile_sizes:
                 if isinstance(x, str):
                     assert x == "cudagraph_capture_sizes", (
                         "Unrecognized size type in compile_sizes, "
