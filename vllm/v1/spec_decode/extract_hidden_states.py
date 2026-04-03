@@ -27,7 +27,10 @@ class ExtractHiddenStatesProposer:
     def __init__(self, vllm_config: VllmConfig, device):
         assert vllm_config.speculative_config is not None
 
-        assert vllm_config.speculative_config.num_speculative_tokens == 1
+        self.num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens
+        )
+        assert self.num_speculative_tokens == 1
         if vllm_config.speculative_config.disable_padded_drafter_batch:
             raise ValueError(
                 "disable_padded_drafter_batch is not supported with "
@@ -71,6 +74,7 @@ class ExtractHiddenStatesProposer:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         sampled_token_ids: torch.Tensor,
         target_hidden_states: list[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
@@ -101,6 +105,7 @@ class ExtractHiddenStatesProposer:
                 - Draft tokens matching sampled tokens, shape [batch_size, 1]
                 - KV connector output (if KV transfer is active), else None
         """
+        assert num_speculative_tokens == self.num_speculative_tokens
         assert self.model is not None and isinstance(target_hidden_states, list)
 
         # target_hidden_states is a list of tensors (one per layer)

@@ -205,6 +205,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
 
     # Run propose
     result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,

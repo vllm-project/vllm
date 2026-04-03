@@ -65,6 +65,41 @@ RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
 
 
 @config
+class DynamicSpeculativeConfig:
+    """A mapping from batch size to optimal number of drafts to use for that
+    batch size. This is used to dynamically adjust the number of drafts used
+    based on the current batch size."""
+
+    is_online: bool = False
+    """Whether the statistics are updated online or not during inference."""
+
+    batch_stats: dict[int, dict[int, float]] | None = None
+    """ 
+    Batch statistics for different batch sizes and number of drafts.
+    The structure is as follows:
+    {
+        batch_size: {
+            num_drafts: itl (i.e., inter token latency in ms)
+        }
+    }
+
+    e.g., 
+    { 
+      1: { 0: 6.87, 3: 9.41, 5: 10.8},
+      4: { 0: 7.3, 3: 9.95, 5: 11.59},
+    }
+
+    where bs 1 at K=3 has itl 9.41ms. K=0 means no speculative decoding.
+    """
+
+    max_num_speculative_tokens: int | None = None
+    """Maximum number of speculative tokens supported in the statistics."""
+
+    acceptance_rate_per_pos: list[float] | None = None
+    """Acceptance rate per position on an offline dataset."""
+
+
+@config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
@@ -149,6 +184,12 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
+
+    # dynamic speculative decoding control
+    dynamic_config_path: str | None = None
+    """Path to config file for dynamic speculative decoding, if provided."""
+    dynamic_config: SkipValidation[DynamicSpeculativeConfig] | None = None
+    """Loaded dynamic speculative config, populated from dynamic_config_path."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -628,6 +669,16 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        # load DynamicSpeculativeConfig: maybe use get_hf_file_to_dict() later
+        if self.dynamic_config_path is not None:
+            import json
+
+            with open(self.dynamic_config_path) as f:
+                data = json.load(f)
+
+            self.dynamic_config = DynamicSpeculativeConfig(**data)
+
         return self
 
     def _validate_suffix_decoding(self):

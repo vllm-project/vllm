@@ -249,6 +249,7 @@ def test_propose():
 
     # Call propose
     draft_tokens = proposer.propose(
+        num_speculative_tokens=1,
         sampled_token_ids=sampled_token_ids,
         target_hidden_states=target_hidden_states,
         common_attn_metadata=common_attn_metadata,
@@ -315,6 +316,7 @@ def test_propose_different_layer_counts(num_hidden_layers):
     ).unsqueeze(-1)
 
     draft_tokens = proposer.propose(
+        num_speculative_tokens=1,
         sampled_token_ids=sampled_token_ids,
         target_hidden_states=target_hidden_states,
         common_attn_metadata=common_attn_metadata,

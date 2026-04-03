@@ -403,6 +403,7 @@ class SpecDecodeBaseProposer:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -420,6 +421,8 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
+        self.num_speculative_tokens = num_speculative_tokens
+
         batch_size = common_attn_metadata.batch_size()
 
         if self.method in ("eagle3", "dflash"):
@@ -478,6 +481,17 @@ class SpecDecodeBaseProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
+
+        # No draft tokens requested (e.g. Dynamic SD decided K=0).
+        # The prefill forward pass above already ran to keep the drafter
+        # KV cache in sync, so just return an empty tensor.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=sample_hidden_states.device,
+                dtype=torch.int64,
+            )
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
