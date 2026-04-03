@@ -27,6 +27,7 @@ class DTypeInfo:
 
 
 EmbedDType = Literal["float32", "float16", "bfloat16", "fp8_e4m3", "fp8_e5m2"]
+MmMetadataDType = Literal["int32", "int64", "uint8", "bool"]
 Endianness = Literal["native", "big", "little"]
 EncodingFormat = Literal["float", "base64", "bytes", "bytes_only"]
 
@@ -42,6 +43,15 @@ EMBED_DTYPES: Mapping[EmbedDType, DTypeInfo] = {
     "fp8_e4m3": DTypeInfo(torch.float8_e4m3fn, torch.uint8, np.uint8),
     "fp8_e5m2": DTypeInfo(torch.float8_e5m2, torch.uint8, np.uint8),
 }
+MM_METADATA_DTYPES: Mapping[MmMetadataDType, DTypeInfo] = {
+    "int32": DTypeInfo(torch.int32, torch.int32, np.int32),
+    "int64": DTypeInfo(torch.int64, torch.int64, np.int64),
+    "uint8": DTypeInfo(torch.uint8, torch.uint8, np.uint8),
+    "bool": DTypeInfo(torch.bool, torch.uint8, np.uint8),
+}
+_ALL_SERIAL_DTYPES: Mapping[str, DTypeInfo] = {
+    k: v for d in (EMBED_DTYPES, MM_METADATA_DTYPES) for k, v in d.items()
+}
 ENDIANNESS: tuple[Endianness, ...] = get_args(Endianness)
 
 
@@ -56,14 +66,14 @@ def tensor2base64(x: torch.Tensor) -> str:
 
 def tensor2binary(
     tensor: torch.Tensor,
-    embed_dtype: EmbedDType,
+    embed_dtype: "EmbedDType | MmMetadataDType",
     endianness: Endianness,
 ) -> bytes:
     assert isinstance(tensor, torch.Tensor)
-    assert embed_dtype in EMBED_DTYPES
+    assert embed_dtype in _ALL_SERIAL_DTYPES
     assert endianness in ENDIANNESS
 
-    dtype_info = EMBED_DTYPES[embed_dtype]
+    dtype_info = _ALL_SERIAL_DTYPES[embed_dtype]
 
     np_array = (
         tensor.to(dtype_info.torch_dtype)
@@ -82,13 +92,13 @@ def tensor2binary(
 def binary2tensor(
     binary: bytes,
     shape: tuple[int, ...],
-    embed_dtype: EmbedDType,
+    embed_dtype: "EmbedDType | MmMetadataDType",
     endianness: Endianness,
 ) -> torch.Tensor:
-    assert embed_dtype in EMBED_DTYPES
+    assert embed_dtype in _ALL_SERIAL_DTYPES
     assert endianness in ENDIANNESS
 
-    dtype_info = EMBED_DTYPES[embed_dtype]
+    dtype_info = _ALL_SERIAL_DTYPES[embed_dtype]
 
     np_array = np.frombuffer(binary, dtype=dtype_info.numpy_view_dtype).reshape(shape)
 
