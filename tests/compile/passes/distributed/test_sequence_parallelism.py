@@ -38,7 +38,8 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE_TYPE = current_platform.device_type
 
 pytestmark = pytest.mark.skipif(
-    DEVICE_TYPE not in ["cuda", "xpu"], reason="Only test CUDA/XPU"
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Only test CUDA/XPU",
 )
 
 FP8_DTYPE = current_platform.fp8_dtype()
