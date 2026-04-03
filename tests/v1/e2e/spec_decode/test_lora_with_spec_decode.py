@@ -5,9 +5,6 @@ This script contains:
 1. test lora with speculative decoding for batch inference
 """
 
-import random
-
-import numpy as np
 import pytest
 import torch
 
@@ -15,6 +12,7 @@ from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
 
@@ -63,10 +61,7 @@ def test_batch_inference_correctness(
     with monkeypatch.context() as m:
         # Disable randomness
         m.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-        torch.manual_seed(SEED)
-        np.random.seed(SEED)
-        random.seed(SEED)
-        current_platform.manual_seed_all(SEED)
+        set_random_seed(SEED)
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
