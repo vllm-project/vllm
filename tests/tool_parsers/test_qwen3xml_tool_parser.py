@@ -117,7 +117,9 @@ def test_convert_param_value_invalid_emits_warning(
     handler = _Capture(level=logging.WARNING)
     vllm_logger.addHandler(handler)
     try:
-        result = parser._convert_param_value(param_value, param_type)
+        result = parser._convert_param_value(
+            param_value, param_type, param_name="my_param", func_name="my_tool"
+        )
     finally:
         vllm_logger.removeHandler(handler)
 
@@ -127,8 +129,10 @@ def test_convert_param_value_invalid_emits_warning(
     # Exactly one warning must have been captured — not zero (lost to TypeError)
     warning_records = [r for r in records if r.levelno == logging.WARNING]
     assert len(warning_records) == 1, f"Expected 1 warning, got {len(warning_records)}"
-    # The message must format successfully and contain the raw param value
-    assert param_value in warning_records[0].getMessage(), (
-        f"param_value '{param_value}' not found in warning: "
-        f"'{warning_records[0].getMessage()}'"
+    # The message must format successfully and contain all three context fields
+    msg = warning_records[0].getMessage()
+    assert param_value in msg, (
+        f"param_value '{param_value}' not found in warning: '{msg}'"
     )
+    assert "my_param" in msg, f"param_name 'my_param' not found in warning: '{msg}'"
+    assert "my_tool" in msg, f"func_name 'my_tool' not found in warning: '{msg}'"
