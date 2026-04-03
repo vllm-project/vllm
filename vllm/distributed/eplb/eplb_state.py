@@ -570,7 +570,11 @@ class EplbState:
             # Run _move_to_workspace if all ranks have finished transferring the
             # new weights to the intermediate buffer
             for eplb_model_state in self.model_states.values():
-                if self._all_ranks_result_ready(eplb_model_state):
+                # rebalanced must remain consistent amongst all ranks otherwise this
+                # all_reduce will hang
+                if eplb_model_state.rebalanced and self._all_ranks_result_ready(
+                    eplb_model_state
+                ):
                     _move_to_workspace(
                         model_state=eplb_model_state,
                         ep_rank=ep_group.rank(),
