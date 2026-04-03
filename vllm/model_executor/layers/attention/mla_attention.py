@@ -781,6 +781,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             actual = output[:num_actual_toks]
             if quant_key.scale.group_shape.is_per_group():
                 # Per-group FP8 (block quant)
+                assert output_block_scale is not None
                 cfg = self._group_quant_config
                 assert cfg is not None, (
                     "Group FP8 output quant requested but "
@@ -790,7 +791,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 torch.ops._C.per_token_group_fp8_quant(
                     actual,
                     quant_output[:num_actual_toks],
-                    output_block_scale,
+                    output_block_scale[:num_actual_toks],
                     cfg.group_size,
                     1e-10,
                     finfo.min,
@@ -804,7 +805,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 assert output_block_scale is not None
                 fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
                 quant_output[:num_actual_toks].copy_(fp4_data)
-                output_block_scale.copy_(fp4_scales)
+                output_block_scale[: fp4_scales.shape[0]].copy_(fp4_scales)
             else:
                 # Static FP8 quantization
                 fp8_data, _ = self._quant_fp8_op(actual, output_scale)

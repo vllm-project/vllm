@@ -349,7 +349,7 @@ if current_platform.is_cuda():
     ]
     PATTERN_TEST_MODELS_MLA_GROUP_FP8 = [
         (
-            "deepseek-ai/DeepSeek-V2-Lite",
+            "deepseek-ai/DeepSeek-V3",
             TestMLAAttentionFp8GroupQuantPatternModel,
         )
     ]
@@ -531,14 +531,13 @@ def test_mla_attention_quant_pattern(
     )
 
     # Check quantization ops in the graph
-    is_group_fp8 = quant_key.scale.group_shape.is_per_group()
+    is_per_group = quant_key.scale.group_shape.is_per_group()
     quant_op = (
         torch.ops.aten.reciprocal
         if "-quant_fp8" in custom_ops_list
         else QUANT_OPS[quant_key]
     )
-    fully_replaced = quant_key is kNvfp4Dynamic or is_group_fp8
-    test_backend.check_before_ops([quant_op], fully_replaced=fully_replaced)
+    test_backend.check_before_ops([quant_op], fully_replaced=is_per_group)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
@@ -550,36 +549,24 @@ def test_mla_attention_quant_pattern(
     assert len(attn_nodes_pre) == len(attn_nodes_post), (
         "Should have same number of MLA attention nodes before and after fusion"
     )
-    assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
-        "MLA attention should not have output_scale before fusion"
+
+    # Before fusion: neither scale should be set
+    assert attn_nodes_pre[0].kwargs.get("output_scale") is None
+    assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None
+
+    # After fusion: derive expected scale presence from quant_key properties.
+    # - output_scale: present for static quant or non-FP8 (NVFP4 carries input_scale)
+    # - output_block_scale: present when quant uses per-group/block scaling
+    has_output_scale = attn_nodes_post[0].kwargs.get("output_scale") is not None
+    has_block_scale = attn_nodes_post[0].kwargs.get("output_block_scale") is not None
+
+    expects_output_scale = quant_key.scale.static or quant_key.dtype != FP8_DTYPE
+    assert has_output_scale == expects_output_scale, (
+        f"output_scale: expected present={expects_output_scale}, got {has_output_scale}"
     )
-
-    if is_group_fp8:
-        # Group FP8: output_scale=None (dynamic), output_block_scale=not None
-        assert attn_nodes_post[0].kwargs.get("output_scale") is None, (
-            "MLA attention should not have output_scale after group FP8 fusion"
-        )
-        assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
-            "MLA attention should have output_block_scale after group FP8 fusion"
-        )
-    else:
-        assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
-            "MLA attention should have output_scale after fusion"
-        )
-
-    assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
-        "MLA attention should not have output_block_scale before fusion"
+    assert has_block_scale == is_per_group, (
+        f"output_block_scale: expected present={is_per_group}, got {has_block_scale}"
     )
-
-    if not is_group_fp8:
-        if quant_key.dtype == FP8_DTYPE:
-            assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
-                "MLA attention should not have output_block_scale after FP8 fusion"
-            )
-        elif quant_key.dtype == FP4_DTYPE:
-            assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
-                "MLA attention should have output_block_scale after FP4 fusion"
-            )
 
     # Check numerical correctness
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
