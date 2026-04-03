@@ -219,10 +219,6 @@ def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     )
 
 
-def _gemm_not_supported(*args, **kwargs):
-    raise NotImplementedError("GEMM not supported for this layer")
-
-
 def dispatch_cpu_unquantized_gemm(
     layer: torch.nn.Module,
     remove_weight: bool,
@@ -232,12 +228,12 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
-    if len(layer.weight.shape) > 2:
-        # This is likely a convolution layer, not a linear layer.
-        # We should not dispatch it as a GEMM.
-        # The convolution will be handled by its own forward pass.
-        layer.cpu_linear = _gemm_not_supported
-        return
+    # Caller should filter out non-linear layers (e.g., convolutions with >2D weights)
+    # before calling this function. This assertion ensures that contract is upheld.
+    assert len(layer.weight.shape) == 2, (
+        f"Expected 2D weight tensor for linear layer, got {layer.weight.shape}. "
+        "Non-linear layers should be filtered before dispatch."
+    )
 
     N, K = layer.weight.size()
     dtype = layer.weight.dtype

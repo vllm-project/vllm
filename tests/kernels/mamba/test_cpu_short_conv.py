@@ -194,10 +194,7 @@ def test_dispatch_cpu_unquantized_gemm_conv_layer():
 
     layer = MockConvLayer()
 
-    # This should set layer.cpu_linear to _gemm_not_supported
-    dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
-
-    assert hasattr(layer, "cpu_linear")
-
-    with pytest.raises(NotImplementedError, match="GEMM not supported for this layer"):
-        layer.cpu_linear(torch.randn(1, 16), layer.weight, layer.bias)
+    # dispatch_cpu_unquantized_gemm should now assert on non-2D weights
+    # since the caller is responsible for filtering these out
+    with pytest.raises(AssertionError, match="Expected 2D weight tensor"):
+        dispatch_cpu_unquantized_gemm(layer, remove_weight=False)

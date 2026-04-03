@@ -213,6 +213,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
+            # Skip layers with >2D weights (e.g., convolution layers).
+            # These are not standard linear layers and should not be
+            # dispatched as GEMM operations.
+            if len(layer.weight.shape) > 2:
+                return
+
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
