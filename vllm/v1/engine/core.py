@@ -16,6 +16,7 @@ from logging import DEBUG
 from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
 
+import huggingface_hub
 import msgspec
 import zmq
 
@@ -1111,16 +1112,13 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
+            huggingface_hub.close_session()
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             if signal_callback is not None:
                 signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
-
-            from huggingface_hub import close_session
-
-            close_session()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
