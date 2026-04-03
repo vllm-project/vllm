@@ -81,7 +81,19 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     _mm_prefix_range_tensor_cache: torch.Tensor | None = None
-    
+
+    def __setattr__(self, name: str, value) -> None:
+        """Override __setattr__ to invalidate cached tensor when mm_prefix_range changes.
+        
+        NOTE: This ensures cache consistency when metadata objects are reused
+        across scheduler steps (e.g., via update_block_table), where mm_prefix_range
+        may change due to requests being added/removed in the batch.
+        """
+        if name == "mm_prefix_range" and hasattr(self, "_mm_prefix_range_tensor_cache"):
+            # Invalidate the cached tensor to force recomputation on next access.
+            object.__setattr__(self, "_mm_prefix_range_tensor_cache", None)
+        object.__setattr__(self, name, value)
+
     @property
     def mm_prefix_range_tensor(self) -> torch.Tensor | None:
         """Convert mm_prefix_range dict to padded tensor for Triton kernel.
