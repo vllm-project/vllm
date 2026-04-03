@@ -1,0 +1,93 @@
+#
+# Debian 12 (Bookworm) + ROCm 7.2.0 + Python 3.11 Base Image
+#
+# Usage:
+#   docker build -t rocm72-debian12-base -f docker/Dockerfile.debian12_rocm72 .
+#
+
+FROM debian:12
+
+ARG AMDGPU_INSTALL_VERSION=7.2
+ARG AMDGPU_INSTALL_DEB=amdgpu-install_7.2.70200-1_all.deb
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# ---------------------------------------------------------------------------
+# Core system packages
+# ---------------------------------------------------------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        locales \
+        ca-certificates \
+        wget \
+        gnupg2 \
+        curl \
+        build-essential \
+        git \
+        sudo \
+        libnuma-dev \
+        libelf-dev \
+        kmod \
+        file && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Locale
+# ---------------------------------------------------------------------------
+RUN sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/g' /etc/locale.gen && \
+    echo 'LANG=en_US.UTF-8' > /etc/default/locale && \
+    locale-gen en_US.UTF-8 && \
+    update-locale LANG=en_US.UTF-8
+
+ENV LC_ALL=C.UTF-8
+ENV LANG=C.UTF-8
+
+# ---------------------------------------------------------------------------
+# Python 3.11 (Debian 12 default)
+# ---------------------------------------------------------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-dev \
+        python3-venv \
+        python-is-python3 && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3 && \
+    python3 -m pip install --upgrade pip && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# ROCm 7.2.0 via amdgpu-install
+# ---------------------------------------------------------------------------
+ARG APT_PREF="Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600"
+RUN echo "$APT_PREF" > /etc/apt/preferences.d/rocm-pin-600
+
+RUN wget https://repo.radeon.com/amdgpu-install/${AMDGPU_INSTALL_VERSION}/ubuntu/jammy/${AMDGPU_INSTALL_DEB} && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ./${AMDGPU_INSTALL_DEB} && \
+    rm ${AMDGPU_INSTALL_DEB} && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        rocm-dev \
+        rocm-libs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 109 render || true
+
+# ---------------------------------------------------------------------------
+# ROCm environment
+# ---------------------------------------------------------------------------
+ENV ROCM_PATH=/opt/rocm
+ENV HIP_PATH=/opt/rocm
+ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+RUN python3 --version && \
+    ls /opt/rocm/bin/rocminfo && \
+    echo "Debian 12 + ROCm 7.2 + Python 3.11 base ready."
+
+CMD ["/bin/bash"]

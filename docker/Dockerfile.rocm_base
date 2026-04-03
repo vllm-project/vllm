@@ -43,23 +43,43 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
+# On Debian 12, Python 3.11 is the system default — skip deadsnakes PPA.
+# On Ubuntu, use deadsnakes PPA for non-default Python versions.
 RUN apt-get update -y \
     && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
-        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
-    done \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-       python${PYTHON_VERSION}-lib2to3 python-is-python3  \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && if [ -f /etc/debian_version ] && ! grep -qi ubuntu /etc/os-release 2>/dev/null; then \
+        echo "Debian detected — using system Python"; \
+        apt-get install -y python3 python3-dev python3-venv python-is-python3; \
+    else \
+        for i in 1 2 3; do \
+            add-apt-repository -y ppa:deadsnakes/ppa && break || \
+            { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+        done \
+        && apt-get update -y \
+        && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+           python${PYTHON_VERSION}-lib2to3 python-is-python3; \
+    fi \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 || true \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} || true \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config || true \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3 \
     && python3 --version && python3 -m pip --version
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
-RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox \
+    pkg-config liblzma-dev && rm -rf /var/lib/apt/lists/*
+
+# GCC 12 on Debian 12 triggers false-positive -Werror=maybe-uninitialized in
+# fbgemm AVX-512 intrinsics (QuantUtilsAvx512.cc). Pin GCC 11 to fix this.
+RUN if [ -f /etc/debian_version ] && ! grep -qi ubuntu /etc/os-release 2>/dev/null; then \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends gcc-11 g++-11 \
+        && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 11 \
+            --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
+        && update-alternatives --set gcc /usr/bin/gcc-11 \
+        && rm -rf /var/lib/apt/lists/* \
+        && echo "GCC pinned to 11:" && gcc --version; \
+    fi
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
@@ -144,7 +164,8 @@ ARG USE_SCCACHE
 
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
-    && pip install -r requirements.txt && git submodule update --init --recursive \
+    && pip install -r requirements.txt && pip install 'cmake<4' \
+    && git submodule update --init --recursive \
     && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
