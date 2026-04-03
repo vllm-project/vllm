@@ -208,6 +208,15 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
+    def import_ir_kernels(cls) -> None:
+        """
+        The default implementation imports ``vllm.kernels``, which registers
+        the built-in IR op implementations. Out-of-tree (OOT) platforms should
+        override this method to import their own kernel modules.
+        """
+        import vllm.kernels  # noqa: F401
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
