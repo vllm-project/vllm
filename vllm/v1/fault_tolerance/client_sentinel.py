@@ -45,7 +45,7 @@ class ClientSentinel(BaseSentinel):
 
         # Port for receiving fault signals:
         # 1. Exceptions caught by fault_tolerant_wrapper in EngineCore
-        # 2. Exit notifications from EngineCoreProc monitored by CoreEngineActorManager
+        # 2. Exit notifications of EngineCoreProc monitored by CoreEngineActorManager
         #    or CoreEngineProcManager
         self.fault_receiver_socket = make_zmq_socket(
             ctx=self.ctx_async,
