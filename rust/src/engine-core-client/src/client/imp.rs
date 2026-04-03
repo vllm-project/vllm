@@ -52,12 +52,19 @@ impl ClientInner {
 
     /// Register a newly added request. Return the selected engine id and the per-request
     /// output channel bound to its `request_id`.
-    pub fn register_request(&self, request_id: String) -> Result<(EngineId, OutputReceiver)> {
+    ///
+    /// When `data_parallel_rank` is provided, the request is routed to that specific engine
+    /// rank, bypassing load balancing.
+    pub fn register_request(
+        &self,
+        request_id: String,
+        data_parallel_rank: Option<u32>,
+    ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id)
+        registry.register(request_id, data_parallel_rank)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.

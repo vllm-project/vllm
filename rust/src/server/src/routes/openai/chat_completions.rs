@@ -25,7 +25,7 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::StopReason;
 
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::chat_completions::convert::prepare_chat_request_with_request_id_header;
+use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::routes::openai::chat_completions::types::{
     ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
@@ -44,16 +44,11 @@ pub async fn chat_completions(
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
     let stream = body.stream;
-    let request_id_header = headers
-        .get("X-Request-Id")
-        .and_then(|value| value.to_str().ok());
 
-    let prepared =
-        match prepare_chat_request_with_request_id_header(body, &state.model_id, request_id_header)
-        {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
+    let prepared = match prepare_chat_request(body, &state.model_id, headers) {
+        Ok(prepared) => prepared,
+        Err(error) => return error.into_response(),
+    };
 
     let created = unix_timestamp();
     info!(

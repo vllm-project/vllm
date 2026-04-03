@@ -24,7 +24,7 @@ use super::utils::logprobs::{
 };
 use super::utils::types::Usage;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::completions::convert::prepare_completion_request_with_request_id_header;
+use crate::routes::openai::completions::convert::prepare_completion_request;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
@@ -40,15 +40,8 @@ pub async fn completions(
 ) -> Response {
     let stream = body.stream;
     let logprobs = body.logprobs;
-    let request_id_header = headers
-        .get("X-Request-Id")
-        .and_then(|value| value.to_str().ok());
 
-    let prepared = match prepare_completion_request_with_request_id_header(
-        body,
-        &state.model_id,
-        request_id_header,
-    ) {
+    let prepared = match prepare_completion_request(body, &state.model_id, headers) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };

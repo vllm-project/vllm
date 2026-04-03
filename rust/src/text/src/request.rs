@@ -132,6 +132,9 @@ pub struct TextRequest {
     pub cache_salt: Option<String>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
+    /// Override data parallel rank.
+    #[serde(default)]
+    pub data_parallel_rank: Option<u32>,
 }
 
 impl TextRequest {
@@ -146,6 +149,7 @@ impl TextRequest {
             priority: 0,
             cache_salt: None,
             add_special_tokens: false,
+            data_parallel_rank: None,
         }
     }
 

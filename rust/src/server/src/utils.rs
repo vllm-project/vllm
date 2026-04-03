@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::http::HeaderMap;
 use serde_json::Value;
 use thiserror_ext::AsReport;
+use uuid::Uuid;
 
 use crate::error::ApiError;
 
@@ -58,4 +60,35 @@ pub fn convert_logit_bias(
                 .collect()
         })
         .transpose()
+}
+
+/// Extract common request metadata from HTTP headers: the external request ID
+/// and the optional data-parallel rank used for engine routing.
+pub fn process_common_headers(
+    headers: HeaderMap,
+    request_id: Option<&str>,
+) -> (String, Option<u32>) {
+    // `None` when the header is absent or cannot be parsed as a `u32`.
+    let data_parallel_rank = headers
+        .get("X-data-parallel-rank")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse().ok());
+
+    // Extract request id from header.
+    let request_id_header = headers
+        .get("X-Request-Id")
+        .and_then(|value| value.to_str().ok());
+    let request_id = resolve_base_request_id(request_id_header, request_id);
+    (request_id, data_parallel_rank)
+}
+
+/// Resolve the base external request ID before API-specific prefixes such as `chatcmpl-`.
+pub fn resolve_base_request_id(
+    request_id_header: Option<&str>,
+    request_id: Option<&str>,
+) -> String {
+    request_id_header
+        .or(request_id)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
 }

@@ -363,7 +363,10 @@ impl EngineCoreClient {
         );
 
         let request_id = req.request_id.clone();
-        let (engine_id, rx) = self.inner.register_request(request_id.clone())?;
+        let data_parallel_rank = req.data_parallel_rank;
+        let (engine_id, rx) = self
+            .inner
+            .register_request(request_id.clone(), data_parallel_rank)?;
 
         let result = try {
             if let Some(coordinator) = self.coordinator.as_ref() {

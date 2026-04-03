@@ -60,6 +60,8 @@ pub enum Error {
     ControlClosed { message: String },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
+    #[error("data parallel rank {rank} is out of range for {num_engines} engine(s)")]
+    InvalidDataParallelRank { rank: u32, num_engines: u32 },
     #[error("engine-core output dispatcher closed: {message}")]
     DispatcherClosed { message: String },
     #[error("engine-core client is closed: {message}")]

@@ -1,10 +1,10 @@
-use uuid::Uuid;
+use axum::http::HeaderMap;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
 use super::types::GenerateRequest;
 use super::validate;
 use crate::error::ApiError;
-use crate::utils::merge_kv_transfer_params;
+use crate::utils::{merge_kv_transfer_params, process_common_headers};
 
 /// Lowered generate request plus the response request ID.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,12 +19,12 @@ pub struct PreparedRequest {
 pub fn prepare_generate_request(
     request: GenerateRequest,
     configured_model: &str,
+    headers: HeaderMap,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, configured_model)?;
 
-    let request_id = request
-        .request_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let (request_id, data_parallel_rank) =
+        process_common_headers(headers, request.request_id.as_deref());
     let include_logprobs = request.sampling_params.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
     let mut sampling_params = request.sampling_params;
@@ -42,6 +42,7 @@ pub fn prepare_generate_request(
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
+        data_parallel_rank,
     };
 
     Ok(PreparedRequest {
@@ -54,6 +55,7 @@ pub fn prepare_generate_request(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::Prompt;
 
@@ -80,7 +82,8 @@ mod tests {
         .expect("parse request");
 
         let prepared =
-            prepare_generate_request(request, "Qwen/Qwen1.5-0.5B-Chat").expect("prepare");
+            prepare_generate_request(request, "Qwen/Qwen1.5-0.5B-Chat", HeaderMap::new())
+                .expect("prepare");
 
         assert_eq!(
             prepared.text_request.prompt,

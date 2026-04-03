@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use openai_protocol::validated::ValidatedJson;
 use thiserror_ext::AsReport as _;
@@ -24,10 +25,11 @@ use crate::state::AppState;
 /// Validate one token-in/token-out request and proxy it into the shared `vllm-text` stack.
 pub async fn generate(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<GenerateRequest>,
 ) -> Response {
     let stream = body.stream;
-    let prepared = match prepare_generate_request(body, &state.model_id) {
+    let prepared = match prepare_generate_request(body, &state.model_id, headers) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };

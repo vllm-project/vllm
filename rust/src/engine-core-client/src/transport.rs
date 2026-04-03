@@ -79,6 +79,14 @@ impl<const N: usize> From<&[u8; N]> for EngineId {
     }
 }
 
+impl From<usize> for EngineId {
+    /// Create an engine id from an index, using the same two-byte little-endian
+    /// encoding that Python vllm `EngineCoreProc` uses for ZMQ identities.
+    fn from(value: usize) -> Self {
+        Self(Bytes::copy_from_slice(&(value as u16).to_le_bytes()))
+    }
+}
+
 impl TryFrom<EngineId> for PeerIdentity {
     type Error = ZmqError;
 
