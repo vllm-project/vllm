@@ -133,7 +133,7 @@ async def transfer_run_periodically(
                 )
 
                 # Wait until all writes to expert_buffer have finished before making the
-                # AsynEPLBLayerResult visible to the main thread.
+                # AsynEplbLayerResult visible to the main thread.
                 cuda_stream.synchronize()
 
                 # This event guarantees that expert_buffer will not be overwritten by

@@ -1150,11 +1150,6 @@ def _move_to_workspace(
         new_physical_to_logical_map=result.new_physical_to_logical_map,
         layer=result.layer_idx,
     )
-    logger.debug(
-        "model %s successfully move_to_workspace layer %d",
-        model_state.model_name,
-        ep_rank,
-    )
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
