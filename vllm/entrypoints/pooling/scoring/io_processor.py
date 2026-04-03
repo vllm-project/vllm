@@ -426,9 +426,10 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        from vllm.model_executor.models.jina import format_docs_prompts_func
+        from vllm.model_executor.models.jina import ensure_str, format_docs_prompts_func
 
         self.format_docs_prompts_func = format_docs_prompts_func
+        self.ensure_str = ensure_str
 
     #######################################
     # helpers
@@ -439,14 +440,15 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor):
         tok_params: TokenizeParams,
         prompt_extras: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
-        if len(scoring_data.data_1) == 1:
-            prompts = self.format_docs_prompts_func(
-                query=scoring_data.data_1[0], docs=scoring_data.data_2
-            )
+        queries = self.ensure_str(scoring_data.data_1)
+        docs = self.ensure_str(scoring_data.data_2)
+
+        if len(queries) == 1:
+            prompts = self.format_docs_prompts_func(query=queries[0], docs=docs)
         else:
             prompts = [
                 self.format_docs_prompts_func(query=q, docs=[d])
-                for q, d in zip(scoring_data.data_1, scoring_data.data_2)
+                for q, d in zip(queries, docs)
             ]
 
         return self._preprocess_completion_offline(

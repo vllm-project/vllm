@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from
-# https://huggingface.co/jinaai/jina-reranker-v3/blob/main/modeling.py
+# Adapted from https://huggingface.co/jinaai/jina-reranker-v3/blob/main/modeling.py
 # ruff: noqa: E501
 
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.sequence import IntermediateTensors
+from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
-from ...sequence import IntermediateTensors
-from ...tasks import PoolingTask
-from ...v1.pool.metadata import PoolingMetadata
 from ..layers.pooler import DispatchPooler
 from ..layers.pooler.tokwise import (
     AllPool,
@@ -24,6 +24,9 @@ from ..layers.pooler.tokwise import (
 from .interfaces import SupportsLateInteraction
 from .qwen3 import Qwen3Model
 from .utils import maybe_prefix
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.pooling.scoring.typing import ScoreData
 
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):
@@ -166,3 +169,12 @@ def format_docs_prompts_func(
     prompt += f"<query>\n{query}{query_emb_token}\n</query>"
 
     return prefix + prompt + suffix
+
+
+def ensure_str(data: list["ScoreData"]) -> list[str]:
+    text: list[str] = []
+    for prompt in data:
+        if not isinstance(prompt, str):
+            raise ValueError("The JinaForRanking model only supports text as input.")
+        text.append(prompt)
+    return text

@@ -559,21 +559,16 @@ class JinaRankingTokenEmbedIOProcessor(TokenEmbedIOProcessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        from vllm.model_executor.models.jina import format_docs_prompts_func
+        from vllm.model_executor.models.jina import ensure_str, format_docs_prompts_func
 
         self.format_docs_prompts_func = format_docs_prompts_func
+        self.ensure_str = ensure_str
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 
-        text_prompts: list[str] = []
-        for prompt in ctx.prompts:
-            if not isinstance(prompt, str):
-                raise ValueError(
-                    "The JinaForRanking model only supports text as input."
-                )
-            text_prompts.append(prompt)
+        text_prompts = self.ensure_str(ctx.prompts)
 
         # The JinaForRanking model concatenates docs first, then query.
         # Let's stay consistent with this novel design.
