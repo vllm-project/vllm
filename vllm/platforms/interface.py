@@ -207,8 +207,6 @@ class Platform:
         """
         return cls.simple_compile_backend
 
-    _ir_kernels_imported: bool = False
-
     @classmethod
     def import_ir_kernels(cls) -> None:
         """
@@ -216,11 +214,7 @@ class Platform:
         the built-in IR op implementations. Out-of-tree (OOT) platforms should
         override this method to import their own kernel modules.
         """
-        if cls._ir_kernels_imported:
-            return
         import vllm.kernels  # noqa: F401
-
-        cls._ir_kernels_imported = True
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
