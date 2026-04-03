@@ -34,32 +34,6 @@ def apply_softcap(S, x):
 
 
 @triton.jit
-def _nf4_dequant(idx):
-    """Map NF4 index [0..15] to normalized float [-1, 1].
-
-    Balanced binary tree (4 levels, 15 selects). Values are the standard
-    NF4 levels from QLoRA (Dettmers et al., 2023), optimal for N(0,1).
-    """
-    # fmt: off
-    return tl.where(idx < 8,
-        tl.where(idx < 4,
-            tl.where(idx < 2,
-                tl.where(idx == 0, -1.0, -0.6962),
-                tl.where(idx == 2, -0.5251, -0.3949)),
-            tl.where(idx < 6,
-                tl.where(idx == 4, -0.2844, -0.1848),
-                tl.where(idx == 6, -0.0911, 0.0))),
-        tl.where(idx < 12,
-            tl.where(idx < 10,
-                tl.where(idx == 8, 0.0796, 0.1609),
-                tl.where(idx == 10, 0.2461, 0.3379)),
-            tl.where(idx < 14,
-                tl.where(idx == 12, 0.4407, 0.5626),
-                tl.where(idx == 14, 0.7230, 1.0))))
-    # fmt: on
-
-
-@triton.jit
 def _prepare_kv_tile(
     data,
     Q,
@@ -253,7 +227,8 @@ def kernel_unified_attention_2d(
         other=0.0,
     )
 
-    # INT4 NF4: split Q into even/odd halves for split-dot.
+    # INT4 packed: split Q into even/odd halves for split-dot.
+    # Q_sum is precomputed for the asymmetric zero-point correction.
     if KV_QUANT_MODE == 4:
         half_offs = tl.arange(0, HALF_HEAD_PADDED)
         even_head_offs = half_offs * 2
@@ -276,6 +251,7 @@ def kernel_unified_attention_2d(
             mask=odd_head_mask[None, :] & q_mask,
             other=0.0,
         ).to(tl.float32)
+        Q_sum = tl.sum(Q_even, axis=1) + tl.sum(Q_odd, axis=1)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -367,7 +343,7 @@ def kernel_unified_attention_2d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        # ---- INT4 NF4: load packed bytes, dequant via NF4 lookup table
+        # ---- INT4 asymmetric: load, unpack, extract zp from scale
         if KV_QUANT_MODE == 4:
             slot_in_blk = seq_offset % BLOCK_SIZE
             k_off_i4 = (
@@ -381,8 +357,8 @@ def kernel_unified_attention_2d(
                 mask=half_dim_mask[:, None] & tile_mask[None, :],
                 other=0,
             )
-            K_lo = _nf4_dequant(K_packed & 0xF).to(Q_even.dtype)
-            K_hi = _nf4_dequant((K_packed >> 4) & 0xF).to(Q_odd.dtype)
+            K_lo = (K_packed & 0xF).to(Q_even.dtype)
+            K_hi = ((K_packed >> 4) & 0xF).to(Q_odd.dtype)
             v_off_i4 = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
@@ -394,24 +370,27 @@ def kernel_unified_attention_2d(
                 mask=half_dim_mask[None, :] & tile_mask[:, None],
                 other=0,
             )
-            V_lo = _nf4_dequant(V_packed & 0xF).to(Q_even.dtype)
-            V_hi = _nf4_dequant((V_packed >> 4) & 0xF).to(Q_odd.dtype)
+            V_lo = (V_packed & 0xF).to(Q_even.dtype)
+            V_hi = ((V_packed >> 4) & 0xF).to(Q_odd.dtype)
+            # Extract scale + zp via bitcast steganography
             ks_idx = (
                 physical_block_idx * stride_ks_blk
                 + slot_in_blk * stride_ks_slot
                 + kv_head_idx * stride_ks_head
             )
-            k_token_head_scales = tl.load(
-                k_scale_cache_ptr + ks_idx, mask=tile_mask, other=1.0
-            )
+            ks_raw = tl.load(k_scale_cache_ptr + ks_idx, mask=tile_mask, other=0)
+            ks_bits = ks_raw.to(tl.int32, bitcast=True)
+            k_zp = (ks_bits & 0xF).to(tl.float32)
+            k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
             vs_idx = (
                 physical_block_idx * stride_vs_blk
                 + slot_in_blk * stride_vs_slot
                 + kv_head_idx * stride_vs_head
             )
-            v_token_head_scales = tl.load(
-                v_scale_cache_ptr + vs_idx, mask=tile_mask, other=1.0
-            )
+            vs_raw = tl.load(v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0)
+            vs_bits = vs_raw.to(tl.int32, bitcast=True)
+            v_zp = (vs_bits & 0xF).to(tl.float32)
+            v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
 
         # ---- Non-INT4 path (existing) ---------------------------------
         if KV_QUANT_MODE != 4:
@@ -507,7 +486,8 @@ def kernel_unified_attention_2d(
         # Per-token-head quant: fuse softmax_scale with per-head k_scale
         # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
         if KV_QUANT_MODE == 4:
-            S += (tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)) * (
+            raw_dot = tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)
+            S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
                 scale * k_token_head_scales[None, :]
             )
         elif KV_QUANT_MODE >= 2:
@@ -582,8 +562,9 @@ def kernel_unified_attention_2d(
                 V_hi = tl.where(sw_mask[:, None], V_hi, 0.0)
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V_lo.dtype)
-            acc_even += tl.dot(P_v, V_lo)
-            acc_odd += tl.dot(P_v, V_hi)
+            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
+            acc_even += tl.dot(P_v, V_lo) - Pv_zp_sum[:, None]
+            acc_odd += tl.dot(P_v, V_hi) - Pv_zp_sum[:, None]
         if KV_QUANT_MODE != 4:
             if SLIDING_WINDOW:
                 qpos_lo = q_block_local_idx * BLOCK_Q
@@ -758,7 +739,8 @@ def kernel_unified_attention_3d(
         other=0.0,
     )
 
-    # INT4 NF4: split Q into even/odd halves for split-dot.
+    # INT4 packed: split Q into even/odd halves for split-dot.
+    # Q_sum is precomputed for the asymmetric zero-point correction.
     if KV_QUANT_MODE == 4:
         half_offs = tl.arange(0, HALF_HEAD_PADDED)
         even_head_offs = half_offs * 2
@@ -781,6 +763,7 @@ def kernel_unified_attention_3d(
             mask=odd_head_mask[None, :] & q_mask,
             other=0.0,
         ).to(tl.float32)
+        Q_sum = tl.sum(Q_even, axis=1) + tl.sum(Q_odd, axis=1)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -870,7 +853,7 @@ def kernel_unified_attention_3d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        # ---- INT4 NF4: load packed bytes, dequant via NF4 lookup table
+        # ---- INT4 asymmetric: load, unpack, extract zp from scale
         if KV_QUANT_MODE == 4:
             slot_in_blk = seq_offset % BLOCK_SIZE
             k_off_i4 = (
@@ -884,8 +867,8 @@ def kernel_unified_attention_3d(
                 mask=half_dim_mask[:, None] & tile_mask[None, :],
                 other=0,
             )
-            K_lo = _nf4_dequant(K_packed & 0xF).to(Q_even.dtype)
-            K_hi = _nf4_dequant((K_packed >> 4) & 0xF).to(Q_odd.dtype)
+            K_lo = (K_packed & 0xF).to(Q_even.dtype)
+            K_hi = ((K_packed >> 4) & 0xF).to(Q_odd.dtype)
             v_off_i4 = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
@@ -897,24 +880,27 @@ def kernel_unified_attention_3d(
                 mask=half_dim_mask[None, :] & tile_mask[:, None],
                 other=0,
             )
-            V_lo = _nf4_dequant(V_packed & 0xF).to(Q_even.dtype)
-            V_hi = _nf4_dequant((V_packed >> 4) & 0xF).to(Q_odd.dtype)
+            V_lo = (V_packed & 0xF).to(Q_even.dtype)
+            V_hi = ((V_packed >> 4) & 0xF).to(Q_odd.dtype)
+            # Extract scale + zp via bitcast steganography
             ks_idx = (
                 physical_block_idx * stride_ks_blk
                 + slot_in_blk * stride_ks_slot
                 + kv_head_idx * stride_ks_head
             )
-            k_token_head_scales = tl.load(
-                k_scale_cache_ptr + ks_idx, mask=tile_mask, other=1.0
-            )
+            ks_raw = tl.load(k_scale_cache_ptr + ks_idx, mask=tile_mask, other=0)
+            ks_bits = ks_raw.to(tl.int32, bitcast=True)
+            k_zp = (ks_bits & 0xF).to(tl.float32)
+            k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
             vs_idx = (
                 physical_block_idx * stride_vs_blk
                 + slot_in_blk * stride_vs_slot
                 + kv_head_idx * stride_vs_head
             )
-            v_token_head_scales = tl.load(
-                v_scale_cache_ptr + vs_idx, mask=tile_mask, other=1.0
-            )
+            vs_raw = tl.load(v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0)
+            vs_bits = vs_raw.to(tl.int32, bitcast=True)
+            v_zp = (vs_bits & 0xF).to(tl.float32)
+            v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
 
         # ---- Non-INT4 path (existing) ---------------------------------
         if KV_QUANT_MODE != 4:
@@ -1010,7 +996,8 @@ def kernel_unified_attention_3d(
         # Per-token-head quant: fuse softmax_scale with per-head k_scale
         # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
         if KV_QUANT_MODE == 4:
-            S += (tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)) * (
+            raw_dot = tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)
+            S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
                 scale * k_token_head_scales[None, :]
             )
         elif KV_QUANT_MODE >= 2:
@@ -1085,8 +1072,9 @@ def kernel_unified_attention_3d(
                 V_hi = tl.where(sw_mask[:, None], V_hi, 0.0)
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V_lo.dtype)
-            acc_even += tl.dot(P_v, V_lo)
-            acc_odd += tl.dot(P_v, V_hi)
+            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
+            acc_even += tl.dot(P_v, V_lo) - Pv_zp_sum[:, None]
+            acc_odd += tl.dot(P_v, V_hi) - Pv_zp_sum[:, None]
         if KV_QUANT_MODE != 4:
             if SLIDING_WINDOW:
                 qpos_lo = q_block_local_idx * BLOCK_Q
