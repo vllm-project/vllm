@@ -301,3 +301,24 @@ torch::stable::Tensor ggml_moe_a8_vec(torch::stable::Tensor X,
                                       int64_t tokens);
 
 int64_t ggml_moe_get_block_size(int64_t type);
+
+void apply_repetition_penalties_(
+    torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
+    const torch::stable::Tensor& output_mask,
+    const torch::stable::Tensor& repetition_penalties);
+
+void top_k_per_row_prefill(const torch::stable::Tensor& logits,
+                           const torch::stable::Tensor& rowStarts,
+                           const torch::stable::Tensor& rowEnds,
+                           torch::stable::Tensor& indices, int64_t numRows,
+                           int64_t stride0, int64_t stride1, int64_t topK);
+
+void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
+                          const torch::stable::Tensor& seqLens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK);
+
+void large_context_topk(const torch::stable::Tensor& logits,
+                        torch::stable::Tensor& indices,
+                        const torch::stable::Tensor& seq_lens,
+                        std::optional<torch::stable::Tensor> row_starts);
