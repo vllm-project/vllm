@@ -129,7 +129,7 @@ def _xpu_mxfp4_quantize_impl(
     return out_q, out_s
 
 
-def xpu_mxfp4_quantize_fake(
+def _xpu_mxfp4_quantize_fake(
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     MXFP4_BLOCK_SIZE = 32
@@ -549,7 +549,7 @@ class xpu_ops:
             direct_register_custom_op(
                 op_name="xpu_mxfp4_quantize",
                 op_func=_xpu_mxfp4_quantize_impl,
-                fake_impl=xpu_mxfp4_quantize_fake,
+                fake_impl=_xpu_mxfp4_quantize_fake,
             )
 
             _OPS_REGISTERED = True
