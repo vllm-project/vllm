@@ -235,6 +235,30 @@ def recompute_mrope_positions(
         0
     ]
 
+    def _get_next_media_start(
+        vis_start_idx: torch.Tensor, num_computed: int
+    ) -> tuple[int, int]:
+        """Find the next media segment start position.
+
+        Returns (global_mm_start, mm_embeddings_seen). Falls back to
+        the first media token when no vision_start_token_id is found
+        (e.g. image pruning with reduced placeholders).
+        """
+        candidate = vis_start_idx[vis_start_idx >= num_computed]
+        if candidate.numel() > 0:
+            return int(candidate[0].item()), 0
+        arange = torch.arange(N, device=input_ids.device)
+        media_after = (
+            media_mask & (arange >= num_computed)
+        ).nonzero(as_tuple=True)[0]
+        if media_after.numel() == 0:
+            raise IndexError(
+                "recompute_mrope_positions: no vision_start_token_id and no "
+                "media tokens >= num_computed_tokens"
+            )
+        first_media = int(media_after[0].item())
+        return max(0, first_media - 1), first_media - max(0, first_media - 1) - 1
+
     for mm_pos in multimodal_positions:
         # Each mm_pos can be a complete embedding for single media
         # or it can be a part of a single media (due to chunked prefill)
@@ -295,21 +319,16 @@ def recompute_mrope_positions(
             else:
                 # We have completed previous mm_embedding part and
                 # ready to start a new one
-                next_vision_start_token = vision_start_indices[
-                    vision_start_indices >= num_computed_tokens
-                ][0]
-                mm_embeddings_seen = 0
-                global_mm_start = next_vision_start_token
+                global_mm_start, mm_embeddings_seen = _get_next_media_start(
+                    vision_start_indices, num_computed_tokens
+                )
 
         else:
             # If there were no vision start indexes so far,
-            # let's find first vision start index
-            next_vision_start_token = vision_start_indices[
-                vision_start_indices >= num_computed_tokens
-            ][0]
-
-            mm_embeddings_seen = 0
-            global_mm_start = next_vision_start_token
+            # find first vision start index or fallback to first media token
+            global_mm_start, mm_embeddings_seen = _get_next_media_start(
+                vision_start_indices, num_computed_tokens
+            )
 
         # For Qwen3 VL, mm_pos includes timestamp tokens before vision_start
         # when starting a new media. Adjust global_mm_start to point to where

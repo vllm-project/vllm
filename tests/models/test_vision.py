@@ -255,6 +255,15 @@ class SimpleMRopeVisionModel(torch.nn.Module):
             )
 
 
+class SimpleMRopeVisionModelWithAux(SimpleMRopeVisionModel):
+    """Simple mrope model returning (embeddings, aux_scores)."""
+
+    def forward(self, pixel_values: torch.Tensor, grid_thw_list: list[list[int]]):
+        embeddings = super().forward(pixel_values, grid_thw_list)
+        aux_scores = embeddings.norm(dim=1)
+        return embeddings, aux_scores
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "batch_size",
@@ -347,6 +356,135 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
         assert direct_output.shape == sharded_output.shape
         # Check that the outputs are close (they should be identical)
         assert torch.allclose(direct_output, sharded_output, rtol=1e-5, atol=1e-5)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_run_dp_sharded_mrope_vision_model_return_aux():
+    world_size = 2
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_return_aux_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_return_aux_worker(
+    local_rank: int, world_size: int, master_port: int
+):
+    """Verify DP mrope helper preserves auxiliary outputs ordering and slicing."""
+    current_platform.seed_everything(2026)
+    device = f"{current_platform.device_name}:{local_rank}"
+    current_platform.set_device(device)
+    torch.set_default_device(device)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+
+    init_distributed_environment()
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    grid_thw_list = [[1, 4, 4], [1, 7, 7], [1, 6, 6]]
+    pixel_values_list = []
+    for grid_thw in grid_thw_list:
+        num_patches = math.prod(grid_thw)
+        pixel_values_list.append(torch.randn(num_patches, 768))
+    pixel_values = torch.cat(pixel_values_list, dim=0)
+
+    vision_model = SimpleMRopeVisionModelWithAux()
+
+    if local_rank == 0:
+        with torch.inference_mode():
+            direct_embeddings, direct_aux = vision_model(pixel_values, grid_thw_list)
+
+    with torch.inference_mode():
+        sharded_embeddings, sharded_aux = run_dp_sharded_mrope_vision_model(
+            vision_model,
+            pixel_values,
+            grid_thw_list,
+            rope_type="rope_3d",
+            return_aux=True,
+        )
+        sharded_embeddings = torch.cat(sharded_embeddings, dim=0)
+        sharded_aux = torch.cat(sharded_aux, dim=0)
+
+    assert get_tensor_model_parallel_world_size() == world_size
+    if local_rank == 0:
+        assert direct_embeddings.shape == sharded_embeddings.shape
+        assert direct_aux.shape == sharded_aux.shape
+        assert torch.allclose(
+            direct_embeddings, sharded_embeddings, rtol=1e-5, atol=1e-5
+        )
+        assert torch.allclose(direct_aux, sharded_aux, rtol=1e-5, atol=1e-5)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_run_dp_sharded_mrope_vision_model_return_aux_false_regression():
+    world_size = 2
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_return_aux_false_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_return_aux_false_worker(
+    local_rank: int, world_size: int, master_port: int
+):
+    """Regression: return_aux=False keeps embeddings-only behavior."""
+    current_platform.seed_everything(2027)
+    device = f"{current_platform.device_name}:{local_rank}"
+    current_platform.set_device(device)
+    torch.set_default_device(device)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+
+    init_distributed_environment()
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    grid_thw_list = [[1, 5, 5], [1, 4, 4], [1, 7, 7]]
+    pixel_values_list = []
+    for grid_thw in grid_thw_list:
+        num_patches = math.prod(grid_thw)
+        pixel_values_list.append(torch.randn(num_patches, 768))
+    pixel_values = torch.cat(pixel_values_list, dim=0)
+
+    vision_model = SimpleMRopeVisionModelWithAux()
+
+    if local_rank == 0:
+        with torch.inference_mode():
+            direct_embeddings, _ = vision_model(pixel_values, grid_thw_list)
+
+    with torch.inference_mode():
+        sharded_output = run_dp_sharded_mrope_vision_model(
+            vision_model,
+            pixel_values,
+            grid_thw_list,
+            rope_type="rope_3d",
+            return_aux=False,
+        )
+        sharded_embeddings = torch.cat(sharded_output, dim=0)
+
+    assert get_tensor_model_parallel_world_size() == world_size
+    if local_rank == 0:
+        assert direct_embeddings.shape == sharded_embeddings.shape
+        assert torch.allclose(
+            direct_embeddings, sharded_embeddings, rtol=1e-5, atol=1e-5
+        )
 
 
 @multi_gpu_test(num_gpus=2)
