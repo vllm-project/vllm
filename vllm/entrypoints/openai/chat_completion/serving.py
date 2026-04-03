@@ -1368,6 +1368,11 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    routed_experts=(
+                        output.routed_experts.tolist()
+                        if output.routed_experts is not None
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
                 continue
@@ -1566,6 +1571,11 @@ class OpenAIServingChat(OpenAIServing):
                 stop_reason=output.stop_reason,
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
+                ),
+                routed_experts=(
+                    output.routed_experts.tolist()
+                    if output.routed_experts is not None
+                    else None
                 ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)

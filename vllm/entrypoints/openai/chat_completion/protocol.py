@@ -92,6 +92,14 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
+    routed_experts: list[list[list[int]]] | None = Field(
+        default=None,
+        description=(
+            "The routed expert indices for each generated token, with shape "
+            "[seq_len, num_layers, topk]. Only present when the server is "
+            "started with --enable-return-routed-experts."
+        ),
+    )
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
