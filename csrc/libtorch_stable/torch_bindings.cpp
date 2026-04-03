@@ -456,6 +456,24 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int type, SymInt row, SymInt tokens) -> Tensor");
 
   ops.def("ggml_moe_get_block_size(int type) -> int");
+
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states,"
+      "int null_block_id,"
+      "int block_size,"
+      "Tensor? block_idx_first_scheduled_token,"
+      "Tensor? block_idx_last_scheduled_token,"
+      "Tensor? initial_state_idx,"
+      "Tensor? cu_chunk_seqlen,"
+      "Tensor? last_chunk_indices) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -562,6 +580,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
   ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
   ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
+  ops.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
 }
 
 // These capability-check functions take only primitive args (no tensors), so
