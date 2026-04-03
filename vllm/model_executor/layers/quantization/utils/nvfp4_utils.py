@@ -196,9 +196,7 @@ def convert_to_nvfp4_linear_kernel_format(
     backend: NvFp4LinearBackend,
     layer: torch.nn.Module,
 ) -> None:
-    """
-    Convert layer to NVFP4 linear kernel format.
-    """
+    """Convert layer to NVFP4 linear kernel format."""
 
     assert layer.weight_scale.dtype == torch.float8_e4m3fn, (
         "Weight Block scale must be represented as FP8-E4M3"
