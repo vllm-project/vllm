@@ -1315,6 +1315,7 @@ class Gemma4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         loader = AutoWeightsLoader(
             self,
             ignore_unexpected_prefixes=ignore_prefixes,
+            ignore_unexpected_suffixes=[".input_max"],
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
