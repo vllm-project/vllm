@@ -1932,9 +1932,18 @@ class NixlConnectorWorker:
         )
         self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
 
-        # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
-        # this is the ratio between the two sizes.
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(engine_id)
+        # This is 1 when P and D effective attention TP match. Otherwise,
+        # this is the ratio between the two sizes. When DCP is active,
+        # the prefill side's effective TP = raw_tp * dcp_size.
+        remote_dcp_size = 1
+        if isinstance(self.kv_topo, DcpTpKVTopology):
+            remote_dcp_size = self.kv_topo.remote_dcp_size.get(engine_id, 1)
+        effective_remote_tp = remote_tp_size * remote_dcp_size
+        effective_local_tp = self.kv_topo.tp_size
+        if effective_local_tp >= effective_remote_tp:
+            tp_ratio = effective_local_tp // effective_remote_tp
+        else:
+            tp_ratio = -(effective_remote_tp // effective_local_tp)
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
         indexes_into_remote = (
@@ -2083,13 +2092,54 @@ class NixlConnectorWorker:
         """
         Validate the remote agent handshake metadata ensuring the
         invariants hold true.
+
+        DCP tp_ratio fix: When DCP is active on the prefill side, the
+        effective attention TP is raw_tp * dcp_size (DCP expands world_size
+        for KV head sharding). The handshake metadata only reports the raw
+        --tensor-parallel-size, so we must multiply by remote_dcp_size to
+        get the true effective TP. Without this, configurations like
+        P:TP=2,DCP=2 / D:TP=4,DCP=2 would appear as hetero-TP (ratio=2)
+        when the KV geometry is actually identical (effective TP=4 on both
+        sides, ratio=1). This fix applies to all three tp_ratio computation
+        sites: validation, remote agent registration, and block reading.
         """
         remote_engine_id = nixl_agent_meta.engine_id
 
         assert self._tp_size[remote_engine_id] == remote_tp_size
         assert self.kv_topo is not None
 
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
+        # When DCP is active, the prefill side's effective attention TP is
+        # raw_tp * dcp_size (DCP expands world_size on prefill). The raw
+        # remote_tp_size from the handshake doesn't include this, so
+        # tp_ratio would be wrong. Compute tp_ratio from effective TP sizes
+        # that account for DCP.
+        remote_dcp_size = 1
+        if isinstance(self.kv_topo, DcpTpKVTopology):
+            remote_dcp_size = self.kv_topo.remote_dcp_size.get(
+                remote_engine_id, 1
+            )
+        effective_remote_tp = remote_tp_size * remote_dcp_size
+        effective_local_tp = self.kv_topo.tp_size
+        if effective_local_tp >= effective_remote_tp:
+            assert effective_local_tp % effective_remote_tp == 0, (
+                f"Effective local TP {effective_local_tp} is not divisible "
+                f"by effective remote TP {effective_remote_tp}."
+            )
+            tp_ratio = effective_local_tp // effective_remote_tp
+        else:
+            assert effective_remote_tp % effective_local_tp == 0, (
+                f"Effective remote TP {effective_remote_tp} is not divisible "
+                f"by effective local TP {effective_local_tp}."
+            )
+            tp_ratio = -(effective_remote_tp // effective_local_tp)
+
+        logger.debug(
+            "Handshake validation: local_tp=%d, remote_tp=%d, "
+            "remote_dcp=%d, eff_local_tp=%d, eff_remote_tp=%d, tp_ratio=%d",
+            self.kv_topo.tp_size, remote_tp_size, remote_dcp_size,
+            effective_local_tp, effective_remote_tp, tp_ratio,
+        )
+
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
             remote_engine_id
         )
@@ -2519,7 +2569,6 @@ class NixlConnectorWorker:
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
             meta.remote.engine_id
         )
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
 
         # DCP block filtering: when D DCP > P DCP, multiple decode ranks
         # map to the same prefill rank but need different block subsets.
@@ -2531,6 +2580,19 @@ class NixlConnectorWorker:
                 meta.remote.engine_id, 1
             )
             local_dcp_size = self.kv_topo.dcp_size
+
+        # DCP fix: compute tp_ratio from effective TP sizes.
+        # On prefill, DCP expands world_size so effective_tp = raw_tp * dcp.
+        # Without this, tp_ratio would incorrectly report hetero-TP when
+        # the KV geometry is actually identical on both sides.
+        effective_remote_tp = (
+            self.kv_topo.remote_tp_size[meta.remote.engine_id] * remote_dcp_size
+        )
+        effective_local_tp = self.kv_topo.tp_size
+        if effective_local_tp >= effective_remote_tp:
+            tp_ratio = effective_local_tp // effective_remote_tp
+        else:
+            tp_ratio = -(effective_remote_tp // effective_local_tp)
         # Block filtering for DCP is NOT needed because the scheduler
         # allocates the same blocks to all ranks on the same engine.
         # Each decode rank reads ALL blocks from its prefill rank(s).
