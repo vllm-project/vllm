@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import enum
+import hashlib
 import logging
 import os
 import queue
@@ -110,6 +111,24 @@ class TransferMode(enum.Enum):
 
 
 REGISTER_BLOCKS_MSG = b"register_blocks_msg"
+PUSH_TRIGGER_MSG = b"push_trigger_msg"
+
+PUSH_TRIGGER_BASE_PORT = 29600  # Base port for push trigger TCP sockets
+
+
+def _push_trigger_addr(engine_id: str, tp_rank: int = 0) -> str:
+    """Return a tcp:// address unique to this engine+rank for push triggers.
+
+    The port is derived from a deterministic
+    hash of the engine_id (not Python's randomized hash()) to ensure
+    scheduler and worker processes agree on the same port.
+    """
+    h = int(hashlib.md5(engine_id.encode()).hexdigest(), 16)
+    port = PUSH_TRIGGER_BASE_PORT + (h % 1000) + tp_rank
+
+    # TODO: add remote node ip and port details for xPyD deployments
+    return f"tcp://127.0.0.1:{port}"
+
 
 # Compiled regex to extract a standard UUID from vLLM request IDs.
 _UUID_RE = re.compile(
@@ -505,6 +524,28 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        registration_data: dict[str, Any],
+    ) -> None:
+        """
+        Trigger push-based KV transfer from P node to D node.
+
+        Called by the push listener thread on the P worker when it
+        receives a PUSH_TRIGGER_MSG from the scheduler via ZMQ TCP.
+
+        Args:
+            request_id: Request ID
+            local_block_ids: Local block IDs to push
+            registration_data: Registration data from D node
+        """
+        assert self.connector_worker is not None
+        self.connector_worker.start_push_kv(
+            request_id, local_block_ids, registration_data
+        )
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
         assert self.connector_worker is not None
@@ -642,6 +683,31 @@ class NixlConnectorScheduler:
         self._registered_blocks: dict[str, dict[str, Any]] = {}
         self._registered_blocks_lock = threading.Lock()
 
+        # Track block_ids for finished requests (for scenario 2)
+        # Maps request_id -> block_ids
+        self._finished_request_blocks: dict[ReqId, list[int]] = {}
+
+        # Queue for push dispatch work items.
+        # Both the handshake listener (scenario 2: D registers after P
+        # finishes) and request_finished (scenario 1: P finishes after D
+        # registers) enqueue here.  The dispatcher thread dequeues,
+        # resolves block_ids, and sends TCP push triggers to workers.
+        self._push_dispatch_queue: queue.Queue[tuple[str, dict[str, Any]]] = (
+            queue.Queue()
+        )
+        self._push_dispatcher_t: threading.Thread | None = None
+
+        # ZMQ PUSH sockets for sending push triggers to worker processes.
+        # Uses TCP for compatibility with both single-node and multi-node TP.
+        # One socket per TP rank so each worker gets the trigger.
+        self._tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self._push_trigger_paths = [
+            _push_trigger_addr(engine_id, rank) for rank in range(self._tp_size)
+        ]
+        self._push_trigger_socks: list[zmq.Socket | None] = [
+            None for _ in range(self._tp_size)
+        ]
+
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
@@ -659,9 +725,16 @@ class NixlConnectorScheduler:
 
     def shutdown(self):
         self._stop_event.set()
+        for rank, sock in enumerate(self._push_trigger_socks):
+            if sock is not None:
+                sock.close()
+                self._push_trigger_socks[rank] = None
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+        if self._push_dispatcher_t is not None:
+            self._push_dispatcher_t.join(timeout=2.0)
+            self._push_dispatcher_t = None
 
     def pop_registered_blocks(self, request_id: str) -> dict[str, Any] | None:
         """Get and remove registered block data for a specific request.
@@ -760,6 +833,140 @@ class NixlConnectorScheduler:
             )
             self._nixl_handshake_listener_t.start()
             ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+
+            # Start the push dispatcher thread that dequeues work items
+            # from both the listener (scenario 2) and request_finished
+            # (scenario 1), then sends TCP push triggers to workers.
+            self._push_dispatcher_t = threading.Thread(
+                target=self._push_dispatcher_loop,
+                daemon=True,
+                name="nixl_push_dispatcher",
+            )
+            self._push_dispatcher_t.start()
+
+    def _send_push_trigger(
+        self,
+        request_id: str,
+        block_ids: list[int],
+        registration_data: dict[str, Any],
+    ) -> None:
+        """Send a push trigger to all TP workers via ZMQ TCP (non-blocking).
+
+        Each worker's push-listener thread picks up the message and
+        calls start_push_kv directly to initiate the NIXL WRITE.
+        """
+        ctx = zmq.Context.instance()
+        for rank in range(self._tp_size):
+            if self._push_trigger_socks[rank] is None:
+                sock = ctx.socket(zmq.PUSH)
+                sock.setsockopt(zmq.LINGER, 0)
+                sock.connect(self._push_trigger_paths[rank])
+                self._push_trigger_socks[rank] = sock
+                logger.info(
+                    "Scheduler connected PUSH socket to %s (rank %d)",
+                    self._push_trigger_paths[rank],
+                    rank,
+                )
+
+        payload = msgspec.msgpack.encode(
+            (
+                PUSH_TRIGGER_MSG,
+                {
+                    "request_id": request_id,
+                    "block_ids": block_ids,
+                    "registration_data": registration_data,
+                },
+            )
+        )
+        sent_count = 0
+        for rank in range(self._tp_size):
+            sock = self._push_trigger_socks[rank]
+            assert sock is not None
+            try:
+                sock.send(payload, zmq.NOBLOCK)
+                sent_count += 1
+            except zmq.Again:
+                logger.warning(
+                    "Push trigger send buffer full for request %s rank %d, dropping",
+                    request_id,
+                    rank,
+                )
+        logger.info(
+            "Sent push trigger for request %s (%d blocks) via TCP to %d/%d workers",
+            request_id,
+            len(block_ids),
+            sent_count,
+            self._tp_size,
+        )
+
+    def _push_dispatcher_loop(self):
+        """Background thread that processes push dispatch work items.
+
+        Handles both scenarios:
+        - Scenario 1: request_finished enqueues (request_id, registration_data)
+          when D already registered.  block_ids are in _finished_request_blocks.
+        - Scenario 2: listener enqueues (request_id, registration_data) when
+          D just registered.  Need to fuzzy-match against _reqs_need_send to
+          find the finished request and its block_ids.
+
+        In both cases the dispatcher performs the push trigger TCP fan-out
+        without blocking the scheduler main loop or the ZMQ listener.
+        """
+        logger.info("Push dispatcher thread started")
+        while not self._stop_event.is_set():
+            try:
+                request_id, registration_data = self._push_dispatch_queue.get(
+                    timeout=0.5
+                )
+            except queue.Empty:
+                continue
+
+            # Try to find the finished request and its block_ids.
+            finished_req_id = None
+            if request_id in self._finished_request_blocks:
+                # Exact match — request already finished and blocks stored
+                finished_req_id = request_id
+            else:
+                # Fuzzy match by base UUID
+                base_id = _get_base_request_id(request_id)
+                for rid in list(self._finished_request_blocks):
+                    if _get_base_request_id(rid) == base_id:
+                        logger.info(
+                            "Dispatcher fuzzy-matched registration ID %s "
+                            "to finished request ID %s (base: %s)",
+                            request_id,
+                            rid,
+                            base_id,
+                        )
+                        finished_req_id = rid
+                        break
+
+            if finished_req_id is None:
+                # Neither scenario matched — D registered but P hasn't
+                # finished yet.  The request_finished path (scenario 1)
+                # will pick it up later via pop_registered_blocks.
+                continue
+
+            block_ids = self._finished_request_blocks.get(finished_req_id)
+            if block_ids is not None:
+                logger.info(
+                    "Push dispatcher: triggering push for request %s "
+                    "(%d blocks) via TCP",
+                    finished_req_id,
+                    len(block_ids),
+                )
+                self._send_push_trigger(
+                    finished_req_id,
+                    block_ids,
+                    registration_data,
+                )
+                self._finished_request_blocks.pop(finished_req_id, None)
+            else:
+                logger.error(
+                    "Dispatcher: request %s matched but no block_ids found",
+                    finished_req_id,
+                )
+        logger.info("Push dispatcher thread stopped")
 
     @staticmethod
     def _nixl_handshake_listener(
@@ -888,6 +1095,12 @@ class NixlConnectorScheduler:
                         "Stored registration data for request %s with %s blocks",
                         request_id,
                         registration_data.get("num_blocks"),
+                    )
+
+                    # Enqueue for the push dispatcher thread to handle
+                    # scenario-2 check without blocking this listener.
+                    scheduler_instance._push_dispatch_queue.put(
+                        (request_id, registration_data)
                     )
 
                 else:
@@ -1300,11 +1513,41 @@ class NixlConnectorScheduler:
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
+
+            # Track block_ids for scenario 2
+            # (when D registers after request_finished)
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_sw_clipped_blocks(block_ids)
+
+            # Track clipped block_ids for push scenario 2
+            # (when D registers after request_finished).
+            # Must be after get_sw_clipped_blocks so push sends
+            # the correct blocks for SWA models.
+            self._finished_request_blocks[request.request_id] = block_ids
+
+            # Scenario 1: Check if D node has already registered
+            # blocks for push-based transfer
+            registration_data = self.pop_registered_blocks(request.request_id)
+            if registration_data:
+                logger.info(
+                    "Scenario 1: D node already registered blocks for "
+                    "request %s, P node KV ready, enqueuing push dispatch",
+                    request.request_id,
+                )
+                # Enqueue to dispatcher thread so scheduler main loop
+                # is not blocked by the TCP fan-out.
+                self._push_dispatch_queue.put((request.request_id, registration_data))
+            else:
+                logger.debug(
+                    "Scenario 2: D node hasn't registered yet for "
+                    "request %s, storing %d blocks for push when "
+                    "registration arrives",
+                    request.request_id,
+                    len(block_ids),
+                )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -1557,6 +1800,11 @@ class NixlConnectorWorker:
             "enforce_handshake_compat", True
         )
 
+        # --- Push trigger listener (TCP from scheduler) ---
+        self._push_trigger_path = _push_trigger_addr(engine_id, self.tp_rank)
+        self._push_stop_event = threading.Event()
+        self._push_listener_thread: threading.Thread | None = None
+
     def _sync_block_size_with_kernel(self) -> None:
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
@@ -1576,6 +1824,200 @@ class NixlConnectorWorker:
             self.block_size = kernel_block_size
             self._block_size[self.engine_id] = kernel_block_size
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
+
+    def _start_push_listener(self) -> None:
+        """Start the background thread that listens for push triggers
+        from the scheduler via ZMQ TCP and calls start_push_kv
+        directly on the listener thread."""
+        if self._push_listener_thread is not None:
+            return
+        ready = threading.Event()
+        self._push_listener_thread = threading.Thread(
+            target=self._push_listener_loop,
+            args=(ready,),
+            daemon=True,
+            name="nixl-push-listener",
+        )
+        self._push_listener_thread.start()
+        ready.wait()
+        logger.info(
+            "Push listener thread started on %s",
+            self._push_trigger_path,
+        )
+
+    def _push_listener_loop(self, ready: threading.Event) -> None:
+        """Poll the ZMQ PULL socket for push triggers and call
+        start_push_kv directly on this thread."""
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.PULL)
+        sock.setsockopt(zmq.RCVTIMEO, 500)  # 500ms poll
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.bind(self._push_trigger_path)
+        ready.set()
+
+        while not self._push_stop_event.is_set():
+            try:
+                raw = sock.recv()
+            except zmq.Again:
+                continue
+            except Exception:
+                if self._push_stop_event.is_set():
+                    break
+                logger.exception("Push listener recv error")
+                continue
+
+            try:
+                decoded = msgspec.msgpack.decode(raw)
+                if not isinstance(decoded, (tuple, list)) or len(decoded) < 2:
+                    logger.warning(
+                        "Push listener got malformed message: %s",
+                        type(decoded),
+                    )
+                    continue
+                msg_type, msg = decoded[0], decoded[1]
+                if msg_type != PUSH_TRIGGER_MSG:
+                    logger.warning(
+                        "Push listener got unexpected message type: %s",
+                        msg_type,
+                    )
+                    continue
+                request_id = msg["request_id"]
+                block_ids = msg["block_ids"]
+                registration_data = msg["registration_data"]
+            except Exception:
+                logger.exception("Failed to decode push trigger message")
+                continue
+
+            logger.info(
+                "Push listener received trigger for request %s (%d blocks)",
+                request_id,
+                len(block_ids),
+            )
+            # Call directly on the listener thread — it's already a
+            # dedicated single thread, so NIXL calls are naturally
+            # serialised (same pattern as pull mode's inline
+            # _read_blocks on the worker thread).
+            self.start_push_kv(request_id, block_ids, registration_data)
+
+        sock.close()
+        logger.info("Push listener thread stopped")
+
+    def start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        registration_data: dict[str, Any],
+    ) -> None:
+        """
+        Start push-based KV transfer from P worker to D node.
+
+        Called by the push listener thread when both conditions are met:
+        1. P node has finished the request and KV blocks are ready
+        2. D node has sent REGISTER_BLOCKS_MSG with its allocated block IDs
+
+        Performs handshake with D (once per engine_id) and initiates
+        the NIXL WRITE transfer (non-blocking RDMA).
+        """
+        decode_engine_id = registration_data["decode_engine_id"]
+        remote_block_ids = registration_data["local_block_ids"]
+        remote_host = registration_data["remote_host"]
+        remote_port = registration_data["remote_port"]
+        decode_request_id = registration_data.get("decode_request_id", request_id)
+        if not local_block_ids:
+            logger.warning(
+                "No local blocks to push for request %s",
+                request_id,
+            )
+            return
+
+        logger.info(
+            "Processing kv push request %s to D node %s: "
+            "pushing %d local blocks to %d remote blocks",
+            request_id,
+            decode_engine_id,
+            len(local_block_ids),
+            len(remote_block_ids),
+        )
+
+        # Handshake with D node to get remote agent metadata.
+        # Done inline on the push listener thread.
+        # One-time cost per D engine_id.
+        if decode_engine_id not in self._remote_agents:
+            logger.info(
+                "No remote agent info for D node %s, performing push handshake",
+                decode_engine_id,
+            )
+
+            try:
+                remote_tp_size = registration_data["decode_tp_size"]
+                remote_agents = self._nixl_handshake(
+                    remote_host,
+                    remote_port,
+                    remote_tp_size,
+                    decode_engine_id,
+                )
+
+                # Store the remote agent info
+                with self._handshake_lock:
+                    self._remote_agents[decode_engine_id] = remote_agents
+
+                logger.info(
+                    "Push handshake with D node %s complete, got %d remote agents",
+                    decode_engine_id,
+                    len(remote_agents),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to handshake with D node %s for push request %s",
+                    decode_engine_id,
+                    request_id,
+                )
+                return
+
+        # Convert logical block IDs to physical/kernel block IDs
+        # local_block_ids comes from request_finished as BlockIds
+        # (tuple/list of lists), preserved through msgpack.
+        block_ids_grouped: BlockIds = local_block_ids
+        if local_block_ids and not isinstance(local_block_ids[0], (list, tuple)):
+            # Safety: wrap flat list as single group
+            block_ids_grouped = (list(local_block_ids),)
+        physical_block_ids = self._logical_to_kernel_block_ids(block_ids_grouped)
+
+        # NOTE: d2h copy is already done by wait_for_save() ->
+        # save_kv_to_host() in the execute_model pipeline before
+        # request_finished triggers this push.
+
+        # Handle remote block IDs - they might be nested for
+        # multiple KV groups or flat from D's registration
+        remote_ids_grouped: BlockIds = remote_block_ids
+        if remote_block_ids and not isinstance(remote_block_ids[0], (list, tuple)):
+            # Flat list from D registration — wrap as single group
+            # to match BlockIds format (tuple of lists)
+            remote_ids_grouped = (list(remote_block_ids),)
+
+        # Convert remote block IDs to physical
+        physical_remote_block_ids = self._logical_to_kernel_block_ids(
+            remote_ids_grouped
+        )
+
+        logger.info(
+            "start_push_kv block shapes: local_groups=%d local_blocks=%s, "
+            "remote_groups=%d remote_blocks=%s",
+            len(physical_block_ids),
+            [len(g) for g in physical_block_ids],
+            len(physical_remote_block_ids),
+            [len(g) for g in physical_remote_block_ids],
+        )
+
+        # Initiate WRITE transfer(s) to D rank(s).
+        self._xfer_blocks_for_req(
+            req_id=request_id,
+            remote_request_id=decode_request_id,
+            dst_engine_id=decode_engine_id,
+            local_block_ids=physical_block_ids,
+            remote_block_ids=physical_remote_block_ids,
+            mode=TransferMode.PUSH,
+        )
 
     def _nixl_handshake(
         self,
@@ -2076,6 +2518,10 @@ class NixlConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+
+        # Start the push trigger listener so the scheduler can send
+        # push triggers to this worker via ZMQ TCP.
+        self._start_push_listener()
 
     def register_local_xfer_handler(
         self,
@@ -3047,6 +3493,20 @@ class NixlConnectorWorker:
                 # Partial prefix cache hit: just read uncomputed blocks.
                 if num_local_blocks < num_remote_blocks:
                     remote_block_ids[i] = remote_group[-num_local_blocks:]
+        elif mode == TransferMode.PUSH:
+            if len(local_block_ids) == 0:
+                logger.warning("No blocks to push for request %s", request_id)
+                return
+            # Align per-group block counts for push.
+            local_block_ids = list(local_block_ids)
+            remote_block_ids = list(remote_block_ids)
+            for i in range(min(len(local_block_ids), len(remote_block_ids))):
+                num_local = len(local_block_ids[i])
+                num_remote = len(remote_block_ids[i])
+                if num_local > num_remote:
+                    local_block_ids[i] = local_block_ids[i][:num_remote]
+                elif num_local < num_remote:
+                    remote_block_ids[i] = remote_block_ids[i][:num_local]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
@@ -3282,6 +3742,11 @@ class NixlConnectorWorker:
 
     def shutdown(self):
         """Shutdown the connector worker."""
+        # Stop push listener thread
+        self._push_stop_event.set()
+        if self._push_listener_thread is not None:
+            self._push_listener_thread.join(timeout=2.0)
+            self._push_listener_thread = None
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
             return
