@@ -1,0 +1,2 @@
+Qwen3.5-35B-A3B-DEP2.yaml
+Qwen3.5-35B-A3B-MXFP4-TP2.yaml

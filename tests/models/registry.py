@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import pytest
 from packaging.version import Version
+from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config.model import ModelDType, TokenizerMode
@@ -277,6 +278,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "google/gemma-2-9b", extras={"tiny": "google/gemma-2-2b-it"}
     ),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
+    "Gemma4ForCausalLM": _HfExamplesInfo(
+        "google/gemma-4-E2B-it",
+        min_transformers_version="5.0.0",
+    ),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
@@ -533,6 +538,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
     ),
+    "TeleChat3ForCausalLM": _HfExamplesInfo(
+        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
+    ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
@@ -636,6 +644,7 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
+        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
@@ -765,6 +774,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),
+    "Cheers": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
+    "CheersForConditionalGeneration": _HfExamplesInfo(
+        "ai9stars/Cheers",
+        trust_remote_code=True,
+    ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
     ),
@@ -791,6 +808,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
+        revision="refs/pr/17",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
@@ -803,6 +821,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "Gemma4ForConditionalGeneration": _HfExamplesInfo(
+        "google/gemma-4-E2B-it",
+        min_transformers_version="5.5.0",
+    ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
@@ -983,7 +1005,26 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
-        "nano_vl_dummy", is_available_online=False, trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        # NemotronH layers are constructed via `hybrid_override_pattern`:
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,  # Trigger image dynamic res
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                # Trigger conv3d:
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B", trust_remote_code=True
@@ -1027,6 +1068,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "hf": "HF model use deprecated imports which have been removed."
         },  # noqa: E501
         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"},
+    ),
+    "Phi4ForCausalLMV": _HfExamplesInfo(
+        "microsoft/Phi-4-reasoning-vision-15B", trust_remote_code=True
     ),
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
@@ -1093,6 +1137,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
     ),
+    "Qwen3ASRForcedAlignerForTokenClassification": _HfExamplesInfo(
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B", trust_remote_code=True
@@ -1128,8 +1178,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": _HfExamplesInfo(
-        "/host/engines/vllm/audio/2b-release",
+    "CohereAsrForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/cohere-transcribe-03-2026",
         trust_remote_code=True,
         is_available_online=False,  # TODO (ekagra): revert after asr release
     ),
@@ -1156,6 +1206,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     #     "JackFram/llama-160m",
     #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
     # ),
+    # [DFlash]
+    "DFlashDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.5-4B",
+        speculative_model="z-lab/Qwen3.5-4B-DFlash",
+        use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     # [Eagle]
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
