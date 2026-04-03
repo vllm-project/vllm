@@ -319,7 +319,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             mm_max_tokens["video"] = seq_len
 
         if mm_counts.get("audio", 0) > 0:
-            assert self.audio_extractor is not None
+            assert self.supports_audio
             mm_max_tokens["audio"] = seq_len
 
         return mm_max_tokens
