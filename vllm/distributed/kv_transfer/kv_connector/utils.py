@@ -518,13 +518,11 @@ class TpKVTopology:
 
 # ---- Mamba-HMA hetero-TP transfer config ----
 #
-# Key insight: FA and Mamba require *different* numbers of P ranks when
-# P is replicated for FA but always TP-sharded for Mamba.
-#
-#   Config   fa_reads  mamba_reads  same?
-#   2p1d     2         2            yes
-#   4p1d     2         4            NO
-#   4p2d     1         2            NO
+# Key insight: with hetero-TP (P_TP > D_TP), FA KV cache may be
+# replicated across P ranks (when P_TP > num_kv_heads), but Mamba
+# conv/SSM state is almost always uniquely sharded per P rank.  So the
+# number of P ranks D must read from can differ between FA and Mamba,
+# and they must be handled separately.
 
 
 def _physical_head_range(tp_size: int, num_heads: int, rank: int) -> range:
@@ -752,21 +750,6 @@ class HeteroTPTransferConfig:
             if _range_overlap(p_head, t_head):
                 return self._fa_target_index[target]
         return 0  # fallback
-
-    @property
-    def indexes_into_remote(self) -> bool:
-        """Whether D indexes into a sub-slice of P's FA block.
-
-        True only when both sides shard (neither replicates) and D_TP > P_TP.
-        When either side replicates, offset logic must account for physical
-        head placement rather than a simple tp_ratio slice.
-        """
-        return (
-            not self.is_d_replicated
-            and not self.is_p_replicated
-            and not self.use_mla
-            and self.tp_ratio > 0
-        )
 
     def fa_rank_offset(self, remote_kv_block_len: int) -> int:
         """Byte offset into P's FA block for this D rank.
