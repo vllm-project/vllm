@@ -155,6 +155,17 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 
 #endif
 
+// Attention kernels (shared CUDA/ROCm)
+void merge_attn_states(
+    torch::stable::Tensor& output,
+    std::optional<torch::stable::Tensor> output_lse,
+    const torch::stable::Tensor& prefix_output,
+    const torch::stable::Tensor& prefix_lse,
+    const torch::stable::Tensor& suffix_output,
+    const torch::stable::Tensor& suffix_lse,
+    const std::optional<int64_t> prefill_tokens_with_context,
+    const std::optional<torch::stable::Tensor>& output_scale);
+
 torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
                                          bool inplace);
 
