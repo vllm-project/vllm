@@ -244,6 +244,20 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
 #endif
 
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  ops.def(
+      "merge_attn_states("
+      "    Tensor! output,"
+      "    Tensor!? output_lse,"
+      "    Tensor prefix_output,"
+      "    Tensor prefix_lse,"
+      "    Tensor suffix_output,"
+      "    Tensor suffix_lse,"
+      "    int!? prefill_tokens_with_context,"
+      "    Tensor? output_scale=None) -> ()");
+
   // Hadamard transforms
   // conditionally compiled so impl registration is in source file
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
@@ -443,6 +457,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // AllSpark ops: conditionally compiled so impl registrations are in source
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
+
+  ops.impl("merge_attn_states", TORCH_BOX(&merge_attn_states));
 
   // Layernorm kernels (shared CUDA/ROCm)
   ops.impl("rms_norm", TORCH_BOX(&rms_norm));
