@@ -18,7 +18,7 @@ def _int(arg):
     try:
         if int(arg) >= 0:
             return int(arg)
-    except ValueError:
+    except (TypeError, ValueError):
         pass
     return 0
 
@@ -53,10 +53,12 @@ def enumerate_resources(resource_map, mask=None, allowed=None):
     lscpu: dict[str, dict] = {"cpus": {}, "cores": {}, "nodes": {}}
     for cpu in resource_map["cpus"]:
         cpunum = int(cpu["cpu"])
+        # ARM lscpu -Je omits "node" and uses "cluster" instead.
+        node_id = _int(cpu.get("node", cpu.get("cluster")))
         if (
             cpunum in allowed
             and cpunum >= 0
-            and (allowed_nodes is None or _int(cpu["node"]) in allowed_nodes)
+            and (allowed_nodes is None or node_id in allowed_nodes)
         ):
             lscpu["cpus"][cpunum] = [cpu]
             core = _int(cpu["core"])
@@ -64,7 +66,7 @@ def enumerate_resources(resource_map, mask=None, allowed=None):
                 lscpu["cores"][core] = [cpu]
             else:
                 lscpu["cores"][core].append(cpu)
-            node = _int(cpu["node"])
+            node = node_id
             if lscpu["nodes"].get(node, None) is None:
                 lscpu["nodes"][node] = [cpu]
             else:
