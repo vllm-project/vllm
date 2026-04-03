@@ -80,9 +80,28 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 "image/jpeg",
             )
 
-            return np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
-            ), {}
+            if self.num_frames > 0:
+                frame_parts = data.split(",", self.num_frames)[: self.num_frames]
+            elif self.num_frames == 0:
+                raise ValueError("num_frames must be greater than 0 or -1")
+            else:
+                frame_parts = data.split(",")
+
+            frames = np.stack(
+                [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
+            )
+            total = int(frames.shape[0])
+            fps = float(self.kwargs.get("fps", 1))
+            duration = total / fps if fps > 0 else 0.0
+            metadata = {
+                "total_num_frames": total,
+                "fps": fps,
+                "duration": duration,
+                "video_backend": "jpeg_sequence",
+                "frames_indices": list(range(total)),
+                "do_sample_frames": False,
+            }
+            return frames, metadata
 
         return self.load_bytes(pybase64.b64decode(data))
 

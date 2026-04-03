@@ -6,6 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # 
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_initialized,
+    ensure_kv_transfer_shutdown,
     get_kv_transfer_group,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
@@ -57,4 +58,4 @@ def test_kv_connector_mixin_clears_metadata():
         assert connector.call_record.get("clear_connector_metadata", 0) == 1
     finally:
         # Ensure we clean up the global connector between tests
-        KVConnectorModelRunnerMixin.ensure_kv_transfer_shutdown()
+        ensure_kv_transfer_shutdown()

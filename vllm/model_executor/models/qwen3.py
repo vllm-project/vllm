@@ -285,6 +285,7 @@ class Qwen3ForCausalLM(
 
         self.config = config
 
+        self.vllm_config = vllm_config
         self.quant_config = quant_config
         self.model = Qwen3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")

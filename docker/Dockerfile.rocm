@@ -29,8 +29,11 @@ RUN if [ "$USE_SCCACHE" != "1" ]; then \
         rm -f "$(which sccache)" || true; \
     fi
 
-# Install UV
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
+# Install UV — download first, then run, so a curl failure is not masked by the pipe
+RUN curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh \
+    && env UV_INSTALL_DIR="/usr/local/bin" sh /tmp/uv-install.sh \
+    && rm -f /tmp/uv-install.sh \
+    && uv --version
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -329,6 +332,11 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
+# Verify that PyTorch is the ROCm build, not CUDA
+RUN python3 -c "import torch; assert torch.version.hip is not None, \
+    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
+    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
+
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     uv pip install --system /rixl_install/*.whl
@@ -380,6 +388,22 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src && mv vllm src/vllm
+
+# This is a workaround to ensure pytest exits with the correct status code in CI tests.
+RUN cat << 'EOF' > /vllm-workspace/conftest.py
+import os
+
+_exit_code = 1
+
+def pytest_sessionfinish(session, exitstatus):
+    global _exit_code
+    _exit_code = int(exitstatus)
+
+def pytest_unconfigure(config):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_exit_code)
+EOF
 
 # -----------------------
 # Final vLLM image
