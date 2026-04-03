@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+
+EAGLE_DEBUG = os.environ.get("EAGLE_DEBUG", "0") == "1"
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
@@ -33,6 +37,24 @@ class AsyncScheduler(Scheduler):
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = self._spec_token_placeholders
+            if EAGLE_DEBUG:
+                for req_id in scheduler_output.num_scheduled_tokens:
+                    request = self.requests[req_id]
+                    logger.info(
+                        "[EAGLE_DEBUG][async_sched.after_schedule] "
+                        "req=%s computed=%d num_tokens=%d "
+                        "placeholders=%d spec_ids=%s "
+                        "is_prefill=%s scheduled=%d "
+                        "num_output_tokens=%d",
+                        req_id,
+                        request.num_computed_tokens,
+                        request.num_tokens,
+                        request.num_output_placeholders,
+                        request.spec_token_ids[:5],
+                        request.is_prefill_chunk,
+                        scheduler_output.num_scheduled_tokens[req_id],
+                        request.num_output_tokens,
+                    )
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
@@ -56,5 +78,21 @@ class AsyncScheduler(Scheduler):
         if status_before_update == RequestStatus.RUNNING:
             self.kv_cache_manager.cache_blocks(
                 request, request.num_computed_tokens - request.num_output_placeholders
+            )
+
+        if EAGLE_DEBUG:
+            logger.info(
+                "[EAGLE_DEBUG][async_sched.update_output] "
+                "req=%s new_tokens=%s placeholders=%d "
+                "computed=%d num_tokens=%d status_before=%s "
+                "cache_pos=%d stopped=%s",
+                request.request_id,
+                new_token_ids[:10],
+                request.num_output_placeholders,
+                request.num_computed_tokens,
+                request.num_tokens,
+                status_before_update.name,
+                request.num_computed_tokens - request.num_output_placeholders,
+                stopped,
             )
         return new_token_ids, stopped

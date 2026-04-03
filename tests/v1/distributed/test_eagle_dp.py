@@ -108,4 +108,15 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
     token_ids_no_eagle = await engine_create_and_generate(engine_args)
 
     # Test for correctness
+    if token_ids_with_eagle != token_ids_no_eagle:
+        for i, (a, b) in enumerate(zip(token_ids_with_eagle, token_ids_no_eagle)):
+            if a != b:
+                print(f"\n=== DIVERGENCE at index {i} ===")
+                print(
+                    f"  EAGLE tokens:    {token_ids_with_eagle[max(0, i - 2) : i + 5]}"
+                )
+                print(f"  NO_EAGLE tokens: {token_ids_no_eagle[max(0, i - 2) : i + 5]}")
+                break
+        print(f"\nFull EAGLE output:    {token_ids_with_eagle}")
+        print(f"Full NO_EAGLE output: {token_ids_no_eagle}")
     assert token_ids_with_eagle == token_ids_no_eagle
