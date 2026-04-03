@@ -47,7 +47,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.minimax_rms_norm.rms_norm_tp import (
-    MiniMaxQKNormWrapper,
     MiniMaxText01RMSNormTP,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -229,14 +228,6 @@ class MiniMaxM2Attention(nn.Module):
             self.head_dim * self.total_num_kv_heads,
             eps=rms_norm_eps,
         )
-        self.qk_norm = MiniMaxQKNormWrapper(
-            self.q_norm,
-            self.k_norm,
-            self.q_size,
-            self.kv_size,
-            max_tokens=max_num_batched_tokens,
-            prefix=prefix + "qk_norm",
-        )
 
     def forward(
         self,
@@ -244,7 +235,10 @@ class MiniMaxM2Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = self.qk_norm(qkv)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = MiniMaxText01RMSNormTP.forward_qk(
+            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
