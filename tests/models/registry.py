@@ -277,6 +277,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "google/gemma-2-9b", extras={"tiny": "google/gemma-2-2b-it"}
     ),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
+    "Gemma4ForCausalLM": _HfExamplesInfo(
+        "google/gemma-4-E2B-it",
+        min_transformers_version="5.0.0",
+    ),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
@@ -532,6 +536,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
+    ),
+    "TeleChat3ForCausalLM": _HfExamplesInfo(
+        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
     ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
@@ -813,6 +820,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "Gemma4ForConditionalGeneration": _HfExamplesInfo(
+        "google/gemma-4-E2B-it",
+        min_transformers_version="5.5.0",
+    ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
