@@ -1028,6 +1028,10 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 layer.w2_weight[expert, :, :]
             )
 
+        if current_platform.is_xpu():
+            w13.data = w13.transpose(-1, -2).contiguous()
+            w2.data = w2.transpose(-1, -2).contiguous()
+
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer,
