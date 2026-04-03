@@ -72,7 +72,9 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [2880])
 @pytest.mark.parametrize("num_local_experts", [128])
 @pytest.mark.parametrize("x_pad_to_multiple", [256])
-@pytest.mark.skip(reason="Skipping for now because of the accuracy issue")
+@pytest.mark.skip(
+    reason="Skipping for now because of the accuracy issue. See: https://github.com/ROCm/aiter/issues/2614"
+)
 def test_fuse_act_padding(
     dtype: torch.dtype,
     num_layers: int,
