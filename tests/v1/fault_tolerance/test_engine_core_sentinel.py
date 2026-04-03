@@ -3,12 +3,13 @@
 
 import socket
 import time
+from unittest.mock import Mock
 
 import pytest
 import zmq
 from msgspec import msgpack
 
-from vllm.config import ParallelConfig
+from vllm.config import FaultToleranceConfig, ParallelConfig
 from vllm.v1.fault_tolerance import EngineCoreSentinel
 from vllm.v1.fault_tolerance.utils import FaultInfo
 
@@ -29,6 +30,20 @@ def addr_dict():
         "worker_cmd_addr": f"tcp://127.0.0.1:{ports[1]}",
         "engine_fault_socket_addr": f"tcp://127.0.0.1:{ports[2]}",
     }
+
+
+@pytest.fixture
+def mock_parallel_config():
+    """Create mock ParallelConfig object"""
+    config = Mock(spec=ParallelConfig)
+
+    config.data_parallel_index = 0
+    config.data_parallel_size = 2
+    config.data_parallel_size_local = 2
+    config.local_engines_only = False
+
+    config.fault_tolerance_config = FaultToleranceConfig(engine_recovery_timeout_sec=10)
+    return config
 
 
 def create_engine_core_sentinel(

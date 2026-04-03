@@ -6,6 +6,7 @@ import msgspec.msgpack
 import pytest
 import zmq
 
+from vllm.config import FaultToleranceConfig, ParallelConfig
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.client_sentinel import ClientSentinel
 from vllm.v1.fault_tolerance.utils import FaultInfo
@@ -20,6 +21,20 @@ def mock_ft_addresses():
     addresses.engine_fault_socket_addr = "tcp://127.0.0.1:5557"
     addresses.fault_state_pub_socket_addr = "tcp://127.0.0.1:5558"
     return addresses
+
+
+@pytest.fixture
+def mock_parallel_config():
+    """Create mock ParallelConfig object"""
+    config = Mock(spec=ParallelConfig)
+
+    config.data_parallel_index = 0
+    config.data_parallel_size = 2
+    config.data_parallel_size_local = 2
+    config.local_engines_only = False
+
+    config.fault_tolerance_config = FaultToleranceConfig(engine_recovery_timeout_sec=10)
+    return config
 
 
 @pytest.fixture
