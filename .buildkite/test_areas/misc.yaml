@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: V1 Spec Decode
   timeout_in_minutes: 30
+  device: h200_18gb
   source_file_dependencies:
     - vllm/
     - tests/v1/spec_decode
@@ -19,6 +20,7 @@ steps:
 
 - label: V1 Sample + Logits
   timeout_in_minutes: 30
+  device: h200_18gb
   source_file_dependencies:
     - vllm/
     - tests/v1/sample
@@ -86,6 +88,7 @@ steps:
 
 - label: Regression
   timeout_in_minutes: 20
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -96,6 +99,7 @@ steps:
 
 - label: Examples
   timeout_in_minutes: 45
+  device: h200_18gb
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
@@ -142,6 +146,7 @@ steps:
 - label: Python-only Installation
   depends_on: ~
   timeout_in_minutes: 20
+  device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -150,6 +155,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker
   timeout_in_minutes: 50
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/detokenizer
