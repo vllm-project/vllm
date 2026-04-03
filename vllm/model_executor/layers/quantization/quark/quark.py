@@ -46,8 +46,8 @@ __all__ = ["QuarkLinearMethod"]
 logger = init_logger(__name__)
 
 # model_type values that use dynamic MXFP4 re-quantization for
-# OCP MX fp4 Quark checkpoints (DSA-MoE architecture family)
-_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "glm_moe_dsa"})
+# OCP MX fp4 Quark checkpoints
+_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3"})
 
 
 class QuarkConfig(QuantizationConfig):
