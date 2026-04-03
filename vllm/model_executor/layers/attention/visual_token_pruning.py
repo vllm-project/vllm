@@ -70,8 +70,7 @@ def prune_visual_tokens_with_merge(
 
     dominant_ratio = keep_ratio - merge_ratio
     if dominant_ratio <= 0:
-        return prune_visual_tokens_dominant_only(
-            embeddings, scores, pruning_rate)
+        return prune_visual_tokens_dominant_only(embeddings, scores, pruning_rate)
 
     anchor_num = max(1, int(N * merge_ratio))
     anchor_num = min(anchor_num, keep_total - 1)
@@ -89,19 +88,18 @@ def prune_visual_tokens_with_merge(
     # Uniformly sample anchors from contextual tokens
     step = max(1, contextual_indices.size(0) // anchor_num)
     anchor_pos_in_ctx = torch.arange(
-        0, contextual_indices.size(0), step,
-        device=embeddings.device)[:anchor_num]
+        0, contextual_indices.size(0), step, device=embeddings.device
+    )[:anchor_num]
     anchor_global_indices = contextual_indices[anchor_pos_in_ctx]
 
     is_anchor_in_ctx = torch.zeros(
-        contextual_indices.size(0), dtype=torch.bool,
-        device=embeddings.device)
+        contextual_indices.size(0), dtype=torch.bool, device=embeddings.device
+    )
     is_anchor_in_ctx[anchor_pos_in_ctx] = True
 
     # Cosine similarity between non-anchor contextual tokens and anchors
     ctx_embeds = embeddings[contextual_indices]
-    ctx_norm = ctx_embeds / ctx_embeds.norm(
-        dim=-1, keepdim=True).clamp(min=1e-8)
+    ctx_norm = ctx_embeds / ctx_embeds.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     anchor_norm = ctx_norm[anchor_pos_in_ctx]
     to_merge_norm = ctx_norm[~is_anchor_in_ctx]
 
@@ -109,15 +107,17 @@ def prune_visual_tokens_with_merge(
         similarity = torch.mm(to_merge_norm, anchor_norm.t())
         assignments = similarity.argmax(dim=1)
         assign_onehot = torch.zeros(
-            to_merge_norm.size(0), anchor_num,
-            dtype=embeddings.dtype, device=embeddings.device)
+            to_merge_norm.size(0),
+            anchor_num,
+            dtype=embeddings.dtype,
+            device=embeddings.device,
+        )
         assign_onehot.scatter_(1, assignments.unsqueeze(-1), 1)
         counts = assign_onehot.sum(dim=0).clamp(min=1).unsqueeze(-1)
 
         to_merge_embeds = ctx_embeds[~is_anchor_in_ctx]
         aggregated = (
-            assign_onehot.t().to(to_merge_embeds.dtype)
-            @ to_merge_embeds
+            assign_onehot.t().to(to_merge_embeds.dtype) @ to_merge_embeds
         ) / counts.to(to_merge_embeds.dtype)
         anchor_embeds = embeddings[anchor_global_indices] + aggregated
     else:

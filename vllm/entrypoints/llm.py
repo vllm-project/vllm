@@ -340,10 +340,8 @@ class LLM:
                 pruning_fields = {
                     "video_pruning_rate": multimodal_config.video_pruning_rate,
                     "image_pruning_rate": multimodal_config.image_pruning_rate,
-                    "extract_vit_attention_score":
-                        multimodal_config.extract_vit_attention_score,
-                    "vit_attention_score_layer_index":
-                        multimodal_config.vit_attention_score_layer_index,
+                    "extract_vit_attention_score": multimodal_config.extract_vit_attention_score,
+                    "vit_attention_score_layer_index": multimodal_config.vit_attention_score_layer_index,
                 }
                 for key, value in pruning_fields.items():
                     if key not in kwargs:

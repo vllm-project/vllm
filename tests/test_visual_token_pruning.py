@@ -10,10 +10,10 @@ from vllm.model_executor.layers.attention.visual_token_pruning import (
     prune_visual_tokens_with_merge,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def sample_embeddings():
@@ -39,8 +39,8 @@ def small_embeddings():
 # Tests for prune_visual_tokens_dominant_only
 # ===================================================================
 
-class TestDominantOnly:
 
+class TestDominantOnly:
     def test_no_pruning_rate_0(self, sample_embeddings):
         emb, scores = sample_embeddings
         pruned, indices = prune_visual_tokens_dominant_only(emb, scores, 0.0)
@@ -94,8 +94,8 @@ class TestDominantOnly:
 # Tests for prune_visual_tokens_with_merge
 # ===================================================================
 
-class TestWithMerge:
 
+class TestWithMerge:
     def test_no_pruning_rate_0(self, sample_embeddings):
         emb, scores = sample_embeddings
         pruned, indices = prune_visual_tokens_with_merge(emb, scores, 0.0)
@@ -108,7 +108,8 @@ class TestWithMerge:
         pruning_rate = 0.6
         merge_ratio = 0.1
         pruned, indices = prune_visual_tokens_with_merge(
-            emb, scores, pruning_rate, merge_ratio)
+            emb, scores, pruning_rate, merge_ratio
+        )
         keep_ratio = 1.0 - pruning_rate  # 0.4
         dominant_num = max(1, int(100 * (keep_ratio - merge_ratio)))  # 30
         anchor_num = max(1, int(100 * merge_ratio))  # 10
@@ -127,7 +128,8 @@ class TestWithMerge:
         emb, scores = sample_embeddings
         pruning_rate, merge_ratio = 0.6, 0.1
         pruned, indices = prune_visual_tokens_with_merge(
-            emb, scores, pruning_rate, merge_ratio)
+            emb, scores, pruning_rate, merge_ratio
+        )
 
         keep_ratio = 1.0 - pruning_rate  # 0.4
         dominant_num = int(100 * (keep_ratio - merge_ratio))
@@ -145,7 +147,8 @@ class TestWithMerge:
         emb, scores = sample_embeddings
         pruning_rate, merge_ratio = 0.6, 0.1
         pruned, indices = prune_visual_tokens_with_merge(
-            emb, scores, pruning_rate, merge_ratio)
+            emb, scores, pruning_rate, merge_ratio
+        )
 
         keep_ratio = 1.0 - pruning_rate  # 0.4
         dominant_num = int(100 * (keep_ratio - merge_ratio))
@@ -166,7 +169,8 @@ class TestWithMerge:
         emb, scores = sample_embeddings
         # pruning_rate=0.95 -> keep_ratio=0.05, which <= merge_ratio=0.1
         pruned, indices = prune_visual_tokens_with_merge(
-            emb, scores, pruning_rate=0.95, merge_ratio=0.1)
+            emb, scores, pruning_rate=0.95, merge_ratio=0.1
+        )
         # Fallback: dominant_only with pruning_rate=0.95 -> keep 5 tokens
         assert pruned.shape[0] == max(1, int(100 * 0.05))
 
@@ -174,7 +178,8 @@ class TestWithMerge:
         emb, scores = small_embeddings
         # pruning_rate=0.5 -> keep_ratio=0.5
         pruned, indices = prune_visual_tokens_with_merge(
-            emb, scores, pruning_rate=0.5, merge_ratio=0.1)
+            emb, scores, pruning_rate=0.5, merge_ratio=0.1
+        )
         # dominant = int(10*0.4)=4, anchor = int(10*0.1)=1 -> 5 total
         assert pruned.shape[0] == 5
         assert pruned.shape[1] == emb.shape[1]
@@ -183,7 +188,8 @@ class TestWithMerge:
         emb, scores = sample_embeddings
         # pruning_rate=0.6 -> keep_ratio=0.4
         pruned_merge, idx_merge = prune_visual_tokens_with_merge(
-            emb, scores, pruning_rate=0.6, merge_ratio=0.0)
+            emb, scores, pruning_rate=0.6, merge_ratio=0.0
+        )
         # merge_ratio=0.0 -> dominant_ratio=0.4, anchor_num=0
         # But max(1, int(100*0.0))=1, so still 1 anchor
         # This is fine - just verify it doesn't crash
@@ -194,44 +200,49 @@ class TestWithMerge:
 # Tests for MultiModalConfig auto-enable
 # ===================================================================
 
-class TestMultiModalConfigAutoEnable:
 
+class TestMultiModalConfigAutoEnable:
     def test_auto_enable_extract_score(self):
         from vllm.config.multimodal import MultiModalConfig
+
         # image_pruning_rate=0.6 means prune 60% of tokens
         cfg = MultiModalConfig(image_pruning_rate=0.6)
         assert cfg.extract_vit_attention_score is True
 
     def test_no_auto_enable_when_rate_none(self):
         from vllm.config.multimodal import MultiModalConfig
+
         cfg = MultiModalConfig(image_pruning_rate=None)
         assert cfg.extract_vit_attention_score is False
 
     def test_no_auto_enable_when_rate_0(self):
         from vllm.config.multimodal import MultiModalConfig
+
         # image_pruning_rate=0.0 means no pruning
         cfg = MultiModalConfig(image_pruning_rate=0.0)
         assert cfg.extract_vit_attention_score is False
 
     def test_already_enabled_not_overridden(self):
         from vllm.config.multimodal import MultiModalConfig
-        cfg = MultiModalConfig(
-            image_pruning_rate=0.6,
-            extract_vit_attention_score=True)
+
+        cfg = MultiModalConfig(image_pruning_rate=0.6, extract_vit_attention_score=True)
         assert cfg.extract_vit_attention_score is True
 
     def test_is_multimodal_pruning_enabled_image(self):
         from vllm.config.multimodal import MultiModalConfig
+
         cfg = MultiModalConfig(image_pruning_rate=0.6)
         assert cfg.is_multimodal_pruning_enabled() is True
 
     def test_is_multimodal_pruning_enabled_none(self):
         from vllm.config.multimodal import MultiModalConfig
+
         cfg = MultiModalConfig()
         assert cfg.is_multimodal_pruning_enabled() is False
 
     def test_is_multimodal_pruning_enabled_video(self):
         from vllm.config.multimodal import MultiModalConfig
+
         cfg = MultiModalConfig(video_pruning_rate=0.5)
         assert cfg.is_multimodal_pruning_enabled() is True
 
@@ -240,16 +251,14 @@ class TestMultiModalConfigAutoEnable:
 # GPU-based tests (only run when CUDA available)
 # ===================================================================
 
-@pytest.mark.skipif(not torch.cuda.is_available(),
-                    reason="Requires CUDA")
-class TestPruningOnGPU:
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+class TestPruningOnGPU:
     def test_dominant_only_cuda(self):
         emb = torch.randn(100, 64, device="cuda")
         scores = torch.randn(100, device="cuda")
         # pruning_rate=0.5 -> keep 50 tokens
-        pruned, indices = prune_visual_tokens_dominant_only(
-            emb, scores, 0.5)
+        pruned, indices = prune_visual_tokens_dominant_only(emb, scores, 0.5)
         assert pruned.device.type == "cuda"
         assert pruned.shape[0] == 50
 
@@ -257,8 +266,7 @@ class TestPruningOnGPU:
         emb = torch.randn(100, 64, device="cuda")
         scores = torch.randn(100, device="cuda")
         # pruning_rate=0.6 -> keep_ratio=0.4, merge_ratio=0.1
-        pruned, indices = prune_visual_tokens_with_merge(
-            emb, scores, 0.6, 0.1)
+        pruned, indices = prune_visual_tokens_with_merge(emb, scores, 0.6, 0.1)
         assert pruned.device.type == "cuda"
         expected = int(100 * 0.3) + int(100 * 0.1)
         assert pruned.shape[0] == expected

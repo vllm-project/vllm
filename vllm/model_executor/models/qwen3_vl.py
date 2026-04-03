@@ -50,14 +50,16 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig, VideoDummyOptions
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
+)
+from vllm.model_executor.layers.attention.visual_token_pruning import (
+    prune_visual_tokens_dominant_only,
 )
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
@@ -70,9 +72,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.layers.attention.visual_token_pruning import (
-    prune_visual_tokens_dominant_only,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
     compute_mrope_for_media,
@@ -555,9 +554,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 else -2
             )
             self.vit_attention_score_layer_index = (
-                layer_index
-                if layer_index >= 0
-                else vision_config.depth + layer_index
+                layer_index if layer_index >= 0 else vision_config.depth + layer_index
             )
 
         self.num_position_embeddings = vision_config.num_position_embeddings
@@ -859,8 +856,7 @@ class Qwen3_VisionTransformer(nn.Module):
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
 
         if attention_score is not None:
-            score = attention_score.view(
-                -1, self.spatial_merge_unit).mean(dim=1)
+            score = attention_score.view(-1, self.spatial_merge_unit).mean(dim=1)
             return hidden_states, score
         return hidden_states
 
@@ -2016,8 +2012,7 @@ class Qwen3VLForConditionalGeneration(
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
-    ) -> tuple[tuple[torch.Tensor, ...],
-               tuple[torch.Tensor, ...] | None]:
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...] | None]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
         attention_score = None
@@ -2033,7 +2028,9 @@ class Qwen3VLForConditionalGeneration(
                 )
                 if need_attention_score:
                     embeds, scores = run_dp_sharded_mrope_vision_model(
-                        self.visual, pixel_values, grid_thw.tolist(),
+                        self.visual,
+                        pixel_values,
+                        grid_thw.tolist(),
                         rope_type="rope_3d",
                         return_aux=True,
                     )
@@ -2041,7 +2038,9 @@ class Qwen3VLForConditionalGeneration(
                         return embeds, None
                     return embeds, scores
                 embeds = run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(),
+                    self.visual,
+                    pixel_values,
+                    grid_thw.tolist(),
                     rope_type="rope_3d",
                 )
                 return embeds, None
@@ -2056,8 +2055,7 @@ class Qwen3VLForConditionalGeneration(
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         embeds_split = image_embeds.split(sizes)
         scores_split = (
-            attention_score.split(sizes)
-            if attention_score is not None else None
+            attention_score.split(sizes) if attention_score is not None else None
         )
         return embeds_split, scores_split
 
@@ -2079,8 +2077,7 @@ class Qwen3VLForConditionalGeneration(
                     self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
                 )
             else:
-                video_output = self.visual(
-                    pixel_values_videos, grid_thw=grid_thw)
+                video_output = self.visual(pixel_values_videos, grid_thw=grid_thw)
                 if isinstance(video_output, tuple):
                     video_embeds, _ = video_output
                 else:
@@ -2143,13 +2140,11 @@ class Qwen3VLForConditionalGeneration(
         grid_thw = image_input["image_grid_thw"]
         grid_thw_list = grid_thw.tolist()
         result = []
-        for emb, score, size in zip(
-            image_embeds_split, scores_split, grid_thw_list
-        ):
+        for emb, score, size in zip(image_embeds_split, scores_split, grid_thw_list):
             pruned_emb, keep_indices = prune_visual_tokens_dominant_only(
-                emb, score, self.image_pruning_rate)
-            positions = compute_mrope_for_media(
-                size, merge_size).to(emb.device)
+                emb, score, self.image_pruning_rate
+            )
+            positions = compute_mrope_for_media(size, merge_size).to(emb.device)
             positions = positions[keep_indices]
             positions = torch.cat(
                 [positions, torch.zeros_like(positions[:, 0:1])],
@@ -2553,8 +2548,7 @@ class Qwen3VLForConditionalGeneration(
             elif actual_num_tokens < expected_tokens_per_frame:
                 # Pruned image: create truncated grid positions as placeholders
                 # (will be corrected by recompute_mrope_positions)
-                full_grid = np.indices((1, llm_grid_h, llm_grid_w)).reshape(
-                    3, -1)
+                full_grid = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
                 grid_indices = full_grid[:, :actual_num_tokens]
                 llm_pos_ids_list.append(grid_indices + text_len + st_idx)
             else:
@@ -2675,16 +2669,19 @@ class Qwen3VLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                embeds_split, scores_split = self._process_image_input(
-                    multimodal_input)
-                if (self.image_pruning_rate is not None
-                        and self.image_pruning_rate > 0.0
-                        and scores_split is not None):
+                embeds_split, scores_split = self._process_image_input(multimodal_input)
+                if (
+                    self.image_pruning_rate is not None
+                    and self.image_pruning_rate > 0.0
+                    and scores_split is not None
+                ):
                     embeds_split = self._postprocess_image_embeds_attn_prune(
-                        embeds_split, scores_split, multimodal_input)
+                        embeds_split, scores_split, multimodal_input
+                    )
                 else:
                     embeds_split = self._postprocess_image_embeds_evs(
-                        embeds_split, multimodal_input)
+                        embeds_split, multimodal_input
+                    )
                 multimodal_embeddings.extend(embeds_split)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
