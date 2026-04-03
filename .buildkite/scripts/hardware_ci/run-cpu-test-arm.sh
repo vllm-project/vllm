@@ -51,7 +51,8 @@ function cpu_tests() {
     set -e
     pytest -x -v -s tests/kernels/test_onednn.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
-    pytest -x -v -s tests/kernels/moe/test_moe.py -k test_cpu_fused_moe_basic"
+    pytest -x -v -s tests/kernels/moe/test_moe.py -k test_cpu_fused_moe_basic
+    pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py"
 
   # basic online serving
   docker exec cpu-test bash -c '
