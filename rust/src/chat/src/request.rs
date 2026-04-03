@@ -311,13 +311,6 @@ impl ChatRequest {
             .then(|| self.tools.iter().map(ChatTool::to_template_value).collect())
     }
 
-    /// Return the list of tools in the shape that can be passed to the `tool-parser` crate, based
-    /// on the tool choice and tool list.
-    pub(crate) fn parser_tools(&self) -> Option<Vec<OpenAiTool>> {
-        self.tool_parsing_enabled()
-            .then(|| self.tools.iter().map(ChatTool::to_openai_tool).collect())
-    }
-
     /// Return true if this request should enable tool parsing based on the tool choice and tool
     /// list.
     pub(crate) fn tool_parsing_enabled(&self) -> bool {

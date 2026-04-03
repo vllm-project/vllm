@@ -12,10 +12,11 @@ use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent
 
 use self::reasoning::reasoning_event_stream;
 use self::tool::tool_event_stream;
+use crate::FinishReason;
 use crate::error::{Error, Result};
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
 use crate::output::structured::structured_chat_event_stream;
-use crate::{ChatRequest, FinishReason};
+use crate::request::{ChatTool, ChatToolChoice};
 
 /// Internal assistant event before final assembly.
 ///
@@ -113,7 +114,9 @@ pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'st
 /// 2. [`tool_event_stream`] — tool-call parsing
 /// 3. [`structured_chat_event_stream`] — final block assembly
 pub(crate) fn output_stream(
-    request: ChatRequest,
+    intermediate: bool,
+    tools: Vec<ChatTool>,
+    tool_choice: ChatToolChoice,
     decoded: impl DecodedTextEventStream,
     model_id: Option<&str>,
     reasoning_parser_factory: &ReasoningParserFactory,
@@ -121,8 +124,9 @@ pub(crate) fn output_stream(
     reasoning_parser_name: Option<&str>,
     tool_call_parser_name: Option<&str>,
 ) -> Result<impl ChatEventStream> {
-    let tool_parser = if request.tool_parsing_enabled() {
-        if let Some(name) = tool_call_parser_name {
+    let tool_parsing_enabled = matches!(tool_choice, ChatToolChoice::Auto) && !tools.is_empty();
+    let (tool_parser, parser_tools) = if tool_parsing_enabled {
+        let parser = if let Some(name) = tool_call_parser_name {
             // Explicit parser name takes precedence.
             tool_parser_factory
                 .registry()
@@ -130,7 +134,6 @@ pub(crate) fn output_stream(
                 .ok_or_else(|| Error::ToolParserUnavailableByName {
                     name: name.to_string(),
                 })?
-                .into()
         } else if let Some(model_id) = model_id {
             tool_parser_factory
                 .registry()
@@ -138,12 +141,13 @@ pub(crate) fn output_stream(
                 .ok_or_else(|| Error::ToolParserUnavailableForModel {
                     model_id: model_id.to_string(),
                 })?
-                .into()
         } else {
             return Err(Error::ToolParserRequiresModelId);
-        }
+        };
+        let parser_tools = tools.iter().map(ChatTool::to_openai_tool).collect();
+        (Some(parser), parser_tools)
     } else {
-        None
+        (None, Vec::new())
     };
     let reasoning_parser = if let Some(name) = reasoning_parser_name {
         // Explicit parser name takes precedence.
@@ -163,6 +167,6 @@ pub(crate) fn output_stream(
         })
     };
     let reasoning = reasoning_event_stream(decoded, reasoning_parser);
-    let tool = tool_event_stream(reasoning, request, tool_parser);
+    let tool = tool_event_stream(reasoning, intermediate, parser_tools, tool_parser);
     Ok(structured_chat_event_stream(tool))
 }

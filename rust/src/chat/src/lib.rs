@@ -111,16 +111,18 @@ impl ChatLlm {
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
             prompt: Prompt::Text(prompt),
-            sampling_params: request.sampling_params.clone(),
-            decode_options: request.decode_options.clone(),
+            sampling_params: request.sampling_params,
+            decode_options: request.decode_options,
             intermediate: request.intermediate,
             priority: request.priority,
-            cache_salt: request.cache_salt.clone(),
+            cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from);
         let structured_stream = output::output_stream(
-            request.clone(),
+            request.intermediate,
+            request.tools,
+            request.tool_choice,
             decoded_stream,
             self.text.model_id(),
             &self.reasoning_parser_factory,
@@ -130,7 +132,7 @@ impl ChatLlm {
         )?;
 
         Ok(ChatEventStream::new(
-            request.request_id.clone(),
+            request.request_id,
             structured_stream.boxed(),
         ))
     }

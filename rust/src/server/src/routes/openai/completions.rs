@@ -36,24 +36,24 @@ pub async fn completions(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
-    let prepared = match prepare_completion_request(&body, &state.model_id) {
+    let stream = body.stream;
+    let logprobs = body.logprobs;
+
+    let prepared = match prepare_completion_request(body, &state.model_id) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
 
-    let response_id = prepared.response_id.clone();
-    let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
-    let echo = prepared.echo.clone();
     let include_prompt_logprobs = prepared
         .text_request
         .sampling_params
         .prompt_logprobs
         .is_some();
     info!(
-        request_id = %response_id,
-        model = %response_model,
-        stream = body.stream,
+        request_id = %prepared.response_id,
+        model = %prepared.response_model,
+        stream,
         "completion"
     );
 
@@ -68,15 +68,15 @@ pub async fn completions(
         }
     };
 
-    if body.stream {
+    if stream {
         let chunk_stream = completion_chunk_stream(
             text_stream,
-            response_id,
-            response_model,
+            prepared.response_id,
+            prepared.response_model,
             created,
             prepared.include_usage,
-            echo,
-            body.logprobs,
+            prepared.echo,
+            logprobs,
         );
         let sse_stream = completion_sse_stream(chunk_stream);
 
@@ -86,11 +86,11 @@ pub async fn completions(
     } else {
         let response = match collect_completion(
             text_stream,
-            response_id,
-            response_model,
+            prepared.response_id,
+            prepared.response_model,
             created,
-            echo,
-            body.logprobs,
+            prepared.echo,
+            logprobs,
             include_prompt_logprobs,
         )
         .await

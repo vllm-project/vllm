@@ -18,7 +18,6 @@ use uuid::Uuid;
 use super::{AssistantEvent, ContentEvent, ContentEventStream};
 use crate::error::Error;
 use crate::event::{AssistantBlockKind, AssistantToolCall};
-use crate::request::ChatRequest;
 
 /// One currently open tool call being assembled from streaming parser output.
 struct OpenToolCallState {
@@ -44,11 +43,11 @@ struct ToolState {
 
 impl ToolState {
     /// Create one fresh tool-parsing state for a new streamed response.
-    fn new(request: &ChatRequest, parser: Box<dyn ToolParser>) -> Self {
+    fn new(tools: Vec<OpenAiTool>, parser: Box<dyn ToolParser>) -> Self {
         Self {
             parser,
             parser_failed: false,
-            tools: request.parser_tools().unwrap_or_default(),
+            tools,
             open_calls: BTreeMap::new(),
         }
     }
@@ -288,7 +287,8 @@ async fn final_only_tool_event_stream(
 #[try_stream(ok = AssistantEvent, error = Error)]
 pub(crate) async fn tool_event_stream(
     stream: impl ContentEventStream,
-    request: ChatRequest,
+    intermediate: bool,
+    parser_tools: Vec<OpenAiTool>,
     parser: Option<Box<dyn ToolParser>>,
 ) {
     // Without a parser, pass through the input stream unchanged.
@@ -301,7 +301,7 @@ pub(crate) async fn tool_event_stream(
     };
 
     // `FinalOnly` needs one-shot parsing over the final text.
-    if !request.intermediate {
+    if !intermediate {
         let final_stream = final_only_tool_event_stream(stream, parser);
         pin_mut!(final_stream);
         while let Some(event) = final_stream.next().await.transpose()? {
@@ -311,7 +311,7 @@ pub(crate) async fn tool_event_stream(
     }
 
     pin_mut!(stream);
-    let mut state = ToolState::new(&request, parser);
+    let mut state = ToolState::new(parser_tools, parser);
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
@@ -376,11 +376,7 @@ mod tests {
     use super::super::structured::structured_chat_event_stream;
     use super::super::{AssistantEvent, ContentEvent};
     use super::tool_event_stream;
-    use crate::SamplingParams;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
-    use crate::request::{
-        ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-    };
     use crate::stream::ChatEventStream;
 
     struct FailingParser {
@@ -415,13 +411,10 @@ mod tests {
         }
     }
 
-    fn tool_request(request_id: &str) -> ChatRequest {
-        ChatRequest {
-            request_id: request_id.to_string(),
-            messages: vec![ChatMessage::text(ChatRole::User, "Call the tool.")],
-            sampling_params: SamplingParams::default(),
-            chat_options: ChatOptions::default(),
-            tools: vec![ChatTool {
+    fn tool_parser_tools() -> Vec<openai_protocol::common::Tool> {
+        vec![openai_protocol::common::Tool {
+            tool_type: "function".to_string(),
+            function: openai_protocol::common::Function {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),
                 parameters: serde_json::json!({
@@ -429,15 +422,8 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: None,
-            }],
-            tool_choice: ChatToolChoice::Auto,
-            decode_options: Default::default(),
-            intermediate: true,
-            priority: 0,
-            documents: None,
-            cache_salt: None,
-            add_special_tokens: false,
-        }
+            },
+        }]
     }
 
     #[tokio::test]
@@ -465,7 +451,8 @@ mod tests {
 
         let collected = tool_event_stream(
             events,
-            tool_request("req_fallback"),
+            true,
+            tool_parser_tools(),
             Some(Box::new(FailingParser { fail_next: true })),
         )
         .collect::<Vec<_>>()
@@ -538,12 +525,10 @@ mod tests {
                 kv_transfer_params: None,
             }),
         ]);
-        let mut request = tool_request("req_final_only_logprobs");
-        request.intermediate = false;
-
         let events = tool_event_stream(
             events,
-            request,
+            false,
+            tool_parser_tools(),
             Some(Box::new(FailingParser { fail_next: false })),
         )
         .collect::<Vec<_>>()

@@ -41,18 +41,18 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
-    let prepared = match prepare_chat_request(&body, &state.model_id) {
+    let stream = body.stream;
+
+    let prepared = match prepare_chat_request(body, &state.model_id) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
 
-    let response_id = prepared.response_id.clone();
-    let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
     info!(
-        request_id = %response_id,
-        model = %response_model,
-        stream = body.stream,
+        request_id = %prepared.response_id,
+        model = %prepared.response_model,
+        stream,
         "chat completion"
     );
 
@@ -67,11 +67,11 @@ pub async fn chat_completions(
         }
     };
 
-    if body.stream {
+    if stream {
         let chunk_stream = chat_completion_chunk_stream(
             chat_stream,
-            response_id,
-            response_model,
+            prepared.response_id,
+            prepared.response_model,
             created,
             prepared.include_usage,
             prepared.requested_logprobs,
@@ -85,8 +85,8 @@ pub async fn chat_completions(
     } else {
         let response = match collect_chat_completion(
             chat_stream,
-            response_id,
-            response_model,
+            prepared.response_id,
+            prepared.response_model,
             created,
             prepared.requested_logprobs,
             prepared.include_prompt_logprobs,

@@ -2072,7 +2072,7 @@ async fn chat_harness_streams_text_events() {
 async fn prepared_openai_request_streams_text_events() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
     let prepared = prepare_chat_request(
-        &serde_json::from_value(json!({
+        serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "stream": true,
             "messages": [{"role": "user", "content": "hello"}]
