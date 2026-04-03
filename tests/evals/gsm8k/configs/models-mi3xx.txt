@@ -1,0 +1,4 @@
+DeepSeek-R1-TP_MI325.yaml
+DeepSeek-R1-DP_MI325.yaml
+DeepSeek-V3.2-TP_MI325.yaml
+DeepSeek-V3.2-DP_MI325.yaml

@@ -42,6 +42,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.utils import split_prefill_chunks
 from vllm.v1.attention.ops import flashmla
 
@@ -178,6 +179,7 @@ def _quantize_dequantize_fp8_ds_mla(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
     dist_init,
@@ -187,9 +189,21 @@ def test_sparse_backend_decode_correctness(
     tensor_parallel_size,
     block_size,
     workspace_init,
+    q_scale: float,
+    k_scale: float,
 ):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
+
+    if (
+        backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype.startswith("fp8")
+        and kv_cache_dtype != "fp8_ds_mla"
+    ):
+        pytest.skip(
+            "FlashMLA Sparse Attention backend fp8 only supports "
+            "fp8_ds_mla kv-cache dtype"
+        )
 
     supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
     if block_size not in supported_block_sizes:
@@ -322,7 +336,7 @@ def test_sparse_backend_decode_correctness(
     kv_c_contexts, k_pe_contexts = [], []
     reference_outputs = []
 
-    kv_cache_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache_scale = torch.tensor(k_scale, dtype=torch.float32, device=device)
     global_token_idx = 0
 
     for i in range(batch_spec.batch_size):
@@ -419,7 +433,7 @@ def test_sparse_backend_decode_correctness(
         num_blocks=vllm_config.cache_config.num_gpu_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=False,
-        kv_cache_dtype=kv_cache_dtype if use_fp8_ds_mla_quantization else "auto",
+        kv_cache_dtype=kv_cache_dtype,
         scale=kv_cache_scale,
     )
 
@@ -480,6 +494,8 @@ def test_sparse_backend_decode_correctness(
             device=device,
             W_UK=W_UK,
             W_UV=W_UV,
+            q_scale=q_scale,
+            k_scale=k_scale,
         )
 
     out_buffer = torch.empty(
@@ -503,7 +519,9 @@ def test_sparse_backend_decode_correctness(
     # FP8 quantization introduces some error, but should be within reasonable bounds
     # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
     if kv_cache_dtype.startswith("fp8"):
-        torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.05, atol=0.05)
+        torch.testing.assert_close(
+            backend_output, sdpa_reference, rtol=0.065, atol=0.05
+        )
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
 
@@ -696,6 +714,81 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 )
 def test_split_prefill_chunks(seq_lens, max_buf, expected):
     out = split_prefill_chunks(seq_lens, max_buf)
+    assert out == expected
+
+
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,workspace_size,max_logits_bytes,expected",
+    [
+        # Logits constraint triggers split (M*N exceeds budget)
+        # req0: M=10, N=100 -> 1000 elems (4000 bytes) - fits in 5000
+        # req1: adding M=10, N=100 -> new_M=20, new_N=200 -> 4000 elems > 1250
+        (
+            torch.tensor([100, 100, 100]),
+            torch.tensor([10, 10, 10]),
+            1000,  # workspace allows all
+            5000,  # 1250 float32 elems -> forces split
+            [
+                (slice(0, 1), slice(0, 10)),
+                (slice(1, 2), slice(0, 10)),
+                (slice(2, 3), slice(0, 10)),
+            ],
+        ),
+        # Both constraints satisfied - all fit in one chunk
+        (
+            torch.tensor([10, 10, 10]),
+            torch.tensor([5, 5, 5]),
+            100,
+            10000,  # 2500 elems, M*N = 15*30 = 450 < 2500
+            [(slice(0, 3), slice(0, 15))],
+        ),
+        # Workspace constraint triggers first
+        (
+            torch.tensor([50, 50, 50]),
+            torch.tensor([1, 1, 1]),
+            50,  # workspace only fits one at a time
+            1000000,  # logits budget is huge
+            [
+                (slice(0, 1), slice(0, 1)),
+                (slice(1, 2), slice(0, 1)),
+                (slice(2, 3), slice(0, 1)),
+            ],
+        ),
+        # Greedy filling: first two fit, third doesn't
+        # req0: M=5, N=10 -> 50 elems
+        # req0+1: M=10, N=20 -> 200 elems <= 250
+        # req0+1+2: M=15, N=30 -> 450 elems > 250
+        (
+            torch.tensor([10, 10, 10]),
+            torch.tensor([5, 5, 5]),
+            100,
+            1000,  # 250 elems
+            [(slice(0, 2), slice(0, 10)), (slice(2, 3), slice(0, 5))],
+        ),
+    ],
+)
+def test_split_indexer_prefill_chunks(
+    seq_lens, query_lens, workspace_size, max_logits_bytes, expected
+):
+    out = split_indexer_prefill_chunks(
+        seq_lens,
+        query_lens,
+        workspace_size,
+        max_logits_bytes,
+    )
+    assert out == expected
+
+
+def test_split_indexer_prefill_chunks_single_request_overflow():
+    """Test that single request exceeding budget is sub-chunked on query dim."""
+    seq_lens = torch.tensor([1000, 50])
+    query_lens = torch.tensor([100, 5])
+
+    out = split_indexer_prefill_chunks(seq_lens, query_lens, 2000, 1000)
+    # max_logits_elems = 250, N=1000 -> max_q = 1 -> 100 query sub-chunks
+    expected = [(slice(0, 1), slice(i, i + 1)) for i in range(100)]
+    # req1: M=5, N=50 -> 250 elems fits budget
+    expected.append((slice(1, 2), slice(0, 5)))
     assert out == expected
 
 

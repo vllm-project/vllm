@@ -89,25 +89,33 @@ def test_models(example_prompts, model_name) -> None:
 
 EAGER = [True, False]
 
-
-if not current_platform.has_device_capability(100):
-    TEST_NVFP4_BACKENDS = ["emulation"]
-else:
-    TEST_NVFP4_BACKENDS = [
-        "emulation",
-        "flashinfer-cudnn",
-        "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
-        "flashinfer-cutlass",
-    ]
+SM_100_NVFP4_BACKENDS = [
+    "flashinfer-cudnn",
+    "flashinfer-trtllm",
+    "flashinfer-cutlass",
+]
 
 
 @pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
 @pytest.mark.parametrize("eager", EAGER)
 @pytest.mark.parametrize(
     "backend",
-    TEST_NVFP4_BACKENDS,
+    [
+        "emulation",
+        "flashinfer-cudnn",
+        "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
+        "flashinfer-cutlass",
+    ],
 )
 def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
+    if (
+        not current_platform.has_device_capability(100)
+        and backend in SM_100_NVFP4_BACKENDS
+    ):
+        pytest.skip(
+            f"The backend {backend} is not supported with current_platform.has_device_capability(100) == False"
+        )
+
     monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
     with vllm_runner(model, enforce_eager=eager) as llm:
         output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
@@ -124,18 +132,8 @@ def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
 )
 @pytest.mark.parametrize("eager", EAGER)
 @pytest.mark.parametrize("backend", ["emulation"])
-@pytest.mark.parametrize("emulation_dequantize_weights", [True, False])
-def test_nvfp4_moe(
-    vllm_runner, model, eager, backend, emulation_dequantize_weights, monkeypatch
-):
+def test_nvfp4_moe(vllm_runner, model, eager, backend, monkeypatch):
     monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
-    hf_overrides = {
-        "quantization_config": {
-            "emulation_dequantize_weights": emulation_dequantize_weights
-        }
-    }
-    with vllm_runner(
-        model, enforce_eager=eager, hf_overrides=hf_overrides, moe_backend="emulation"
-    ) as llm:
+    with vllm_runner(model, enforce_eager=eager, moe_backend="emulation") as llm:
         output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
     assert output[0][1] == "1 2 3 4 5 6"

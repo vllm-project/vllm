@@ -15,7 +15,7 @@ from transformers import (
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType
+from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.linear import (
@@ -27,7 +27,6 @@ from vllm.model_executor.models.whisper_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -41,7 +40,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.fireredasr2_processor import (
+from vllm.transformers_utils.processors.fireredasr2 import (
     FireRedASR2FeatureExtractor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -107,7 +106,7 @@ class Conv2dSubsampling(nn.Module):
         )
 
         self.subsampling = 4
-        left_context = right_context = 3  # both exclude currect frame
+        left_context = right_context = 3  # both exclude current frame
         self.context = left_context + 1 + right_context  # 7
 
     def forward(
@@ -754,12 +753,17 @@ class FireRedASR2ForConditionalGeneration(
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 
-        self.model = FireRedASR2Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
-        logit_scale = getattr(config, "logit_scale", 1.0)
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=Qwen2ForCausalLM,
+            tower_targets={"audio": (FireRedASR2Encoder, FireRedASR2Adapter)},
+        ):
+            self.model = FireRedASR2Model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
 
+        logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def forward(
@@ -793,7 +797,6 @@ class FireRedASR2ForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self.model.decoder.embed_input_ids(input_ids)
 

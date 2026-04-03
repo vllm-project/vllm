@@ -216,20 +216,10 @@ WIKITEXT_ACCURACY_CONFIGS = [
 @pytest.mark.parametrize(
     "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
 )
-@pytest.mark.parametrize(
-    "emulation_dequantize_weights",
-    [
-        pytest.param(val, id=f"emulation_dequantize_weights:{val}")
-        for val in [True, False]
-    ],
-)
-def test_ocp_mx_wikitext_correctness(
-    config: AccuracyTestConfig, tp_size: int, emulation_dequantize_weights: bool
-):
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(
-            f"This test requires >={tp_size} gpus, got only {torch.cuda.device_count()}"
-        )
+def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
 
     task = "wikitext"
     rtol = 0.1
@@ -239,14 +229,7 @@ def test_ocp_mx_wikitext_correctness(
         model="vllm",
         model_args=config.get_model_args(
             tp_size=tp_size,
-            kwargs={
-                "cudagraph_capture_sizes": [16],
-                "hf_overrides": {
-                    "quantization_config": {
-                        "emulation_dequantize_weights": emulation_dequantize_weights
-                    }
-                },
-            },
+            kwargs={"cudagraph_capture_sizes": [16]},
         ),
         tasks=task,
         batch_size=64,
@@ -266,10 +249,9 @@ def test_ocp_mx_wikitext_correctness(
 )
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_nvfp4_wikitext_correctness(tp_size: int):
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(
-            f"This test requires >={tp_size} gpus, got only {torch.cuda.device_count()}"
-        )
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
 
     # model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
     # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
@@ -321,10 +303,9 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
     reason="Read access to huggingface.co/amd is required for this test.",
 )
 def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
-    if torch.cuda.device_count() < 8:
-        pytest.skip(
-            f"This test requires >=8 gpus, got only {torch.cuda.device_count()}"
-        )
+    device_count = torch.accelerator.device_count()
+    if device_count < 8:
+        pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
 
     task = "gsm8k"
     rtol = 0.03

@@ -62,6 +62,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -88,7 +89,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         transform_config: dict[str, Any] | None = None,
         total_num_heads: int | None = None,
         total_num_kv_heads: int | None = None,
-        emulation_dequantize_weights: bool | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -101,7 +101,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
-        self.emulation_dequantize_weights = emulation_dequantize_weights
 
         if transform_config:
             self.transform_config = TransformConfig.model_validate(transform_config)
@@ -181,6 +180,15 @@ class CompressedTensorsConfig(QuantizationConfig):
             else:
                 return quant_method
 
+        if isinstance(layer, ParallelLMHead):
+            try:
+                quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            except ValueError:
+                quant_scheme = None
+            if quant_scheme is not None:
+                layer.scheme = quant_scheme
+                return CompressedTensorsLinearMethod(self)
+
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
@@ -193,7 +201,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
-        targetting 'Linear' needs to also match
+        targeting 'Linear' needs to also match
         FusedMoE modules.
         """
         if (
@@ -241,7 +249,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             kv_cache_scheme=config.get("kv_cache_scheme"),
             total_num_heads=config.get("total_num_heads"),
             total_num_kv_heads=config.get("total_num_kv_heads"),
-            emulation_dequantize_weights=config.get("emulation_dequantize_weights"),
         )
 
     @classmethod
@@ -627,9 +634,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
                 input_quant
             ):
-                return CompressedTensorsW4A4Fp4(
-                    emulation_dequantize_weights=self.emulation_dequantize_weights
-                )
+                return CompressedTensorsW4A4Fp4()
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(

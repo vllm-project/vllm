@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
@@ -27,9 +30,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    dequantize_to_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -91,7 +91,7 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (  # noqa: E501
             FlashInferCuteDSLExperts,
         )
 
@@ -111,7 +111,7 @@ def backend_to_kernel_cls(
 
         return [MarlinExperts]
     elif backend == NvFp4MoeBackend.EMULATION:
-        from vllm.model_executor.layers.fused_moe.quantization_emulation_moe import (
+        from vllm.model_executor.layers.fused_moe.nvfp4_emulation_moe import (
             Nvfp4QuantizationEmulationTritonExperts,
         )
 
@@ -288,7 +288,6 @@ def convert_to_nvfp4_moe_kernel_format(
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor | None,
     is_act_and_mul: bool,
-    emulation_dequantize_weights: bool | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -299,11 +298,6 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
     torch.Tensor,
 ]:
-    """
-    Args:
-        emulation_dequantize_weights: If True and backend is EMULATION,
-            dequantize weights ahead of time
-    """
     if (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
@@ -364,51 +358,16 @@ def convert_to_nvfp4_moe_kernel_format(
                 " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
             )
 
-        # moe_kernel_quantize_input -> ref_nvfp4_quant_dequant use the inverse scale.
-        # Similar to model_executor/layers/quantization/utils/flashinfer_fp4_moe.py.
-        # NOTE: at this point `a13_scale` and `a2_scale` are the inverses such that:
-        # `x_fp8_range = x * 1 / global_scale`, and `global_scale` is small.
-        # We take the max following e.g. flashinfer_fp4_moe.py, which results in likely
-        # overflow of the fp8 range, and scale clamping!
-        # It may be better to use min here.
-        a13_scale = a13_scale.max().to(torch.float32)
-        a2_scale = a2_scale.max().to(torch.float32)
-
-        a13_scale = 1.0 / a13_scale
-        a2_scale = 1.0 / a2_scale
-
-        if emulation_dequantize_weights:
-            # For emulation backend, optionally dequantize weights ahead of time
-            target_dtype = torch.get_default_dtype()
-
-            # Dequantize w13 weights
-            w13_dequantized = dequantize_to_dtype(
-                tensor_fp4=w13,
-                tensor_sf=w13_scale,
-                global_scale=w13_scale_2,
-                dtype=target_dtype,
-                device=w13.device,
-                block_size=16,
-                swizzle=False,
-            )
-            w13 = w13_dequantized
-
-            # Dequantize w2 weights
-            w2_dequantized = dequantize_to_dtype(
-                tensor_fp4=w2,
-                tensor_sf=w2_scale,
-                global_scale=w2_scale_2,
-                dtype=target_dtype,
-                device=w2.device,
-                block_size=16,
-                swizzle=False,
-            )
-            w2 = w2_dequantized
-
-            w13_scale = None
-            w13_scale_2 = None
-            w2_scale = None
-            w2_scale_2 = None
+        # 1. We take the max following e.g. quantization/utils/flashinfer_fp4_moe.py.
+        # 2. moe_kernel_quantize_input -> ref_nvfp4_quant_dequant
+        # use the inverse scale directly (large global scale).
+        # NOTE: Before this point, `a13_scale` and `a2_scale` are such that:
+        # `FP8_MAX = activation[expert_id].abs().max() * global_scale[expert_id]`,
+        # and `global_scale[expert_id]` are small (~1e-4).
+        # Taking the largest global scale likely results in overflowing the FP8 range
+        # for other experts - other selection strategies may be used.
+        a13_scale = 1.0 / a13_scale.max().to(torch.float32)
+        a2_scale = 1.0 / a2_scale.max().to(torch.float32)
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
@@ -460,11 +419,13 @@ def make_nvfp4_moe_quant_config(
             w2_scale=w2_scale,
         )
 
-    g1_alphas = a13_scale * w13_scale_2
-    g2_alphas = a2_scale * w2_scale_2
+    # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
+    # The expert's process_weights_after_loading will fuse activation
+    # scales in-place. Since the quant config references the same tensor
+    # as the registered parameter, EPLB rearrangement stays in sync.
     return nvfp4_moe_quant_config(
-        g1_alphas=g1_alphas,
-        g2_alphas=g2_alphas,
+        g1_alphas=w13_scale_2,
+        g2_alphas=w2_scale_2,
         a1_gscale=(1.0 / a13_scale),
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
@@ -481,7 +442,7 @@ def make_nvfp4_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
+    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -517,12 +478,7 @@ def make_nvfp4_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if moe_config.moe_parallel_config.use_all2all_kernels
-            else None
-        ),
-        moe_parallel_config=moe_config.moe_parallel_config,
+        shared_experts=shared_experts,
         inplace=False,
     )
 

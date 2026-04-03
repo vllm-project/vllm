@@ -4,7 +4,7 @@
 
 #include <torch/library.h>
 
-// Note: overwrite the external defination for sharing same name between
+// Note: overwrite the external definition for sharing same name between
 // libraries use different ISAs.
 #define TORCH_EXTENSION_NAME _C
 
@@ -79,6 +79,14 @@ at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
 
+// Adapted from sglang: INT4 W4A8 kernels
+std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
+    at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
+
+at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
+                              at::Tensor& w_scales,
+                              std::optional<at::Tensor> bias);
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -125,6 +133,12 @@ void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
                    const torch::Tensor& topk_weights,
                    const torch::Tensor& topk_id, const bool skip_weighted,
                    const std::string& act, const std::string& isa);
+
+void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
+                                      const torch::Tensor positions,
+                                      const torch::Tensor block_table,
+                                      torch::Tensor slot_mapping,
+                                      const int64_t block_size);
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -279,6 +293,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? bias, ScalarType out_dtype, bool is_vnni) -> Tensor");
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
+
+  // Adapted from sglang: INT4 W4A8 kernels
+  ops.def(
+      "convert_weight_packed_scale_zp(Tensor qweight, Tensor qzeros, "
+      "Tensor scales) -> (Tensor, Tensor, Tensor)");
+  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
+           &convert_weight_packed_scale_zp);
+
+  ops.def(
+      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
+      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
+  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
 #endif
 
   // CPU attention kernels
@@ -334,6 +360,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "   Tensor! out, Tensor query, Tensor kv_cache,"
       "   float scale, Tensor block_tables, Tensor seq_lens) -> ()");
   ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
+
+  ops.def(
+      "compute_slot_mapping_kernel_impl(Tensor query_start_loc, Tensor "
+      "positions, Tensor block_table, Tensor(a3!) slot_mapping, SymInt "
+      "block_size) -> ()",
+      &compute_slot_mapping_kernel_impl);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

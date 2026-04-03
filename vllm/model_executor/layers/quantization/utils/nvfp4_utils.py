@@ -17,24 +17,15 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    dequantize_to_dtype,
     kE2M1ToFloat_handle,
     run_nvfp4_emulations,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
+from vllm.utils.import_utils import has_fbgemm_gpu
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
-
-
-def has_fbgemm() -> bool:
-    try:
-        import fbgemm_gpu  # noqa: F401
-
-        return True
-    except Exception:
-        return False
 
 
 # NOTE: This is ordered by preferred backend.
@@ -57,7 +48,15 @@ def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]
     supported = True
 
     if backend == NvFp4LinearBackend.FLASHINFER_CUTLASS:
-        supported = current_platform.has_device_capability(100) and has_flashinfer()
+        # cutlass_fp4_supported() checks that the vLLM NVFP4 kernels (both
+        # quantization and GEMM) were compiled for the current SM version.
+        # FlashInfer backends still rely on the vLLM quantization kernels,
+        # so we gate them on the same check.
+        supported = (
+            cutlass_fp4_supported()
+            and current_platform.has_device_capability(100)
+            and has_flashinfer()
+        )
 
         if not supported:
             reason = "FlashInfer is required, >=sm_100 is required"
@@ -77,9 +76,30 @@ def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]
         if not supported:
             reason = "FlashInfer is required"
     elif backend == NvFp4LinearBackend.FBGEMM:
-        supported = has_fbgemm()
+        supported = has_fbgemm_gpu()
         if not supported:
             reason = "fbgemm_gpu is required"
+    elif backend == NvFp4LinearBackend.EMULATION:
+        # e.g. AMD Instinct does not support native NVFP4.
+        unsupported_reasons = {}
+        for other_backend in NVFP4_LINEAR_BACKENDS:
+            if other_backend == NvFp4LinearBackend.EMULATION:
+                continue
+            other_supported, other_reason = is_backend_supported(other_backend)
+            if not other_supported:
+                unsupported_reasons[other_backend] = other_reason
+
+        if unsupported_reasons:
+            unsupported_reasons_str = "\n - ".join(
+                [f"{b.value}: {r}" for b, r in unsupported_reasons.items()]
+            )
+            logger.warning_once(
+                f"NVFP4 linear falling back to the slow and unoptimized "
+                f"backend=NvFp4LinearBackend.EMULATION as no optimized backend is "
+                f"available (unavailable reasons:\n - {unsupported_reasons_str}\n). "
+                "In case you expect one of these backend to be used, "
+                "please verify your environment."
+            )
 
     return supported, reason
 
@@ -103,30 +123,11 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
         selected_backend = NvFp4LinearBackend.EMULATION
     elif envs.VLLM_NVFP4_GEMM_BACKEND is None:
-        unsupported_reasons = {}
         for backend in NVFP4_LINEAR_BACKENDS:
             supported, reason = is_backend_supported(backend)
             if supported:
                 selected_backend = backend
                 break
-            else:
-                unsupported_reasons[backend] = reason
-
-        if selected_backend == NvFp4LinearBackend.EMULATION:
-            # e.g. AMD Instinct does not support native NVFP4.
-            unsupported_reasons_str = "\n - ".join(
-                [
-                    f"{backend.value}: {reason}"
-                    for backend, reason in unsupported_reasons.items()
-                ]
-            )
-            logger.warning_once(
-                f"NVFP4 linear falling back to the slow and unoptimized "
-                f"backend=NvFp4LinearBackend.EMULATION as no optimized backend is "
-                f"available (unavailable reasons:\n - {unsupported_reasons_str}\n). "
-                "In case you expect one of these backend to be used, "
-                "please verify your environment."
-            )
     else:
         selected_backend = NvFp4LinearBackend(envs.VLLM_NVFP4_GEMM_BACKEND)
 
@@ -194,15 +195,12 @@ def prepare_weights_for_nvfp4_fbgemm(
 def convert_to_nvfp4_linear_kernel_format(
     backend: NvFp4LinearBackend,
     layer: torch.nn.Module,
-    emulation_dequantize_weights: bool | None = None,
 ) -> None:
     """Convert layer to NVFP4 linear kernel format.
 
     Args:
         backend: The NVFP4 backend to use
         layer: The layer to convert
-        emulation_dequantize_weights: If True and backend is EMULATION,
-            dequantize weights ahead of time
         group_size: Block size for dequantization (default: 16)
     """
 
@@ -214,6 +212,12 @@ def convert_to_nvfp4_linear_kernel_format(
     layer.weights_padding_cols = 0
 
     if backend == NvFp4LinearBackend.MARLIN:
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression "
+            "will be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
         prepare_fp4_layer_for_marlin(layer)
     elif backend == NvFp4LinearBackend.FLASHINFER_TRTLLM:
         weight, weight_scale = prepare_weights_for_nvfp4_flashinfer_trtllm(
@@ -242,25 +246,6 @@ def convert_to_nvfp4_linear_kernel_format(
         # We can not call `.to(device)` during cuda graph capture - do it here instead.
         # (operation not permitted when stream is capturing)
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
-
-        if emulation_dequantize_weights:
-            # For emulation backend, optionally dequantize weights ahead of time.
-            target_dtype = torch.get_default_dtype()
-
-            # Dequantize the weight
-            weight_dequantized = dequantize_to_dtype(
-                tensor_fp4=layer.weight.data,
-                tensor_sf=layer.weight_scale.data,
-                global_scale=layer.weight_global_scale,
-                dtype=target_dtype,
-                device=layer.weight.device,
-                block_size=16,
-                swizzle=False,  # No swizzle for emulation backend
-            )
-
-            layer.weight = torch.nn.Parameter(weight_dequantized, requires_grad=False)
-            layer.weight_scale = None
-            layer.weight_global_scale = None
 
 
 def apply_nvfp4_linear(

@@ -38,7 +38,6 @@ class QuarkNVFP4(QuarkScheme):
 
     def __init__(
         self,
-        emulation_dequantize_weights: bool | None = None,
     ):
         self.group_size = 16
         self.backend = select_nvfp4_linear_backend()
@@ -51,21 +50,6 @@ class QuarkNVFP4(QuarkScheme):
             self.swizzle: bool | None = None
         else:
             self.swizzle = False
-
-        self.emulation_dequantize_weights = emulation_dequantize_weights
-        if self.emulation_dequantize_weights:
-            if self.backend != NvFp4LinearBackend.EMULATION:
-                raise ValueError(
-                    f"emulation_dequantize_weights="
-                    f"{self.emulation_dequantize_weights} "
-                    f"has an effect only with backend "
-                    f"NvFp4LinearBackend.EMULATION, "
-                    f"but currently backend={self.backend}."
-                )
-
-            logger.info_once(
-                "QuarkNVFP4 simulated dense linear: dequantizing weights ahead of time."
-            )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -163,7 +147,6 @@ class QuarkNVFP4(QuarkScheme):
         convert_to_nvfp4_linear_kernel_format(
             self.backend,
             layer,
-            emulation_dequantize_weights=self.emulation_dequantize_weights,
         )
         del layer.weight_scale_2
 

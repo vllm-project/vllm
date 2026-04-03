@@ -26,6 +26,7 @@
       "model": "meta-llama/Llama-3.1-8B-Instruct",
       "backend": "vllm",
       "ignore-eos": "",
+      "temperature": 0,
       "num_prompts": 200
     }
   },
@@ -150,6 +151,39 @@
       }
     },
     {
+      "test_name": "serving_llama8B_tp1_random_2048_2048",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 2048,
+        "random-output-len": 2048
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp2_random_2048_2048",
+      "server_parameters": {
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 2048,
+        "random-output-len": 2048
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp4_random_2048_2048",
+      "server_parameters": {
+        "tensor_parallel_size": 4
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 2048,
+        "random-output-len": 2048
+      }
+    },
+    {
       "test_name": "serving_llama8B_int4_tp1_random_128_128",
       "server_parameters": {
         "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
@@ -183,6 +217,45 @@
       },
       "client_parameters": {
         "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_int8_tp1_random_128_128",
+      "server_parameters": {
+        "model": "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "model": "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_int8_tp2_random_128_128",
+      "server_parameters": {
+        "model": "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "model": "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_int8_tp4_random_128_128",
+      "server_parameters": {
+        "model": "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+        "tensor_parallel_size": 4
+      },
+      "client_parameters": {
+        "model": "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
         "dataset_name": "random",
         "random-input-len": 128,
         "random-output-len": 128

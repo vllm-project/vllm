@@ -6,6 +6,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+import vllm.utils.cpu_triton_utils as cpu_tl
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -28,15 +29,16 @@ class CPUModelRunner(GPUModelRunner):
         self.cascade_attn_enabled = False
 
         self._postprocess_tensors()
+        self._postprocess_triton()
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
         def replace_tensor(obj: Any, cpu_attr_name: str, device_attr_name) -> None:
             cpu_tensor = getattr(obj, cpu_attr_name, None)
             device_tensor = getattr(obj, device_attr_name, None)
-            if cpu_tensor is not None and device_tensor is not None:
-                assert isinstance(cpu_tensor, torch.Tensor)
-                assert isinstance(device_tensor, torch.Tensor)
+            if isinstance(cpu_tensor, torch.Tensor) and isinstance(
+                device_tensor, torch.Tensor
+            ):
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for v in vars(self).values():
@@ -51,6 +53,13 @@ class CPUModelRunner(GPUModelRunner):
             for v in vars(block_table).values():
                 if isinstance(v, CpuGpuBuffer):
                     v.gpu = v.cpu
+
+    def _postprocess_triton(self) -> None:
+        import vllm.v1.worker.block_table
+
+        vllm.v1.worker.block_table._compute_slot_mapping_kernel = (
+            cpu_tl.compute_slot_mapping_kernel
+        )
 
     @instrument(span_name="Loading (CPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
@@ -88,9 +97,10 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
-    def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
-        # Note: For CPU backend, dp padding is not required for now.
-        return 0, None
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        # CPU attention assigns -INF to logits at invalid positions,
+        # so stale KV cache data never affects computation.
+        pass
 
 
 @contextmanager

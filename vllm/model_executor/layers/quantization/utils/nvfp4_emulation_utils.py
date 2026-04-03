@@ -51,12 +51,11 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
 
 
 def dequantize_to_dtype(
-    tensor_fp4,
-    tensor_sf,
-    global_scale,
-    dtype,
-    device,
-    block_size=16,
+    tensor_fp4: torch.Tensor,
+    tensor_sf: torch.Tensor,
+    global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    block_size: int = 16,
     swizzle: bool | None = True,
 ):
     """Dequantize the fp4 tensor back to high precision.
@@ -180,29 +179,18 @@ def run_nvfp4_emulations(
 
     x_dq, _ = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=group_size)
 
-    # Check if weight is already dequantized (same dtype as x)
-    if weight.dtype == x.dtype:
-        # Weight is already dequantized, use it directly
-        w_dq = weight
-    else:
-        # Weight needs dequantization
-        w_fp4 = weight.data.view(torch.uint8)
-
-        w_dq = dequantize_to_dtype(
-            w_fp4,
-            weight_scale_swizzled.data,
-            weight_global_scale,
-            output_dtype,
-            x.device,
-            group_size,
-            swizzle=swizzle,
-        )
+    # dequantize weight
+    w_fp4 = weight.data.view(torch.uint8)
+    w_dq = dequantize_to_dtype(
+        w_fp4,
+        weight_scale_swizzled.data,
+        weight_global_scale,
+        output_dtype,
+        group_size,
+        swizzle=swizzle,
+    )
 
     # matmul
     out = torch.matmul(x_dq, w_dq.t())
-
-    # Only delete w_dq if we created it (not a reference to weight)
-    if weight.dtype != x.dtype:
-        del w_dq
-    del x_dq
+    del w_dq, x_dq
     return out

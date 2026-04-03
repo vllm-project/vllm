@@ -29,29 +29,13 @@ logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
-    def __init__(self, emulation_dequantize_weights: bool | None = None):
+    def __init__(self):
         self.backend = select_nvfp4_linear_backend()
         self.group_size = 16
 
         self.swizzle = None
         if self.backend == NvFp4LinearBackend.EMULATION:
             self.swizzle = False
-
-        self.emulation_dequantize_weights = emulation_dequantize_weights
-        if self.emulation_dequantize_weights:
-            if self.backend != NvFp4LinearBackend.EMULATION:
-                raise ValueError(
-                    f"emulation_dequantize_weights="
-                    f"{self.emulation_dequantize_weights} "
-                    f"has an effect only with backend "
-                    f"NvFp4LinearBackend.EMULATION, "
-                    f"but currently backend={self.backend}."
-                )
-
-            logger.info_once(
-                "CompressedTensorsW4A4Fp4 simulated dense linear: "
-                "dequantizing weights ahead of time."
-            )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -123,9 +107,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             logger.warning_once(
                 "In NVFP4 linear, the global scale for input or weight are different"
                 " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely results in reduce accuracy. Please verify the model"
+                " will likely result in reduced accuracy. Please verify the model"
                 " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for parallel layers."
+                " scale for fused layers."
             )
 
         # Process global scales (CT stores as divisors, i.e. 1/scale)
@@ -155,7 +139,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         convert_to_nvfp4_linear_kernel_format(
             self.backend,
             layer,
-            emulation_dequantize_weights=self.emulation_dequantize_weights,
         )
 
     def apply_weights(

@@ -8,11 +8,13 @@ steps:
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
+  - tests/distributed/test_eplb_utils.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
+  - pytest -v -s distributed/test_eplb_utils.py
 
-- label: EPLB Execution
-  timeout_in_minutes: 20
+- label: EPLB Execution # 17min
+  timeout_in_minutes: 27
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
@@ -24,8 +26,7 @@ steps:
 
 - label: Elastic EP Scaling Test
   timeout_in_minutes: 20
-  device: b200
-  optional: true
+  device: h100
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
