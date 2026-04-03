@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from copy import deepcopy
+from copy import copy
 from typing import Any, cast
 
 from vllm.outputs import CompletionOutput
@@ -74,12 +74,13 @@ class ParentRequest:
             # Reuse child sampling_params data structure
             return self.cached_child_sampling_params
         # Build child sampling_params
-        child_sampling_params = deepcopy(self.sampling_params)
+        child_sampling_params = copy(self.sampling_params)
         child_sampling_params.n = 1
-        kv_transfer = child_sampling_params.extra_args.get("kv_transfer_params")
-        if kv_transfer is not None and isinstance(kv_transfer, list):
+        extra_args = child_sampling_params.extra_args or {}
+        kv_transfer = extra_args.get("kv_transfer_params")
+        if kv_transfer and isinstance(kv_transfer, list):
+            child_sampling_params.extra_args = copy(extra_args)
             child_sampling_params.extra_args["kv_transfer_params"] = kv_transfer[index]
-
         if seed is None:
             if not no_caching:
                 # Cache child sampling_params for later reuse

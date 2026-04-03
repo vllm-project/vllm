@@ -272,7 +272,7 @@ class RequestState:
         pooling_output: torch.Tensor | None,
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
-        kv_transfer_params: dict[str, Any] | None = None,
+        kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None,
         routed_experts: np.ndarray | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
@@ -327,6 +327,8 @@ class RequestState:
                 output_with_kv_transfer = self.parent_req.aggre_kv_transfer_params(
                     self.request_id, output, kv_transfer_params
                 )
+                # overwrite kv_transfer_params with the aggregated one
+                # from children requests in case of parallel sampling
                 outputs, finished, kv_transfer_params = output_with_kv_transfer
             if not outputs:
                 return None
