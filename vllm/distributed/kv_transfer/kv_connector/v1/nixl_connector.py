@@ -2127,6 +2127,10 @@ class NixlConnectorWorker:
             nixl_agent_meta.attn_backend_name != self.backend_name
             and self.backend_name in ["CPU_ATTN"]
         ):
+            if self._is_hma_required:
+                raise RuntimeError(
+                    "heterogeneous attn post process is not supported with HMA"
+                )
             logger.info(
                 "[Experimental] CPU_ATTN backend is used, "
                 "hint heterogeneous attn post process"
