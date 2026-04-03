@@ -31,6 +31,7 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
 FP8_DTYPE = current_platform.fp8_dtype()
 
 prompts = [
@@ -241,7 +242,9 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("dynamic", [True, False])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on GPU"
+)
 def test_async_tp_pass_replace(
     test_model: str,
     batch_size: int,
@@ -299,7 +302,7 @@ def async_tp_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -324,7 +327,7 @@ def async_tp_pass_on_test_model(
             fuse_gemm_comms=True,
         ),
     )
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
