@@ -120,26 +120,30 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             if start_idx >= 0:
                 delta_text = delta_text[start_idx + len(self.start_token) :]
 
-        if self.end_token_id in delta_token_ids:
-            # End token in this delta: split reasoning from content.
-            end_index = delta_text.find(self.end_token)
-            if end_index >= 0:
-                reasoning = delta_text[:end_index]
-                content = delta_text[end_index + len(self.end_token) :]
-                if not reasoning and not content:
-                    return None
-                return DeltaMessage(
-                    reasoning=reasoning if reasoning else None,
-                    content=content if content else None,
-                )
-            # end_token_id in IDs but not in text (already stripped)
+        # Stop-string buffering can delay the visible text for </think> until a
+        # later chunk, so detect the end marker from text first rather than
+        # relying solely on the token ids from the current delta.
+        end_index = delta_text.find(self.end_token)
+        if end_index >= 0:
+            reasoning = delta_text[:end_index]
+            content = delta_text[end_index + len(self.end_token) :]
+            if not reasoning and not content:
+                return None
+            return DeltaMessage(
+                reasoning=reasoning if reasoning else None,
+                content=content if content else None,
+            )
+
+        if self.end_token_id in delta_token_ids and not delta_text:
+            # End token in IDs but not in visible text yet. Wait for the
+            # detokenizer to flush the buffered text in a later chunk.
             return None
 
         # No end token in this delta.
         if not delta_text:
             # Nothing left after stripping start token.
             return None
-        elif self.end_token_id in previous_token_ids:
+        elif self.end_token_id in previous_token_ids or self.end_token in previous_text:
             # End token already passed: everything is content now.
             return DeltaMessage(content=delta_text)
         else:

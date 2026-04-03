@@ -23,6 +23,14 @@ REASONING_MODEL_NAMES = [
 ]
 
 
+class DummyQwen3Tokenizer:
+    def get_vocab(self) -> dict[str, int]:
+        return {
+            "<think>": 1,
+            "</think>": 2,
+        }
+
+
 @pytest.fixture(scope="module", params=REASONING_MODEL_NAMES)
 def qwen3_tokenizer(request):
     return AutoTokenizer.from_pretrained(request.param)
@@ -278,6 +286,55 @@ def test_reasoning_streaming_multi_token_deltas(
 
     assert reconstructor.reasoning == expected_reasoning
     assert (reconstructor.other_content or None) == expected_content
+
+
+def test_reasoning_streaming_delayed_visible_end_token():
+    """Stop buffering can delay visible </think> text to a later chunk."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        DummyQwen3Tokenizer()
+    )
+
+    previous_text = ""
+    previous_token_ids: list[int] = []
+
+    first_delta = parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text="Thinking...",
+        delta_text="Thinking...",
+        previous_token_ids=previous_token_ids,
+        current_token_ids=[100],
+        delta_token_ids=[100],
+    )
+    assert first_delta is not None
+    assert first_delta.reasoning == "Thinking..."
+    assert first_delta.content is None
+
+    previous_text = "Thinking..."
+    previous_token_ids = [100]
+
+    hidden_end_delta = parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text=previous_text,
+        delta_text="",
+        previous_token_ids=previous_token_ids,
+        current_token_ids=previous_token_ids + [parser.end_token_id],
+        delta_token_ids=[parser.end_token_id],
+    )
+    assert hidden_end_delta is None
+
+    previous_token_ids = previous_token_ids + [parser.end_token_id]
+
+    flushed_delta = parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text=previous_text + "</think>Hello!",
+        delta_text="</think>Hello!",
+        previous_token_ids=previous_token_ids,
+        current_token_ids=previous_token_ids + [101],
+        delta_token_ids=[101],
+    )
+    assert flushed_delta is not None
+    assert flushed_delta.reasoning is None
+    assert flushed_delta.content == "Hello!"
 
 
 # --- Tests for enable_thinking=False (thinking explicitly disabled) ---
