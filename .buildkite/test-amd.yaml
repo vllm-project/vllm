@@ -240,7 +240,8 @@ steps:
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_chat.py --ignore=entrypoints/llm/test_accuracy.py --ignore=entrypoints/llm/test_init.py --ignore=entrypoints/llm/test_prompt_validation.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py  - pytest -v -s entrypoints/llm/test_generate.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_chat.py --ignore=entrypoints/llm/test_accuracy.py --ignore=entrypoints/llm/test_init.py --ignore=entrypoints/llm/test_prompt_validation.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm/test_generate.py
   - pytest -v -s entrypoints/offline_mode
 
 
@@ -258,7 +259,8 @@ steps:
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator --ignore=entrypoints/serve/lora/test_lora_adapters.py  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
+  - pytest -v -s entrypoints/serve/instrumentator
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
 
@@ -1440,7 +1442,8 @@ steps:
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_chat.py --ignore=entrypoints/llm/test_accuracy.py --ignore=entrypoints/llm/test_init.py --ignore=entrypoints/llm/test_prompt_validation.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py  - pytest -v -s entrypoints/llm/test_generate.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_chat.py --ignore=entrypoints/llm/test_accuracy.py --ignore=entrypoints/llm/test_init.py --ignore=entrypoints/llm/test_prompt_validation.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm/test_generate.py
   - pytest -v -s entrypoints/offline_mode
 
 
@@ -1491,7 +1494,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_audio.py --ignore=entrypoints/openai/completion/test_shutdown.py --ignore=entrypoints/openai/test_completion.py --ignore=entrypoints/openai/models/test_models.py --ignore=entrypoints/openai/test_return_tokens_as_ids.py --ignore=entrypoints/openai/chat_completion/test_root_path.py --ignore=entrypoints/openai/completion/test_prompt_validation.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_completion.py --ignore=entrypoints/openai/models/test_models.py --ignore=entrypoints/openai/test_return_tokens_as_ids.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 - label: Entrypoints Integration (API Server 2) #26.9m
   timeout_in_minutes: 45
@@ -1508,7 +1511,8 @@ steps:
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator --ignore=entrypoints/serve/lora/test_lora_adapters.py  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
+  - pytest -v -s entrypoints/serve/instrumentator
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
 
@@ -2091,7 +2095,8 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels FP8 MoE Test # TBD
   timeout_in_minutes: 180
@@ -2108,7 +2113,7 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/envs.py
   commands:
-    - pytest -v -s kernels/moe/test_deepep_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py
+    - pytest -v -s kernels/moe/test_deepep_moe.py
 
 - label: ROCm AITER Ops Test # TBD
   timeout_in_minutes: 180
@@ -3036,7 +3041,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_audio.py --ignore=entrypoints/openai/completion/test_shutdown.py --ignore=entrypoints/openai/test_completion.py --ignore=entrypoints/openai/models/test_models.py --ignore=entrypoints/openai/test_return_tokens_as_ids.py --ignore=entrypoints/openai/chat_completion/test_root_path.py --ignore=entrypoints/openai/completion/test_prompt_validation.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_completion.py --ignore=entrypoints/openai/models/test_models.py --ignore=entrypoints/openai/test_return_tokens_as_ids.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 - label: Entrypoints Integration (API Server 2) # TBD
   timeout_in_minutes: 180
@@ -3053,7 +3058,8 @@ steps:
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator --ignore=entrypoints/serve/lora/test_lora_adapters.py  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
+  - pytest -v -s entrypoints/serve/instrumentator
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
 
@@ -3269,7 +3275,8 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels FP8 MoE Test # TBD
   timeout_in_minutes: 180
@@ -3285,7 +3292,7 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/envs.py
   commands:
-    - pytest -v -s kernels/moe/test_deepep_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py
+    - pytest -v -s kernels/moe/test_deepep_moe.py
 
 - label: Quantization # TBD
   timeout_in_minutes: 180
