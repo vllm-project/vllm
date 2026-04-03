@@ -3426,5 +3426,9 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
         rank: int,
         nranks: int,
         eps: float,
-    ) -> None:
-        pass
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_num = qkv.shape[0]
+        return (
+            torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
+            torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
+        )

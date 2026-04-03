@@ -135,7 +135,7 @@ class MiniMaxQKNormWrapper(nn.Module):
         self, qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert self.q_norm.variance_epsilon == self.k_norm.variance_epsilon
-        torch.ops._C.minimax_allreduce_rms_qk(
+        q_out, k_out = torch.ops._C.minimax_allreduce_rms_qk(
             qkv,
             self.q_norm.weight,
             self.k_norm.weight,
@@ -146,8 +146,8 @@ class MiniMaxQKNormWrapper(nn.Module):
             self.tp_world,
             self.q_norm.variance_epsilon,
         )
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        return q, k, v
+        _, _, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        return q_out, k_out, v
 
     @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _native_ops(

@@ -344,6 +344,13 @@ __global__ void __launch_bounds__(1024)
                         kElemsPerAccess<DType>;
   int access_stride_k = (params.stride_k > 0 ? params.stride_k : RankKDim) /
                         kElemsPerAccess<DType>;
+  // Output strides: default to contiguous (hidden_dim / hidden_dim_k)
+  int access_stride_q_out =
+      (params.stride_q_out > 0 ? params.stride_q_out : params.hidden_dim) /
+      kElemsPerAccess<DType>;
+  int access_stride_k_out =
+      (params.stride_k_out > 0 ? params.stride_k_out : params.hidden_dim_k) /
+      kElemsPerAccess<DType>;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   namespace cg = cooperative_groups;
@@ -558,7 +565,7 @@ __global__ void __launch_bounds__(1024)
         if (token_r >= tot_tokens || !is_valid_q) {
           continue;
         }
-        int idx_out = token_r * access_stride_q + access_id_in_token;
+        int idx_out = token_r * access_stride_q_out + access_id_in_token;
         reinterpret_cast<float4*>(params.rms_norm_out)[idx_out] =
             *reinterpret_cast<float4*>(&vals[r][0]);
       }
@@ -579,7 +586,7 @@ __global__ void __launch_bounds__(1024)
         if (token_r >= tot_tokens || !is_valid_k) {
           continue;
         }
-        int idx_out = token_r * access_stride_k + k_thread_idx;
+        int idx_out = token_r * access_stride_k_out + k_thread_idx;
         reinterpret_cast<float4*>(params.rms_norm_out_k)[idx_out] =
             *reinterpret_cast<float4*>(&vals[r][0]);
       }
@@ -821,12 +828,11 @@ torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
   return rms_norm_out;
 }
 
-void minimax_allreduce_rms_qk(torch::Tensor qkv,
-                              torch::Tensor const& norm_weight_q,
-                              torch::Tensor const& norm_weight_k,
-                              torch::Tensor workspace, int64_t const q_size,
-                              int64_t const kv_size, int64_t const rank,
-                              int64_t const nranks, double const eps) {
+std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
+    torch::Tensor qkv, torch::Tensor const& norm_weight_q,
+    torch::Tensor const& norm_weight_k, torch::Tensor workspace,
+    int64_t const q_size, int64_t const kv_size, int64_t const rank,
+    int64_t const nranks, double const eps) {
   TORCH_CHECK(qkv.dim() == 2, "minimax_allreduce_rms_qk: qkv must be 2D");
   TORCH_CHECK(qkv.is_contiguous(),
               "minimax_allreduce_rms_qk: qkv must be contiguous");
@@ -840,6 +846,9 @@ void minimax_allreduce_rms_qk(torch::Tensor qkv,
   int64_t num_tokens = qkv.size(0);
   int elem_bytes = qkv.element_size();
 
+  torch::Tensor q_out = torch::empty({num_tokens, q_size}, qkv.options());
+  torch::Tensor k_out = torch::empty({num_tokens, kv_size}, qkv.options());
+
   auto params = vllm::tensorrt_llm::MiniMaxReduceRMSParams();
   params.nranks = static_cast<int>(nranks);
   params.rank = static_cast<int>(rank);
@@ -850,6 +859,8 @@ void minimax_allreduce_rms_qk(torch::Tensor qkv,
   params.hidden_dim_k = static_cast<int>(kv_size);
   params.stride_q = static_cast<int>(qkv_dim);
   params.stride_k = static_cast<int>(qkv_dim);
+  params.stride_q_out = 0;  // q_out is contiguous; kernel uses hidden_dim
+  params.stride_k_out = 0;  // k_out is contiguous; kernel uses hidden_dim_k
   params.workspace = reinterpret_cast<void**>(workspace.mutable_data_ptr());
 
   uint8_t* base = static_cast<uint8_t*>(qkv.data_ptr());
@@ -860,9 +871,9 @@ void minimax_allreduce_rms_qk(torch::Tensor qkv,
   params.rms_eps = static_cast<float>(eps);
   params.stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
 
-  // In-place: write normed q and k back into the qkv tensor
-  params.rms_norm_out = params.allreduce_in;
-  params.rms_norm_out_k = params.allreduce_in_k;
+  params.rms_norm_out = q_out.mutable_data_ptr();
+  params.rms_norm_out_k = k_out.mutable_data_ptr();
 
   vllm::tensorrt_llm::minimax_reduce_rms_op(params);
+  return {q_out, k_out};
 }
