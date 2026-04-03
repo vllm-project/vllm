@@ -214,7 +214,10 @@ from vllm.distributed.parallel_state import (
     get_dcp_group,
     is_global_first_rank,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
@@ -1012,6 +1015,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if self.dcp_world_size is None:
             self.dcp_world_size = get_dcp_group().world_size
+
+        # Also initialize impl's dcp_world_size if needed
+        if self.impl.dcp_world_size == -1:
+            self.impl.dcp_world_size = get_dcp_group().world_size
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
