@@ -431,6 +431,7 @@ class GPUModelRunner(
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
+        self.routed_experts_layer_range: tuple[int, int] | None = None
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -4040,6 +4041,14 @@ class GPUModelRunner(
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
+                    if self.routed_experts_initialized:
+                        capturer = RoutedExpertsCapturer.get_instance()
+                        if capturer is not None:
+                            capturer.save_captured_experts(
+                                indices=self.slot_mapping,
+                                layer_range=self.routed_experts_layer_range,
+                            )
+
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
@@ -4302,7 +4311,10 @@ class GPUModelRunner(
             if self.routed_experts_initialized:
                 capturer = RoutedExpertsCapturer.get_instance()
                 if capturer is not None:
-                    capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
+                    capturer.save_captured_experts(
+                        indices=self.slot_mapping,
+                        layer_range=self.routed_experts_layer_range,
+                    )
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
@@ -6897,14 +6909,24 @@ class GPUModelRunner(
             BaseRouter,
         )
 
+        bound_layer_ids: list[int] = []
         for module in self.compilation_config.static_forward_context.values():
             if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
+                bound_layer_ids.append(layer_id)
 
                 def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
                     _capturer.capture(_layer_id, topk_ids)
 
                 module.router.set_capture_fn(_capture_fn)
+
+        if bound_layer_ids:
+            self.routed_experts_layer_range = (
+                min(bound_layer_ids),
+                max(bound_layer_ids) + 1,
+            )
+        else:
+            self.routed_experts_layer_range = None
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
