@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 
@@ -12,6 +13,13 @@ class FusedMoERouter(ABC):
     FusedMoERouter is an abstract class that provides a 'select_experts'
     method that is used for routing hidden states based on router logits.
     """
+
+    @abstractmethod
+    def set_capture_fn(
+        self,
+        capture_fn: Callable[[torch.Tensor], None] | None,
+    ) -> None:
+        raise NotImplementedError
 
     @property
     @abstractmethod
