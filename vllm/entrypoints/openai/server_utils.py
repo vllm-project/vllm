@@ -463,7 +463,9 @@ async def lifespan(app: FastAPI):
         dns_aid_record = None
         _args = getattr(app.state, "args", None)
         if getattr(_args, "dns_aid_enabled", False):
-            from vllm.entrypoints.dns_aid import register as _dns_aid_register
+            from vllm.entrypoints.serve.instrumentator.dns_aid import (
+                register as _dns_aid_register,
+            )
 
             dns_aid_record = await _dns_aid_register(_args, app.state.engine_client)
 
@@ -476,7 +478,7 @@ async def lifespan(app: FastAPI):
             if task is not None:
                 task.cancel()
             if dns_aid_record is not None:
-                from vllm.entrypoints.dns_aid import (
+                from vllm.entrypoints.serve.instrumentator.dns_aid import (
                     deregister as _dns_aid_deregister,
                 )
 
