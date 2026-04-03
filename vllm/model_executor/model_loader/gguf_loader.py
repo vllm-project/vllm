@@ -145,10 +145,20 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
                 )
+                # Match per-expert format (Transformers v4):
+                #   model.layers.{i}.mlp.experts.{j}.(gate|up|down)_proj.weight
                 sideload_params.append(
                     re.compile(
                         f"model\\.layers\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
+                # Match fused expert format (Transformers v5+):
+                #   model.layers.{i}.mlp.experts.(gate_up_proj|down_proj)
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.(gate_up_proj|down_proj)"
                     )
                 )
         if model_type in ("qwen2_moe", "qwen3_moe"):
@@ -165,10 +175,20 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
                 )
+                # Match per-expert format (Transformers v4):
+                #   model.layers.{i}.mlp.experts.{j}.(gate|up|down)_proj.weight
                 sideload_params.append(
                     re.compile(
                         f"model\\.layers\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
+                # Match fused expert format (Transformers v5+):
+                #   model.layers.{i}.mlp.experts.(gate_up_proj|down_proj)
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.(gate_up_proj|down_proj)"
                     )
                 )
         if model_type == "minimax_m2":
