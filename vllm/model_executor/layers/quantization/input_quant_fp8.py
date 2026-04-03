@@ -5,12 +5,12 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
-    group_broadcast,
     prep_scale_for_group_broadcast,
 )
 from vllm.platforms import current_platform
@@ -185,7 +185,12 @@ class QuantFP8(CustomOp):
     ):
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
-            return self._quantize_group_native(x)
+            return ir.ops.dynamic_group_quant_fp8(
+                x,
+                group_shape=[self.group_shape.row, self.group_shape.col],
+                column_major=self.column_major_scales,
+                use_ue8m0=self.use_ue8m0,
+            )
 
         assert (scale is not None) == self.static
         assert scale_ub is None or (
@@ -195,25 +200,14 @@ class QuantFP8(CustomOp):
         )
 
         if scale is None:
-            if self.group_shape == GroupShape.PER_TOKEN:
-                x_max, _ = x.abs().max(dim=-1)
-                x_max = x_max.unsqueeze(-1).to(torch.float32)
-                if scale_ub is not None:
-                    x_max = x_max.clamp(max=scale_ub)
-            else:
-                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
-
-            scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+            out, scale = ir.ops.dynamic_quant_fp8(
+                x,
+                per_token=self.use_per_token_if_dynamic,
+                scale_ub=scale_ub,
+            )
         else:
             scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
-
-        # Even for dynamic per-token scales,
-        # reciprocal performs slightly better than division
-        out = (
-            x.to(torch.float32)
-            * group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
-        )
-        out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+            out = ir.ops.static_quant_fp8(x, scale)
 
         # This currently generates an extra Triton kernel in compilation.
         # Fortunately, we don't use padding if compiling.
