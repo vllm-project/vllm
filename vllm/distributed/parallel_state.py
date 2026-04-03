@@ -1232,6 +1232,48 @@ def get_dcp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_context_model_parallel_group = get_dcp_group
 
+_TPA_SIZE: int = 0  # TPA size (head parallelism for attention)
+_KVP_SIZE: int = 0  # KVP size (= DCP size when TPA is enabled)
+
+
+def is_tpa_gqa_mode() -> bool:
+    """Check if TPA GQA mode is enabled (TPA > 1).
+
+    TPA GQA mode is enabled when tensor_parallel_size_attention is set
+    AND TPA < TP (meaning KVP > 1 with head separation).
+
+    For MLA models, TPA=1 so this returns False.
+    """
+    return _TPA_SIZE > 1
+
+
+def get_attention_tp_world_size(disable_parallel: bool = False) -> int:
+    """Get the world size for attention head parallelism.
+
+    In TPA GQA mode, attention heads are sharded by TPA (not full TP).
+    In standard mode or TPA MLA mode, heads are sharded by full TP.
+    """
+    if disable_parallel:
+        return 1
+    if _TPA_SIZE > 0:
+        return _TPA_SIZE
+    return get_tensor_model_parallel_world_size()
+
+
+def get_attention_tp_rank(disable_parallel: bool = False) -> int:
+    """Get the rank for attention head parallelism.
+
+    In TPA GQA mode, attention heads are indexed by TPA rank (TP rank // KVP).
+    In standard mode, returns the full TP rank.
+    """
+    if disable_parallel:
+        return 0
+    if _TPA_SIZE > 0:
+        tp_rank = get_tensor_model_parallel_rank()
+        return tp_rank // _KVP_SIZE
+    return get_tensor_model_parallel_rank()
+
+
 _PP: GroupCoordinator | None = None
 
 
@@ -1602,6 +1644,19 @@ def initialize_model_parallel(
         group_name="dcp",
     )
 
+    # Store TPA/KVP sizes for head sharding math if TPA is enabled.
+    # No separate KVP group is needed — DCP group has the correct topology
+    # (contiguous ranks within TP group, same as KVP grouping).
+    global _TPA_SIZE, _KVP_SIZE
+    if config is not None and config.parallel_config.kvp_size > 1:
+        _TPA_SIZE = config.parallel_config.tpa_size
+        _KVP_SIZE = config.parallel_config.kvp_size
+        logger.info(
+            "TPA enabled: TPA=%d, KVP=%d (using DCP group for communication)",
+            _TPA_SIZE,
+            _KVP_SIZE,
+        )
+
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
     group_ranks = (
@@ -1861,6 +1916,10 @@ def destroy_model_parallel():
     if _DCP:
         _DCP.destroy()
     _DCP = None
+
+    global _TPA_SIZE, _KVP_SIZE
+    _TPA_SIZE = 0
+    _KVP_SIZE = 0
 
     global _PCP
     if _PCP:

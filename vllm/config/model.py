@@ -1133,7 +1133,14 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size > 1 and not self.use_mla:
+        if (
+            decode_context_parallel_size > 1
+            and not self.use_mla
+            and parallel_config.tensor_parallel_size_attention is None
+        ):
+            # Standard DCP GQA checks. Skipped when TPA is active because
+            # TPA changes the effective attention TP; TPA's own validation
+            # in ParallelConfig covers the invariants.
             total_num_kv_heads = self.get_total_num_kv_heads()
             assert tensor_parallel_size > total_num_kv_heads, (
                 f"tensor parallel size {tensor_parallel_size} must be greater "

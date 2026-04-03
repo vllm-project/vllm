@@ -316,6 +316,31 @@ class ParallelConfig:
     Block_size should be divisible by cp_kv_cache_interleave_size.
     """
 
+    tensor_parallel_size_attention: int | None = None
+    """Tensor parallel size for attention heads. When set to a value smaller
+    than tensor_parallel_size, attention heads are sharded by this value (TPA)
+    while FFN layers use the full tensor_parallel_size.
+
+    This enables KV Parallel (KVP) where TP / TPA ranks share the same
+    attention heads but process different KV cache shards with sequence
+    parallelism. KVP groups use All-to-All communication to exchange partial
+    attention outputs and combine them with LSE-weighted reduction.
+
+    For GQA models: TPA < TP means each TPA group has the same Q/KV heads
+    and different sequence shards.
+    For MLA models: TPA = 1 (single effective KV head), all ranks share the
+    same heads and process different sequence shards.
+
+    Requires: tensor_parallel_size must be divisible by
+    tensor_parallel_size_attention, and decode_context_parallel_size must
+    match tensor_parallel_size / tensor_parallel_size_attention.
+
+    Example: --tensor-parallel-size 16 --tensor-parallel-size-attention 4
+    creates TPA=4, KVP=4 (4 groups of 4 ranks each).
+
+    Reference: https://arxiv.org/abs/2507.07120
+    """
+
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
     and not overridden for dense models."""
@@ -412,7 +437,41 @@ class ParallelConfig:
                 "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
             )
 
+        # TPA (tensor parallel for attention) validation
+        if self.tensor_parallel_size_attention is not None:
+            tpa = self.tensor_parallel_size_attention
+            tp = self.tensor_parallel_size
+            if tp % tpa != 0:
+                raise ValueError(
+                    f"tensor_parallel_size ({tp}) must be divisible by "
+                    f"tensor_parallel_size_attention ({tpa})."
+                )
+            kvp = tp // tpa
+            if kvp > 1 and self.decode_context_parallel_size != kvp:
+                raise ValueError(
+                    f"When tensor_parallel_size_attention ({tpa}) < "
+                    f"tensor_parallel_size ({tp}), "
+                    f"decode_context_parallel_size must equal "
+                    f"tensor_parallel_size / tensor_parallel_size_attention "
+                    f"(= {kvp}), but got "
+                    f"{self.decode_context_parallel_size}."
+                )
+
         return self
+
+    @property
+    def tpa_size(self) -> int:
+        """TPA (tensor parallel for attention) size.
+        Returns tensor_parallel_size_attention if set, else tensor_parallel_size."""
+        if self.tensor_parallel_size_attention is not None:
+            return self.tensor_parallel_size_attention
+        return self.tensor_parallel_size
+
+    @property
+    def kvp_size(self) -> int:
+        """KVP (KV parallel) size. Derived as TP / TPA.
+        Returns 1 when TPA == TP (no KV parallelism)."""
+        return self.tensor_parallel_size // self.tpa_size
 
     @property
     def world_size_across_dp(self) -> int:
