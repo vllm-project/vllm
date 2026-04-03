@@ -23,6 +23,7 @@ import vllm._C_stable_libtorch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -30,6 +31,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -86,7 +88,7 @@ def _get_backend_priorities(
             # Sparse MLA backend priorities
             # See https://github.com/vllm-project/vllm/issues/35807 for
             # benchmark results
-            if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
+            if kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
                 # Prefer FlashInfer for fp8 kv cache
                 sparse_backends = [
                     AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
@@ -549,6 +551,26 @@ class CudaPlatformBase(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # Use oink if enabled for rms_norm
+        # TODO(Laurawly/luka): remove this env var,
+        #  users can just use IR op priority directly
+        rms_norm = default
+        if envs.VLLM_USE_OINK_OPS:
+            rms_norm = ["oink"] + default
+
+        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
 
 
 # NVML utils
