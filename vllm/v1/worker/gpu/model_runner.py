@@ -177,6 +177,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self.uniform_decode_query_len = 1 + self.num_speculative_steps
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -225,12 +226,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-        # CUDA graphs.
+        # CUDA graphs — initialized without mode; will call init_cg_mode_and_candidates
+        #  in initialize_kv_cache after init_attn_backend resolves backend support.
         self.decode_query_len = self.num_speculative_steps + 1
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
-            self.compilation_config.cudagraph_mode,
             decode_query_len=self.decode_query_len,
         )
         # LoRA-related workers.
@@ -365,6 +366,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_backends, self.attn_groups = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        # compilation_config.cudagraph_mode is resolved in init_attn_backend;
+        # now set mode, adjust sizes for spec-decode, and build candidates.
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        assert cudagraph_mode is not None
+        self.cudagraph_manager.set_cg_mode_and_candidates(cudagraph_mode)
+        if self.speculator is not None:
+            self.speculator.cudagraph_manager.set_cg_mode_and_candidates(cudagraph_mode)
+
         check_attention_cp_compatibility(self.vllm_config)
         if self.speculator is not None:
             # HACK(woosuk)
