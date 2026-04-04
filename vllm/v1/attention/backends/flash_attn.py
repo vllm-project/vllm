@@ -662,6 +662,28 @@ class FlashAttentionImpl(AttentionImpl):
         self._dcp_dtype: torch.dtype | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
             self._dcp_dtype = vllm_config.model_config.dtype
+            # Pre-grow workspace for max DCP context output buffer size.
+            # CUDA graph capture only sees small batches (≤512 tokens), but
+            # chunked prefill at inference can send up to max_num_batched_tokens
+            # through _forward_with_dcp. Without this, the workspace locks at
+            # the capture size and fails at inference time.
+            from vllm.v1.worker.workspace import (
+                current_workspace_manager,
+                is_workspace_manager_initialized,
+            )
+
+            if is_workspace_manager_initialized():
+                max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+                from vllm.distributed.parallel_state import is_tpa_gqa_mode
+
+                dcp_heads = (
+                    self.num_heads
+                    if is_tpa_gqa_mode()
+                    else self.num_heads * self.dcp_world_size
+                )
+                current_workspace_manager().get_simultaneous(
+                    ((max_tokens, dcp_heads, self.head_size), self._dcp_dtype),
+                )
 
     def forward(
         self,
