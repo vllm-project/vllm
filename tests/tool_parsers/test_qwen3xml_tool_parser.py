@@ -124,6 +124,12 @@ def test_get_param_type_anyof_type_conversion():
                         "ref_param": {
                             "$ref": "#/$defs/ToolInput",
                         },
+                        "anyof_ref": {
+                            "anyOf": [
+                                {"$ref": "#/$defs/ToolInput"},
+                                {"type": "null"},
+                            ],
+                        },
                     },
                 },
             },
@@ -144,6 +150,8 @@ def test_get_param_type_anyof_type_conversion():
     assert parser._get_param_type("multi_non_null") == "string"
     # $ref: treated as object
     assert parser._get_param_type("ref_param") == "object"
+    # anyOf[$ref, null]: Optional[BaseModel] pattern → object
+    assert parser._get_param_type("anyof_ref") == "object"
 
 
 def test_xml_parser_anyof_end_to_end():

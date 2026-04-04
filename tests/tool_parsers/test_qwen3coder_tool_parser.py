@@ -528,6 +528,12 @@ def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser):
                         "ref_param": {
                             "$ref": "#/$defs/ToolInput",
                         },
+                        "anyof_ref": {
+                            "anyOf": [
+                                {"$ref": "#/$defs/ToolInput"},
+                                {"type": "null"},
+                            ],
+                        },
                     },
                 },
             },
@@ -557,6 +563,9 @@ some text
 <parameter=ref_param>
 {"city": "Paris"}
 </parameter>
+<parameter=anyof_ref>
+{"city": "London"}
+</parameter>
 </function>
 </tool_call>"""
 
@@ -580,6 +589,9 @@ some text
     # $ref: treated as object, parsed via json.loads
     assert args["ref_param"] == {"city": "Paris"}
     assert isinstance(args["ref_param"], dict)
+    # anyOf[$ref, null]: Optional[BaseModel] pattern → object via json.loads
+    assert args["anyof_ref"] == {"city": "London"}
+    assert isinstance(args["anyof_ref"], dict)
 
 
 def test_extract_tool_calls_anyof_type_conversion_streaming(
