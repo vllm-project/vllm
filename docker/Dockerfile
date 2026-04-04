@@ -590,10 +590,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-# 0.6.7.post1: CUTLASS 4.4.2 bump, fixes TMA grouped GEMM on SM12x (flashinfer#2798)
+# 0.6.7.post2: CUTLASS 4.4.2 bump, fixes TMA grouped GEMM on SM12x (flashinfer#2798)
 # TODO: bump to 0.6.8 when released for NVFP4/MXFP4 group GEMMs on
 #   SM120/SM121 (RTX 50 / DGX Spark) via flashinfer#2738
-ARG FLASHINFER_VERSION=0.6.7.post1
+ARG FLASHINFER_VERSION=0.6.7.post2
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
