@@ -3,7 +3,6 @@
 
 import ast
 import dataclasses
-import hashlib
 import json
 import operator
 import os
@@ -13,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
-from functools import partial
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -25,13 +24,18 @@ from torch.fx._lazy_graph_module import _use_lazy_graph_module
 import vllm.envs as envs
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
-from vllm.config.utils import Range, hash_factors
+from vllm.config.utils import CompileFactors, Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
+from .caching import (
+    VllmSerializableFunction,
+    compute_env_and_config_hashes,
+    get_code_factors,
+)
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -137,8 +141,8 @@ class CompilerManager:
         self.compiler = make_compiler(compilation_config)
         self.loaded_artifacts: dict[str, Any] = {}
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        return self.compiler.compute_hash(vllm_config)
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return self.compiler.compile_factors(vllm_config)
 
     @contextmanager
     def compile_context(self, compile_range: Range) -> Generator[None, None, None]:
@@ -975,41 +979,31 @@ class VllmBackend:
 
     @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
-        from .caching import (
-            VllmSerializableFunction,
-        )
-
         vllm_config = self.vllm_config
 
         self._log_compilation_config()
 
         # Minimal hashing here with existing utilities, reused below.
 
-        env_factors = envs.compile_factors()
-        env_hash = hash_factors(env_factors)
-        # Compute config/compiler/code hashes once and reuse
-        config_hash = vllm_config.compute_hash()
-        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        (
+            env_hash,
+            config_hash,
+            env_factors,
+            config_factors,
+        ) = compute_env_and_config_hashes(vllm_config)
+        compiler_factors = self.compiler_manager.compile_factors(vllm_config)
+        compiler_hash = hash_factors(compiler_factors)
+        traced_files = set(self.compilation_config.traced_files)
+        forward_code_files = sorted(
+            (Path(filepath) for filepath in traced_files), key=str
+        )
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            lazy(lambda: "\n".join(forward_code_files)),
+            lazy(lambda: "\n".join(map(str, forward_code_files))),
         )
-        hash_content = []
-        for filepath in forward_code_files:
-            hash_content.append(filepath)
-            if filepath == "<string>":
-                # This means the function was dynamically generated, with
-                # e.g. exec(). We can't actually check these.
-                continue
-            try:
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            except (OSError, UnicodeDecodeError):
-                logger.warning("Failed to read file %s", filepath)
-                continue
-        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        code_factors = get_code_factors(forward_code_files)
+        code_hash = hash_factors({"files": code_factors})
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
@@ -1017,10 +1011,15 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-            factors = [env_hash, config_hash, code_hash, compiler_hash]
+            all_factors = {
+                "env": env_factors,
+                "config": config_factors,
+                "code": {"files": code_factors},
+                "compiler": compiler_factors,
+            }
             # Use SHA-256 for cache key hashing to be consistent across
-            # compute_hash functions. Truncate for a short cache dir name.
-            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
+            # compile_factors functions. Truncate for a short cache dir name.
+            hash_key = hash_factors(all_factors)[:10]
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
             )
@@ -1071,25 +1070,34 @@ class VllmBackend:
 
         # Persist and log only hash-relevant factors together.
         try:
-            logger.debug(
-                "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                lazy(partial(pprint.pformat, env_factors, width=120)),
-                config_hash,
-            )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
                 with open(meta_path, "w") as f:
                     json.dump(
                         {
                             "env": env_factors,  # raw factors used for env_hash
+                            "config": config_factors,
                             "config_hash": config_hash,
-                            "code_hash": code_hash,
+                            "compiler": compiler_factors,
                             "compiler_hash": compiler_hash,
+                            "code_hash": code_hash,
+                            "code": code_factors,
                         },
                         f,
                         indent=2,
                         sort_keys=True,
                     )
+            logger.debug(
+                (
+                    "Persisted compile cache factors to %s "
+                    "(env_keys=%d config_keys=%d compiler_keys=%d code_entries=%d)"
+                ),
+                meta_path,
+                len(env_factors),
+                len(config_factors),
+                len(compiler_factors),
+                len(code_factors),
+            )
         except Exception:
             # Best-effort only; metadata write failures are non-fatal.
             logger.warning(

@@ -23,7 +23,7 @@ from vllm.config.multimodal import (
 from vllm.config.pooler import PoolerConfig
 from vllm.config.quantization import OnlineQuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import CompileFactors, config, get_compile_factors, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
@@ -330,19 +330,23 @@ class ModelConfig:
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        WARNING: Whenever a new field is added to this config, review
+        `ignored_factors` to decide whether that field must be excluded.
+        Every other dataclass field automatically participates in the hash.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This config is opt-out hashed: include every dataclass field except for
+        those explicitly listed in `ignored_factors`.
         """
         ignored_factors = {
+            "runner",
             "convert",
             "tokenizer",
             "tokenizer_mode",
@@ -360,6 +364,7 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
+            "logits_processor_pattern",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
@@ -376,16 +381,12 @@ class ModelConfig:
             "skip_mm_profiling",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-
+        factors = get_compile_factors(self, ignored_factors)
         # NOTE: For some models (e.g, Qwen3-VL), whether the MM code path is enabled
-        # affects the computation graph of the language model, therefore we add it
-        # here early.
+        # affects the computation graph of the language model.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
-        return hash_factors(factors)
+        return factors or {}
 
     def _update_nested(
         self,

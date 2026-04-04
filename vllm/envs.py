@@ -1784,10 +1784,8 @@ def validate_environ(hard_fail: bool) -> None:
 
 
 def compile_factors() -> dict[str, object]:
-    """Return env vars used for torch.compile cache keys.
-
-    Start with every known vLLM env var; drop entries in `ignored_factors`;
-    hash everything else. This keeps the cache key aligned across workers."""
+    """Collect env vars used for torch.compile cache keys."""
+    from vllm.config.utils import normalize_value
 
     ignored_factors: set[str] = {
         "MAX_JOBS",
@@ -1852,8 +1850,6 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
     }
-
-    from vllm.config.utils import normalize_value
 
     factors: dict[str, object] = {}
     for factor, getter in environment_variables.items():

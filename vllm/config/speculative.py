@@ -12,10 +12,9 @@ from vllm.config import LoadConfig
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, normalize_value
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
-from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
 if TYPE_CHECKING:
@@ -194,7 +193,7 @@ class SpeculativeConfig:
     positions equals this value. Only used when rejection_sample_method
     is 'synthetic'. Must be in [0, 1]."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -206,17 +205,13 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
         # Eagle3 and extract_hidden_states affect the computation graph because
-        # they return intermediate hidden states in addition to the final hidden state.
-        uses_aux_hidden_states = self.method in (
-            "eagle3",
-            "extract_hidden_states",
-            "dflash",
-        )
-        factors.append(uses_aux_hidden_states)
+        # they return intermediate hidden states in addition to the final hidden
+        # state.
+        uses_aux_hidden_states = self.method in ("eagle3", "extract_hidden_states")
+        factors: list[Any] = [uses_aux_hidden_states]
 
-        # The specific layers used also affect the computation graph
+        # The specific layers used also affect the computation graph.
         if uses_aux_hidden_states and self.draft_model_config is not None:
             layer_ids = getattr(
                 self.draft_model_config.hf_config,
@@ -224,11 +219,10 @@ class SpeculativeConfig:
                 None,
             )
             if layer_ids is not None:
-                # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
 
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        normalized = normalize_value(factors)
+        return {"factors": normalized} if normalized else {}
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:

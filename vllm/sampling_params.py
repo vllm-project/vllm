@@ -10,7 +10,8 @@ from functools import cached_property
 from typing import Any
 
 import msgspec
-from pydantic.dataclasses import dataclass
+from pydantic.dataclasses import dataclass as pydantic_dataclass
+from typing_extensions import dataclass_transform
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
@@ -19,6 +20,13 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.serial_utils import PydanticMsgspecMixin
+
+
+# Keep pydantic runtime behavior while giving mypy dataclass semantics.
+@dataclass_transform(field_specifiers=(field,))
+def dataclass(*args, **kwargs):
+    return pydantic_dataclass(*args, **kwargs)
+
 
 logger = init_logger(__name__)
 
