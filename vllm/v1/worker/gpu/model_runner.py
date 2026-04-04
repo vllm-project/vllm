@@ -777,7 +777,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         print(
             "[spec_decode_debug][prepare_inputs] "
             f"req_ids={req_ids[:3]} num_reqs={num_reqs} num_tokens={num_tokens} "
-            f"total_draft={total_num_draft_tokens} "
             f"input_ids[:10]={self.input_buffers.input_ids[: min(10, num_tokens)].tolist()} "
             f"positions[:10]={self.input_buffers.positions[: min(10, num_tokens)].tolist()}"
         )
@@ -846,7 +845,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             topk_vals, topk_ids = torch.topk(first_logits.float(), 5)
             print(
                 "[spec_decode_debug][logits] "
-                f"reqs={input_batch.num_reqs} draft={total_num_draft_tokens} "
+                f"reqs={input_batch.num_reqs} draft={input_batch.num_draft_tokens} "
                 f"argmax={first_logits.argmax().item()} "
                 f"top5_ids={topk_ids.tolist()} "
                 f"top5_vals={[f'{v:.6f}' for v in topk_vals.tolist()]}"
