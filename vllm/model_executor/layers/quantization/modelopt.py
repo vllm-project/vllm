@@ -569,6 +569,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         weight = ModelWeightParameter(
             data=torch.empty(
@@ -651,6 +652,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         # Expose block size so the v2 weight loaders can translate offsets from
         # element-space -> block-space for BlockQuantScaleParameter.
@@ -782,6 +784,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     ):
         layer.orig_dtype = params_dtype
         layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
 
         # Use FP8 dtype if checkpoint is serialized
         weight_dtype = (
@@ -1102,6 +1105,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -1585,6 +1589,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         if input_size_per_partition % MXFP8_BLOCK_SIZE != 0:
             raise ValueError(
