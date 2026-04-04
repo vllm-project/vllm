@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+import weakref
 from collections.abc import Callable, Mapping
 from copy import copy
 from typing import Any
@@ -129,6 +130,10 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
+            self._finalizer = weakref.finalize(
+                self, LLMEngine._cleanup_instance_caches, self.model_executor
+            )
 
         if self.external_launcher_dp:
             # If we use DP in external launcher mode, we reuse the
@@ -423,6 +428,19 @@ class LLMEngine:
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
+
+    @staticmethod
+    def _cleanup_instance_caches(model_executor) -> None:
+        """Release caches that prevent the model from being GC'd."""
+        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+        from vllm.utils.func_utils import supports_kw
+
+        supports_kw.cache_clear()
+
+        model = model_executor.driver_worker.model_runner.model
+        for module in model.modules():
+            if isinstance(module, TorchCompileWithNoGuardsWrapper):
+                module.cleanup()
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)

@@ -4,6 +4,7 @@
 
 import pytest
 
+from tests.conftest import VllmRunner
 from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.shutdown.utils import (
     SHUTDOWN_TEST_THRESHOLD_BYTES,
@@ -104,5 +105,30 @@ def test_llm_delete(
         # Confirm all the processes are cleaned up.
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),
+            threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+        )
+
+
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("send_one_request", [False, True])
+def test_llm_delete_inprocess(
+    monkeypatch,
+    model: str,
+    send_one_request: bool,
+) -> None:
+    """Test that VllmRunner frees GPU memory in in-process (no MP) mode."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+        with VllmRunner(model) as vllm_model:
+            if send_one_request:
+                vllm_model.generate(
+                    ["Hello my name is"],
+                    SamplingParams(max_tokens=1),
+                )
+
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
             threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
         )
