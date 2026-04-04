@@ -2073,9 +2073,36 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+        # Mirror the legacy fused_experts_impl fast path for decode-like
+        # batches where only a small fraction of experts are active.
+        SPARSITY_FACTOR = 4
+        naive_block_assignment = (
+            expert_map is None
+            and num_tokens * top_k_num * SPARSITY_FACTOR <= global_num_experts
+            and not (
+                (self.quant_config.use_int8_w8a16 or self.quant_config.use_int4_w4a16)
+                and self.block_shape is not None
+                and self.block_shape[1] > 0
+            )
         )
+
+        if not naive_block_assignment:
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                topk_ids,
+                config["BLOCK_SIZE_M"],
+                global_num_experts,
+                expert_map,
+            )
+        else:
+            max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"]
+            expert_ids = topk_ids.view(-1)
+            num_tokens_post_padded = torch.full(
+                (1,),
+                max_num_tokens_padded,
+                dtype=torch.int32,
+                device=topk_ids.device,
+            )
+            sorted_token_ids = None
 
         invoke_fused_moe_triton_kernel(
             hidden_states,
