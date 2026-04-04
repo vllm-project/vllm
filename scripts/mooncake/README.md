@@ -4,15 +4,18 @@
 
 ### 1. Install Mooncake
 
-```bash
-# CUDA <13.0
-uv pip install mooncake-transfer-engine
+We need to use our own version of Mooncake for GB200:
 
-# CUDA >= 13.0
-uv pip install mooncake-transfer-engine-cuda13
+```shell
+git clone https://github.com/ivanium/Mooncake
+cd Mooncake
+git checkout yifan/dev
+# NOTE: Install necessary dependencies
+./scripts/dev_compile.sh
+# NOTE: Please check to ensure compile succeeded before installing
+# NOTE: Please ensure to activate vllm venv before installing
+./scripts/dev_install.sh
 ```
-
-Follow Mooncake README is good in general.
 
 ### 2. Verify Installation
 

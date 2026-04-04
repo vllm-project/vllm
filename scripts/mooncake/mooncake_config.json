@@ -3,6 +3,6 @@
   "master_server_address": "127.0.0.1:50051",
   "global_segment_size": "80GB",
   "local_buffer_size": "80GB",
-  "protocol": "tcp",
+  "protocol": "rdma",
   "device_name": ""
 }
