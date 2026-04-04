@@ -291,6 +291,9 @@ class SHMManager {
   }
 
   static SHMManager* get_singleton_instance(int64_t handle) {
+    TORCH_CHECK(handle >= 0
+                    && static_cast<size_t>(handle) < SingletonInstances.size(),
+                "Invalid SHMManager handle: ", handle);
     return SingletonInstances[handle].get();
   }
 
