@@ -144,7 +144,7 @@ def _valid_deep_gemm(
     return True
 
 
-class DeepGemmExperts(mk.FusedMoEExpertsModular):
+class DeepGemmExperts(mk.FusedMoEExpertsModular, DeepGemmFp8PrepMixin):
     """DeepGemm-based fused MoE expert implementation."""
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
