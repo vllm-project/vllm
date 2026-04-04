@@ -12,6 +12,7 @@ from torch._C._profiler import _EventType, _ExperimentalConfig, _ProfilerEvent
 from torch.autograd.profiler import FunctionEvent
 from torch.profiler import ProfilerActivity, profile
 
+from vllm.logger import init_logger
 from vllm.profiler.utils import (
     TablePrinter,
     event_has_module,
@@ -21,6 +22,8 @@ from vllm.profiler.utils import (
     indent_string,
 )
 from vllm.utils.import_utils import PlaceholderModule
+
+logger = init_logger(__name__)
 
 try:
     import pandas as pd
@@ -245,6 +248,13 @@ class LayerwiseProfileResults(profile):
         total_cuda_time = self._total_cuda_time()
 
         def pct_cuda_time(cuda_time_us):
+            if total_cuda_time == 0:
+                if cuda_time_us > 0:
+                    logger.warning(
+                        "cuda_time_us > 0 but total_cuda_time == 0, "
+                        "possible data inconsistency"
+                    )
+                return 0.0
             return (cuda_time_us / total_cuda_time) * 100
 
         def build_summary_stats_tree_df(
