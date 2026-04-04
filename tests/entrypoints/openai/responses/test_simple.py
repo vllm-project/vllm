@@ -5,20 +5,24 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
+from .conftest import validate_streaming_event_stack
 
 MODEL_NAME = "Qwen/Qwen3-8B"
 
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
-    env_dict = dict(
-        VLLM_ENABLE_RESPONSES_API_STORE="1",
-        # uncomment for tool calling
-        # PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
-    )
+    from .conftest import BASE_TEST_ENV
 
+    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
+    env_dict = {
+        **BASE_TEST_ENV,
+        "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+        # uncomment for tool calling
+        # PYTHON_EXECUTION_BACKEND: "dangerously_use_uv",
+    }
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
@@ -136,6 +140,106 @@ async def test_streaming_output_consistency(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_logprobs(client: OpenAI, model_name: str):
+    """Test that streaming with logprobs returns valid logprob data on
+    output_text.delta events and that top_logprobs has the requested count."""
+    response = await client.responses.create(
+        model=model_name,
+        input="Say hello.",
+        stream=True,
+        top_logprobs=3,
+        include=["message.output_text.logprobs"],
+    )
+
+    events = []
+    async for event in response:
+        events.append(event)
+
+    assert len(events) > 0
+
+    # Collect all output_text.delta events that carry logprobs
+    text_delta_events = [e for e in events if e.type == "response.output_text.delta"]
+    assert len(text_delta_events) > 0, "Expected at least one text delta event"
+
+    for delta_event in text_delta_events:
+        logprobs = delta_event.logprobs
+        assert logprobs is not None, "logprobs should be present on text delta events"
+        assert len(logprobs) > 0, "logprobs list should not be empty"
+        for lp in logprobs:
+            # Each logprob entry must have a token and a logprob value
+            assert lp.token is not None
+            assert isinstance(lp.logprob, float)
+            assert lp.logprob <= 0.0, f"logprob should be <= 0, got {lp.logprob}"
+            # top_logprobs should have up to 3 entries
+            assert lp.top_logprobs is not None
+            assert len(lp.top_logprobs) <= 3
+            for tl in lp.top_logprobs:
+                assert tl.token is not None
+                assert isinstance(tl.logprob, float)
+
+    # Verify that top_logprobs are actually populated, not always empty
+    all_top_logprobs = [
+        tl for e in text_delta_events for lp in e.logprobs for tl in lp.top_logprobs
+    ]
+    assert len(all_top_logprobs) > 0, (
+        "Expected at least one top_logprobs entry across all delta events"
+    )
+
+    # Verify the completed event still has valid output
+    completed = events[-1]
+    assert completed.type == "response.completed"
+    assert completed.response.status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_reasoning_tokens_e2e(client: OpenAI, model_name: str):
+    """Verify final usage includes reasoning_tokens in streaming mode."""
+    response = await client.responses.create(
+        model=model_name,
+        input="Compute 17 * 19 and explain briefly.",
+        reasoning={"effort": "low"},
+        temperature=0.0,
+        stream=True,
+    )
+
+    completed_event = None
+    async for event in response:
+        if event.type == "response.completed":
+            completed_event = event
+
+    assert completed_event is not None
+    assert completed_event.response.status == "completed"
+    assert completed_event.response.usage is not None
+    assert completed_event.response.usage.output_tokens_details is not None
+    assert completed_event.response.usage.output_tokens_details.reasoning_tokens > 0, (
+        "Expected reasoning_tokens > 0 for streamed Qwen3 response."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_non_streaming_reasoning_tokens_e2e(client: OpenAI, model_name: str):
+    """Verify usage includes reasoning_tokens in non-streaming mode."""
+    response = await client.responses.create(
+        model=model_name,
+        input="Compute 23 * 17 and explain briefly.",
+        reasoning={"effort": "low"},
+        temperature=0.0,
+        stream=False,
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert response.usage is not None
+    assert response.usage.output_tokens_details is not None
+    assert response.usage.output_tokens_details.reasoning_tokens > 0, (
+        "Expected reasoning_tokens > 0 for non-streamed Qwen3 response."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_max_tokens(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -170,3 +274,23 @@ async def test_extra_sampling_params(client: OpenAI, model_name: str):
     assert response.status in ["completed", "incomplete"]
     assert len(response.output) > 0
     assert response.output[0].content[0].text  # Has text output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_types(
+    pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
+):
+    stream = await client.responses.create(
+        model=model_name,
+        input="tell me a story about a cat in 20 words",
+        reasoning={"effort": "low"},
+        tools=[],
+        stream=True,
+        background=False,
+    )
+    events = []
+    async for event in stream:
+        events.append(event)
+
+    validate_streaming_event_stack(events, pairs_of_event_types)

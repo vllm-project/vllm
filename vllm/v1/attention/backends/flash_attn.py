@@ -10,20 +10,23 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import (
@@ -32,13 +35,17 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+import vllm.envs as envs
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -47,7 +54,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    get_dcp_local_seq_lens,
     get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -58,6 +64,11 @@ logger = init_logger(__name__)
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -81,9 +92,19 @@ class FlashAttentionBackend(AttentionBackend):
 
     forward_includes_kv_cache_update: bool = False
 
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        if current_platform.is_xpu():
+            return max(default_block_size, 64)
+        return super().get_preferred_block_size(default_block_size)
+
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -94,6 +115,11 @@ class FlashAttentionBackend(AttentionBackend):
             AttentionType.ENCODER_ONLY,
             AttentionType.ENCODER_DECODER,
         )
+
+    @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        fa_version = get_flash_attn_version()
+        return fa_version is not None and fa_version >= 3
 
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
@@ -151,9 +177,9 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(kv_cache_dtype):
             return flash_attn_supports_fp8()
-        return kv_cache_dtype in ["auto", "bfloat16"]
+        return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -331,6 +357,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
             )
 
+        if self.dcp_world_size > 1:
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self._dcp_context_kv_lens = torch.zeros(
+                max_num_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
@@ -355,8 +389,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
 
-        # the overhead of the aot schedule is not worth it for spec-decode
-        aot_schedule = self.aot_schedule and not fast_build
+        # Disable AOT schedule for spec-decode proposer (not worth the overhead)
+        # and for batch invariance (schedule varies with max_seqlen_q/k).
+        aot_schedule = (
+            self.aot_schedule and not fast_build and not envs.VLLM_BATCH_INVARIANT
+        )
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
@@ -386,14 +423,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
 
         def schedule(
             batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
         ):
             cache_dtype = self.cache_config.cache_dtype
-            if cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(cache_dtype):
                 qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                     cache_dtype
                 )
@@ -427,15 +464,18 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
-            dcp_context_kv_lens = seq_lens - query_kv_lens
-
-            dcp_context_kv_lens = get_dcp_local_seq_lens(
-                dcp_context_kv_lens,
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            context_kv_lens = seq_lens - query_lens
+            local_context_kv_lens = get_dcp_local_seq_lens(
+                context_kv_lens,
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.cp_kv_cache_interleave_size,
             )
+            self._dcp_context_kv_lens[:num_reqs] = local_context_kv_lens
+            self._dcp_context_kv_lens[num_reqs:] = 0
+            dcp_context_kv_lens = self._dcp_context_kv_lens[:num_reqs]
+
             # After DCP distribution, the maximum number of tokens for any rank is
             # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
             # and I is cp_kv_cache_interleave_size.
@@ -575,9 +615,17 @@ class FlashAttentionImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.attn_type = attn_type
-        self.vllm_flash_attn_version = get_flash_attn_version()
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+        )
+        logger.info_once(
+            "Using FlashAttention version %s",
+            self.vllm_flash_attn_version,
+            scope="local",
+        )
         # Cache the batch invariant result for use in forward passes
-        self.batch_invariant_enabled = vllm_is_batch_invariant()
+        self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
         if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
             raise NotImplementedError(
@@ -595,11 +643,18 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.supports_quant_query_input = True
-        self.supports_per_head_quant_scales = (
-            self.vllm_flash_attn_version >= 3
-            if self.vllm_flash_attn_version is not None
-            else False
+
+        vllm_config = get_current_vllm_config_or_none()
+        dcp_a2a = (
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
+        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+
+        self._dcp_dtype: torch.dtype | None = None
+        if vllm_config is not None and self.dcp_world_size > 1:
+            self._dcp_dtype = vllm_config.model_config.dtype
 
     def forward(
         self,
@@ -671,7 +726,7 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype
@@ -826,11 +881,18 @@ class FlashAttentionImpl(AttentionImpl):
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
+        n = query_across_dcp.shape[0]
+        (dcp_context_out,) = current_workspace_manager().get_simultaneous(
+            (
+                (n, self.num_heads * self.dcp_world_size, self.head_size),
+                self._dcp_dtype,
+            ),
+        )
         context_attn_out, context_lse = flash_attn_varlen_func(
             q=query_across_dcp,
             k=key_cache,
             v=value_cache,
-            out=None,
+            out=dcp_context_out,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             seqused_k=attn_metadata.dcp_context_kv_lens,
@@ -847,9 +909,10 @@ class FlashAttentionImpl(AttentionImpl):
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
+            num_splits=attn_metadata.max_num_splits,
         )
-        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+        # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
+        context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
             context_lse.transpose(0, 1),
             get_dcp_group(),
@@ -857,11 +920,14 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
+        (dcp_query_out,) = current_workspace_manager().get_simultaneous(
+            ((query.shape[0], self.num_heads, self.head_size), self._dcp_dtype),
+        )
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
-            out=None,
+            out=dcp_query_out,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
@@ -876,6 +942,7 @@ class FlashAttentionImpl(AttentionImpl):
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
+            num_splits=attn_metadata.max_num_splits,
         )
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
@@ -911,7 +978,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
@@ -1095,7 +1162,7 @@ def cascade_attention(
         # s_aux is incorporated into prefix_lse inside the GPU kernel,
         # enabling its effect during the final attention merge.
         s_aux=s_aux,
-        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
+        num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -1120,7 +1187,7 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
+        num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.

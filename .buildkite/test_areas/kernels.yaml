@@ -2,14 +2,25 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
+- label: vLLM IR Tests
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+    - vllm/ir
+    - vllm/kernels
+  commands:
+    - pytest -v -s tests/ir
+    - pytest -v -s tests/kernels/ir
+
 - label: Kernels Core Operation Test
   timeout_in_minutes: 75
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
@@ -18,6 +29,7 @@ steps:
   - vllm/v1/attention
     # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
   - vllm/model_executor/layers/attention
+  - vllm/utils/flashinfer.py
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -34,7 +46,7 @@ steps:
   parallelism: 2
 
 - label: Kernels MoE Test %N
-  timeout_in_minutes: 60
+  timeout_in_minutes: 25
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -44,8 +56,9 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 5
 
 - label: Kernels Mamba Test
   timeout_in_minutes: 45
@@ -70,7 +83,7 @@ steps:
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
   commands:
-    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s kernels/quantization/test_block_fp8.py
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
@@ -95,7 +108,7 @@ steps:
   - vllm/platforms/cuda.py
   commands:
     - nvidia-smi
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_attention_selector.py
@@ -115,6 +128,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
@@ -126,7 +140,7 @@ steps:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
   commands:
-    - pip install helion
+    - pip install helion==0.3.3
     - pytest -v -s kernels/helion/
 
  
@@ -154,9 +168,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
-    - pytest -v -s kernels/moe/test_pplx_cutlass_moe.py
-    # - pytest -v -s kernels/moe/test_pplx_moe.py - failing on main
-  
+
 - label: Kernels Fp4 MoE Test (B200)
   timeout_in_minutes: 60
   device: b200

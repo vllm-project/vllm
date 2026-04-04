@@ -8,7 +8,7 @@ Generate CPU attention dispatch switch cases and kernel instantiations.
 import os
 
 # Head dimensions divisible by 32 (support all ISAs)
-HEAD_DIMS_32 = [32, 64, 96, 128, 160, 192, 224, 256]
+HEAD_DIMS_32 = [32, 64, 96, 128, 160, 192, 224, 256, 512]
 
 # Head dimensions divisible by 16 but not 32 (VEC16 only)
 HEAD_DIMS_16 = [80, 112]
@@ -19,10 +19,11 @@ ISA_TYPES = {
     "VEC": 1,
     "VEC16": 2,
     "NEON": 3,
+    "VXE": 4,
 }
 
 # ISAs supported for head_dims divisible by 32
-ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16"]
+ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE"]
 
 # ISAs supported for head_dims divisible by 16 only
 ISA_FOR_16 = ["VEC16"]
@@ -118,6 +119,10 @@ def generate_header_file() -> str:
   #include "cpu_attn_neon.hpp"
 #endif
 
+#ifdef __s390x__
+  #include "cpu_attn_vxe.hpp"
+#endif
+
 """
 
     header += generate_helper_function()
@@ -165,6 +170,25 @@ def generate_header_file() -> str:
 
 """
 
+    # s390x with VXE
+    header += """#elif defined(__s390x__)
+#define CPU_ATTN_DISPATCH(HEAD_DIM, ISA_TYPE, ...) \\
+  [&] { \\
+    int64_t encoded_params = encode_cpu_attn_params(HEAD_DIM, ISA_TYPE); \\
+    switch (encoded_params) { \\
+"""
+    header += generate_cases_for_isa_group(["VXE", "VEC", "VEC16"])
+    header += """
+      default: { \\
+        TORCH_CHECK(false, "Unsupported CPU attention configuration: head_dim=" + \\
+                    std::to_string(HEAD_DIM) + " isa=" + \\
+                    std::to_string(static_cast<int>(ISA_TYPE))); \\
+      } \\
+    } \\
+  }()
+
+"""
+
     # Fallback: VEC and VEC16 only
     header += """#else
 #define CPU_ATTN_DISPATCH(HEAD_DIM, ISA_TYPE, ...) \\
@@ -182,7 +206,7 @@ def generate_header_file() -> str:
     } \\
   }()
 
-#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ */
+#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / __s390x__ */
 
 #endif  // CPU_ATTN_DISPATCH_GENERATED_H
 """

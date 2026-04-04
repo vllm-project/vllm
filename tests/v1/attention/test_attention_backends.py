@@ -40,6 +40,8 @@ BACKENDS_TO_TEST = [
     "FLEX_ATTENTION_SLOW",
 ]
 
+DEVICE_TYPE = current_platform.device_type
+
 # Remove flashinfer from the list if it's not available
 try:
     import flashinfer  # noqa: F401
@@ -179,7 +181,7 @@ def create_and_prepopulate_kv_cache(
         block_table[i, :num_blocks_for_seq] = inv_perm[start:end]
         start_block_idx += num_blocks_for_seq
 
-        # Create a realistic slot mapping that corresponds to the block table
+    # Create a realistic slot mapping that corresponds to the block table
     for i in range(batch_size):
         token_offsets = torch.arange(int(query_lens[i])) + int(context_lens[i])
         block_indices = token_offsets // block_size
@@ -366,7 +368,7 @@ def _test_backend_correctness(
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 

@@ -6,9 +6,11 @@ from typing import ClassVar
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -16,7 +18,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -25,7 +26,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 logger = init_logger(__name__)
 
-_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM)
+_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.S390X)
 
 
 class CPUAttentionBackend(AttentionBackend):
@@ -37,12 +38,8 @@ class CPUAttentionBackend(AttentionBackend):
     ]
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256]
+        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
 
     @staticmethod
     def get_name() -> str:
@@ -174,7 +171,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             query_start_loc = query_start_loc[: num_decodes + 1]
             block_table_tensor = block_table_tensor[:num_decodes]
 
-        sheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
+        scheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
             num_reqs=num_reqs,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
@@ -185,7 +182,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             causal=causal,
             sliding_window_size=self.window_size,
             isa=self.isa,
-            enable_kv_split=True,
+            enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -197,7 +194,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            scheduler_metadata=sheduler_metadata,
+            scheduler_metadata=scheduler_metadata,
             causal=causal,
             use_sdpa_prefill=self.use_sdpa_prefill,
             num_decode_tokens=num_decode_tokens,
@@ -486,14 +483,17 @@ def _get_attn_isa(
 ) -> str:
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
         return "vec16"
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
+    supports_amx = torch.cpu._is_amx_tile_supported()
     supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+    supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:
         if supports_arm:
             # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
             return "neon"
+        elif supports_vxe:
+            return "vxe"
         else:
             return "vec"
     else:

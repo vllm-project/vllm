@@ -23,12 +23,14 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
@@ -66,9 +68,7 @@ class MistralToolCall(ToolCall):
 
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
-    return not (
-        isinstance(model_tokenizer, MistralTokenizer) and model_tokenizer.version >= 11
-    )
+    return not (is_mistral_tokenizer(model_tokenizer) and model_tokenizer.version >= 11)
 
 
 class MistralToolParser(ToolParser):
@@ -80,10 +80,10 @@ class MistralToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
-        if not isinstance(self.model_tokenizer, MistralTokenizer):
+        if not is_mistral_tokenizer(self.model_tokenizer):
             logger.info("Non-Mistral tokenizer detected when using a Mistral model...")
 
         # initialize properties used for state when parsing tool calls in
@@ -112,10 +112,12 @@ class MistralToolParser(ToolParser):
                 "the tokenizer!"
             )
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         if (
-            not isinstance(self.model_tokenizer, MistralTokenizer)
+            not is_mistral_tokenizer(self.model_tokenizer)
             and request.tools
             and request.tool_choice != "none"
         ):
@@ -243,7 +245,10 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if self.bot_token_id not in current_token_ids:
+        has_bot_token = (
+            self.bot_token_id in current_token_ids or self.bot_token in current_text
+        )
+        if not has_bot_token:
             # if the tool call token is not in the tokens generated so far,
             # append output to contents since it's not a tool
             return DeltaMessage(content=delta_text)
@@ -277,7 +282,8 @@ class MistralToolParser(ToolParser):
         additional_content: str = ""
         if self.streaming_state == StreamingState.WAITING_FOR_TOOL_START:
             # this is the first tool call
-            assert self.bot_token_id in delta_token_ids
+            if self.bot_token not in delta_text:
+                return DeltaMessage(content=delta_text)
             if not delta_text.startswith(self.bot_token):
                 additional_content += delta_text.split(self.bot_token)[0]
                 delta_text = self.bot_token + "".join(
@@ -413,7 +419,7 @@ class MistralToolParser(ToolParser):
             index=self.current_tool_id, type="function"
         )
         current_tool_call_modified = False
-        if self.bot_token_id in delta_token_ids:
+        if self.bot_token_id in delta_token_ids or self.bot_token in delta_text:
             # this is the first tool call
             if not delta_text.startswith(self.bot_token):
                 content = delta_text.split(self.bot_token)[0]

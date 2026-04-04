@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
@@ -11,7 +9,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.logger import init_logger
-from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -50,48 +47,17 @@ def safe_apply_chat_template(
         raise ValueError(str(e)) from e
 
 
-class MistralRenderer(BaseRenderer):
-    @classmethod
-    def from_config(
-        cls,
-        config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
-        return cls(config, tokenizer_kwargs)
-
+class MistralRenderer(BaseRenderer[MistralTokenizer]):
     def __init__(
         self,
         config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
+        tokenizer: MistralTokenizer | None,
     ) -> None:
-        super().__init__(config)
+        super().__init__(config, tokenizer)
 
-        model_config = self.model_config
-        if model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_get_tokenizer(
-                tokenizer_cls=MistralTokenizer,
-                **tokenizer_kwargs,
-            )
-
-        self._tokenizer = tokenizer
-
-        self._apply_chat_template_executor = ThreadPoolExecutor(max_workers=1)
         self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._apply_chat_template_executor
+            safe_apply_chat_template, executor=self._executor
         )
-
-    @property
-    def tokenizer(self) -> MistralTokenizer | None:
-        return self._tokenizer
-
-    def get_tokenizer(self) -> MistralTokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
 
     def render_messages(
         self,
@@ -103,6 +69,8 @@ class MistralRenderer(BaseRenderer):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -129,6 +97,8 @@ class MistralRenderer(BaseRenderer):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = await self._apply_chat_template_async(

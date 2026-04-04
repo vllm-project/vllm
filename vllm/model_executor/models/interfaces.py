@@ -13,6 +13,7 @@ from collections.abc import (
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
+    Any,
     ClassVar,
     Literal,
     Protocol,
@@ -29,15 +30,15 @@ from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.config import ModelConfig, SpeechToTextConfig
-from vllm.inputs import TokensPrompt
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.tasks import ScoreType
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
-from .interfaces_base import VllmModel, is_pooling_model
+from .interfaces_base import VllmModel
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -45,6 +46,11 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        EncoderCudaGraphCaptureInputs,
+        EncoderCudaGraphConfig,
+        EncoderCudaGraphReplayBuffers,
+    )
 else:
     VllmConfig = object
     WeightsMapper = object
@@ -130,6 +136,13 @@ class SupportsMultiModal(Protocol):
     Set internally by `_mark_tower_model`.
     """
 
+    _has_oov_mm_tokens: bool = False
+    """
+    In general, this should be set at init time by invoking
+    `configure_mm_token_handling` models & passing all potentially
+    OOV multimodal tokens.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
@@ -148,6 +161,17 @@ class SupportsMultiModal(Protocol):
             input prompt.
         """
         ...
+
+    def configure_mm_token_handling(self, vocab_size: int, mm_token_ids: list[int]):
+        """Check if any multimodal tokens are out of vocabulary. If so, we will
+        explicitly mask all multimodal tokens out when computing text embeddings,
+        since the multimodal embeddings will be scattered over the results.
+        """
+        self._has_oov_mm_tokens = any(tok_id >= vocab_size for tok_id in mm_token_ids)
+        logger.info(
+            "Contains out of vocabulary multimodal tokens? %s",
+            self._has_oov_mm_tokens,
+        )
 
     def get_language_model(self) -> VllmModel:
         """
@@ -324,7 +348,6 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: MultiModalEmbeddings,
         *,
         is_multimodal: torch.Tensor,
-        handle_oov_mm_token: bool = False,
     ) -> Tensor: ...
 
     def _embed_text_input_ids(
@@ -333,17 +356,16 @@ class SupportsMultiModal(Protocol):
         embed_input_ids: Callable[[Tensor], Tensor],
         *,
         is_multimodal: Tensor | None,
-        handle_oov_mm_token: bool,
     ) -> Tensor:
-        if handle_oov_mm_token and is_multimodal is not None:
-            is_text = ~is_multimodal
-            text_embeds = embed_input_ids(input_ids[is_text])
-
-            return torch.empty(
-                (input_ids.shape[0], text_embeds.shape[1]),
-                dtype=text_embeds.dtype,
-                device=text_embeds.device,
-            ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
+        if is_multimodal is not None and self._has_oov_mm_tokens:
+            # Force all input IDs to be in vocab; we do this instead of squeezing
+            # to ensure that any external configuration requiring offset tracking,
+            # e.g., LoRA, are applied correctly regardless of whether or not
+            # we have multimodal tokens.
+            in_vocab_ids = input_ids.masked_fill(
+                is_multimodal.to(device=input_ids.device, non_blocking=True), 0
+            )
+            return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
 
@@ -353,7 +375,6 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> Tensor:
         """
         Apply token embeddings to `input_ids`.
@@ -361,19 +382,19 @@ class SupportsMultiModal(Protocol):
         If `multimodal_embeddings` is passed, scatter them into
         `input_ids` according to the mask `is_multimodal`.
 
-        In case the multi-modal token IDs exceed the vocabulary size of
-        the language model, you can set `handle_oov_mm_token=False`
-        to avoid calling the language model's `embed_input_ids` method
-        on those tokens. Note however that doing so increases memory usage
-        as an additional buffer is needed to hold the input embeddings.
+        NOTE: If this model has multimodal tokens that are of vocabulary
+        (i.e., self._has_oov_mm_tokens=True), the input_ids will be copied
+        and masked to 0 during the forward pass for the text embeddings.
         """
         from .utils import _merge_multimodal_embeddings
 
+        # Get text embeddings first; multimodal embeddings will clobber
+        # any invalid contents in the indices of multimodal embeddings
+        # for the in vocabulary and out of vocabulary case.
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -956,29 +977,7 @@ def supports_mamba_prefix_caching(
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
-    supports_cross_encoding: ClassVar[Literal[True]] = True
-
-
-@overload
-def supports_cross_encoding(
-    model: type[object],
-) -> TypeIs[type[SupportsCrossEncoding]]: ...
-
-
-@overload
-def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]: ...
-
-
-def _supports_cross_encoding(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsCrossEncoding]] | TypeIs[SupportsCrossEncoding]:
-    return getattr(model, "supports_cross_encoding", False)
-
-
-def supports_cross_encoding(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsCrossEncoding]] | TypeIs[SupportsCrossEncoding]:
-    return is_pooling_model(model) and _supports_cross_encoding(model)
+    score_type: ClassVar[ScoreType] = "cross-encoder"
 
 
 @runtime_checkable
@@ -990,29 +989,7 @@ class SupportsLateInteraction(Protocol):
     MaxSim (max over document tokens, sum over query tokens).
     """
 
-    supports_late_interaction: ClassVar[Literal[True]] = True
-
-
-@overload
-def supports_late_interaction(
-    model: type[object],
-) -> TypeIs[type[SupportsLateInteraction]]: ...
-
-
-@overload
-def supports_late_interaction(model: object) -> TypeIs[SupportsLateInteraction]: ...
-
-
-def _supports_late_interaction(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsLateInteraction]] | TypeIs[SupportsLateInteraction]:
-    return getattr(model, "supports_late_interaction", False)
-
-
-def supports_late_interaction(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsLateInteraction]] | TypeIs[SupportsLateInteraction]:
-    return is_pooling_model(model) and _supports_late_interaction(model)
+    score_type: ClassVar[ScoreType] = "late-interaction"
 
 
 class SupportsQuant:
@@ -1025,19 +1002,10 @@ class SupportsQuant:
     def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
 
-        # find config passed in arguments
-        quant_config = cls._find_quant_config(*args, **kwargs)
-        if quant_config is not None:
-            # attach config to model for general use
-            instance.quant_config = quant_config
+        # find config passed in arguments and attach it to model for general use
+        instance.quant_config = cls._find_quant_config(*args, **kwargs)
 
-            # apply model mappings to config for proper config-model matching
-            if (hf_to_vllm_mapper := instance.hf_to_vllm_mapper) is not None:
-                instance.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
-            if instance.packed_modules_mapping is not None:
-                instance.quant_config.packed_modules_mapping.update(
-                    instance.packed_modules_mapping
-                )
+        cls._maybe_apply_model_mapping(instance)
 
         return instance
 
@@ -1056,12 +1024,25 @@ class SupportsQuant:
 
         return None
 
+    def _maybe_apply_model_mapping(self):
+        """Apply model mappings to config for proper config-model matching"""
+        if self.quant_config is None:
+            return
+        if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
+            self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+        if self.packed_modules_mapping is not None:
+            self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
+
 
 @runtime_checkable
 class SupportsRealtime(Protocol):
     """The interface required for all models that support transcription."""
 
     supports_realtime: ClassVar[Literal[True]] = True
+
+    realtime_max_tokens: ClassVar[int] = 1
+    """Maximum tokens to generate per streaming audio segment.
+    Override in subclasses based on the model's expected output length."""
 
     @classmethod
     async def buffer_realtime_audio(
@@ -1105,6 +1086,16 @@ class SupportsTranscription(Protocol):
     supports_segment_timestamp: ClassVar[bool] = False
     """
     Enables the segment timestamp option for supported models by setting this to `True`.
+    """
+
+    supports_explicit_language_detection: ClassVar[bool] = False
+    """
+    Transcription models that require an explicit language detection step
+    (e.g. Whisper needs a separate forward pass to predict the language
+    token) should set this to ``True`` and implement
+    :meth:`get_language_detection_prompt` and
+    :meth:`parse_language_detection_output` and
+    :meth:`get_language_token_ids`.
     """
 
     def __init_subclass__(cls, **kwargs):
@@ -1202,6 +1193,46 @@ class SupportsTranscription(Protocol):
         """
         return text
 
+    @classmethod
+    def get_language_detection_prompt(
+        cls,
+        audio: np.ndarray,
+        stt_config: SpeechToTextConfig,
+    ) -> PromptType:
+        """Return a prompt that triggers language detection.
+
+        Only needs to be implemented when
+        ``supports_explicit_language_detection`` is ``True``.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def parse_language_detection_output(
+        cls,
+        token_ids: list[int],
+        tokenizer: object,
+    ) -> str:
+        """Parse the detected language from model output token IDs.
+
+        Only needs to be implemented when
+        ``supports_explicit_language_detection`` is ``True``.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def get_language_token_ids(
+        cls,
+        tokenizer: object,
+    ) -> list[int] | None:
+        """Return token IDs that represent valid language tokens.
+
+        Used to constrain language detection to only produce valid language tokens.
+
+        Only needs to be implemented when
+        ``supports_explicit_language_detection`` is ``True``.
+        """
+        raise NotImplementedError
+
 
 @overload
 def supports_transcription(
@@ -1247,6 +1278,25 @@ def supports_any_eagle(
 ) -> TypeIs[type[SupportsEagleBase]] | TypeIs[SupportsEagleBase]:
     """Check if model supports any EAGLE variant (1, 2, or 3)."""
     return supports_eagle(model) or supports_eagle3(model)
+
+
+class EagleModelMixin:
+    aux_hidden_state_layers: tuple[int, ...] = ()
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.aux_hidden_state_layers = layers
+
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            value = hidden_states + residual if residual is not None else hidden_states
+            aux_hidden_states.append(value)
+        return aux_hidden_states
 
 
 @runtime_checkable
@@ -1296,24 +1346,48 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
-        Set which layers should output auxiliary
-        hidden states for EAGLE-3.
+        Set which layers should output auxiliary hidden states for EAGLE-3.
 
         Args:
             layers: Tuple of layer indices that should output auxiliary
                 hidden states.
         """
-        ...
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
+            "Model instance must have 'model' attribute to set number of layers"
+        )
+        assert isinstance(parent_ref.model, EagleModelMixin), (
+            "Model instance must inherit from EagleModelMixin to set auxiliary layers"
+        )
+        parent_ref.model._set_aux_hidden_state_layers(layers)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
-        Get the layer indices that should output auxiliary hidden states
-        for EAGLE-3.
+        Get the default layer indices that should output auxiliary hidden states
+        for EAGLE-3 for this model. Models can override this method to provide
+        different default layers based on their architecture, but it is encouraged
+        to instead include the layer specification in the model's config if possible.
 
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
         """
-        ...
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
+            "Model instance must have 'model' attribute to get number of layers"
+        )
+        assert hasattr(parent_ref.model, "layers"), (
+            "Model instance must have 'layers' attribute to get number of layers"
+        )
+        num_layers = len(parent_ref.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
 
 @overload
@@ -1427,3 +1501,138 @@ def supports_xdrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
     return isinstance(model, SupportsXDRoPE)
+
+
+@runtime_checkable
+class SupportsEncoderCudaGraph(Protocol):
+    """Interface for models whose vision encoder supports CUDA graph
+    capture/replay.
+
+    Models implement these methods to provide the
+    :class:`EncoderCudaGraphManager` with all model-specific logic
+    (input handling, metadata computation, forward pass) without the
+    manager needing to know model internals.
+    """
+
+    supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+
+    def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> tuple[int, int]:
+        """Return (min_token_budget, max_token_budget) for auto-inference.
+
+        - min_token_budget: estimated smallest possible encoder input
+          (e.g. 64 for a 224x224 image)
+        - max_token_budget: estimated largest budget worth capturing
+          (e.g. max_num_batched_tokens)
+
+        Used when ``encoder_cudagraph_token_budgets`` and/or
+        ``encoder_cudagraph_max_images_per_batch`` are not explicitly
+        specified by the user.
+        """
+        ...
+
+    def get_encoder_cudagraph_num_items(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> int:
+        """Return the number of items (e.g. images) in the batch."""
+        ...
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        """Return output token count for each item.
+
+        Used for greedy packing and DP load balancing.
+        """
+        ...
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        """Return input size (e.g. patch count) for each item.
+
+        Used for input tensor slicing offsets.
+        """
+        ...
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        """Select a subset of items and return mm_kwargs for the sub-batch.
+
+        Called by the manager during greedy packing and DP sharding to
+        extract inputs for a specific set of items (e.g. images at
+        indices [0, 3, 5]).  The implementation is model-specific
+        because input formats differ:
+
+        - Qwen-family: slice concatenated pixel_values by cumulative
+          patch offsets, subset grid_thw by indices.
+        - Batched models (CLIP): index pixel_values along dim 0.
+        """
+        ...
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "EncoderCudaGraphCaptureInputs":
+        """Create dummy inputs and buffers for CUDA graph capture."""
+        ...
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+    ) -> "EncoderCudaGraphReplayBuffers":
+        """Compute buffer values from actual batch inputs for replay."""
+        ...
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Run the encoder forward pass with precomputed buffers.
+
+        Used during both CUDA graph capture and replay.
+        """
+        ...
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """Run the encoder forward pass without precomputed buffers.
+
+        Used as eager fallback when inputs exceed all budgets.
+        """
+        ...
+
+
+@overload
+def supports_encoder_cudagraph(
+    model: type[object],
+) -> TypeIs[type[SupportsEncoderCudaGraph]]: ...
+
+
+@overload
+def supports_encoder_cudagraph(
+    model: object,
+) -> TypeIs[SupportsEncoderCudaGraph]: ...
+
+
+def supports_encoder_cudagraph(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsEncoderCudaGraph]] | TypeIs[SupportsEncoderCudaGraph]:
+    return isinstance(model, SupportsEncoderCudaGraph)

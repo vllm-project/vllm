@@ -184,11 +184,16 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         # Set MoE hyperparameters
         self.set_moe_parameters()
+        self.is_fp4_ckpt = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "modelopt_fp4"
+        )
 
     def set_moe_parameters(self):
         self.expert_weights = []
@@ -242,6 +247,14 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
+
+        if self.is_fp4_ckpt:
+            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+            indexer_fused_mapping = [
+                ("wk_weights_proj", "wk", 0),
+                ("wk_weights_proj", "weights_proj", 1),
+            ]
+            stacked_params_mapping.extend(indexer_fused_mapping)
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             self,
@@ -415,6 +428,26 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         weight_loader(param, loaded_weight)
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
+
+        # Validate that weights were loaded for each expected MTP layer.
+        loaded_layers: set[int] = set()
+        for param_name in loaded_params:
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
+            if spec_layer is not None:
+                loaded_layers.add(spec_layer)
+        for layer_idx in range(
+            self.model.mtp_start_layer_idx,
+            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
+        ):
+            if layer_idx not in loaded_layers:
+                raise ValueError(
+                    f"MTP speculative decoding layer {layer_idx} weights "
+                    f"missing from checkpoint. The checkpoint may have "
+                    f"been quantized without including the MTP layers. "
+                    f"Use a checkpoint that includes MTP layer weights, "
+                    f"or disable speculative decoding."
+                )
+
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

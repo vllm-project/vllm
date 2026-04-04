@@ -10,6 +10,7 @@ import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -18,14 +19,70 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
+from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
 
 logger = init_logger(__name__)
+
+# Min hidden size per device capability for sequence parallelism
+# Only apply sequence parallelism for models with hidden_size >= threshold
+SP_MIN_HIDDEN_SIZE: dict[int, int] = {
+    90: 8192,  # H100: only for models with hidden_size >= 8192
+}
+
+# Min size per GPU per device capability for sequence parallelism
+# Total min size = min_per_gpu_size * tp_size
+# This ensures the threshold scales appropriately with tensor parallelism
+SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
+    90: 8,  # 8MB per GPU for H100
+}
+
+
+def get_sequence_parallelism_threshold(
+    hidden_size: int,
+    tp_size: int,
+    element_size: int,
+) -> int | None:
+    """
+    Calculate the minimum token threshold for applying sequence parallelism.
+
+    Returns None if sequence parallelism should not be applied based on model size.
+
+    Branching logic based on device capability:
+    - Check if hidden_size >= SP_MIN_HIDDEN_SIZE[device_capability]
+    - If not, returns None (SP disabled for small models on this device)
+    - If yes, calculates threshold based on per-GPU size
+
+    Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
+             (hidden_size * element_size)
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        return None
+
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return None
+    device_capability = capability.to_int()
+
+    # Check if device has configured thresholds
+    min_hidden_size = SP_MIN_HIDDEN_SIZE.get(device_capability)
+    min_per_gpu_size_mb = SP_MIN_PER_GPU_SIZE_MB.get(device_capability)
+
+    if min_hidden_size is None or min_per_gpu_size_mb is None:
+        return None
+
+    # Only apply sequence parallelism for models meeting the size threshold
+    if hidden_size < min_hidden_size:
+        return None
+
+    MiB = 1024 * 1024
+    min_size = min_per_gpu_size_mb * MiB * tp_size
+    return int(min_size // (hidden_size * element_size))
 
 
 def get_first_out_wrapper(
@@ -66,35 +123,38 @@ class _SequenceParallelPatternHelper:
             x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
         )
 
+    def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=self.dtype, device=self.device, **kwargs)
+
+    def empty_f32(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
+
 
 class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
-        arg3_1 = torch.empty([4], device=self.device, dtype=self.dtype)
-
-        return [input, arg3_1]
+        # input, weight
+        return [self.empty([1, 8, 4]), self.empty([4])]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
-            arg3_1: torch.Tensor,
+            weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, arg3_1)
+            rmsnorm = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
 
             return rmsnorm, all_reduce
 
         def replacement(
             input: torch.Tensor,
-            arg3_1: torch.Tensor,
+            weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
 
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, arg3_1)
+            rmsnorm = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             all_gather = self._all_gather(rmsnorm)
             return all_gather, reduce_scatter
 
@@ -158,9 +218,6 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         )
 
 
-FP8_DTYPE = current_platform.fp8_dtype()
-
-
 class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
     def __init__(
         self,
@@ -169,14 +226,11 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         device: str | None,
     ) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.zeros([1, 8, 4], device=self.device, dtype=self.dtype)
-        weight = torch.empty([4], device=self.device, dtype=self.dtype)
-        scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        return [input, weight, scale]
+        # input, weight, scale
+        return [self.empty([1, 8, 4]), self.empty([4]), self.empty_f32([1, 1])]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -185,7 +239,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rms = self.rmsnorm_matcher(all_reduce, weight)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -195,7 +249,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
-            rms = self.rmsnorm_matcher(reduce_scatter, weight)
+            rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
 
@@ -309,6 +363,23 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
+        # Get min_token_num threshold
+        # Read min_token_num from config (calculated during config init)
+        self.min_token_num = None
+        if config.model_config is not None:
+            pass_config = config.compilation_config.pass_config
+            self.min_token_num = pass_config.sp_min_token_num
+
+            if self.min_token_num is not None:
+                # Take the min to avoid exceeding max_num_batched_tokens
+                max_batched = config.scheduler_config.max_num_batched_tokens
+                if max_batched is not None:
+                    self.min_token_num = min(self.min_token_num, max_batched)
+                logger.debug_once(
+                    f"Sequence parallelism min token threshold: {self.min_token_num}",
+                    scope="global",
+                )
+
         # Used to clean up redundant views created temporarily
         # to circumvent residual shape change issues
         self.noop_cleanup = NoOpEliminationPass(config)
@@ -339,29 +410,36 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        # When sequence parallelism is enabled, the residual tensor from RMSNorm
-        # needs to be split along the sequence dimension. However, this dimension
-        # is symbolic during piecewise compilation, and splitting symbolic shapes
-        # is not supported.
-        #
-        # This pass is therefore only applied when the sequence dimension is
-        # concrete:
-        # 1. In full-graph compilation mode (no Dynamo splitting ops are used).
-        #   For this case we always pad num_tokens to be a multiple of
-        #   tensor_parallel_size, so there's no need to check shape % tp_size == 0.
-        # 2. For specific shape provided during compilation (e.g., from
-        #    `compile_sizes`), which must be divisible by the tensor-parallel
-        #    size.
+        """
+        Determines if sequence parallelism should be applied for the given
+        compile range.
+
+        SP is only beneficial for larger batch sizes where the communication
+        overhead is amortized. For small batches, the overhead of splitting
+        and gathering tensors across TP ranks outweighs the benefits.
+
+        Returns False (SP disabled) when:
+        - Using piecewise compilation with non-concrete or TP-indivisible sizes
+        - min_token_num is None (SP disabled for this device/config)
+        - The compile range starts below the minimum token threshold
+        """
+        # For piecewise compilation (not using inductor graph partition),
+        # we need concrete sizes that are divisible by TP for correct splitting
         if (
-            not self.compilation_config.splitting_ops
-            or self.compilation_config.use_inductor_graph_partition
+            not self.compilation_config.use_inductor_graph_partition
+            and self.compilation_config.splitting_ops
         ):
-            return True
-        tp_size = get_tensor_model_parallel_world_size()
-        result: bool = (compile_range.is_single_size()) and (
-            compile_range.end % tp_size == 0
-        )
-        return result
+            tp_size = get_tensor_model_parallel_world_size()
+            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
+                return False
+
+        # min_token_num is None when SP is disabled for this device/config
+        # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)
+        if self.min_token_num is None:
+            return False
+
+        # Only apply SP when batch size meets the minimum threshold
+        return compile_range.start >= self.min_token_num
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:

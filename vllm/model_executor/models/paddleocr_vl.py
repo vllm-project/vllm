@@ -25,6 +25,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
+from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
     BaseModelOutputWithPooling,
 )
@@ -34,6 +35,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
@@ -52,7 +54,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -155,15 +156,30 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
 
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            min_pixels_key = "shortest_edge"
+            max_pixels_key = "longest_edge"
+
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {min_pixels_key: override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {max_pixels_key: override_max_pixels}
 
         resized_height, resized_width = smart_resize(
             height=image_height,
             width=image_width,
             factor=patch_size * merge_size,
-            min_pixels=size["min_pixels"],
-            max_pixels=size["max_pixels"],
+            min_pixels=size[min_pixels_key],
+            max_pixels=size[max_pixels_key],
         )
         preprocessed_size = ImageSize(width=resized_width, height=resized_height)
 
@@ -184,7 +200,13 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         merge_size = hf_config.vision_config.spatial_merge_size
         patch_size = hf_config.vision_config.patch_size
         factor = merge_size * patch_size
-        max_num_tokens = image_processor.max_pixels // (factor**2)
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            max_pixels = image_processor.max_pixels
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            max_pixels = image_processor.size.longest_edge
+        max_num_tokens = max_pixels // (factor**2)
         # Find factors of max_num_tokens close to its square root
         # to create a dummy image with a reasonable aspect ratio.
         h_patches = int(math.sqrt(max_num_tokens))
@@ -206,13 +228,12 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         max_image_size = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -235,8 +256,12 @@ class PaddleOCRVLMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
+            final_mm_kwargs = dict(mm_kwargs or {})
+            final_mm_kwargs.setdefault("images_kwargs", {})
+            # vLLM use PIL.Image, always set channel_last
+            final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
             processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
+                self.info.get_hf_processor(**final_mm_kwargs),
                 dict(text=prompt, **mm_data),
                 dict(**mm_kwargs, **tok_kwargs),
             )
@@ -390,7 +415,6 @@ class SiglipVisionEmbeddings(nn.Module):
         self.cache_position_embedding = dict()
         self.cache_position_count = dict()
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
-        self.packing_position_embedding = nn.Embedding(32768, self.embed_dim)
 
         self.register_buffer(
             "position_ids",
@@ -472,7 +496,7 @@ class SiglipVisionEmbeddings(nn.Module):
                 )
             (
                 batch_size,
-                squence_len,
+                sequence_len,
                 channel,
                 height,
                 width,
@@ -482,24 +506,22 @@ class SiglipVisionEmbeddings(nn.Module):
             patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
             embeddings = patch_embeds.flatten(-2).squeeze(-1)
 
-            if interpolate_pos_encoding and image_grid_thw is not None:
-                start = 0
-                tmp_embeddings = list()
-                for image_grid in image_grid_thw:
-                    t, h, w = image_grid
-                    end = start + t * h * w
-                    image_embeddings = embeddings[start:end, :]
-                    position_embedding = (
-                        self.interpolate_pos_encoding(image_embeddings, h, w, True)
-                        .squeeze(0)
-                        .repeat(t, 1)
-                    )
-                    image_embeddings = image_embeddings + position_embedding
-                    tmp_embeddings.append(image_embeddings)
-                    start = end
-                embeddings = torch.concat(tmp_embeddings, dim=0).unsqueeze(0)
-            else:
-                embeddings = embeddings + self.packing_position_embedding(position_ids)
+            start = 0
+            tmp_embeddings = list()
+            for image_grid in image_grid_thw:
+                t, h, w = image_grid
+                end = start + t * h * w
+                image_embeddings = embeddings[start:end, :]
+                position_embedding = (
+                    self.interpolate_pos_encoding(image_embeddings, h, w, True)
+                    .squeeze(0)
+                    .repeat(t, 1)
+                )
+                image_embeddings = image_embeddings + position_embedding
+                tmp_embeddings.append(image_embeddings)
+                start = end
+            embeddings = torch.concat(tmp_embeddings, dim=0).unsqueeze(0)
+
             return embeddings
         else:
             raise ValueError(
@@ -730,14 +752,7 @@ class SiglipEncoder(nn.Module):
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
         )
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"PaddleOCR-VL does not support {self.attn_backend} backend now."
-            )
+
         self.layers = nn.ModuleList(
             [
                 SiglipEncoderLayer(
@@ -805,6 +820,7 @@ class SiglipEncoder(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
@@ -925,6 +941,8 @@ class SiglipVisionModel(nn.Module):
             if "head.attention" in name or "head.layernorm" in name:
                 continue
             if "head.mlp" in name or "head.probe" in name:
+                continue
+            if "packing_position_embedding" in name:
                 continue
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)

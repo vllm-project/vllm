@@ -26,6 +26,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -62,7 +63,10 @@ class FlashInferMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -104,23 +108,23 @@ class FlashInferMLASparseBackend(AttentionBackend):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: CacheDType | None,
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # FlashInfer MLA sparse kernel requires qk_nope_head_dim == 128
+        # FlashInfer MLA sparse kernel requires qk_nope_head_dim in [128, 192]
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-            if qk_nope_head_dim != 128:
+            if qk_nope_head_dim not in [128, 192]:
                 return (
-                    f"FlashInfer MLA Sparse kernel requires qk_nope_head_dim == 128, "
-                    f"but got {qk_nope_head_dim}"
+                    "FlashInfer MLA Sparse kernel requires qk_nope_head_dim "
+                    f"in [128, 192], but got {qk_nope_head_dim}"
                 )
             # Check for index_topk which indicates sparse model
             if not hasattr(hf_text_config, "index_topk"):
@@ -304,6 +308,11 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
+        # fp8 query quantization is required when using fp8 kv_cache,
+        # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
+        # for query and kv_cache (mixed bf16+fp8 is not supported).
+        self.supports_quant_query_input = True
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -332,9 +341,13 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             self._workspace_buffer = _get_workspace_buffer(q.device)
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
         if self.bmm2_scale is None:
-            self.bmm2_scale = layer._v_scale_float
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._k_scale_float
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),

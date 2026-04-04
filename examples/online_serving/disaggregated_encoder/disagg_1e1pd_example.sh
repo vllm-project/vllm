@@ -8,7 +8,7 @@ declare -a PIDS=()
 ###############################################################################
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 LOG_PATH="${LOG_PATH:-./logs}"
-mkdir -p $LOG_PATH
+mkdir -p "$LOG_PATH"
 
 ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19535}"
@@ -17,10 +17,27 @@ PROXY_PORT="${PROXY_PORT:-10001}"
 GPU_E="${GPU_E:-0}"
 GPU_PD="${GPU_PD:-1}"
 
+# Device platform and affinity env name.
+# DEVICE_PLATFORM supports: cuda, xpu
+DEVICE_PLATFORM="${DEVICE_PLATFORM:-cuda}"
+if [[ -z "${DEVICE_AFFINITY_ENV:-}" ]]; then
+    if [[ "${DEVICE_PLATFORM,,}" == "xpu" ]]; then
+        DEVICE_AFFINITY_ENV="ZE_AFFINITY_MASK"
+    else
+        DEVICE_AFFINITY_ENV="CUDA_VISIBLE_DEVICES"
+    fi
+fi
+
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 
 NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
+
+# Serve args
+GPU_MEMORY_UTILIZATION_E="${GPU_MEMORY_UTILIZATION_E:-0.01}"
+GPU_MEMORY_UTILIZATION_PD="${GPU_MEMORY_UTILIZATION_PD:-0.7}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 
 ###############################################################################
 # Helpers
@@ -78,23 +95,23 @@ trap cleanup TERM
 
 # clear previous cache
 echo "remove previous ec cache folder"
-rm -rf $EC_SHARED_STORAGE_PATH
+rm -rf "$EC_SHARED_STORAGE_PATH"
 
 echo "make ec cache folder"
-mkdir -p $EC_SHARED_STORAGE_PATH
+mkdir -p "$EC_SHARED_STORAGE_PATH"
 
 ###############################################################################
 # Encoder worker
 ###############################################################################
-CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.01 \
+env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_E" \
     --port "$ENCODE_PORT" \
     --enforce-eager \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 114688 \
-    --max-num-seqs 128 \
-    --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+    --max-num-seqs "$MAX_NUM_SEQS" \
+    --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
     --ec-transfer-config '{
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_producer",
@@ -109,13 +126,14 @@ PIDS+=($!)
 ###############################################################################
 # Prefill+Decode worker
 ###############################################################################
-CUDA_VISIBLE_DEVICES="$GPU_PD" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.7 \
+env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_PD" \
     --port "$PREFILL_DECODE_PORT" \
     --enforce-eager \
     --enable-request-id-headers \
-    --max-num-seqs 128 \
-    --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+    --max-num-seqs "$MAX_NUM_SEQS" \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
     --ec-transfer-config '{
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_consumer",
@@ -128,8 +146,8 @@ CUDA_VISIBLE_DEVICES="$GPU_PD" vllm serve "$MODEL" \
 PIDS+=($!)
 
 # Wait for workers
-wait_for_server $ENCODE_PORT
-wait_for_server $PREFILL_DECODE_PORT
+wait_for_server "$ENCODE_PORT"
+wait_for_server "$PREFILL_DECODE_PORT"
 
 ###############################################################################
 # Proxy
@@ -144,7 +162,7 @@ python disagg_epd_proxy.py \
 
 PIDS+=($!)
 
-wait_for_server $PROXY_PORT
+wait_for_server "$PROXY_PORT"
 echo "All services are up!"
 
 ###############################################################################
@@ -152,14 +170,14 @@ echo "All services are up!"
 ###############################################################################
 echo "Running benchmark (stream)..."
 vllm bench serve \
-  --model               $MODEL \
+  --model               "$MODEL" \
   --backend             openai-chat \
   --endpoint            /v1/chat/completions \
   --dataset-name        hf \
   --dataset-path        lmarena-ai/VisionArena-Chat \
   --seed                0 \
-  --num-prompts         $NUM_PROMPTS \
-  --port                $PROXY_PORT
+  --num-prompts         "$NUM_PROMPTS" \
+  --port                "$PROXY_PORT"
 
 PIDS+=($!)
 
@@ -167,10 +185,10 @@ PIDS+=($!)
 # Single request with local image
 ###############################################################################
 echo "Running single request with local image (non-stream)..."
-curl http://127.0.0.1:${PROXY_PORT}/v1/chat/completions \
+curl http://127.0.0.1:"${PROXY_PORT}"/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "'${MODEL}'",
+    "model": "'"${MODEL}"'",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [

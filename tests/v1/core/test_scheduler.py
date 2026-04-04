@@ -1115,12 +1115,16 @@ def _step_until_done(
         all_finished = all_done
 
 
+def _num_waiting_requests(scheduler: Scheduler) -> int:
+    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
+
+
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
-    """Cycle requests through a KV transfer cyle."""
+    """Cycle requests through a KV transfer cycle."""
 
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
     assert len(output.scheduled_new_reqs) == 0
     for req in scheduler.requests.values():
@@ -1139,7 +1143,7 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
 
     # Simulate KV transfer completion using KVConnectorOutput.finished_recving
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
@@ -1546,7 +1550,7 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # All can be scheduled - 1st token.
     output = scheduler.schedule()
     if is_async:
-        assert len(scheduler.waiting) == 2
+        assert _num_waiting_requests(scheduler) == 2
         assert scheduler.running == []
         _step_until_kv_transfer_finished(scheduler, req_ids)
         output = scheduler.schedule()
@@ -1604,7 +1608,11 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # This will have a local and remote cache hit.
     output = scheduler.schedule()
     if is_async:
-        waiting_req_ids = [req.request_id for req in scheduler.waiting]
+        waiting_req_ids = [
+            req.request_id
+            for req in scheduler.skipped_waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        ]
         assert len(waiting_req_ids) == 1
         _step_until_kv_transfer_finished(scheduler, waiting_req_ids)
         output = scheduler.schedule()
@@ -1776,7 +1784,6 @@ def create_scheduler_with_priority(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )
@@ -2033,91 +2040,103 @@ def test_priority_scheduling_mixed_priority_and_arrival():
     assert scheduled_req_ids == ["3", "2", "1", "0"]
 
 
-# This test had previously been passing due to its use of duplicate
-# request ids which resulted in incorrect behavior.
-# Now that the duplicate req ids had been fixed it fails and
-# investigation is needed into whether the priority scheduling
-# preemption logic is working as designed or not.
-@pytest.mark.skip("needs investigation")
 def test_priority_scheduling_preemption():
-    """Test that priority scheduling preempts
-    lower priority requests when memory is constrained."""
-    # Create scheduler with very limited memory to force preemption
+    """Test that under KV block pressure the scheduler preempts the
+    lowest-priority *running* request, not the highest-priority one.
+
+    A low-priority request starts running first. Then a high-priority
+    request arrives and is admitted to running.  When block pressure
+    builds, the scheduler preempts the low-priority running request
+    while keeping the high-priority one.
+
+    Block math
+    ----------
+    block_size = 16, num_blocks = 6 (1 null → 5 usable).
+
+    Phase 1: lo1 (priority 5, 32 tokens) → 2 blocks.  3 free.
+             Decode → lo1 has 33 tokens (needs 3rd block on next schedule).
+    Phase 2: hi1 (priority 0, 32 tokens) arrives.
+             schedule() allocates lo1's 3rd block (3 used) and admits
+             hi1 (2 blocks) → 5 used, 0 free. Both running.
+             Decode → lo1 34 tokens, hi1 33 tokens.
+    Phase 3: schedule() → hi1 needs 3rd block, 0 free → preemption.
+             lo1 (priority 5) is preempted, hi1 (priority 0) survives.
+    """
+    block_size = 16
+    num_blocks = 6  # 1 null block → 5 usable
+    num_tokens = block_size * 2  # 32 tokens = exactly 2 blocks
+
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=3,  # Allow multiple requests
+        max_num_seqs=3,
         max_num_batched_tokens=200,
-        num_blocks=6,  # Very limited blocks to force memory pressure
-        block_size=16,  # Standard block size
+        num_blocks=num_blocks,
+        block_size=block_size,
     )
 
-    # Create initial low-priority requests that will consume most memory
-    low_priority_requests = create_requests_with_priority(
-        num_requests=2,
-        priorities=[5, 5],  # Low priority
-        arrival_times=[1.0, 2.0],
-        num_tokens=30,  # Large enough to consume significant memory,
-        req_ids=["lo1", "lo2"],
-    )
-
-    # Add and schedule low priority requests
-    for request in low_priority_requests:
-        scheduler.add_request(request)
+    # --- Phase 1: low-priority request starts running ---
+    lo1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=num_tokens,
+        req_ids=["lo1"],
+    )[0]
+    scheduler.add_request(lo1)
 
     output = scheduler.schedule()
-    assert len(output.scheduled_new_reqs) == 2
+    assert len(output.scheduled_new_reqs) == 1
 
-    # Simulate model execution to move requests to running state
+    # Decode: lo1 now has 33 tokens (crosses 32-token boundary).
     model_output = ModelRunnerOutput(
-        req_ids=[req.request_id for req in low_priority_requests],
-        req_id_to_index={
-            req.request_id: i for i, req in enumerate(low_priority_requests)
-        },
-        sampled_token_ids=[[100] for _ in low_priority_requests],
+        req_ids=["lo1"],
+        req_id_to_index={"lo1": 0},
+        sampled_token_ids=[[100]],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
 
-    # Verify both requests are running
-    assert len(scheduler.running) == 2
-
-    # Now add a high-priority request that requires memory allocation
-    # This should trigger preemption due to memory constraints
-    high_priority_request = create_requests_with_priority(
+    # --- Phase 2: high-priority request arrives AFTER lo1 is running ---
+    hi1 = create_requests_with_priority(
         num_requests=1,
-        priorities=[0],  # High priority
-        arrival_times=[3.0],
-        num_tokens=30,  # Large enough to require significant memory
+        priorities=[0],
+        arrival_times=[2.0],
+        num_tokens=num_tokens,
         req_ids=["hi1"],
     )[0]
+    scheduler.add_request(hi1)
 
-    scheduler.add_request(high_priority_request)
+    # schedule(): lo1 gets its 3rd block (3 used), hi1 admitted (5 used,
+    # 0 free).  Both are now running.
+    output = scheduler.schedule()
+    assert any(r.req_id == "hi1" for r in output.scheduled_new_reqs)
+    assert len(scheduler.running) == 2
 
-    # Schedule again - this should trigger
-    # preemption when trying to allocate memory
+    # Decode: lo1 → 34 tokens, hi1 → 33 tokens.
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1", "hi1"],
+        req_id_to_index={"lo1": 0, "hi1": 1},
+        sampled_token_ids=[[101], [100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # --- Phase 3: preemption with mixed-priority running requests ---
+    # hi1 needs a 3rd block but 0 are free.  The scheduler picks the
+    # lowest-priority running request to preempt:
+    #   max(running, key=(priority, arrival_time)) → lo1 (5 > 0).
     output = scheduler.schedule()
 
-    # Due to the scheduler's design, if preemption happens
-    # during running request scheduling,
-    # waiting requests won't be scheduled in the same step
-    # Let's check if preemption occurred by looking at the waiting queue
-
-    # If preemption happened, we should see requests in the
-    # waiting queue
-    if len(scheduler.waiting) > 1:  # high priority + preempted request
-        # Preemption occurred - verify the high priority request
-        # gets scheduled next
-        output2 = scheduler.schedule()
-        assert len(output2.scheduled_new_reqs) == 1
-        # High priority request
-        assert output2.scheduled_new_reqs[0].req_id == "hi1"
-    else:
-        # No preemption needed - all requests fit
-        # This is also valid behavior if memory allows
-        assert len(output.scheduled_new_reqs) == 1
-        # High priority request
-        assert output.scheduled_new_reqs[0].req_id == "hi1"
+    lo1_req = scheduler.requests["lo1"]
+    assert lo1_req.status == RequestStatus.PREEMPTED, (
+        "Expected low-priority 'lo1' to be preempted"
+    )
+    assert any(req.request_id == "hi1" for req in scheduler.running), (
+        "High-priority 'hi1' should still be running"
+    )
 
 
 def test_priority_scheduling_no_preemption_when_space_available():
@@ -2440,7 +2459,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
-    assert len(scheduler.waiting) == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.skipped_waiting) == 1
 
 
 @pytest.mark.parametrize(
@@ -2714,7 +2734,7 @@ def _assert_right_encoder_inputs(
         if expected_total_reqs == 0:
             return
 
-    # Number of expected enocder inputs should match number of requests
+    # Number of expected encoder inputs should match number of requests
     if expected_encoder_inputs:
         assert check_exist and requests is not None  # only support expect input exist
         assert len(requests) == len(expected_encoder_inputs)
@@ -2964,7 +2984,7 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
 
@@ -3010,12 +3030,16 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     # Encoder cache should contain all mm items from request2
     _assert_right_encoder_cache_allocated(scheduler, requests=[request2])
 
-    # Should call update_state_after_alloc for hash1_C, ONLY
     # hash1_A should not be loaded from connector
     # since it's computed in last request & exist in local cache
     # Order of getting encoder cache should be: local cache -> connector-> compute
-    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request2, 0)
-    scheduler.ec_connector.update_state_after_alloc.assert_called_once()
+    # update_state_after_alloc is called for all paths:
+    #   index 0 (hash1_C): connector hit → queued for load
+    #   index 1 (hash1_D): cache miss → no-op inside connector
+    #   index 2 (hash1_E): cache miss → no-op inside connector
+    scheduler.ec_connector.update_state_after_alloc.assert_any_call(request2, 0)
+    scheduler.ec_connector.update_state_after_alloc.assert_any_call(request2, 1)
+    scheduler.ec_connector.update_state_after_alloc.assert_any_call(request2, 2)
 
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
 
@@ -3056,14 +3080,14 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
     for request in requests:
         scheduler.add_request(request)
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
 
     if cache_exist == "local":
-        # Allocate cache to cache manager manually to mimick
+        # Allocate cache to cache manager manually to mimic
         for req in requests:
             scheduler.encoder_cache_manager.allocate(req, 0)
     else:
@@ -3087,7 +3111,6 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
     # mm_hashes of requests exist in cache after scheduling for all scenario
     _assert_right_encoder_cache_allocated(scheduler, requests=requests)
 
-    # Should only call update_state_after_alloc when loaded externally
     if cache_exist == "connector_only":
         scheduler.ec_connector.update_state_after_alloc.assert_called_with(
             requests[-1], 0
@@ -3098,9 +3121,15 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
 
         # Check metadata should contain mm data for all 10 requests
         _assert_right_ec_connector_metadata(output, mm_features_list=mm_features_list)
-    else:
+    elif cache_exist == "local":
+        # Local cache hit: items never reach update_state_after_alloc
         scheduler.ec_connector.update_state_after_alloc.assert_not_called()
-        # ECConnector should carry no metadata
+        _assert_right_ec_connector_metadata(output, mm_features_list=[])
+    else:
+        # no_where: called from encoder_inputs_to_schedule but no-op
+        # inside connector (has_cache_item returns False)
+        assert cache_exist == "no_where"
+        scheduler.ec_connector.update_state_after_alloc.assert_called()
         _assert_right_ec_connector_metadata(output, mm_features_list=[])
 
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
@@ -3375,13 +3404,13 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         pooler_output=[],
     )
     # Finish the requests to make room for the preempted requests to resume
-    # req_high is finished after outputing 2 tokens
+    # req_high is finished after outputting 2 tokens
     scheduler.update_from_output(output, model_output)
     scheduler.finish_requests(
         request_high.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
     )
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     # By default, the cache should still exist in local in this test case
     if cache_exist != "local":
@@ -3419,7 +3448,6 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     # mm_hash of request_low exists in cache after scheduling for all scenario
     _assert_right_encoder_cache_allocated(scheduler, requests=[request_low])
 
-    # Should only call update_state_after_alloc when loaded externally
     if cache_exist == "connector_only":
         scheduler.ec_connector.update_state_after_alloc.assert_called_with(
             request_low, 0
@@ -3427,9 +3455,14 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         _assert_right_ec_connector_metadata(
             output, mm_features_list=request_low.mm_features
         )
-    else:
+    elif cache_exist == "local":
         scheduler.ec_connector.update_state_after_alloc.assert_not_called()
-        # ECConnector should carry no metadata
+        _assert_right_ec_connector_metadata(output, mm_features_list=[])
+    else:
+        assert cache_exist == "no_where"
+        scheduler.ec_connector.update_state_after_alloc.assert_called_with(
+            request_low, 0
+        )
         _assert_right_ec_connector_metadata(output, mm_features_list=[])
 
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
@@ -3470,7 +3503,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
         ec_role="ec_consumer",
     )
 
-    # Limit the number of availiable slots of EncoderCacheManager
+    # Limit the number of available slots of EncoderCacheManager
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=32)
 
     # Create MM request1
@@ -3561,7 +3594,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
     assert scheduler.get_num_unfinished_requests() == 1
@@ -3614,6 +3647,9 @@ def test_prepend_skipped_requests_order():
     # simulate first 2 waiting requests are waiting for remote KVs
     for req in expected_waiting_reqs[:2]:
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_requests(expected_waiting_reqs[:2])
+    for req in expected_waiting_reqs[:2]:
+        scheduler.skipped_waiting.add_request(req)
 
     # schedule step
     # expect the first 2 waiting to be skipped, the third running,
@@ -3624,7 +3660,92 @@ def test_prepend_skipped_requests_order():
     expected_waiting_reqs.pop(2)
 
     # verify waiting order is preserved
-    assert list(scheduler.waiting) == expected_waiting_reqs
+    waiting_reqs = list(scheduler.skipped_waiting) + list(scheduler.waiting)
+    assert waiting_reqs == expected_waiting_reqs
+
+
+def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
+    scheduler = create_scheduler(max_num_seqs=1)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+
+    requests = create_requests(num_requests=4)
+    for request in requests:
+        scheduler.add_request(request)
+
+    req_grammar_1, req_grammar_2, req_remote, req_tail = list(scheduler.waiting)
+
+    # simulate two structured-output grammar requests at the waiting head
+    # that become ready now.
+    req_grammar_1.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    req_grammar_1.structured_output_request = Mock(grammar=object())
+    req_grammar_2.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    req_grammar_2.structured_output_request = Mock(grammar=object())
+
+    # simulate a remote-KV request that is ready to be promoted now.
+    req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_requests([req_grammar_1, req_grammar_2, req_remote])
+    scheduler.skipped_waiting.add_request(req_grammar_1)
+    scheduler.skipped_waiting.add_request(req_grammar_2)
+    scheduler.skipped_waiting.add_request(req_remote)
+    scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
+    scheduler._update_waiting_for_remote_kv = Mock()
+
+    output = scheduler.schedule()
+
+    assert output.scheduled_new_reqs
+    assert output.scheduled_new_reqs[0].req_id == req_grammar_1.request_id
+    waiting_req_ids = [
+        req.request_id
+        for req in list(scheduler.skipped_waiting) + list(scheduler.waiting)
+    ]
+    assert waiting_req_ids == [
+        req_grammar_2.request_id,
+        req_remote.request_id,
+        req_tail.request_id,
+    ]
+
+
+def test_fcfs_mixed_skipped_waiting_types_keep_order():
+    scheduler = create_scheduler(max_num_batched_tokens=20)
+    scheduler._update_waiting_for_remote_kv = Mock()
+
+    mk_req = lambda req_id, num_tokens=1: create_requests(  # noqa: E731
+        num_requests=1, num_tokens=num_tokens, req_ids=[req_id]
+    )[0]
+    req_grammar, req_remote, req_stream = (
+        mk_req("grammar"),
+        mk_req("remote"),
+        mk_req("stream"),
+    )
+    req_regular, req_tail = mk_req("regular", 20), mk_req("tail")
+    req_grammar.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    req_grammar.structured_output_request = Mock(grammar=None)
+    req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    req_stream.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    for req in (req_grammar, req_remote, req_stream, req_regular, req_tail):
+        scheduler.add_request(req)
+    scheduler.schedule()
+    assert list(scheduler.skipped_waiting) == [req_grammar, req_remote, req_stream]
+
+    scheduler.finish_requests(req_regular.request_id, RequestStatus.FINISHED_ABORTED)
+    assert not scheduler.running
+
+    req_grammar.structured_output_request = Mock(grammar=object())
+    scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
+    req_stream.status = RequestStatus.WAITING
+
+    second_output = scheduler.schedule()
+    expected_order = [
+        req_grammar.request_id,
+        req_remote.request_id,
+        req_stream.request_id,
+        req_tail.request_id,
+    ]
+    assert [req.req_id for req in second_output.scheduled_new_reqs] == expected_order
+    assert [req.request_id for req in scheduler.running] == expected_order
+    scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
 
 
 def test_abort_request_waiting_for_remote_kvs():
@@ -3674,6 +3795,299 @@ def test_abort_request_finished_recving():
     # verify request is deleted
     assert request.request_id not in scheduler.requests
     assert not scheduler.finished_recving_kv_req_ids
+
+
+# ==============================================================================
+# Variable-length encoder cross-attention block allocation tests
+# ==============================================================================
+
+
+def _create_encoder_decoder_scheduler(
+    block_size: int = 16,
+    num_blocks: int = 10000,
+    max_num_batched_tokens: int = 8192,
+    max_num_seqs: int = 16,
+) -> Scheduler:
+    """Create a scheduler configured for encoder-decoder cross-attention
+    block allocation testing.
+
+    Constructs a scheduler with both FullAttentionSpec (self-attention) and
+    CrossAttentionSpec (cross-attention) KV cache groups, then patches it
+    to behave as an encoder-decoder model.
+    """
+    from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
+    from vllm.v1.kv_cache_interface import CrossAttentionSpec
+
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_num_batched_tokens,
+        # is_encoder_decoder disables chunked prefill and prefix caching
+        is_encoder_decoder=True,
+    )
+    cache_config = CacheConfig(
+        block_size=block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=False,
+    )
+    cache_config.num_gpu_blocks = num_blocks
+
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+    )
+
+    # KV cache config with both self-attention and cross-attention groups,
+    # mirroring an encoder-decoder model like Whisper.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["self_attn_layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["cross_attn_layer"],
+                CrossAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+        ],
+    )
+
+    # Construct the scheduler. Since opt-125m is not truly encoder-decoder,
+    # the __init__ won't set up encoder-decoder internals. We patch them
+    # after construction.
+    scheduler = Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=block_size,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+
+    # Patch to enable encoder-decoder behavior in the scheduling loop.
+    scheduler.is_encoder_decoder = True
+    scheduler.max_num_encoder_input_tokens = max_num_batched_tokens
+    scheduler.encoder_cache_manager = EncoderDecoderCacheManager(
+        cache_size=max_num_batched_tokens
+    )
+
+    return scheduler
+
+
+def _get_num_cross_attn_blocks(scheduler: Scheduler, request_id: str) -> int:
+    """Get the number of cross-attention blocks allocated for a request."""
+    from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
+
+    coordinator = scheduler.kv_cache_manager.coordinator
+    for manager in coordinator.single_type_managers:
+        if isinstance(manager, CrossAttentionManager):
+            blocks = manager.req_to_blocks.get(request_id, [])
+            return len(blocks)
+    raise AssertionError("No CrossAttentionManager found in coordinator")
+
+
+def test_variable_length_cross_attn_block_allocation():
+    """Test that cross-attention blocks are allocated per-request based on
+    actual encoder input length, not a fixed maximum.
+
+    Fixed max-encoder-length allocation would assign
+    `ceil(max_encoder_tokens / block_size)` blocks to
+    every request whereas with dynamic allocation, exactly
+    `ceil(actual_encoder_tokens / block_size)` blocks are assigned
+    to each request.
+    """
+    block_size = 16
+    scheduler = _create_encoder_decoder_scheduler(block_size=block_size)
+
+    # Create requests with distinctly different encoder input lengths,
+    # simulating variable-length audio inputs to a model like Whisper.
+    encoder_lengths = [500, 1000, 200]
+    num_prompt_tokens = 100  # Decoder prompt tokens
+
+    requests = []
+    for i, enc_len in enumerate(encoder_lengths):
+        req = create_requests(
+            num_requests=1,
+            num_tokens=num_prompt_tokens,
+            mm_hashes_list=[[f"enc_hash_{i}"]],
+            mm_positions=[[PlaceholderRange(offset=0, length=enc_len)]],
+            req_ids=[f"req_{i}"],
+        )[0]
+        requests.append(req)
+
+    # Add and schedule all requests.
+    for req in requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # All requests should be scheduled.
+    assert len(output.scheduled_new_reqs) == len(requests)
+
+    # Verify cross-attention blocks per request match the actual encoder length.
+    from math import ceil
+
+    for req, enc_len in zip(requests, encoder_lengths):
+        expected_blocks = ceil(enc_len / block_size)
+        actual_blocks = _get_num_cross_attn_blocks(scheduler, req.request_id)
+
+        assert actual_blocks == expected_blocks, (
+            f"Request {req.request_id} with {enc_len} encoder tokens: "
+            f"expected {expected_blocks} cross-attn blocks, "
+            f"got {actual_blocks}"
+        )
+
+    # Verify that different encoder lengths produce different block counts,
+    # confirming variable-length (not fixed-max) allocation.
+    block_counts = [
+        _get_num_cross_attn_blocks(scheduler, req.request_id) for req in requests
+    ]
+    assert len(set(block_counts)) > 1, (
+        "All requests have the same number of cross-attn blocks, "
+        "suggesting static max-based allocation instead of per-request"
+    )
+
+
+def test_cross_attn_blocks_not_over_allocated():
+    """Test that cross-attention blocks are not over-allocated compared to
+    what each request actually needs."""
+    from math import ceil
+
+    block_size = 16
+    max_encoder_tokens = 1500  # e.g., Whisper's max mel-spectrogram length
+    scheduler = _create_encoder_decoder_scheduler(block_size=block_size)
+
+    # Request with a small encoder input (much less than the max).
+    small_enc_len = 200
+    request = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        mm_hashes_list=[["enc_small"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=small_enc_len)]],
+        req_ids=["req_small"],
+    )[0]
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 1
+
+    actual_blocks = _get_num_cross_attn_blocks(scheduler, request.request_id)
+    expected_blocks = ceil(small_enc_len / block_size)
+    max_blocks = ceil(max_encoder_tokens / block_size)
+
+    # Blocks should match the actual encoder length.
+    assert actual_blocks == expected_blocks, (
+        f"Expected {expected_blocks} blocks for {small_enc_len} encoder tokens, "
+        f"got {actual_blocks}"
+    )
+
+    # Blocks should be strictly less than what max-based allocation would give.
+    assert actual_blocks < max_blocks, (
+        f"Cross-attn blocks ({actual_blocks}) should be less than max "
+        f"({max_blocks}), indicating no over-allocation"
+    )
+
+
+def test_cross_attn_blocks_not_under_allocated():
+    """Test that cross-attention blocks are sufficient for each request's
+    actual encoder input length. Every encoder token must have a slot.
+
+    Tests various edge cases including exact block boundaries, off-by-one,
+    and the minimum/maximum encoder input sizes.
+    """
+    from math import ceil
+
+    block_size = 16
+
+    # Test various encoder lengths including edge cases around block boundaries.
+    test_cases = [
+        1,  # Minimum: single encoder token
+        block_size - 1,  # Just under one full block
+        block_size,  # Exactly one full block
+        block_size + 1,  # Just over one block (needs 2 blocks)
+        block_size * 10,  # Exact multiple of block size
+        block_size * 10 + 1,  # One over exact multiple
+        1500,  # Whisper's typical max
+    ]
+
+    for enc_len in test_cases:
+        scheduler = _create_encoder_decoder_scheduler(block_size=block_size)
+
+        request = create_requests(
+            num_requests=1,
+            num_tokens=100,
+            mm_hashes_list=[[f"enc_{enc_len}"]],
+            mm_positions=[[PlaceholderRange(offset=0, length=enc_len)]],
+            req_ids=[f"req_{enc_len}"],
+        )[0]
+
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+
+        assert len(output.scheduled_new_reqs) == 1
+
+        actual_blocks = _get_num_cross_attn_blocks(scheduler, request.request_id)
+        expected_blocks = ceil(enc_len / block_size)
+
+        # Number of blocks must be exactly ceil(enc_len / block_size).
+        assert actual_blocks == expected_blocks, (
+            f"Encoder length {enc_len}: expected {expected_blocks} blocks, "
+            f"got {actual_blocks}"
+        )
+
+        # Total available slots must be >= encoder tokens (no under-allocation).
+        total_slots = actual_blocks * block_size
+        assert total_slots >= enc_len, (
+            f"Encoder length {enc_len}: total slots {total_slots} < "
+            f"needed {enc_len} (under-allocation)"
+        )
+
+
+def test_cross_attn_zero_blocks_without_encoder_inputs():
+    """Test that requests without encoder inputs get zero cross-attention
+    blocks, even when the scheduler is configured for encoder-decoder."""
+    block_size = 16
+    scheduler = _create_encoder_decoder_scheduler(block_size=block_size)
+
+    # Create a text-only request (no mm_features).
+    request = create_requests(
+        num_requests=1,
+        num_tokens=100,
+        req_ids=["req_text_only"],
+    )[0]
+
+    # Text-only request has no encoder inputs.
+    assert not request.has_encoder_inputs
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 1
+
+    # No cross-attention blocks should be allocated.
+    actual_blocks = _get_num_cross_attn_blocks(scheduler, request.request_id)
+    assert actual_blocks == 0, (
+        f"Text-only request should have 0 cross-attn blocks, got {actual_blocks}"
+    )
 
 
 def test_eagle3_mm_encoder_cache_with_shift():

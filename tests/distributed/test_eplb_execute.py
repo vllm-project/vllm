@@ -8,6 +8,8 @@ import pytest
 import torch
 import torch.distributed
 
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -129,9 +131,10 @@ def verify_expert_weights_after_shuffle(
     hidden_sizes: list[int],
     ep_rank: int,
     num_local_experts: int,
-):
+) -> bool:
     """Verify the weights after shuffling are correct."""
     num_layers = len(expert_weights)
+    ok = True
 
     for layer in range(num_layers):
         for weight_idx, hidden_size in enumerate(hidden_sizes):
@@ -154,29 +157,38 @@ def verify_expert_weights_after_shuffle(
                     dtype=actual_weights.dtype,
                 )
 
-                torch.testing.assert_close(
-                    actual_weights,
-                    expected_weights,
-                    msg=f"Layer {layer}, weight {weight_idx},"
-                    f"local expert {local_expert}: "
-                    f"weights do not match. "
-                    f"Expected logical expert {expected_logical_expert}",
-                )
+                if not torch.equal(actual_weights, expected_weights):
+                    ok = False
+                    actual_head = actual_weights[:8].detach().cpu().tolist()
+                    expected_head = expected_weights[:8].detach().cpu().tolist()
+                    print(
+                        "verify_expert_weights_after_shuffle failed: "
+                        f"rank={ep_rank}, "
+                        f"layer={layer}, weight_idx={weight_idx}, "
+                        f"local_expert={local_expert}, "
+                        f"expected_logical_expert={expected_logical_expert}, "
+                        f"actual_head={actual_head}, expected_head={expected_head}",
+                        flush=True,
+                    )
+
+    return ok
 
 
 def verify_redundant_experts_have_same_weights(
     expert_weights: list[list[torch.Tensor]],
     indices: torch.Tensor,
     hidden_sizes: list[int],
+    ep_rank: int,
     world_size: int,
     num_local_experts: int,
-):
+) -> bool:
     """
     Verify that all replicas of the same logical expert have the same weights.
     """
     num_layers = len(expert_weights)
     total_physical_experts = world_size * num_local_experts
 
+    ok = True
     for layer in range(num_layers):
         # Collect weights for all physical experts for each weight matrix
         all_weights: list[torch.Tensor] = []
@@ -226,14 +238,54 @@ def verify_redundant_experts_have_same_weights(
                 # Verify that current physical expert's weights match the
                 # previously saved logical expert weights
                 for weight_idx in range(len(hidden_sizes)):
-                    torch.testing.assert_close(
+                    if not torch.equal(
                         all_weights[weight_idx][physical_pos],
                         logical_expert_weights[logical_expert_id][weight_idx],
-                        msg=f"Layer {layer}, weight {weight_idx},"
-                        f"logical expert {logical_expert_id}: "
-                        f"Physical expert {physical_pos} has different weights"
-                        f"than expected",
-                    )
+                    ):
+                        ok = False
+                        actual_head = (
+                            all_weights[weight_idx][physical_pos][:8]
+                            .detach()
+                            .cpu()
+                            .tolist()
+                        )
+                        reference_head = (
+                            logical_expert_weights[logical_expert_id][weight_idx][:8]
+                            .detach()
+                            .cpu()
+                            .tolist()
+                        )
+                        print(
+                            "verify_redundant_experts_have_same_weights failed: "
+                            f"rank={ep_rank}, "
+                            f"layer={layer}, weight_idx={weight_idx}, "
+                            f"logical_expert={logical_expert_id}, "
+                            f"physical_pos={physical_pos}, "
+                            f"actual_head={actual_head}, "
+                            f"reference_head={reference_head}",
+                            flush=True,
+                        )
+
+    return ok
+
+
+def assert_verification_synced(local_ok: bool, msg: str) -> None:
+    ok_tensor = torch.tensor([1 if local_ok else 0], device="cuda", dtype=torch.int32)
+    torch.distributed.all_reduce(ok_tensor, op=torch.distributed.ReduceOp.MIN)
+    assert bool(ok_tensor.item()), msg
+
+
+def create_eplb_communicator_or_raise(*, group_coordinator, backend, expert_weights):
+    try:
+        return create_eplb_communicator(
+            group_coordinator=group_coordinator,
+            backend=backend,
+            expert_weights=expert_weights,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to create EPLB communicator for backend={backend}: {exc}"
+        ) from exc
 
 
 def _test_async_transfer_layer_without_mtp_worker(
@@ -242,151 +294,192 @@ def _test_async_transfer_layer_without_mtp_worker(
     num_layers: int,
     num_local_experts: int,
     num_logical_experts: int,
+    eplb_communicator: str,
 ) -> None:
     set_env_vars_and_device(env)
-    ensure_model_parallel_initialized(
-        tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
-    )
 
-    tp_group = get_tp_group()
-    ep_group = tp_group.device_group
-    ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
 
-    total_physical_experts = world_size * num_local_experts
-    hidden_sizes = [16, 32]
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
 
-    redundancy_config = create_redundancy_config(
-        num_logical_experts,
-        total_physical_experts,
-    )
-    old_indices = create_expert_indices_with_redundancy(
-        num_layers,
-        num_logical_experts,
-        total_physical_experts,
-        redundancy_config,
-    )
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.device_group
+        ep_rank = torch.distributed.get_rank()
+        device = torch.device(f"cuda:{ep_rank}")
 
-    new_redundancy_config = create_redundancy_config(
-        num_logical_experts,
-        total_physical_experts,
-    )
-    new_indices = create_expert_indices_with_redundancy(
-        num_layers,
-        num_logical_experts,
-        total_physical_experts,
-        new_redundancy_config,
-    )
+        total_physical_experts = world_size * num_local_experts
+        hidden_sizes = [16, 32]
 
-    expert_weights = create_expert_weights(
-        num_layers,
-        num_local_experts,
-        hidden_sizes,
-        ep_rank,
-        device,
-        old_indices,
-    )
-    old_indices_cpu = old_indices.cpu()
-    new_indices_cpu = new_indices.cpu()
+        redundancy_config = create_redundancy_config(
+            num_logical_experts,
+            total_physical_experts,
+        )
+        old_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            redundancy_config,
+        )
 
-    expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-    cuda_stream = torch.cuda.Stream(device=device)
+        new_redundancy_config = create_redundancy_config(
+            num_logical_experts,
+            total_physical_experts,
+        )
+        new_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            new_redundancy_config,
+        )
 
-    for layer_idx in range(num_layers):
-        is_unchanged, is_received_locally, recv_metadata = asyncio.run(
-            transfer_layer(
-                old_layer_indices=old_indices_cpu[layer_idx],
-                new_layer_indices=new_indices_cpu[layer_idx],
-                expert_weights=expert_weights[layer_idx],
-                expert_weights_buffer=expert_buffer,
-                ep_group=ep_group,
-                cuda_stream=cuda_stream,
+        expert_weights = create_expert_weights(
+            num_layers,
+            num_local_experts,
+            hidden_sizes,
+            ep_rank,
+            device,
+            old_indices,
+        )
+        old_indices_cpu = old_indices.cpu()
+        new_indices_cpu = new_indices.cpu()
+
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+        cuda_stream = torch.cuda.Stream(device=device)
+
+        communicator = create_eplb_communicator_or_raise(
+            group_coordinator=ep_group_coordinator,
+            backend=eplb_communicator,
+            expert_weights=expert_weights[0],
+        )
+        communicator.set_stream(cuda_stream)
+
+        for layer_idx in range(num_layers):
+            is_unchanged, is_received_locally, recv_metadata = asyncio.run(
+                transfer_layer(
+                    old_layer_indices=old_indices_cpu[layer_idx],
+                    new_layer_indices=new_indices_cpu[layer_idx],
+                    expert_weights=expert_weights[layer_idx],
+                    expert_weights_buffer=expert_buffer,
+                    ep_group=ep_group,
+                    communicator=communicator,
+                    cuda_stream=cuda_stream,
+                )
             )
-        )
-        cuda_stream.synchronize()
-        move_from_buffer(
-            expert_weights=expert_weights[layer_idx],
-            expert_weights_buffers=expert_buffer,
-            is_unchanged=is_unchanged,
-            is_received_locally=is_received_locally,
-            recv_metadata=recv_metadata,
-            new_indices=new_indices_cpu[layer_idx].numpy(),
-            ep_rank=ep_rank,
-        )
+            cuda_stream.synchronize()
+            move_from_buffer(
+                expert_weights=expert_weights[layer_idx],
+                expert_weights_buffers=expert_buffer,
+                is_unchanged=is_unchanged,
+                is_received_locally=is_received_locally,
+                recv_metadata=recv_metadata,
+                new_indices=new_indices_cpu[layer_idx].numpy(),
+                ep_rank=ep_rank,
+            )
 
-    verify_expert_weights_after_shuffle(
+    local_ok = verify_expert_weights_after_shuffle(
         expert_weights,
         new_indices,
         hidden_sizes,
         ep_rank,
         num_local_experts,
     )
-    verify_redundant_experts_have_same_weights(
-        expert_weights,
-        new_indices,
-        hidden_sizes,
-        world_size,
-        num_local_experts,
+    local_ok = (
+        verify_redundant_experts_have_same_weights(
+            expert_weights,
+            new_indices,
+            hidden_sizes,
+            ep_rank,
+            world_size,
+            num_local_experts,
+        )
+        and local_ok
+    )
+    assert_verification_synced(
+        local_ok,
+        "Async transfer verification failed on at least one rank. "
+        "See logs for details.",
     )
 
 
 def _test_rearrange_expert_weights_with_redundancy(
-    env, world_size, num_layers, num_local_experts, num_logical_experts
+    env,
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    eplb_communicator: str,
 ) -> None:
     # Initialize model parallel (using tensor parallel as an entrypoint
     # to expert parallel)
     set_env_vars_and_device(env)
-    ensure_model_parallel_initialized(
-        tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
-    )
 
-    ep_group = get_tp_group().cpu_group
-    ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
 
-    # Test parameters
-    total_physical_experts = world_size * num_local_experts
-    hidden_sizes = [32, 64]  # Two different weight matrices
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
 
-    # Create old expert indices (with redundancy)
-    redundancy_config = create_redundancy_config(
-        num_logical_experts, total_physical_experts
-    )
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.cpu_group
+        ep_rank = torch.distributed.get_rank()
+        device = torch.device(f"cuda:{ep_rank}")
 
-    old_indices = create_expert_indices_with_redundancy(
-        num_layers,
-        num_logical_experts,
-        total_physical_experts,
-        redundancy_config,
-    )
+        # Test parameters
+        total_physical_experts = world_size * num_local_experts
+        hidden_sizes = [32, 64]  # Two different weight matrices
 
-    # Create new expert indices (with redundancy)
-    new_redundancy_config = create_redundancy_config(
-        num_logical_experts, total_physical_experts
-    )
-    new_indices = create_expert_indices_with_redundancy(
-        num_layers,
-        num_logical_experts,
-        total_physical_experts,
-        new_redundancy_config,
-    )
+        # Create old expert indices (with redundancy)
+        redundancy_config = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
 
-    # Create expert weights
-    expert_weights = create_expert_weights(
-        num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
-    )
+        old_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            redundancy_config,
+        )
 
-    # Execute weight rearrangement
-    rearrange_expert_weights_inplace(
-        old_indices,
-        new_indices,
-        expert_weights,
-        ep_group,
-        is_profile=False,
-    )
+        # Create new expert indices (with redundancy)
+        new_redundancy_config = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
+        new_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            new_redundancy_config,
+        )
+
+        # Create expert weights
+        expert_weights = create_expert_weights(
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
+        )
+
+        communicator = create_eplb_communicator_or_raise(
+            group_coordinator=ep_group_coordinator,
+            backend=eplb_communicator,
+            expert_weights=expert_weights[0],
+        )
+
+        # Execute weight rearrangement
+        rearrange_expert_weights_inplace(
+            old_indices,
+            new_indices,
+            expert_weights,
+            ep_group,
+            is_profile=False,
+            communicator=communicator,
+        )
 
     # Verify the rearrangement result
-    verify_expert_weights_after_shuffle(
+    local_ok = verify_expert_weights_after_shuffle(
         expert_weights,
         new_indices,
         hidden_sizes,
@@ -394,12 +487,20 @@ def _test_rearrange_expert_weights_with_redundancy(
         num_local_experts,
     )
 
-    verify_redundant_experts_have_same_weights(
-        expert_weights,
-        new_indices,
-        hidden_sizes,
-        world_size,
-        num_local_experts,
+    local_ok = (
+        verify_redundant_experts_have_same_weights(
+            expert_weights,
+            new_indices,
+            hidden_sizes,
+            ep_rank,
+            world_size,
+            num_local_experts,
+        )
+        and local_ok
+    )
+    assert_verification_synced(
+        local_ok,
+        "Rearrange verification failed on at least one rank. See logs for details.",
     )
 
 
@@ -426,12 +527,17 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
+@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
 def test_rearrange_expert_weights_with_redundancy(
-    world_size, num_layers, num_local_experts, num_logical_experts
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    eplb_communicator,
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
         _test_rearrange_expert_weights_with_redundancy,
@@ -439,63 +545,86 @@ def test_rearrange_expert_weights_with_redundancy(
         num_layers,
         num_local_experts,
         num_logical_experts,
+        eplb_communicator,
     )
 
 
 def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
     set_env_vars_and_device(env)
-    ensure_model_parallel_initialized(
-        tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
-    )
 
-    ep_group = get_tp_group().cpu_group
-    ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
 
-    num_layers = 2
-    num_local_experts = 2
-    total_physical_experts = world_size * num_local_experts
-    num_logical_experts = total_physical_experts // 2  # Some redundancy
-    hidden_sizes = [32, 64]
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
 
-    # Create redundancy configuration
-    redundancy_config = [2] * num_logical_experts
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.cpu_group
+        ep_rank = torch.distributed.get_rank()
+        device = torch.device(f"cuda:{ep_rank}")
 
-    # Same indices - no change
-    indices = create_expert_indices_with_redundancy(
-        num_layers, num_logical_experts, total_physical_experts, redundancy_config
-    )
+        num_layers = 2
+        num_local_experts = 2
+        total_physical_experts = world_size * num_local_experts
+        num_logical_experts = total_physical_experts // 2  # Some redundancy
+        hidden_sizes = [32, 64]
 
-    expert_weights = create_expert_weights(
-        num_layers, num_local_experts, hidden_sizes, ep_rank, device, indices
-    )
+        # Create redundancy configuration
+        redundancy_config = [2] * num_logical_experts
 
-    # Save original weights
-    original_weights = []
-    for layer_weights in expert_weights:
-        layer_copy = []
-        for weight in layer_weights:
-            layer_copy.append(weight.clone())
-        original_weights.append(layer_copy)
+        # Same indices - no change
+        indices = create_expert_indices_with_redundancy(
+            num_layers, num_logical_experts, total_physical_experts, redundancy_config
+        )
 
-    # Execute rearrangement (should be no change)
-    rearrange_expert_weights_inplace(
-        indices,
-        indices,  # Same indices
-        expert_weights,
-        ep_group,
-        is_profile=False,
-    )
+        expert_weights = create_expert_weights(
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, indices
+        )
+
+        # Save original weights
+        original_weights = []
+        for layer_weights in expert_weights:
+            layer_copy = []
+            for weight in layer_weights:
+                layer_copy.append(weight.clone())
+            original_weights.append(layer_copy)
+
+        communicator = create_eplb_communicator_or_raise(
+            group_coordinator=ep_group_coordinator,
+            backend="torch_nccl",
+            expert_weights=expert_weights[0],
+        )
+
+        # Execute rearrangement (should be no change)
+        rearrange_expert_weights_inplace(
+            indices,
+            indices,  # Same indices
+            expert_weights,
+            ep_group,
+            communicator,
+            is_profile=False,
+        )
 
     # Verify that the weights have not changed
+    local_ok = True
     for layer in range(num_layers):
         for weight_idx in range(len(hidden_sizes)):
-            torch.testing.assert_close(
+            if not torch.equal(
                 expert_weights[layer][weight_idx],
                 original_weights[layer][weight_idx],
-                msg=f"""Layer {layer}, weight {weight_idx}
- should remain unchanged""",
-            )
+            ):
+                local_ok = False
+                print(
+                    "test_rearrange_expert_weights_no_change failed: "
+                    f"layer={layer}, weight_idx={weight_idx}",
+                    flush=True,
+                )
+    assert_verification_synced(
+        local_ok,
+        "No-change EPLB verification failed on at least one rank.",
+    )
 
 
 @pytest.mark.parametrize(
@@ -504,15 +633,17 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
+@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
     num_local_experts: int,
     num_logical_experts: int,
+    eplb_communicator: str,
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     distributed_run(
@@ -521,6 +652,7 @@ def test_async_transfer_layer_without_mtp(
         num_layers,
         num_local_experts,
         num_logical_experts,
+        eplb_communicator,
     )
 
 
@@ -531,77 +663,106 @@ def test_rearrange_expert_weights_no_change(world_size):
     unchanged.
     """
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(_test_rearrange_expert_weights_no_change, world_size)
+    distributed_run(
+        _test_rearrange_expert_weights_no_change,
+        world_size,
+    )
 
 
 def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
     set_env_vars_and_device(env)
-    ensure_model_parallel_initialized(
-        tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
-    )
 
-    ep_group = get_tp_group().cpu_group
-    ep_rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{ep_rank}")
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
 
-    num_layers = 1
-    num_local_experts = 2
-    total_physical_experts = world_size * num_local_experts
-    num_logical_experts = total_physical_experts // 2
-    hidden_sizes = [32]
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
 
-    # Create different index distributions
-    old_redundancy = create_redundancy_config(
-        num_logical_experts, total_physical_experts
-    )
-    new_redundancy = create_redundancy_config(
-        num_logical_experts, total_physical_experts
-    )
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.cpu_group
+        ep_rank = torch.distributed.get_rank()
+        device = torch.device(f"cuda:{ep_rank}")
 
-    old_indices = create_expert_indices_with_redundancy(
-        num_layers, num_logical_experts, total_physical_experts, old_redundancy
-    )
-    new_indices = create_expert_indices_with_redundancy(
-        num_layers, num_logical_experts, total_physical_experts, new_redundancy
-    )
+        num_layers = 1
+        num_local_experts = 2
+        total_physical_experts = world_size * num_local_experts
+        num_logical_experts = total_physical_experts // 2
+        hidden_sizes = [32]
 
-    expert_weights = create_expert_weights(
-        num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
-    )
+        # Create different index distributions
+        old_redundancy = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
+        new_redundancy = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
 
-    # Save original weights
-    original_weights = []
-    for layer_weights in expert_weights:
-        layer_copy = []
-        for weight in layer_weights:
-            layer_copy.append(weight.clone())
-        original_weights.append(layer_copy)
+        old_indices = create_expert_indices_with_redundancy(
+            num_layers, num_logical_experts, total_physical_experts, old_redundancy
+        )
+        new_indices = create_expert_indices_with_redundancy(
+            num_layers, num_logical_experts, total_physical_experts, new_redundancy
+        )
 
-    # Execute profile mode rearrangement
-    rearrange_expert_weights_inplace(
-        old_indices,
-        new_indices,
-        expert_weights,
-        ep_group,
-        is_profile=True,  # Profile mode
-    )
+        expert_weights = create_expert_weights(
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
+        )
+
+        # Save original weights
+        original_weights = []
+        for layer_weights in expert_weights:
+            layer_copy = []
+            for weight in layer_weights:
+                layer_copy.append(weight.clone())
+            original_weights.append(layer_copy)
+
+        communicator = create_eplb_communicator_or_raise(
+            group_coordinator=ep_group_coordinator,
+            backend="torch_nccl",
+            expert_weights=expert_weights[0],
+        )
+
+        # Execute profile mode rearrangement
+        rearrange_expert_weights_inplace(
+            old_indices,
+            new_indices,
+            expert_weights,
+            ep_group,
+            communicator,
+            is_profile=True,  # Profile mode
+        )
 
     # In profile mode, the weights should remain unchanged
+    local_ok = True
     for layer in range(num_layers):
         for weight_idx in range(len(hidden_sizes)):
-            torch.testing.assert_close(
+            if not torch.equal(
                 expert_weights[layer][weight_idx],
                 original_weights[layer][weight_idx],
-                msg="In profile mode, the weights should remain unchanged",
-            )
+            ):
+                local_ok = False
+                print(
+                    "test_rearrange_expert_weights_profile_mode failed: "
+                    f"layer={layer}, weight_idx={weight_idx}",
+                    flush=True,
+                )
+    assert_verification_synced(
+        local_ok,
+        "Profile-mode EPLB verification failed on at least one rank.",
+    )
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)
+    distributed_run(
+        _test_rearrange_expert_weights_profile_mode,
+        world_size,
+    )

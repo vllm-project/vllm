@@ -8,12 +8,12 @@ from tests.conftest import VllmRunner
 from tests.utils import create_new_process_for_each_test
 
 
-@create_new_process_for_each_test()  # Memory is not cleaned up properly otherwise
+@create_new_process_for_each_test()  # Hangs otherwise
 @pytest.mark.parametrize(
     "model",
     [
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
-        "mgazz/Prithvi_v2_eo_300_tl_unet_agb",
+        "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars",
     ],
 )
 def test_inference(

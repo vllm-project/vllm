@@ -7,13 +7,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
+import regex as re
 import torch
 import torch.nn as nn
-from torch.func import functional_call
 from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -33,26 +32,24 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
-    is_uva_available,
 )
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
-    get_accelerator_view_from_cpu_tensor,
 )
 
 logger = init_logger(__name__)
 
-WeightsMapping = Mapping[str, str | None]
-"""If a key maps to a value of `None`, the corresponding weight is ignored."""
-
 
 @dataclass
 class WeightsMapper:
-    """Maps the name of each weight if they match the following patterns."""
+    """Maps the name of each weight if they match the following patterns.
 
-    orig_to_new_substr: WeightsMapping = field(default_factory=dict)
-    orig_to_new_prefix: WeightsMapping = field(default_factory=dict)
-    orig_to_new_suffix: WeightsMapping = field(default_factory=dict)
+    If a key maps to a value of `None`, the corresponding weight is ignored."""
+
+    orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
+    orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
@@ -63,6 +60,13 @@ class WeightsMapper:
         )
 
     def _map_name(self, key: str) -> str | None:
+        for pattern, new_key in self.orig_to_new_regex.items():
+            if pattern.search(key):
+                if new_key is None:
+                    return None
+
+                key = pattern.sub(new_key, key)
+
         for substr, new_key in self.orig_to_new_substr.items():
             if substr in key:
                 if new_key is None:
@@ -229,8 +233,15 @@ class AutoWeightsLoader:
     ):
         """
         Add tensor names that are not in the model params that may be in the
-        safetensors, e.g., batch normalization stats.
+        safetensors, e.g., batch normalization stats and registered buffers.
         """
+        # Add persistent registered buffers.
+        # Non-persistent buffers are excluded, matching PyTorch state_dict().
+        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        for buf_name, buf in module.named_buffers(recurse=False):
+            if buf_name not in child_params and buf_name not in non_persistent:
+                child_params[buf_name] = buf
+
         if isinstance(
             module,
             (
@@ -315,8 +326,9 @@ class AutoWeightsLoader:
 
                     continue
 
+                named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
-                    base_prefix + k for k, _ in module.named_parameters(recurse=True)
+                    maybe_prefix(base_prefix, k) for k, _ in named_parameters
                 }
                 msg = (
                     f"There is no module or parameter named {prefix!r} "
@@ -463,14 +475,8 @@ def _merge_multimodal_embeddings(
     input_dtype = inputs_embeds.dtype
 
     try:
-        # For debugging
-        # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
-
-        # NOTE: This can avoid D2H sync (#22105), but fails to
-        # raise an error if is_multimodal.sum() < len(mm_embeds_flat)
-        inputs_embeds.masked_scatter_(
-            is_multimodal.unsqueeze(-1), mm_embeds_flat.to(dtype=input_dtype)
-        )
+        # If is_multimodal is on CPU this avoids a D2H sync
+        inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
     except RuntimeError as e:
         num_actual_tokens = len(mm_embeds_flat)
         num_expected_tokens = is_multimodal.sum().item()
@@ -483,7 +489,7 @@ def _merge_multimodal_embeddings(
                 f"multimodal tokens to {num_expected_tokens} placeholders"
             ) from e
 
-        raise ValueError("Error during masked scatter operation") from e
+        raise ValueError("Error during index put operation") from e
 
     return inputs_embeds
 
@@ -611,81 +617,6 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
-_CPU_OFFLOAD_BYTES = 0
-_CPU_OFFLOAD_MAX_BYTES = 0
-
-
-def set_cpu_offload_max_bytes(max_bytes: int) -> None:
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    _CPU_OFFLOAD_BYTES = 0
-    _CPU_OFFLOAD_MAX_BYTES = max_bytes
-
-
-def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
-    if (params := next(module.parameters(), None)) is None:
-        return module
-
-    device = params.device
-
-    if device == torch.device("cpu"):
-        return module
-
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-        return module
-
-    pin_memory = (
-        is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
-    )
-    uva_offloading = is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
-
-    # offload parameters to CPU
-    # use pin_memory if possible, which helps cudagraph capture speed
-    offloaded_parameters = False
-    for p in module.parameters():
-        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-            # we use per-parameter offloading
-            # one module might have some parameters offloaded and some not
-            break
-
-        cpu_data = p.data.to(device="cpu")
-        if pin_memory:
-            cpu_data = cpu_data.pin_memory()
-
-        if not uva_offloading:
-            p.data = cpu_data
-        else:
-            p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
-            p._vllm_is_uva_offloaded = True
-
-        _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
-        offloaded_parameters = True
-
-    if offloaded_parameters and not uva_offloading:
-        original_forward = module.forward
-
-        def forward(*args, **kwargs):
-            module.forward = original_forward
-            device_state = {
-                # here we blindly call `to(device)`
-                # if the parameter is already on the device, it will be a no-op
-                k: v.to(device, non_blocking=True)
-                for k, v in module.state_dict().items()
-            }
-
-            # set `tie_weights=False` as tied weights in original model
-            # become untied when calling .to(device) individually
-            output = functional_call(
-                module, device_state, args=args, kwargs=kwargs, tie_weights=False
-            )
-            module.forward = forward
-            return output
-
-        module.forward = forward
-
-    return module
-
-
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
@@ -693,21 +624,31 @@ def make_layers(
 ) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
+
+    Args:
+        num_hidden_layers: Total number of hidden layers in the model.
+        layer_fn: Function to create a layer given its index.
+        prefix: Prefix for layer names.
+
+    Returns:
+        Tuple of (start_layer, end_layer, modules).
     """
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
+    from vllm.model_executor.offloader import get_offloader
 
     start_layer, end_layer = get_pp_indices(
         num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
     )
+
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)]
-        + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
-            for idx in range(start_layer, end_layer)
-        ]
+        + get_offloader().wrap_modules(
+            layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
+        )
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
+
     return start_layer, end_layer, modules
 
 
