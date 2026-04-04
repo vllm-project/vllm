@@ -68,7 +68,10 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             del layer.prob_scale
             return
 
-        # Evaluate once; reused for both k/v resolution and q_scale fallback.
+        # If the kv-cache is not quantized, we enforce the k/v_scale to be 1.0
+        # regardless whether the kv-scale is available in the checkpoint.
+        # No need to process kv scales after loading if we are going to
+        # calculate them on the fly.
         use_static_kv_scales = (
             is_quantized_kv_cache(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales
@@ -85,8 +88,6 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
             elif not (layer.k_scale < 0.0 and layer.v_scale < 0.0):
-                # Single kv_scale: remapped to k_scale during weight loading;
-                # duplicate to v_scale here.
                 assert layer.k_scale > 0.0
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
@@ -136,11 +137,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # --- prob_scale: checkpoint → 1.0 ---
         prob_scale = _from_checkpoint(layer.prob_scale) or 1.0
 
+        # These are used in the final Attention.forward()
         layer._q_scale.copy_(q_scale)
         layer._q_scale_float = q_scale
         layer._prob_scale.copy_(prob_scale)
         layer._prob_scale_float = prob_scale
-        if layer.kv_cache_dtype.startswith("fp8") and (q_scale == 1.0 or prob_scale == 1.0):
+        if layer.kv_cache_dtype.startswith("fp8") and (
+            q_scale == 1.0 or prob_scale == 1.0
+        ):
             logger.warning_once(
                 f"Using uncalibrated q_scale {q_scale} and/or prob_scale "
                 f"{prob_scale} with fp8 attention. This may cause accuracy "
