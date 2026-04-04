@@ -1468,7 +1468,7 @@ class LLMEngine:
         """处理tree decoding逻辑"""
         if len(self.seq_id_to_seq_group) == 0:
             return
-        original_parallel_seq_group = next(iter(self.seq_id_to_seq_group.values()))
+        # original_parallel_seq_group = next(iter(self.seq_id_to_seq_group.values()))
         # unfinished_seqs = original_parallel_seq_group.get_unfinished_seqs()
         assert hasattr(outputs[0], 'logprobs')
         logprobs = outputs[0].logprobs
@@ -1481,14 +1481,15 @@ class LLMEngine:
             if sampling_params.tree_search_params is None:
                 continue
             num_branches = sampling_params.tree_search_params.branching_factor
-            seq_index = original_parallel_seq_group.seq_id_to_index[request_id]
-            seq = original_parallel_seq_group.assembled_seq_group.seqs[seq_index]
+            current_group = self.seq_id_to_seq_group[request_id]
+            seq_index = current_group.seq_id_to_index[request_id]
+            seq = current_group.assembled_seq_group.seqs[seq_index]
             if self._should_create_branches(
                 seq, logprobs[i], sampling_params):
                 probs = torch.exp(logprobs[i])
                 _, new_token_ids = torch.topk(probs, num_branches, dim=-1)
                 new_token_ids = new_token_ids.tolist()
-                original_parallel_seq_group.add_tree_branches(request_id, new_token_ids, self)
+                current_group.add_tree_branches(request_id, new_token_ids, self)
 
     def _should_create_branches(self, seq, logprobs, sampling_params):
         if seq.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
