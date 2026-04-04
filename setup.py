@@ -962,6 +962,9 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
+if _is_cuda():
+    ext_modules.append(CMakeExtension(name="vllm.cuda_checkpoint"))
+
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 

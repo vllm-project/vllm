@@ -276,6 +276,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
+# cuda_checkpoint extension (CUDA-only, requires driver >= 570)
+#
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  message(STATUS "Enabling cuda_checkpoint extension.")
+  set(VLLM_CUDA_CHECKPOINT_EXT_SRC "csrc/cuda_checkpoint.cpp")
+
+  define_extension_target(
+    cuda_checkpoint
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES ${VLLM_CUDA_CHECKPOINT_EXT_SRC}
+    LIBRARIES CUDA::cuda_driver
+    USE_SABI 3.8
+    WITH_SOABI)
+endif()
+
+#
 # _C extension
 #
 
