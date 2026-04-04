@@ -221,6 +221,17 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        """Check if backend supports non-causal (bidirectional) attention
+        for decoder models.
+
+        Unlike ENCODER_ONLY attention type which implies a different
+        execution model, this refers to non-causal attention within the
+        standard paged-KV-cache decoder path.
+        """
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -261,6 +272,7 @@ class AttentionBackend(ABC):
         use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
+        use_non_causal: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -293,6 +305,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
             invalid_reasons.append(f"attention type {attn_type} not supported")
+        if use_non_causal and not cls.supports_non_causal():
+            invalid_reasons.append("non-causal attention not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -310,6 +324,10 @@ class AttentionBackend(ABC):
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
+
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return False
 
 
 class AttentionMetadata:
@@ -934,10 +952,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(

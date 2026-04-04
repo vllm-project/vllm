@@ -9,6 +9,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -16,7 +17,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -38,7 +38,7 @@ class CPUAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256]
+        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
 
     @staticmethod
     def get_name() -> str:

@@ -14,11 +14,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 

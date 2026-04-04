@@ -2,6 +2,16 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
+- label: vLLM IR Tests
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+    - vllm/ir
+    - vllm/kernels
+  commands:
+    - pytest -v -s tests/ir
+    - pytest -v -s tests/kernels/ir
+
 - label: Kernels Core Operation Test
   timeout_in_minutes: 75
   source_file_dependencies:

@@ -221,12 +221,13 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         # No weights were loaded
         elif info.load_numel <= 0:
-            # first load but received no weights. This happens on dummy load
+            # first load: checkpoint did not contain weights for this layer
             if info.kernel_tensors is None:
-                materialize_layer(layer, info)
+                _layerwise_process(layer, info)
+                continue
 
             # reloading: place kernel tensors back as a fallback
-            else:
+            elif info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
                 _place_kernel_tensors(layer, info)
 

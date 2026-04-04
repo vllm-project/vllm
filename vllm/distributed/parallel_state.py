@@ -1690,11 +1690,7 @@ def initialize_model_parallel(
         # using torch.distributed in execution with torch.distributed in EPLB.
         global _EPLB
         assert _EPLB is None, "EPLB group is already initialized"
-        if (
-            config is not None
-            and config.parallel_config is not None
-            and config.parallel_config.enable_eplb
-        ):
+        if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
                 _EPLB = _init_stateless_group(
                     group_ranks,

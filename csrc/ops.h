@@ -53,12 +53,11 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
-void merge_attn_states(torch::Tensor& output,
-                       std::optional<torch::Tensor> output_lse,
-                       const torch::Tensor& prefix_output,
-                       const torch::Tensor& prefix_lse,
-                       const torch::Tensor& suffix_output,
-                       const torch::Tensor& suffix_lse);
+void merge_attn_states(
+    torch::Tensor& output, std::optional<torch::Tensor> output_lse,
+    const torch::Tensor& prefix_output, const torch::Tensor& prefix_lse,
+    const torch::Tensor& suffix_output, const torch::Tensor& suffix_lse,
+    const std::optional<int64_t> prefill_tokens_with_context);
 #ifndef USE_ROCM
 void convert_vertical_slash_indexes(
     torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
@@ -152,12 +151,6 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
-#ifndef USE_ROCM
-void silu_and_mul_nvfp4_quant(torch::Tensor& out,
-                              torch::Tensor& output_block_scale,
-                              torch::Tensor& input,
-                              torch::Tensor& input_global_scale);
-#endif
 void persistent_masked_m_silu_mul_quant(
     const at::Tensor& input,   // (E, T, 2*H)
     const at::Tensor& counts,  // (E)
@@ -225,89 +218,6 @@ torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
 
 int64_t ggml_moe_get_block_size(int64_t type);
 
-#ifndef USE_ROCM
-
-bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
-bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
-bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
-bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
-
-void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
-                           torch::Tensor const& B, torch::Tensor const& A_sf,
-                           torch::Tensor const& B_sf,
-                           torch::Tensor const& alpha);
-
-void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b, torch::Tensor const& a_scales,
-                       torch::Tensor const& b_scales,
-                       std::optional<torch::Tensor> const& bias);
-
-void cutlass_moe_mm(
-    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch);
-
-void cutlass_fp4_group_mm(
-    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets);
-
-void get_cutlass_moe_mm_data(
-    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
-    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
-    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets,
-    const bool is_gated);
-
-void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
-    const torch::Tensor& expert_first_token_offset,
-    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
-    const int64_t n, const int64_t k, const bool swap_ab);
-
-void get_cutlass_batched_moe_mm_data(torch::Tensor& expert_offsets,
-                                     torch::Tensor& problem_sizes1,
-                                     torch::Tensor& problem_sizes2,
-                                     const torch::Tensor& expert_num_tokens,
-                                     const int64_t num_local_experts,
-                                     const int64_t padded_m, const int64_t n,
-                                     const int64_t k);
-
-void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
-                           torch::Tensor const& b,
-                           torch::Tensor const& a_scales,
-                           torch::Tensor const& b_scales,
-                           torch::Tensor const& azp_adj,
-                           std::optional<torch::Tensor> const& azp,
-                           std::optional<torch::Tensor> const& bias);
-
-std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
-    torch::Tensor const& input, torch::Tensor const& input_scale,
-    bool is_sf_swizzled_layout);
-
-void scaled_fp4_quant_out(torch::Tensor const& input,
-                          torch::Tensor const& input_scale,
-                          bool is_sf_swizzled_layout, torch::Tensor& output,
-                          torch::Tensor& output_scale);
-
-void scaled_fp4_experts_quant(
-    torch::Tensor& output, torch::Tensor& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts);
-
-void silu_and_mul_scaled_fp4_experts_quant(
-    torch::Tensor& output, torch::Tensor& output_scale,
-    torch::Tensor const& input, torch::Tensor const& input_global_scale,
-    torch::Tensor const& input_offset_by_experts,
-    torch::Tensor const& output_scale_offset_by_experts);
-
-#endif
-
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
                               std::optional<torch::Tensor> const& azp);
@@ -343,7 +253,7 @@ void selective_scan_fwd(
     const std::optional<torch::Tensor>& query_start_loc,
     const std::optional<torch::Tensor>& cache_indices,
     const std::optional<torch::Tensor>& has_initial_state,
-    const torch::Tensor& ssm_states, int64_t pad_slot_id, int64_t block_size,
+    const torch::Tensor& ssm_states, int64_t null_block_id, int64_t block_size,
     const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
     const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
     const std::optional<torch::Tensor>& initial_state_idx,
