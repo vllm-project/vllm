@@ -472,6 +472,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
         weight_dtype = (
             torch.float8_e4m3fn
             if self.quant_config.is_checkpoint_fp8_serialized
@@ -514,6 +515,9 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+
+        if hasattr(self, "fp8_linear"):
+            self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -589,6 +593,9 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+
+        if hasattr(self, "fp8_linear"):
+            self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -2034,7 +2041,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 75
 
     @classmethod
     def override_quantization_method(
