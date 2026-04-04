@@ -241,8 +241,12 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         if residual is None:
+            # TODO(luka): address the weight=None passing issue more generally
             return ir.ops.rms_norm(
-                x, self.weight.data, self.variance_epsilon, self.variance_size_override
+                x,
+                self.weight.data if self.has_weight else None,
+                self.variance_epsilon,
+                self.variance_size_override,
             )
 
         return self.forward_static(
@@ -372,46 +376,6 @@ class GemmaRMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
-    @staticmethod
-    def _forward_static_no_residual(
-        weight: torch.Tensor,
-        variance_epsilon: float,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward() without residual."""
-        orig_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        x = x * (1.0 + weight.float())
-        x = x.to(orig_dtype)
-        return x
-
-    @staticmethod
-    def _forward_static_with_residual(
-        weight: torch.Tensor,
-        variance_epsilon: float,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """PyTorch-native implementation equivalent to forward() with residual."""
-        orig_dtype = x.dtype
-        x = (
-            x.float() + residual.float()
-            if orig_dtype == torch.float16
-            else x + residual
-        )
-        residual = x
-
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        x = x * (1.0 + weight.float())
-        x = x.to(orig_dtype)
-        return x, residual
-
     def forward_native(
         self,
         x: torch.Tensor,
@@ -419,30 +383,26 @@ class GemmaRMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         if residual is None:
-            return self._forward_static_no_residual(
-                self.weight.data, self.variance_epsilon, x
+            return ir.ops.rms_norm(
+                x, self.weight.data.float() + 1.0, self.variance_epsilon
             )
         else:
-            return self._forward_static_with_residual(
-                self.weight.data, self.variance_epsilon, x, residual
+            orig_dtype = x.dtype
+            x = (
+                x.float() + residual.float()
+                if orig_dtype == torch.float16
+                else x + residual
             )
+            residual = x
+            return ir.ops.rms_norm(
+                x, self.weight.data.float() + 1.0, self.variance_epsilon
+            ).to(orig_dtype), residual
 
     def forward_cuda(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, residual)
-
-        if not getattr(self, "_is_compiled", False):
-            self._forward_static_no_residual = torch.compile(  # type: ignore
-                self._forward_static_no_residual
-            )
-            self._forward_static_with_residual = torch.compile(  # type: ignore
-                self._forward_static_with_residual
-            )
-            self._is_compiled = True
         return self.forward_native(x, residual)
 
 
@@ -559,6 +519,11 @@ class RMSNormGated(CustomOp):
             norm_before_gate=self.norm_before_gate,
             activation=self.activation,
         )
+
+    def forward_xpu(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.forward_cuda(x, z)
 
 
 class LayerNorm(nn.Module):
