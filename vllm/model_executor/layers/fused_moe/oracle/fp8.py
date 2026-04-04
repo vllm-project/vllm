@@ -168,11 +168,14 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+            DeepGemmExperts,
+        )
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
         )
 
-        return [TritonOrDeepGemmExperts]
+        return [TritonOrDeepGemmExperts, DeepGemmExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_DEEPGEMM:
         from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
@@ -279,10 +282,10 @@ def select_fp8_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _make_log_backend(backend: Fp8MoeBackend):
+    def _make_log_backend(backend: Fp8MoeBackend, k_cls: type[mk.FusedMoEExperts]):
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
         return (
-            f"Using {backend.value} Fp8 MoE backend out "
+            f"Using {backend.value} Fp8 MoE backend ({k_cls.__name__}) out "
             f"of potential backends: {available_backend_strs}."
         )
 
@@ -310,7 +313,7 @@ def select_fp8_moe_backend(
                 k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend, k_cls), scope="local")
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
@@ -381,7 +384,9 @@ def select_fp8_moe_backend(
                     )
 
                     if supported:
-                        logger.info_once(_make_log_backend(backend), scope="local")
+                        logger.info_once(
+                            _make_log_backend(backend, k_cls), scope="local"
+                        )
                         return backend, k_cls
                     else:
                         logger.debug_once(
@@ -440,7 +445,7 @@ def select_fp8_moe_backend(
                 activation_format,
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend, k_cls), scope="local")
                 return backend, k_cls
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")

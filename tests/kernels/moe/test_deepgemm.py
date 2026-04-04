@@ -5,7 +5,6 @@ Unit-test DeepGEMM FP8 kernels (no DeepEP).
 Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
 """
 
-import importlib
 import math
 
 import pytest
@@ -23,10 +22,10 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-    TritonOrDeepGemmExperts,
+from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+    DeepGemmExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -116,7 +115,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     )
 
     # DeepGemm weight and scales
-    w1, w2, w1_s, w2_s = TritonOrDeepGemmExperts.prepare_fp8_weights(
+    w1, w2, w1_s, w2_s = DeepGemmExperts.prepare_fp8_weights(
         layer=None,
         w13=w1,
         w2=w2,
@@ -140,7 +139,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
             allow_new_interface=True,
             use_monolithic=False,
         ),
-        fused_experts=TritonOrDeepGemmExperts(
+        fused_experts=DeepGemmExperts(
             moe_config=moe_config,
             quant_config=dg_quant_config,
         ),
@@ -174,43 +173,25 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     assert diff < 0.001, f"Diff exceeded 1%: {diff}"
 
 
-# Note: N <= 512 may fall back to Triton due to performance issues.
-MNKs_may_fallback = [
-    (512, 384, 128, True),
-    (1024, 512, 128, True),
-    (1024, 768, 128, False),
-    (2048, 768, 512, False),
-    (512, 1024, 1024, False),
-    (4096, 4096, 1024, False),
+MNKs = [
+    (1024, 512, 128),
+    (1024, 768, 128),
+    (2048, 768, 512),
+    (512, 1024, 1024),
+    (4096, 4096, 1024),
 ]
 
 TOPKS = [2, 6]
 NUM_EXPERTS = [32]
 
 
-@pytest.mark.parametrize(("m", "n", "k", "may_fallback"), MNKs_may_fallback)
+@pytest.mark.parametrize(("m", "n", "k"), MNKs)
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
-def test_deepgemm_vs_triton(
-    m, n, k, may_fallback, topk, num_experts, monkeypatch, workspace_init
-):
+def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_init):
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_USE_DEEP_GEMM", "1")
-
-        _DeepGemmExperts = importlib.import_module(
-            "vllm.model_executor.layers.fused_moe.deep_gemm_moe"
-        ).DeepGemmExperts
-
-        if not may_fallback:
-            call_counter = {"cnt": 0}
-            orig_fn = _DeepGemmExperts.apply
-
-            def _spy_apply(*args, **kwargs):
-                call_counter["cnt"] += 1
-                return orig_fn(*args, **kwargs)
-
-            monkeypatch.setattr(_DeepGemmExperts, "apply", _spy_apply)
 
         if topk > num_experts:
             pytest.skip(f"topk={topk} > num_experts={num_experts}")
@@ -223,10 +204,3 @@ def test_deepgemm_vs_triton(
             num_experts=num_experts,
             block_size=BLOCK_SIZE,
         )
-
-        if not may_fallback:
-            # ensure that the DeepGEMM path was indeed taken.
-            assert call_counter["cnt"] == 1, (
-                f"DeepGEMM path was not executed during the test. "
-                f"Call counter: {call_counter['cnt']}"
-            )

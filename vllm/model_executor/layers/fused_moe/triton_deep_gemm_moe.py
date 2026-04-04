@@ -31,6 +31,12 @@ class TritonOrDeepGemmExperts(FallbackExperts, DeepGemmFp8PrepMixin):
             fallback_experts=TritonExperts(moe_config, quant_config),
         )
 
+    @classmethod
+    def _supports_current_device(cls) -> bool:
+        # TritonExperts does not support E8M0 scales
+        # so disable this FallbackExperts if E8M0 is used.
+        return super()._supports_current_device() and not is_deep_gemm_e8m0_used()
+
     @staticmethod
     def get_clses() -> tuple[
         type[mk.FusedMoEExpertsModular],
@@ -52,7 +58,7 @@ class TritonOrDeepGemmExperts(FallbackExperts, DeepGemmFp8PrepMixin):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
-        if is_deep_gemm_e8m0_used() or _valid_deep_gemm_shape(M, N, K):
+        if _valid_deep_gemm_shape(M, N, K):
             return self.experts.workspace_shapes(
                 M,
                 N,
@@ -81,7 +87,7 @@ class TritonOrDeepGemmExperts(FallbackExperts, DeepGemmFp8PrepMixin):
         w1: torch.Tensor,
         w2: torch.Tensor,
     ) -> mk.FusedMoEExpertsModular:
-        if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
+        if _valid_deep_gemm(hidden_states, w1, w2):
             return self.experts
         else:
             return self.fallback_experts
