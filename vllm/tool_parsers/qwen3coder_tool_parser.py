@@ -135,8 +135,13 @@ class Qwen3CoderToolParser(ToolParser):
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
-        # Handle null value for any type
-        if param_value.lower() == "null":
+        # Handle null value for any type.
+        # Qwen3.5's chat template uses Jinja's ``| string`` filter for
+        # scalar tool-call arguments, producing Python repr strings
+        # (``None``, ``True``, ``False``) instead of JSON literals
+        # (``null``, ``true``, ``false``).  Accept both spellings so the
+        # parser works with models trained on either template variant.
+        if param_value.lower() in ("null", "none"):
             return None
 
         if param_name not in param_config:

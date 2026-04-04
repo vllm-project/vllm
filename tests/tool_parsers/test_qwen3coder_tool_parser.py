@@ -1128,3 +1128,60 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
     args = json.loads(raw_arguments)
     assert args["message"] == "hello world"
     assert '\\"hello world\\"' not in raw_arguments
+
+
+@pytest.mark.parametrize(
+    "parser_cls",
+    [Qwen3CoderToolParser, Qwen3XMLToolParser],
+    ids=["coder", "xml"],
+)
+def test_python_style_none_parsed_as_null(qwen3_tokenizer, parser_cls):
+    """Qwen3.5's chat template emits Python-style ``None`` instead of
+    JSON ``null`` for scalar tool-call arguments.  The parser must
+    accept both spellings so that models trained on either template
+    variant produce correct tool-call JSON.
+
+    See: https://github.com/vllm-project/vllm/issues/38885
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "update_record",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "label": {"type": "string"},
+                        "metadata": {
+                            "anyOf": [{"type": "object"}, {"type": "null"}],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    # The model emits "None" (Python repr) for the nullable field.
+    model_output = (
+        "<tool_call>\n"
+        "<function=update_record>\n"
+        "<parameter=id>42</parameter>\n"
+        "<parameter=label>test</parameter>\n"
+        "<parameter=metadata>None</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    parser = parser_cls(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["id"] == 42
+    assert args["label"] == "test"
+    # The critical assertion: "None" must become JSON null, not the
+    # string "None".
+    assert args["metadata"] is None
