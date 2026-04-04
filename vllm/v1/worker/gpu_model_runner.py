@@ -5614,7 +5614,8 @@ class GPUModelRunner(
             else:
                 raise e
         if self.speculative_config:
-            draft_token_ids = [[0] for _ in range(num_reqs)]
+            num_spec_tokens = self.speculative_config.num_speculative_tokens
+            draft_token_ids = [[0] * num_spec_tokens for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device
             )
