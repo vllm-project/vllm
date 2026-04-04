@@ -93,27 +93,29 @@ class SharedExperts:
                 )
 
     @property
-    def _has_external_experts(self) -> bool:
+    def _use_external_experts(self) -> bool:
+        if self._use_dp_chunking:
+            return False
+
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
         backend = self._moe_config.moe_parallel_config.all2all_backend
-        return not (
-            (
-                self._moe_config.moe_parallel_config.enable_eplb
-                and backend != "allgather_reducescatter"
-            )
-            or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
-        )
+        return (
+            self._moe_config.moe_parallel_config.enable_eplb
+            and backend != "allgather_reducescatter"
+        ) or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
+        if self._use_external_experts:
+            return SharedExpertsOrder.EXTERNAL
+
         if self._quant_method.mk_owns_shared_expert:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
-        # Prefer multi-stream overlap when aux stream is available
         should_run_shared_in_aux_stream = (
             current_platform.is_cuda()
             and not self._use_dp_chunking
@@ -124,11 +126,8 @@ class SharedExperts:
 
         if should_run_shared_in_aux_stream:
             return SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
-
-        if self._has_external_experts and not self._use_dp_chunking:
-            return SharedExpertsOrder.EXTERNAL
-
-        return SharedExpertsOrder.NO_OVERLAP
+        else:
+            return SharedExpertsOrder.NO_OVERLAP
 
     def maybe_sync_shared_experts_stream(
         self,
