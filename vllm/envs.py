@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
+    VLLM_HEALTH_CHECK_GPU_TIMEOUT: int = 20
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -651,6 +652,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    ),
+    # Timeout in seconds for GPU health check (dummy forward pass).
+    # Default is 20 seconds.
+    "VLLM_HEALTH_CHECK_GPU_TIMEOUT": lambda: int(
+        os.environ.get("VLLM_HEALTH_CHECK_GPU_TIMEOUT", "20")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
@@ -1821,6 +1827,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
+        "VLLM_HEALTH_CHECK_GPU_TIMEOUT",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",

@@ -31,3 +31,16 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
+
+
+@router.get("/health/ready", response_class=Response)
+async def health_ready(raw_request: Request) -> Response:
+    """Readiness check — verifies GPU can execute inference."""
+    client = engine_client(raw_request)
+    if client is None:
+        return Response(status_code=200)
+    try:
+        await client.check_health_gpu()
+        return Response(status_code=200)
+    except EngineDeadError:
+        return Response(status_code=503)

@@ -876,6 +876,26 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
+    async def check_health_gpu(self) -> None:
+        logger.debug("Called check_health_gpu.")
+        # First do the basic liveness check.
+        await self.check_health()
+        # Then verify GPU can execute a forward pass.
+        try:
+            await asyncio.wait_for(
+                self.engine_core.execute_dummy_batch_async(),
+                timeout=envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "GPU health check timed out after %ss",
+                envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT,
+            )
+            raise self.dead_error from None
+        except Exception:
+            logger.warning("GPU health check failed", exc_info=True)
+            raise self.dead_error from None
+
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:
