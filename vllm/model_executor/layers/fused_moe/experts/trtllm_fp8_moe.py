@@ -338,6 +338,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
 
+        # Currently FI requires bfloat16 routing bias.
+        # https://github.com/flashinfer-ai/flashinfer/issues/2909
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
+
         is_mxfp8 = self.quant_config.block_shape == [1, 32]
         if is_mxfp8:
             fp8_quant_type = Fp8QuantizationType.MxFp8
