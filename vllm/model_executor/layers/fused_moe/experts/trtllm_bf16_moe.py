@@ -78,11 +78,8 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         return routing_method in [
             RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Llama4,
-            # NOTE: TRTLLM Kernel has issue with Qwen3.5 router.
-            # Re-enable once the issue is resolved.
-            # https://github.com/vllm-project/vllm/issues/37591
-            # RoutingMethodType.Renormalize,
-            # RoutingMethodType.RenormalizeNaive
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
         ]
 
     @staticmethod
