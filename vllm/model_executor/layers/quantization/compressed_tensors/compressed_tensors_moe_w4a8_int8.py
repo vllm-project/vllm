@@ -7,7 +7,6 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationStrategy,
 )
-from compressed_tensors_moe import CompressedTensorsMoEMethod
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -19,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
+)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
 

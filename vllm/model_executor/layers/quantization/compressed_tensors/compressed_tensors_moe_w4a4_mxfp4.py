@@ -3,7 +3,6 @@
 
 
 import torch
-from compressed_tensors_moe import CompressedTensorsMoEMethod
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -20,6 +19,9 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,

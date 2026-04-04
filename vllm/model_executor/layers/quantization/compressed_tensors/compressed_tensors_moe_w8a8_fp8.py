@@ -7,7 +7,6 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationStrategy,
 )
-from compressed_tensors_moe import CompressedTensorsMoEMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -25,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,

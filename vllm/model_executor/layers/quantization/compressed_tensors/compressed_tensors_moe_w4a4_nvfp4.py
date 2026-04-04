@@ -3,7 +3,6 @@
 
 
 import torch
-from compressed_tensors_moe import CompressedTensorsMoEMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -21,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,

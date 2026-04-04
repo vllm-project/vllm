@@ -37,28 +37,28 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> FusedMoEMethodBase:
-        from .compressed_tensors.compressed_tensors_moe_w4a4_mxfp4 import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa E501
             CompressedTensorsW4A4Mxfp4MoEMethod,
         )
-        from .compressed_tensors.compressed_tensors_moe_w4a4_nvfp4 import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa E501
             CompressedTensorsW4A4Nvfp4MoEMethod,
         )
-        from .compressed_tensors.compressed_tensors_moe_w4a8_fp8 import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a8_fp8 import (  # noqa E501
             CompressedTensorsW4A8Fp8MoEMethod,
         )
-        from .compressed_tensors.compressed_tensors_moe_w4a8_int8 import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a8_int8 import (  # noqa E501
             CompressedTensorsW4A8Int8MoEMethod,
         )
-        from .compressed_tensors.compressed_tensors_moe_w8a8_fp8 import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w8a8_fp8 import (  # noqa E501
             CompressedTensorsW8A8Fp8MoEMethod,
         )
-        from .compressed_tensors.compressed_tensors_moe_w8a8_int8 import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w8a8_int8 import (  # noqa E501
             CompressedTensorsW8A8Int8MoEMethod,
         )
-        from .compressed_tensors.compressed_tensors_moe_wna16 import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_wna16 import (  # noqa E501
             CompressedTensorsWNA16MoEMethod,
         )
-        from .compressed_tensors.compressed_tensors_moe_wna16_marlin import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_wna16_marlin import (  # noqa E501
             CompressedTensorsWNA16MarlinMoEMethod,
         )
 

@@ -6,7 +6,6 @@ import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
 )
-from compressed_tensors_moe import CompressedTensorsMoEMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
@@ -21,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     int4_w4afp8_moe_quant_config,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_bf16_scales_to_fp8,

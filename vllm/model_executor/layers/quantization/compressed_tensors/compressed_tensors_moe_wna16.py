@@ -6,7 +6,6 @@ import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
 )
-from compressed_tensors_moe import CompressedTensorsMoEMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -18,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
