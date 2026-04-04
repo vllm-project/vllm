@@ -406,11 +406,11 @@ class Attention(nn.Module, AttentionLayerBase):
         self, cache_dtype: str, head_size: int, prefix: str
     ) -> None:
         """Initialize TurboQuant rotation/projection matrices and centroids."""
-        from vllm.turboquant.config import TurboQuantConfig
-        from vllm.turboquant.quantizer import (
+        from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
+        from vllm.model_executor.layers.quantization.turboquant.quantizer import (
             generate_rotation_matrix,
         )
-        from vllm.turboquant.centroids import get_centroids
+        from vllm.model_executor.layers.quantization.turboquant.centroids import get_centroids
 
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
 
@@ -589,7 +589,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window=self.sliding_window,
             )
         elif self.kv_cache_dtype.startswith("tq"):
-            from vllm.turboquant.config import TurboQuantConfig
+            from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
             tq_config = TurboQuantConfig.from_cache_dtype(
                 self.kv_cache_dtype, self.head_size)
             padded_slot = tq_config.padded_slot_size

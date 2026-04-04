@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Triton fused TurboQuant decode attention.
 
-Three decode paths (tried in order):
-  1. Pre-dequant + GQA SDPA: Bulk dequant K+V to fp16, then cuBLAS GEMM +
-     FlashAttention SDPA with enable_gqa=True. ~2x faster than fused WPH.
-  2. CUDA warp-per-head (WPH): Fused score+value+softmax per warp.
-  3. Triton stage1+stage2: Split-KV tiled fallback.
+Decode path: Triton stage1 (split-KV tiled attention scoring + value
+accumulation) + stage2 (log-sum-exp reduction across splits).
 
-Supports both FP8 (E4M3) and 4-bit uniform quantized values.
+Supports FP8 (E4M3) keys, 3-bit and 4-bit uniform quantized values.
 """
 
 import math
 import os
 import torch
-import torch.nn.functional as F
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -424,123 +420,7 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
     return cfg
 
 
-# ---------------------------------------------------------------------------
-# CUDA warp-per-head kernel (faster alternative to Triton stage 1)
-# ---------------------------------------------------------------------------
-
-_wph_module = None
-_wph_available = None
-_wph_has_smem = False
-_wph_compiled_d = None
-_wph_compiled_gs = None
-
-def _get_wph_module(head_dim=None, kv_group_size=None):
-    """Lazy-compile and cache the warp-per-head CUDA kernel."""
-    global _wph_module, _wph_available, _wph_has_smem
-    global _wph_compiled_d, _wph_compiled_gs
-    if _wph_available is not None:
-        return _wph_module if _wph_available else None
-    try:
-        cu_path = os.path.join(os.path.dirname(__file__),
-                               'csrc', 'tq_decode_warp_per_head.cu')
-        with open(cu_path) as f:
-            cuda_src = f.read()
-
-        cpp_src = """
-void tq_decode_wph_launch(
-    torch::Tensor q_rot,
-    torch::Tensor kv_cache, torch::Tensor block_table,
-    torch::Tensor seq_lens, torch::Tensor centroids,
-    torch::Tensor mid_o,
-    int64_t num_kv_splits, int64_t head_dim,
-    int64_t num_kv_heads, int64_t kv_group_size,
-    int64_t block_size,
-    int64_t mse_bytes,
-    int64_t kps, int64_t val_data_bytes,
-    int64_t value_fp8,
-    int64_t mse_bits, int64_t n_centroids, int64_t key_fp8,
-    double attn_scale,
-    double sparse_v_threshold);
-
-void tq_decode_wph_smem_launch(
-    torch::Tensor q_rot,
-    torch::Tensor kv_cache, torch::Tensor block_table,
-    torch::Tensor seq_lens, torch::Tensor centroids,
-    torch::Tensor mid_o,
-    int64_t num_kv_splits, int64_t head_dim,
-    int64_t num_kv_heads, int64_t kv_group_size,
-    int64_t block_size,
-    int64_t mse_bytes,
-    int64_t kps, int64_t val_data_bytes,
-    int64_t slot_bytes,
-    int64_t value_fp8,
-    double attn_scale,
-    double sparse_v_threshold);
-
-void tq_full_dequant_kv_launch(
-    torch::Tensor kv_cache, torch::Tensor block_table,
-    torch::Tensor seq_lens, torch::Tensor centroids,
-    torch::Tensor k_out, torch::Tensor v_out,
-    int64_t alloc_seq_len, int64_t head_dim,
-    int64_t num_kv_heads, int64_t block_size,
-    int64_t mse_bytes,
-    int64_t kps, int64_t val_data_bytes,
-    int64_t mse_bits, int64_t n_centroids, int64_t key_fp8);
-
-void tq_masked_softmax_launch(
-    torch::Tensor scores, torch::Tensor seq_lens,
-    int64_t alloc_seq_len, int64_t num_q_heads);
-"""
-        extra_cflags = ["-O3", "--use_fast_math"]
-
-        if head_dim is not None and kv_group_size is not None:
-            extra_cflags.append(f"-DTQ_HEAD_DIM={head_dim}")
-            extra_cflags.append(f"-DTQ_KV_GROUP_SIZE={kv_group_size}")
-            _wph_compiled_d = head_dim
-            _wph_compiled_gs = kv_group_size
-            logger.info("TQ WPH: compiling for D=%d GS=%d (2 kernels)",
-                        head_dim, kv_group_size)
-
-        from torch.utils.cpp_extension import load_inline
-        _wph_module = load_inline(
-            name="tq_decode_wph",
-            cpp_sources=cpp_src,
-            cuda_sources=cuda_src,
-            functions=["tq_decode_wph_launch", "tq_decode_wph_smem_launch",
-                       "tq_full_dequant_kv_launch", "tq_masked_softmax_launch"],
-            verbose=False,
-            extra_cuda_cflags=extra_cflags,
-        )
-        _wph_available = True
-        _wph_has_smem = hasattr(_wph_module, 'tq_decode_wph_smem_launch')
-        logger.info("TQ WPH CUDA kernel compiled (smem=%s)", _wph_has_smem)
-        return _wph_module
-    except Exception as e:
-        logger.warning("TQ WPH CUDA kernel failed to compile, "
-                       "falling back to Triton: %s", e)
-        _wph_available = False
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Pre-dequant + manual GQA decode path (~2-4x faster than fused WPH)
-# ---------------------------------------------------------------------------
-
-_predequant_available = None
 _pi_t_cache: dict = {}
-_dequant_buf_cache: dict = {}
-_predequant_max_batch = 0
-
-
-def _check_predequant_available():
-    global _predequant_available
-    if _predequant_available is True:
-        return True
-    if _wph_module is not None and hasattr(_wph_module, 'tq_full_dequant_kv_launch'):
-        _predequant_available = True
-        logger.info("Pre-dequant manual GQA path available (CUDA-graph compatible)")
-        return True
-    return False
 
 
 def _get_pi_t(Pi):
@@ -551,123 +431,6 @@ def _get_pi_t(Pi):
         pit = Pi.T.contiguous()
         _pi_t_cache[key] = pit
     return pit
-
-
-def _predequant_gqa_sdpa_decode(
-    query: torch.Tensor,
-    kv_cache: torch.Tensor,
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-    Pi: torch.Tensor,
-    centroids: torch.Tensor,
-    scale: float,
-    cfg: dict,
-    key_packed_size: int,
-    value_quant_bits: int,
-    max_seq_len: int,
-) -> torch.Tensor:
-    """Pre-dequant K+V to fp16 -> q@Pi^T -> manual GQA attention."""
-    global _predequant_max_batch
-    B, Hq, D = query.shape
-    Hk = kv_cache.shape[2]
-    block_size = kv_cache.shape[1]
-    device = query.device
-    group_size = Hq // Hk
-
-    wph_mod = _wph_module
-    if wph_mod is None:
-        raise RuntimeError("WPH module required for predequant path")
-
-    max_num_blocks = block_table.shape[1]
-    alloc_seq_len = max_num_blocks * block_size
-
-    cached = _dequant_buf_cache.get(device)
-    if cached is None:
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("Predequant buffers not allocated yet "
-                               "(cannot allocate during graph capture)")
-        per_batch_bytes = (
-            2 * Hk * alloc_seq_len * D * 2
-            + Hq * alloc_seq_len * 4
-            + Hq * D * 2
-            + Hq * D * 2
-            + Hq * D * 4
-        )
-        free_mem = torch.cuda.mem_get_info(device)[0]
-        max_bytes = int(free_mem * 0.15)
-        _predequant_max_batch = max(1, max_bytes // per_batch_bytes)
-        _predequant_max_batch = min(_predequant_max_batch, 512)
-
-        if _predequant_max_batch < 1:
-            raise RuntimeError(
-                f"Pre-dequant needs {per_batch_bytes / 1e9:.2f} GiB/batch "
-                f"but only {free_mem / 1e9:.2f} GiB free")
-
-        alloc_B = _predequant_max_batch
-        k_fp16 = torch.empty(alloc_B, Hk, alloc_seq_len, D,
-                              dtype=torch.float16, device=device)
-        v_fp16 = torch.empty(alloc_B, Hk, alloc_seq_len, D,
-                              dtype=torch.float16, device=device)
-        scores_buf = torch.empty(alloc_B * Hq, alloc_seq_len,
-                                  dtype=torch.float32, device=device)
-        q_rot_buf = torch.empty(alloc_B, Hq, D,
-                                 dtype=torch.float16, device=device)
-        q_float_buf = torch.empty(alloc_B * Hq, D,
-                                   dtype=torch.float32, device=device)
-        output_buf = torch.empty(alloc_B, Hq, D,
-                                  dtype=torch.float16, device=device)
-        _dequant_buf_cache[device] = (k_fp16, v_fp16, scores_buf,
-                                       q_rot_buf, q_float_buf, output_buf)
-        logger.info("Pre-dequant buffers allocated: max_batch=%d "
-                    "(%.2f GiB)", alloc_B,
-                    (alloc_B * per_batch_bytes) / 1e9)
-        cached = _dequant_buf_cache[device]
-
-    if B > _predequant_max_batch:
-        raise RuntimeError(
-            f"Batch {B} > predequant max_batch {_predequant_max_batch}")
-
-    (k_fp16_full, v_fp16_full, scores_buf_full,
-     q_rot_full, q_float_full, output_full) = cached
-    k_fp16 = k_fp16_full[:B]
-    v_fp16 = v_fp16_full[:B]
-    scores_buf = scores_buf_full[:B * Hq]
-    q_rot = q_rot_full[:B]
-    q_float = q_float_full[:B * Hq]
-    output = output_full[:B]
-
-    # CUDA dequant
-    wph_mod.tq_full_dequant_kv_launch(
-        kv_cache, block_table, seq_lens, centroids,
-        k_fp16, v_fp16,
-        alloc_seq_len, D, Hk, block_size,
-        cfg['mse_bytes'],
-        key_packed_size, cfg['val_data_bytes'],
-        cfg.get('mse_bits', 3), cfg.get('n_centroids', 8), 0,
-    )
-
-    # q @ Pi^T rotation
-    Pi_T = _get_pi_t(Pi)
-    q_float.copy_(query.float().reshape(B * Hq, D))
-    torch.mm(q_float, Pi_T, out=q_float)
-    q_rot.copy_(q_float.reshape(B, Hq, D).to(torch.float16))
-
-    # Manual GQA attention
-    q_grouped = q_rot.float().reshape(B, Hk, group_size, D)
-    torch.matmul(
-        q_grouped, k_fp16.float().transpose(-2, -1),
-        out=scores_buf.reshape(B, Hk, group_size, alloc_seq_len),
-    )
-    scores_buf.mul_(scale)
-
-    wph_mod.tq_masked_softmax_launch(
-        scores_buf, seq_lens, alloc_seq_len, Hq,
-    )
-
-    weights = scores_buf.reshape(B, Hk, group_size, alloc_seq_len)
-    output.copy_(torch.matmul(weights, v_fp16.float()).to(torch.float16).reshape(B, Hq, D))
-
-    return output
 
 
 def triton_tq_decode_attention(
@@ -687,12 +450,7 @@ def triton_tq_decode_attention(
     key_fp8: bool = False,
     norm_correction: bool = False,
 ) -> torch.Tensor:
-    """Launch fused TQ decode attention.
-
-    Tries three paths in order:
-      1. Pre-dequant + GQA SDPA (~2x faster, requires enable_gqa support)
-      2. CUDA warp-per-head kernel
-      3. Triton stage1+stage2 fallback
+    """Launch fused TQ decode attention (Triton stage1 + stage2).
 
     Returns: output tensor [B, Hq, D] in query's dtype.
     """
@@ -744,90 +502,41 @@ def triton_tq_decode_attention(
 
     sparse_v_threshold = float(os.environ.get("TQ_SPARSE_V_THRESHOLD", "1e-6"))
 
-    # Path 2: CUDA warp-per-head kernel
-    # Disabled for VQB=3: CUDA kernels hardcode 4-bit value unpack.
-    # Falls through to Triton stage1 which has proper 3-bit support.
-    wph_mod = _get_wph_module(head_dim=D, kv_group_size=kv_group_size)
-    use_wph = (wph_mod is not None
-               and D in (128, 256)
-               and kv_group_size in (1, 2, 4, 8, 16)
-               and 32 * kv_group_size <= 1024
-               and value_quant_bits != 3)
-
-    if use_wph:
-        if not getattr(triton_tq_decode_attention, '_wph_path_logged', False):
-            import logging as _logging
-            _l = _logging.getLogger(__name__)
-            _l.info("TQ decode: use_wph=True, mse_bits=%d, key_fp8=%s, use_smem=%s",
-                    mse_bits, key_fp8, (_wph_has_smem and not key_fp8))
-            triton_tq_decode_attention._wph_path_logged = True
-        slot_bytes = (cfg['mse_bytes']
-                      + 4 + cfg['val_data_bytes'] + 4)  # +4 = scale+zero
-        _vfp8 = 0  # FP8 values not supported
-        _kfp8 = 1 if key_fp8 else 0
-        _use_smem = (_wph_has_smem and not key_fp8)
-        if _use_smem:
-            wph_mod.tq_decode_wph_smem_launch(
-                q_rot.contiguous(),
-                kv_cache.contiguous(), block_table, seq_lens,
-                centroids, mid_o,
-                NUM_KV_SPLITS, D, Hk, kv_group_size, block_size,
-                cfg['mse_bytes'],
-                key_packed_size, cfg['val_data_bytes'],
-                slot_bytes,
-                _vfp8,
-                scale,
-                sparse_v_threshold,
-            )
-        else:
-            wph_mod.tq_decode_wph_launch(
-                q_rot.contiguous(),
-                kv_cache.contiguous(), block_table, seq_lens,
-                centroids, mid_o,
-                NUM_KV_SPLITS, D, Hk, kv_group_size, block_size,
-                cfg['mse_bytes'],
-                key_packed_size, cfg['val_data_bytes'],
-                _vfp8,
-                mse_bits, n_centroids, _kfp8,
-                scale,
-                sparse_v_threshold,
-            )
-    else:
-        # Path 3: Triton stage 1
-        BLOCK_KV = 4
-        grid = (B, Hq, NUM_KV_SPLITS)
-        _tq_decode_stage1[grid](
-            q_rot,
-            kv_cache,
-            block_table, seq_lens,
-            centroids,
-            mid_o,
-            q_rot.stride(0), q_rot.stride(1),
-            kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
-            block_table.stride(0),
-            mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
-            NUM_Q_HEADS=Hq,
-            NUM_KV_HEADS=Hk,
-            HEAD_DIM=D,
-            BLOCK_SIZE=block_size,
-            PADDED_SLOT=padded_slot,
-            MAX_NUM_BLOCKS=max_num_blocks,
-            NUM_KV_SPLITS=NUM_KV_SPLITS,
-            KV_GROUP_SIZE=kv_group_size,
-            MSE_BITS=mse_bits,
-            MSE_BYTES=cfg['mse_bytes'],
-            KPS=key_packed_size,
-            VQB=value_quant_bits,
-            VAL_DATA_BYTES=cfg['val_data_bytes'],
-            N_CENTROIDS=n_centroids,
-            ATTN_SCALE=scale,
-            BLOCK_D=cfg['BLOCK_D'],
-            BLOCK_KV=BLOCK_KV,
-            KEY_FP8=1 if key_fp8 else 0,
-            NORM_CORRECTION=1 if norm_correction else 0,
-            num_warps=4,
-            num_stages=2,
-        )
+    # Triton stage 1: split-KV tiled attention scoring + value accumulation
+    BLOCK_KV = 4
+    grid = (B, Hq, NUM_KV_SPLITS)
+    _tq_decode_stage1[grid](
+        q_rot,
+        kv_cache,
+        block_table, seq_lens,
+        centroids,
+        mid_o,
+        q_rot.stride(0), q_rot.stride(1),
+        kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
+        block_table.stride(0),
+        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+        NUM_Q_HEADS=Hq,
+        NUM_KV_HEADS=Hk,
+        HEAD_DIM=D,
+        BLOCK_SIZE=block_size,
+        PADDED_SLOT=padded_slot,
+        MAX_NUM_BLOCKS=max_num_blocks,
+        NUM_KV_SPLITS=NUM_KV_SPLITS,
+        KV_GROUP_SIZE=kv_group_size,
+        MSE_BITS=mse_bits,
+        MSE_BYTES=cfg['mse_bytes'],
+        KPS=key_packed_size,
+        VQB=value_quant_bits,
+        VAL_DATA_BYTES=cfg['val_data_bytes'],
+        N_CENTROIDS=n_centroids,
+        ATTN_SCALE=scale,
+        BLOCK_D=cfg['BLOCK_D'],
+        BLOCK_KV=BLOCK_KV,
+        KEY_FP8=1 if key_fp8 else 0,
+        NORM_CORRECTION=1 if norm_correction else 0,
+        num_warps=4,
+        num_stages=2,
+    )
 
     # Stage 2: Reduce across KV splits
     output = torch.empty(B, Hq, D, dtype=torch.float32, device=device)

@@ -22,13 +22,12 @@ from typing import ClassVar, Optional
 import torch
 import torch.nn.functional as F
 
+from vllm.utils.torch_utils import aux_stream
 from vllm.v1.attention.ops.triton_tq_store import triton_tq_store
 
 # CUDA stream overlap: disabled by default — degrades TTFT under concurrent
 # load (489ms vs 338ms). Enable via TQ_STREAM_OVERLAP=1 for experimentation.
 _USE_STREAM_OVERLAP = os.environ.get("TQ_STREAM_OVERLAP", "0") == "1"
-
-_store_stream: torch.cuda.Stream | None = None
 
 from vllm.config.cache import CacheDType
 from vllm.v1.attention.backends.fa_utils import (
@@ -208,7 +207,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.num_kv_groups = num_heads // num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
-        from vllm.turboquant.config import TurboQuantConfig
+        from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
         self.tq_config = TurboQuantConfig.from_cache_dtype(kv_cache_dtype, head_size)
 
     def _ensure_on_device(self, layer, device):
@@ -244,8 +243,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         With stream overlap enabled, the store runs on a secondary CUDA
         stream so it can overlap with the next layer's forward pass.
         """
-        global _store_stream
-
         N = slot_mapping.shape[0]
         if N <= 0:
             return
@@ -258,22 +255,18 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self._current_layer = layer
 
         # Use stream overlap only when not capturing CUDA graphs
+        stream = aux_stream() if _USE_STREAM_OVERLAP else None
         use_overlap = (
-            _USE_STREAM_OVERLAP
-            and _USE_TRITON_STORE
+            stream is not None
             and not torch.cuda.is_current_stream_capturing()
         )
 
         if use_overlap:
-            # Lazy-init the secondary stream
-            if _store_stream is None:
-                _store_stream = torch.cuda.Stream(device=device)
-
             # Wait for any previous store to finish before starting new one
-            torch.cuda.current_stream(device).wait_stream(_store_stream)
+            torch.cuda.current_stream(device).wait_stream(stream)
 
             # Launch store on secondary stream
-            with torch.cuda.stream(_store_stream):
+            with torch.cuda.stream(stream):
                 self._store_kv(k, v, kv_cache, slot_mapping,
                                layer._tq_Pi, layer._tq_centroids)
         else:
@@ -317,10 +310,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         centroids = layer._tq_centroids
 
         # Ensure any async store has completed before decode reads cache
-        if (_store_stream is not None
+        stream = aux_stream()
+        if (stream is not None
                 and not attn_metadata.is_prefill
                 and not torch.cuda.is_current_stream_capturing()):
-            torch.cuda.current_stream(device).wait_stream(_store_stream)
+            torch.cuda.current_stream(device).wait_stream(stream)
 
         # Compute attention (KV cache was already updated by do_kv_cache_update)
         # Handle mixed prefill+decode batches (chunked prefill):

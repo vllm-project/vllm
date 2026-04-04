@@ -1617,7 +1617,7 @@ class EngineArgs:
         # from TQ_BOUNDARY_LAYERS env var when using TQ cache dtype.
         n_boundary = int(os.environ.get("TQ_BOUNDARY_LAYERS", "2"))
         if resolved_cache_dtype.startswith("tq-") and n_boundary > 0:
-            from vllm.turboquant.config import TurboQuantConfig
+            from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
             num_layers = model_config.hf_text_config.num_hidden_layers
             boundary_layers = TurboQuantConfig.get_boundary_skip_layers(
                 num_layers, n_boundary)
