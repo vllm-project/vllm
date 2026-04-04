@@ -1674,7 +1674,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 new_wave >= self.current_wave
             ):
                 self.current_wave = new_wave
-                if not self.engines_running:
+                if not self.engines_running and not self.is_scheduler_paused():
                     logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
         else:
