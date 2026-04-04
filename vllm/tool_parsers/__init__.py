@@ -98,6 +98,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_m2_tool_parser",
         "MinimaxM2ToolParser",
     ),
+    "minimax_m2_sanitized": (
+        "minimax_m2_sanitized_tool_parser",
+        "MinimaxM2SanitizedToolParser",
+    ),
     "minimax": (
         "minimax_tool_parser",
         "MinimaxToolParser",

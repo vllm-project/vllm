@@ -64,6 +64,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "minimax_m2_reasoning_parser",
         "MiniMaxM2ReasoningParser",
     ),
+    "minimax_m2_sanitized": (
+        "minimax_m2_sanitized_reasoning_parser",
+        "MiniMaxM2SanitizedReasoningParser",
+    ),
     "minimax_m2_append_think": (
         "minimax_m2_reasoning_parser",
         "MiniMaxM2AppendThinkReasoningParser",
