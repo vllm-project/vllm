@@ -38,7 +38,6 @@ if is_flash_attn_varlen_func_available():
 import vllm.envs as envs
 from vllm.config import (
     VllmConfig,
-    get_current_vllm_config,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
@@ -72,22 +71,6 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        vllm_config = get_current_vllm_config()
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        if (
-            model_config
-            and model_config.is_hybrid
-            and (
-                cache_config.mamba_ssm_cache_dtype == "float32"
-                or cache_config.mamba_cache_dtype == "float32"
-            )
-        ):
-            # NOTE(tdoublep): while in principle, FA supports
-            # MultipleOf(16), these are the block sizes that do not
-            # suffer from the NaN propagation problem described here:
-            # https://github.com/Dao-AILab/flash-attention/issues/1974
-            return [16, 32, 64]
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
