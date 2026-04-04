@@ -1445,3 +1445,66 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         "MergedColumnParallelLinearVariableSliceWithLoRA "
         "should NOT handle 2 slices even with empty packed_modules_list"
     )
+
+
+def test_merged_column_parallel_lora_b_bounds_checking():
+    """Test that slice_lora_b handles len(lora_b) < n_slices (issue #36372)"""
+    from vllm.lora.layers.column_parallel_linear import (
+        MergedColumnParallelLinearWithLoRA,
+    )
+
+    # Create a layer with 2 slices (e.g., gate_up_proj)
+    layer = MergedColumnParallelLinear(
+        input_size=4096,
+        output_sizes=[4096, 4096],
+        bias=False,
+        params_dtype=torch.float16,
+    )
+
+    lora_config = LoRAConfig(max_loras=8, max_lora_rank=8, lora_dtype=torch.float16)
+
+    lora_layer = MergedColumnParallelLinearWithLoRA(layer)
+    lora_layer.create_lora_weights(8, lora_config)
+
+    # Simulate the case where lora_b has fewer elements than n_slices
+    # This can happen in certain TP configurations
+    lora_b_short = [None]  # Only 1 element, but n_slices = 2
+
+    # This should not raise IndexError
+    try:
+        result = lora_layer.slice_lora_b(lora_b_short)
+        assert len(result) == 2, f"Expected 2 slices, got {len(result)}"
+        assert result == [None, None], f"Expected [None, None], got {result}"
+    except IndexError:
+        pytest.fail("slice_lora_b raised IndexError when len(lora_b) < n_slices")
+
+
+def test_merged_column_parallel_set_lora_bounds_checking():
+    """Test that set_lora handles len(lora_a/lora_b) < n_slices (issue #36372)"""
+    from vllm.lora.layers.column_parallel_linear import (
+        MergedColumnParallelLinearWithLoRA,
+    )
+
+    # Create a layer with 2 slices (e.g., gate_up_proj)
+    layer = MergedColumnParallelLinear(
+        input_size=4096,
+        output_sizes=[4096, 4096],
+        bias=False,
+        params_dtype=torch.float16,
+    )
+
+    lora_config = LoRAConfig(max_loras=8, max_lora_rank=8, lora_dtype=torch.float16)
+
+    lora_layer = MergedColumnParallelLinearWithLoRA(layer)
+    lora_layer.create_lora_weights(8, lora_config)
+
+    # Simulate the case where lora_a/lora_b have fewer elements than n_slices
+    # This can happen in certain TP configurations with vision models
+    lora_a_short = [torch.randn(8, 4096, dtype=torch.float16)]  # Only 1 element
+    lora_b_short = [torch.randn(4096, 8, dtype=torch.float16)]  # Only 1 element
+
+    # This should not raise IndexError
+    try:
+        lora_layer.set_lora(0, lora_a_short, lora_b_short)
+    except IndexError:
+        pytest.fail("set_lora raised IndexError when len(lora_a/lora_b) < n_slices")

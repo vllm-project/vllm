@@ -247,7 +247,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         for i, (shard_id, shard_size) in enumerate(
             zip(self.output_ids, self.output_slices)
         ):
-            if (lora_b_i := lora_b[i]) is not None:
+            if i < len(lora_b) and (lora_b_i := lora_b[i]) is not None:
                 sliced_lora_b[i] = lora_b_i[
                     shard_size * shard_id : shard_size * (shard_id + 1), :
                 ]
@@ -265,12 +265,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
-        for i in range(self.n_slices):
-            if (lora_a_i := lora_a[i]) is not None:
+        for i, (lora_a_i, lora_b_i) in enumerate(zip(lora_a, lora_b, strict=False)):
+            if lora_a_i is not None:
                 self.lora_a_stacked[i][
                     index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
                 ].copy_(lora_a_i, non_blocking=True)
-            if (lora_b_i := lora_b[i]) is not None:
+            if lora_b_i is not None:
                 self.lora_b_stacked[i][
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
