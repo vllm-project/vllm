@@ -241,9 +241,6 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("gate_up_proj", "up_proj", 1),
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
-            # Fused indexer wk + weights_proj
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
         ]
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
