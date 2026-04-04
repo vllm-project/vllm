@@ -91,9 +91,9 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
   if (n == 0) return;
 
-  const int64_t* src_data = src_ptrs.data_ptr<int64_t>();
-  const int64_t* dst_data = dst_ptrs.data_ptr<int64_t>();
-  const int64_t* size_data = sizes.data_ptr<int64_t>();
+  int64_t* src_data = src_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* dst_data = dst_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* size_data = sizes.mutable_data_ptr<int64_t>();
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -105,7 +105,8 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
   static_assert(sizeof(size_t) == sizeof(int64_t));
 #if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12080
   // Resolve cuMemcpyBatchAsync at runtime via cuGetProcAddress so that
-  // binaries compiled with CUDA 12.8+ still work on older drivers.
+  // binaries compiled with CUDA 12.8+ still work on older drivers, and
+  // we avoid the CUDA 13.0 header remapping (#define to _v2 signature).
   // The function pointer is cached after the first call.
   using BatchFn =
       CUresult (*)(CUdeviceptr*, CUdeviceptr*, size_t*, size_t,
@@ -126,12 +127,11 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
     attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
-    CUresult result =
-        batch_fn(reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(dst_data)),
-                 reinterpret_cast<CUdeviceptr*>(const_cast<int64_t*>(src_data)),
-                 reinterpret_cast<size_t*>(const_cast<int64_t*>(size_data)),
-                 static_cast<size_t>(n), &attr, &attrs_idx, 1, &fail_idx,
-                 static_cast<CUstream>(stream));
+    CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data),
+                               reinterpret_cast<CUdeviceptr*>(src_data),
+                               reinterpret_cast<size_t*>(size_data),
+                               static_cast<size_t>(n), &attr, &attrs_idx, 1,
+                               &fail_idx, static_cast<CUstream>(stream));
     TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed at index ",
                 fail_idx, " with error ", result);
   } else
