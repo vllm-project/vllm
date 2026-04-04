@@ -6,6 +6,7 @@
 import json
 import math
 import os
+import time
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Literal
 
@@ -77,6 +78,38 @@ class PEFTHelper:
         filtered_dict = {k: v for k, v in config_dict.items() if k in class_fields}
         return cls(**filtered_dict)
 
+    @staticmethod
+    def _load_lora_config(path: str, timeout: float = 15.0) -> dict:
+        """Load LoRA adapter config JSON with safe timeout and retry.
+
+        Retries ``FileNotFoundError`` and ``json.JSONDecodeError`` until
+        *timeout* seconds elapse, using exponential backoff.  This guards
+        against races where the adapter weights are still being downloaded
+        or flushed to disk when the worker tries to read the config.
+        """
+        deadline = time.monotonic() + timeout
+        # Exponential backoff: 50ms -> 100ms -> 200ms -> ... -> 1s cap.
+        interval = 0.05
+        max_interval = 1.0
+
+        while True:
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError) as err:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                logger.warning(
+                    "Failed to read LoRA adapter config %s: %s, "
+                    "retrying for up to %.1fs",
+                    path,
+                    err,
+                    remaining,
+                )
+                time.sleep(min(interval, max_interval, remaining))
+                interval *= 2
+
     @classmethod
     def from_local_dir(
         cls,
@@ -105,8 +138,7 @@ class PEFTHelper:
             )
 
         else:
-            with open(lora_config_path) as f:
-                config = json.load(f)
+            config = cls._load_lora_config(lora_config_path)
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         return cls.from_dict(config)
