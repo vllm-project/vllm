@@ -662,11 +662,19 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Note: we should not use torch.empty here like other attention backends,
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # Use pre-allocated buffer for CUDA graph compatibility.
+        # torch.zeros() allocates memory which is not allowed during
+        # CUDA graph capture. Instead, lazily allocate a reusable buffer
+        # and zero it in-place.
+        h_v = self.num_v_heads // self.tp_size
+        if not hasattr(self, "_core_attn_out_buf") or self._core_attn_out_buf.shape[0] < num_tokens:
+            buf_size = max(num_tokens, 256)
+            self._core_attn_out_buf = torch.zeros(
+                buf_size, h_v, self.head_v_dim,
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+        core_attn_out = self._core_attn_out_buf[:num_tokens]
+        core_attn_out.zero_()
 
         torch.ops.vllm.gdn_attention_core(
             mixed_qkv,
