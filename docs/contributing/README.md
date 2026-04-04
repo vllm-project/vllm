@@ -131,13 +131,22 @@ For additional features and advanced configurations, refer to the:
 
 vLLM uses `pytest` to test the codebase.
 
+Install the test dependencies used in CI for CUDA development:
+
 ```bash
-# Install the test dependencies used in CI (CUDA only)
-uv pip install -r requirements/common.txt -r requirements/dev.txt --torch-backend=auto
+uv pip install -r requirements/cuda.txt --torch-backend=auto
+uv pip install -r requirements/dev.txt --torch-backend=auto
+```
 
-# Install some common test dependencies (hardware agnostic)
+If you only need a minimal hardware-agnostic test environment, install:
+
+```bash
 uv pip install pytest pytest-asyncio
+```
 
+Then run tests with:
+
+```bash
 # Run all tests
 pytest tests/
 
