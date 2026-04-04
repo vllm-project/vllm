@@ -8,8 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.logger import init_logger
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
@@ -267,17 +270,77 @@ class PromptTokenStats:
     recomputed_tokens: int = 0
     total: int = 0
 
-    def update_from_output(
+    def _enforce_accounting_invariant(
         self,
+        request_id: str,
+        prompt_len: int,
+        recomputed: int,
         num_cached_tokens: int,
         num_external_computed_tokens: int,
+    ) -> tuple[int, int]:
+        # Temporary defensive check: enforce invariant to catch accounting bugs
+        # Invariant: prompt_len >= num_cached_tokens + recomputed >=
+        # num_external_computed_tokens >= 0
+        error_details = []
+        if num_cached_tokens < 0:
+            error_details.append(f"num_cached_tokens={num_cached_tokens} < 0")
+        if num_external_computed_tokens < 0:
+            error_details.append(
+                f"num_external_computed_tokens={num_external_computed_tokens} < 0"
+            )
+        if num_cached_tokens > prompt_len:
+            error_details.append(
+                f"num_cached_tokens={num_cached_tokens} > prompt_len={prompt_len}"
+            )
+        if num_external_computed_tokens > num_cached_tokens + recomputed:
+            error_details.append(
+                f"num_external_computed_tokens={num_external_computed_tokens} > "
+                f"num_cached_tokens + recomputed ({num_cached_tokens} + {recomputed})"
+            )
+        if error_details:
+            logger.warning_once(
+                "METRICS ACCOUNTING BUG DETECTED - Please file a bug report at "
+                "https://github.com/vllm-project/vllm/issues\n"
+                "Request ID: %s\n"
+                "Invariant violated: prompt_len >= num_cached_tokens + recomputed >= "
+                "num_external_computed_tokens >= 0\n"
+                "Values: prompt_len=%d, num_cached_tokens=%d, "
+                "num_external_computed_tokens=%d, recomputed=%d\n"
+                "Violations: %s\n"
+                "Discarding cache metrics for such requests to prevent crash.",
+                request_id,
+                prompt_len,
+                num_cached_tokens,
+                num_external_computed_tokens,
+                recomputed,
+                ", ".join(error_details),
+            )
+            num_cached_tokens = 0
+            num_external_computed_tokens = 0
+        return num_cached_tokens, num_external_computed_tokens
+
+    def update_from_output(
+        self,
+        request_id: str,
         prompt_len: int,
+        num_cached_tokens: int,
+        num_external_computed_tokens: int,
     ) -> None:
         """Update stats from a prefill output."""
         # When all tokens are cached, the scheduler reduces num_cached_tokens
         # by 1 to force the model to recompute the last token, since the model
         # needs at least one input token to run a forward pass.
         recomputed = 1 if (num_cached_tokens + 1 == prompt_len) else 0
+
+        num_cached_tokens, num_external_computed_tokens = (
+            self._enforce_accounting_invariant(
+                request_id,
+                prompt_len,
+                recomputed,
+                num_cached_tokens,
+                num_external_computed_tokens,
+            )
+        )
 
         self.computed += prompt_len - num_cached_tokens
         self.external_kv_transfer += num_external_computed_tokens
@@ -351,9 +414,10 @@ class IterationStats:
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
             self.prompt_token_stats.update_from_output(
+                request_id=output.request_id,
+                prompt_len=prompt_len,
                 num_cached_tokens=output.num_cached_tokens,
                 num_external_computed_tokens=output.num_external_computed_tokens,
-                prompt_len=prompt_len,
             )
 
             first_token_latency = self._time_since(req_stats.arrival_time)
