@@ -88,6 +88,29 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
+- label: Kernels Sonic MoE Test (H100)
+  timeout_in_minutes: 10
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/sonic_moe.py
+  - tests/kernels/moe/test_sonic_moe.py
+  commands:
+    - pip install --no-deps sonic-moe quack-kernels==0.2.5 && pip install nvidia-cutlass-dsl==4.4.0 nvidia-cutlass-dsl-libs-base==4.4.0
+    - pytest -v -s kernels/moe/test_sonic_moe.py
+
+- label: Kernels Sonic MoE Benchmark (H100)
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/sonic_moe.py
+  - benchmarks/kernels/benchmark_sonic_moe.py
+  commands:
+    - pip install --no-deps sonic-moe quack-kernels==0.2.5 && pip install nvidia-cutlass-dsl==4.4.0 nvidia-cutlass-dsl-libs-base==4.4.0
+    - python3 benchmarks/kernels/benchmark_sonic_moe.py --output-json benchmark_sonic_moe.json
+
 - label: Kernels (B200)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
