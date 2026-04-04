@@ -700,6 +700,41 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
+    def suspend(self, mode: PauseMode = "abort") -> None | Future:
+        """Suspend GPU state using CUDA checkpoint APIs.
+
+        Args:
+            mode: Pause mode - how to deal with any existing requests.
+        """
+        pause_future = self.pause_scheduler(mode=mode, clear_cache=True)
+
+        model_executor = self.model_executor
+        if pause_future is None:
+            model_executor.suspend()
+            return None
+
+        future = Future[Any]()
+
+        def pause_complete(f: Future):
+            try:
+                f.result()
+                future.set_result(model_executor.suspend())
+            except Exception as e:
+                future.set_exception(e)
+
+        logger.info("Waiting for in-flight requests to complete before suspending...")
+        pause_future.add_done_callback(pause_complete)
+        return future
+
+    def resume(self) -> None:
+        """Resume GPU state from CUDA checkpoint."""
+        self.model_executor.resume()
+        self.resume_scheduler()
+
+    def is_checkpoint_suspended(self) -> bool:
+        """Check if engine is checkpoint-suspended."""
+        return self.model_executor.is_suspended
+
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 

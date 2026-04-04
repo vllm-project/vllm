@@ -163,6 +163,21 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def suspend(self, mode: "PauseMode" = "abort") -> None:
+        """Suspend the engine using CUDA checkpoint"""
+        ...
+
+    @abstractmethod
+    async def resume(self) -> None:
+        """Resume the engine from CUDA checkpoint suspend"""
+        ...
+
+    @abstractmethod
+    async def is_checkpoint_suspended(self) -> bool:
+        """Check whether the engine is checkpoint-suspended"""
+        ...
+
+    @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
