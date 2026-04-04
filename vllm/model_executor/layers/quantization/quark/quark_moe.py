@@ -1265,19 +1265,14 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
                 layer.w2_input_scale.max().to(torch.float32), requires_grad=False
             )
 
-            from triton_kernels.numerics import InFlexData
-
-            lhs_data13 = InFlexData(scale=layer.w13_input_scale)
-            lhs_data2 = InFlexData(scale=layer.w2_input_scale)
-
             self.w13_precision_config = PrecisionConfig(
                 weight_scale=w13_scale,
-                flex_ctx=FlexCtx(rhs_data=w13_flex, lhs_data=lhs_data13),
+                flex_ctx=FlexCtx(rhs_data=w13_flex),
             )
 
             self.w2_precision_config = PrecisionConfig(
                 weight_scale=w2_scale,
-                flex_ctx=FlexCtx(rhs_data=w2_flex, lhs_data=lhs_data2),
+                flex_ctx=FlexCtx(rhs_data=w2_flex),
             )
 
     def get_fused_moe_quant_config(
