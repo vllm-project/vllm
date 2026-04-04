@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import os
+import tempfile
+
 import pytest
 
-from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+from vllm.model_executor.layers.fused_moe.layer import (
+    determine_expert_map,
+    load_expert_placement_file,
+)
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):
@@ -241,4 +248,155 @@ def test_determine_expert_map_comprehensive():
                 f"global_num_experts={global_num_experts}, "
                 f"expert_placement_strategy={expert_placement_strategy}: "
                 f"expected map {expected_map_pattern}, got {actual_map}"
+            )
+
+
+class TestCustomExpertPlacement:
+    """Tests for custom expert placement via placement file."""
+
+    def test_custom_placement_basic(self):
+        """Test basic custom placement with 4 experts on 2 ranks."""
+        # Assign experts 0,2 to rank 0 and experts 1,3 to rank 1
+        mapping = [0, 1, 0, 1]
+        local_experts_0, expert_map_0, _ = determine_expert_map(
+            ep_size=2,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_placement_strategy="custom",
+            custom_expert_to_ep_rank=mapping,
+        )
+        assert local_experts_0 == 2
+        assert expert_map_0.tolist() == [0, -1, 1, -1]
+
+        local_experts_1, expert_map_1, _ = determine_expert_map(
+            ep_size=2,
+            ep_rank=1,
+            global_num_experts=4,
+            expert_placement_strategy="custom",
+            custom_expert_to_ep_rank=mapping,
+        )
+        assert local_experts_1 == 2
+        assert expert_map_1.tolist() == [-1, 0, -1, 1]
+
+    def test_custom_placement_uneven(self):
+        """Test custom placement with uneven distribution."""
+        # 3 experts on rank 0, 1 expert on rank 1
+        mapping = [0, 0, 0, 1]
+        local_experts_0, expert_map_0, _ = determine_expert_map(
+            ep_size=2,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_placement_strategy="custom",
+            custom_expert_to_ep_rank=mapping,
+        )
+        assert local_experts_0 == 3
+        assert expert_map_0.tolist() == [0, 1, 2, -1]
+
+        local_experts_1, expert_map_1, _ = determine_expert_map(
+            ep_size=2,
+            ep_rank=1,
+            global_num_experts=4,
+            expert_placement_strategy="custom",
+            custom_expert_to_ep_rank=mapping,
+        )
+        assert local_experts_1 == 1
+        assert expert_map_1.tolist() == [-1, -1, -1, 0]
+
+    def test_custom_placement_4_ranks(self):
+        """Test custom placement with 8 experts across 4 ranks."""
+        # Custom mapping: pairs of experts on each rank
+        mapping = [0, 1, 2, 3, 0, 1, 2, 3]
+        for rank in range(4):
+            local_experts, expert_map, _ = determine_expert_map(
+                ep_size=4,
+                ep_rank=rank,
+                global_num_experts=8,
+                expert_placement_strategy="custom",
+                custom_expert_to_ep_rank=mapping,
+            )
+            assert local_experts == 2
+            expected = [-1] * 8
+            expected[rank] = 0
+            expected[rank + 4] = 1
+            assert expert_map.tolist() == expected
+
+    def test_custom_placement_ep_size_1(self):
+        """Test that ep_size=1 returns all experts regardless of strategy."""
+        local_experts, expert_map, _ = determine_expert_map(
+            ep_size=1,
+            ep_rank=0,
+            global_num_experts=8,
+            expert_placement_strategy="custom",
+            custom_expert_to_ep_rank=[0] * 8,
+        )
+        assert local_experts == 8
+        assert expert_map is None
+
+    def test_custom_placement_missing_mapping_raises(self):
+        """Test that custom strategy without mapping raises an error."""
+        with pytest.raises(AssertionError):
+            determine_expert_map(
+                ep_size=2,
+                ep_rank=0,
+                global_num_experts=4,
+                expert_placement_strategy="custom",
+                custom_expert_to_ep_rank=None,
+            )
+
+
+class TestLoadExpertPlacementFile:
+    """Tests for load_expert_placement_file."""
+
+    def _write_placement(self, mapping, tmpdir):
+        path = os.path.join(tmpdir, "placement.json")
+        with open(path, "w") as f:
+            json.dump({"expert_to_ep_rank": mapping}, f)
+        return path
+
+    def test_load_valid_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mapping = [0, 1, 0, 1]
+            path = self._write_placement(mapping, tmpdir)
+            result = load_expert_placement_file(path, global_num_experts=4, ep_size=2)
+            assert result == mapping
+
+    def test_load_wrong_length(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_placement([0, 1], tmpdir)
+            with pytest.raises(ValueError, match="has length 2, expected 4"):
+                load_expert_placement_file(path, global_num_experts=4, ep_size=2)
+
+    def test_load_invalid_rank(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_placement([0, 1, 2, 0], tmpdir)
+            with pytest.raises(ValueError, match="Invalid EP rank 2"):
+                load_expert_placement_file(path, global_num_experts=4, ep_size=2)
+
+    def test_load_negative_rank(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_placement([0, -1, 0, 1], tmpdir)
+            with pytest.raises(ValueError, match="Invalid EP rank -1"):
+                load_expert_placement_file(path, global_num_experts=4, ep_size=2)
+
+    def test_load_missing_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "placement.json")
+            with open(path, "w") as f:
+                json.dump({"wrong_key": [0, 1]}, f)
+            with pytest.raises(ValueError, match="expert_to_ep_rank"):
+                load_expert_placement_file(path, global_num_experts=4, ep_size=2)
+
+    def test_load_rank_with_no_experts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # All experts on rank 0, none on rank 1
+            path = self._write_placement([0, 0, 0, 0], tmpdir)
+            with pytest.raises(ValueError, match="rank 1 has no experts"):
+                load_expert_placement_file(path, global_num_experts=4, ep_size=2)
+
+    def test_load_file_not_found(self):
+        with pytest.raises(FileNotFoundError):
+            load_expert_placement_file(
+                "/nonexistent/path.json",
+                global_num_experts=4,
+                ep_size=2,
             )
