@@ -31,7 +31,11 @@ from .linear import (
     RowParallelLinear,
 )
 from .mamba.abstract import MambaBase
-from .mamba.mamba_utils import MambaStateDtypeCalculator, MambaStateShapeCalculator
+from .mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+    is_conv_state_dim_first,
+)
 from .mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from .quantization.base_config import QuantizationConfig
 
@@ -306,7 +310,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         num_actual_tokens = attn_metadata.num_actual_tokens
-        constant_caches = self.kv_cache[0]
+        constant_caches = self.kv_cache
 
         q_proj_states = q_proj_states[:num_actual_tokens]
         k_proj_states = k_proj_states[:num_actual_tokens]
@@ -315,10 +319,12 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         beta = beta[:num_actual_tokens]
 
         (conv_state_q, conv_state_k, conv_state_v, recurrent_state) = constant_caches
-        # deal with strides
-        conv_state_q = conv_state_q.transpose(-1, -2)
-        conv_state_k = conv_state_k.transpose(-1, -2)
-        conv_state_v = conv_state_v.transpose(-1, -2)
+        # conv_state must be (..., dim, width-1) for the conv kernels.
+        # DS layout stores it that way directly; SD layout needs a transpose.
+        if not is_conv_state_dim_first():
+            conv_state_q = conv_state_q.transpose(-1, -2)
+            conv_state_k = conv_state_k.transpose(-1, -2)
+            conv_state_v = conv_state_v.transpose(-1, -2)
 
         q_conv_weights = self.q_conv1d.weight.view(
             self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)

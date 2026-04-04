@@ -11,8 +11,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -20,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kMxfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -250,11 +253,17 @@ def triton_kernel_moe_forward(
         logits = gating_output
         if sm_first:
             logits = torch.softmax(logits, dim=-1)
-        sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
-        # sparse_logits.indx contains global expert IDs – remap to local.
-        topk_ids = expert_map[sparse_logits.indx.to(torch.long)]
-        topk_weights = sparse_logits.vals
-        local_num_experts = w1.size(0)
+        topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
+        # topk may return a tuple (vals, indx, bitmatrix) or a
+        # SparseMatrix depending on the triton_kernels version.
+        if isinstance(topk_result, tuple):
+            topk_weights, topk_ids_raw, _ = topk_result
+        else:
+            topk_weights = topk_result.vals
+            topk_ids_raw = topk_result.indx
+        # topk_ids_raw contains global expert IDs - remap to local.
+        topk_ids = expert_map[topk_ids_raw.to(torch.long)]
+        local_num_experts = w1.shape[0]
         routing_data, gather_idx, scatter_idx = make_routing_data(
             topk_ids, topk_weights, local_num_experts
         )
@@ -419,7 +428,8 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
     assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
 
-    # Shape check, only check non-mxfp4
+    # Shape check: weights are padded (e.g. hidden_size padded for
+    # GFX950 swizzle).
     assert hidden_states.shape[-1] == w1.shape[-2]
     assert w2.shape[-1] == w1.shape[1]
 
@@ -537,43 +547,43 @@ def make_routing_data(
 
 
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
     @staticmethod
     def _supports_current_device() -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        p = current_platform
+        if not p.is_cuda_alike():
+            return False
+        cap = p.get_device_capability()
+        if cap is None:
+            return False
+        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
+        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return False
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        raise NotImplementedError
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return True
 
     def supports_expert_map(self) -> bool:
         return True
@@ -601,8 +611,8 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
         require a specialized implementation, like MarlinExperts, they are free
         to override this function.
         """
-        assert w1.dim() == 3 and w2.dim() == 3
-        E, _, N = w1.size()
+        assert len(w1.shape) == 3 and len(w2.shape) == 3
+        E, _, N = w1.shape
         K = a1.size(-1)
 
         assert a1.dim() == 2
@@ -629,6 +639,10 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
 
 class OAITritonExperts(BaseOAITritonExperts):
     """OAI Triton-based fused MoE expert implementation."""
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SWIGLUOAI
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -676,7 +690,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
-        local_num_experts = w1.size(0)
+        local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
@@ -713,6 +727,15 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
 
     One use case for it is to inject LoRA modules on the activation and moe_sum.
     """
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+        ]
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -765,7 +788,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
-        local_num_experts = w1.size(0)
+        local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
@@ -839,3 +862,118 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         )
 
         self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
+
+
+class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
+    """Monolithic Triton MXFP4 expert. Wraps triton_kernel_moe_forward()."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        self.topk = moe_config.experts_per_token
+        self.renormalize = moe_config.routing_method in (
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        )
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        if not p.is_cuda_alike():
+            return False
+        cap = p.get_device_capability()
+        if cap is None:
+            return False
+        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
+        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SWIGLUOAI
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return (
+            not moe_parallel_config.use_all2all_kernels
+            and not moe_parallel_config.enable_eplb
+            and moe_parallel_config.dp_size <= 1
+        )
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return routing_method in [
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
+        return True
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+    ) -> torch.Tensor:
+        return triton_kernel_moe_forward(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            gating_output=router_logits,
+            topk=self.topk,
+            renormalize=self.renormalize,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            quant_config=self.quant_config,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )

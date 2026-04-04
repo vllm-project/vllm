@@ -67,25 +67,29 @@ logger = init_logger(__name__)
 class FutureWrapper(Future):
     def __init__(
         self,
-        futures_queue: deque[tuple["FutureWrapper", Callable]],
+        futures_queue: deque["FutureWrapper"],
+        get_response: Callable[[], Any],
         aggregate: Callable = lambda x: x,
     ):
         self.futures_queue = futures_queue
+        self.get_response = get_response
         self.aggregate = aggregate
         super().__init__()
+        self.futures_queue.appendleft(self)
 
     def result(self, timeout=None):
         if timeout is not None:
             raise RuntimeError("timeout not implemented")
+
         # Drain any futures ahead of us in the queue.
         while not self.done():
-            future, get_response = self.futures_queue.pop()
-            future.wait_for_response(get_response)
+            future = self.futures_queue.pop()
+            future._wait_for_response()
         return super().result()
 
-    def wait_for_response(self, get_response: Callable):
+    def _wait_for_response(self):
         try:
-            response = self.aggregate(get_response())
+            response = self.aggregate(self.get_response())
             with suppress(InvalidStateError):
                 self.set_result(response)
         except Exception as e:
@@ -115,7 +119,6 @@ class MultiprocExecutor(Executor):
             f"_parallel_size ({pcp_size}). "
         )
 
-        # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
         # use the loopback address get_loopback_ip() for communication.
@@ -168,16 +171,31 @@ class MultiprocExecutor(Executor):
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
-                unready_worker_handle = WorkerProc.make_worker_process(
-                    vllm_config=self.vllm_config,
-                    local_rank=local_rank,
-                    rank=global_rank,
-                    distributed_init_method=distributed_init_method,
-                    input_shm_handle=scheduler_output_handle,
-                    shared_worker_lock=shared_worker_lock,
-                    is_driver_worker=is_driver_worker,
-                    inherited_fds=inherited_fds,
-                )
+                if current_platform.is_cpu():
+                    om = current_platform.get_omp_manager()
+                    logger.info("Configured OMP PLACES %s", str(om.omp_places))
+                    unready_worker_handle = om.run(
+                        WorkerProc.make_worker_process,
+                        vllm_config=self.vllm_config,
+                        local_rank=local_rank,
+                        rank=global_rank,
+                        distributed_init_method=distributed_init_method,
+                        input_shm_handle=scheduler_output_handle,
+                        shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
+                        inherited_fds=inherited_fds,
+                    )
+                else:
+                    unready_worker_handle = WorkerProc.make_worker_process(
+                        vllm_config=self.vllm_config,
+                        local_rank=local_rank,
+                        rank=global_rank,
+                        distributed_init_method=distributed_init_method,
+                        input_shm_handle=scheduler_output_handle,
+                        shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
+                        inherited_fds=inherited_fds,
+                    )
                 unready_workers.append(unready_worker_handle)
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
@@ -218,7 +236,7 @@ class MultiprocExecutor(Executor):
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
 
-            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+            self.futures_queue = deque[FutureWrapper]()
 
             self._post_init_executor()
 
@@ -384,17 +402,13 @@ class MultiprocExecutor(Executor):
                 responses.append(result)
             return responses[0] if output_rank is not None else responses
 
-        if non_block:
-            future = FutureWrapper(self.futures_queue, aggregate=aggregate)
-            self.futures_queue.appendleft((future, get_response))
-            return future
+        future = FutureWrapper(
+            self.futures_queue,
+            get_response=get_response,
+            aggregate=aggregate,
+        )
 
-        # First drain any pending futures in the queue.
-        while self.futures_queue:
-            future, get_fut_response = self.futures_queue.pop()
-            future.wait_for_response(get_fut_response)
-
-        return aggregate(get_response())
+        return future if non_block else future.result()
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
@@ -602,13 +616,14 @@ class WorkerProc:
         )
 
         # Load model
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
-        if not is_eep_new_worker:
-            self.worker.init_device()
-            # Update process title now that parallel groups are initialized
-            self.setup_proc_title_and_log_prefix(
-                enable_ep=vllm_config.parallel_config.enable_expert_parallel
-            )
+        self.worker.init_device()
+        # Update process title now that parallel groups are initialized
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+        )
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.worker.elastic_ep_execute("load_model")
+        else:
             self.worker.load_model()
 
         scheduler_config = vllm_config.scheduler_config
@@ -999,24 +1014,26 @@ def set_multiprocessing_worker_envs():
 
     _maybe_force_spawn()
 
-    # Configure thread parallelism if OMP_NUM_THREADS isn't set
-    #
-    # Helps to avoid CPU contention. The default of spawning a thread per
-    # core combined with multiprocessing for each GPU can have a negative
-    # impact on performance. The contention is amplified when running in a
-    # container where CPU limits can cause throttling.
-    default_omp_num_threads = 1
-    if (
-        "OMP_NUM_THREADS" not in os.environ
-        and (current_parallelism := torch.get_num_threads()) > default_omp_num_threads
-    ):
-        logger.warning_once(
-            "Reducing Torch parallelism from %d threads to %d to avoid "
-            "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-            "external environment to tune this value as needed.",
-            current_parallelism,
-            default_omp_num_threads,
-            scope="local",
-        )
-        os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
-        torch.set_num_threads(default_omp_num_threads)
+    if not current_platform.is_cpu():
+        # Configure thread parallelism if OMP_NUM_THREADS isn't set
+        #
+        # Helps to avoid CPU contention. The default of spawning a thread per
+        # core combined with multiprocessing for each GPU can have a negative
+        # impact on performance. The contention is amplified when running in a
+        # container where CPU limits can cause throttling.
+        default_omp_num_threads = 1
+        if (
+            "OMP_NUM_THREADS" not in os.environ
+            and (current_parallelism := torch.get_num_threads())
+            > default_omp_num_threads
+        ):
+            logger.warning_once(
+                "Reducing Torch parallelism from %d threads to %d to avoid "
+                "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
+                "external environment to tune this value as needed.",
+                current_parallelism,
+                default_omp_num_threads,
+                scope="local",
+            )
+            os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
+            torch.set_num_threads(default_omp_num_threads)
