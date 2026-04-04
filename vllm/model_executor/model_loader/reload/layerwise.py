@@ -263,7 +263,11 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
     target_device = info.restore_device
     for name, tensor in get_layer_tensors(layer).items():
         if tensor.device != target_device:
-            tensor.data = tensor.data.to(target_device)
+            data = tensor.data.to(target_device)
+            if isinstance(tensor, torch.nn.Parameter):
+                tensor.data = data
+            else:
+                setattr(layer, name, data)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
