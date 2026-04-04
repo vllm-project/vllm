@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""TurboQuant quantizer: rotation + Lloyd-Max + QJL residual correction.
+"""TurboQuant quantizer: rotation + Lloyd-Max scalar quantization.
 
 Pure PyTorch implementation for correctness validation and as fallback.
 Triton/CUDA kernels replace this in production.
 """
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -30,28 +29,17 @@ def generate_rotation_matrix(
     return Q.to(device)
 
 
-def generate_qjl_matrix(
-    d: int, seed: int, device: torch.device = torch.device("cpu")
-) -> torch.Tensor:
-    """Generate i.i.d. N(0,1) projection matrix for QJL."""
-    gen = torch.Generator(device="cpu")
-    gen.manual_seed(seed)
-    S = torch.randn(d, d, generator=gen, device="cpu", dtype=torch.float32)
-    return S.to(device)
-
-
 class TurboQuantizer(nn.Module):
-    """TurboQuant quantizer with MSE stage + QJL residual correction.
+    """TurboQuant quantizer with PolarQuant MSE stage.
 
     For each KV vector x:
       1. Normalize: x_hat = x / ||x||
       2. Rotate: y = Pi @ x_hat
       3. Scalar quantize: idx[j] = nearest(y[j], centroids)
       4. Reconstruct: x_mse = Pi^T @ centroids[idx]
-      5. Residual: r = x_hat - x_mse, gamma = ||r||
-      6. QJL: signs = sign(S @ r)
+      5. Residual norm: gamma = ||x_hat - x_mse||
 
-    Storage: indices ((b-1)*d bits) + signs (d bits) + norm (fp16) + gamma (fp16)
+    Storage: indices (mse_bits*d bits) + vec_norm (fp16) + res_norm (fp16)
     """
 
     def __init__(self, config: TurboQuantConfig, layer_idx: int = 0):
@@ -64,23 +52,18 @@ class TurboQuantizer(nn.Module):
         self.register_buffer(
             "Pi", generate_rotation_matrix(d, seed=seed).float()
         )
-        # QJL projection matrix S (random Gaussian, d x d)
-        self.register_buffer(
-            "S", generate_qjl_matrix(d, seed=seed + 1).float()
-        )
         # Lloyd-Max centroids for the MSE stage
         centroids = get_centroids(d, config.mse_bits)
         self.register_buffer("centroids", centroids.float())
 
-        # Precomputed transposes for efficiency
+        # Precomputed transpose for efficiency
         self.register_buffer("PiT", self.Pi.T.contiguous())
-        self.register_buffer("ST", self.S.T.contiguous())
 
     @torch.no_grad()
     def quantize(
         self, x: torch.Tensor
     ) -> dict[str, torch.Tensor]:
-        """Quantize vectors using TurboQuant.
+        """Quantize vectors using TurboQuant (PolarQuant MSE).
 
         Args:
             x: Input vectors (..., head_dim) in any shape.
@@ -88,7 +71,6 @@ class TurboQuantizer(nn.Module):
         Returns:
             Dict with:
                 mse_indices: (..., head_dim) uint8 indices
-                qjl_signs: (..., head_dim) int8 signs {-1, +1}
                 vec_norm: (...,) float16 vector norms
                 res_norm: (...,) float16 residual norms
         """
@@ -111,21 +93,14 @@ class TurboQuantizer(nn.Module):
         reconstructed_rotated = self.centroids[indices.long()]  # (N, d)
         x_mse = reconstructed_rotated @ self.Pi  # (N, d) back to original space
 
-        # 5. Residual
+        # 5. Residual norm
         residual = x_hat - x_mse
         res_norm = torch.norm(residual, dim=-1, keepdim=True)  # (N, 1)
-
-        # 6. QJL: project residual and take sign
-        projected = residual @ self.S.T  # (N, d)
-        signs = torch.where(projected >= 0,
-                            torch.ones_like(projected, dtype=torch.int8),
-                            -torch.ones_like(projected, dtype=torch.int8))
 
         # Reshape back
         batch_shape = orig_shape[:-1]
         return {
             "mse_indices": indices.reshape(*batch_shape, d),
-            "qjl_signs": signs.reshape(*batch_shape, d),
             "vec_norm": vec_norm.squeeze(-1).half().reshape(batch_shape),
             "res_norm": res_norm.squeeze(-1).half().reshape(batch_shape),
         }
@@ -134,31 +109,22 @@ class TurboQuantizer(nn.Module):
     def dequantize(self, compressed: dict[str, torch.Tensor]) -> torch.Tensor:
         """Dequantize MSE component (for reconstruction/validation).
 
-        Returns full TurboQuant reconstruction including QJL correction.
+        Returns TurboQuant reconstruction (MSE only, no QJL).
         """
         d = self.config.head_dim
         indices = compressed["mse_indices"]
-        signs = compressed["qjl_signs"]
         vec_norm = compressed["vec_norm"]
-        res_norm = compressed["res_norm"]
 
         orig_shape = indices.shape
         flat_idx = indices.reshape(-1, d).long()
-        flat_signs = signs.reshape(-1, d).float()
         flat_vec_norm = vec_norm.reshape(-1).float().unsqueeze(-1)
-        flat_res_norm = res_norm.reshape(-1).float().unsqueeze(-1)
 
         # MSE reconstruction
         reconstructed_rotated = self.centroids[flat_idx]  # (N, d)
         x_mse = reconstructed_rotated @ self.Pi  # (N, d)
 
-        # QJL correction
-        m = self.S.shape[0]
-        correction_scale = math.sqrt(math.pi / 2) / m
-        x_qjl = correction_scale * flat_res_norm * (flat_signs @ self.S)  # (N, d)
-
-        # Combine and rescale
-        x_recon = flat_vec_norm * (x_mse + x_qjl)
+        # Rescale by original norm
+        x_recon = flat_vec_norm * x_mse
         return x_recon.reshape(orig_shape)
 
     @torch.no_grad()
@@ -167,12 +133,12 @@ class TurboQuantizer(nn.Module):
         queries: torch.Tensor,
         compressed: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """Compute unbiased attention scores <Q, K> from compressed K.
+        """Compute attention scores <Q, K> from compressed K.
 
-        Uses the asymmetric estimator:
-          <q, k> ~ norm * (<q_rot, c[idx]> + gamma * sqrt(pi/2)/m * <q_proj, signs>)
+        Uses the asymmetric MSE estimator:
+          <q, k> ~ norm * <q_rot, c[idx]>
 
-        where q_rot = q @ Pi^T and q_proj = q @ S^T are precomputed per query.
+        where q_rot = q @ Pi^T is precomputed per query.
 
         Args:
             queries: (batch, heads, seq_q, head_dim)
@@ -182,31 +148,19 @@ class TurboQuantizer(nn.Module):
         Returns:
             scores: (batch, heads, seq_q, seq_k)
         """
-        d = self.config.head_dim
         indices = compressed["mse_indices"]  # (B, H, S_k, D)
-        signs = compressed["qjl_signs"]  # (B, H, S_k, D)
         vec_norm = compressed["vec_norm"]  # (B, H, S_k)
-        res_norm = compressed["res_norm"]  # (B, H, S_k)
 
-        # Precompute rotated/projected queries (once per query token)
+        # Precompute rotated queries (once per query token)
         q_float = queries.float()
         q_rot = q_float @ self.PiT     # = q @ Pi^T, shape (B, H, S_q, D)
-        q_proj = q_float @ self.ST      # = q @ S^T,  shape (B, H, S_q, D)
 
         # Term 1: <q, Pi^T @ c[idx]> = sum_j q_rot[j] * centroids[idx[j]]
         k_mse_rotated = self.centroids[indices.long()]  # (B, H, S_k, D)
-        term1 = torch.matmul(q_rot, k_mse_rotated.transpose(-2, -1))  # (B,H,S_q,S_k)
-
-        # Term 2: QJL correction
-        signs_float = signs.float()
-        qjl_ip = torch.matmul(q_proj, signs_float.transpose(-2, -1))  # (B,H,S_q,S_k)
-
-        m = d  # QJL dimension = head_dim
-        correction_scale = math.sqrt(math.pi / 2) / m
-        term2 = correction_scale * qjl_ip * res_norm.float().unsqueeze(-2)
+        term1 = torch.matmul(q_rot, k_mse_rotated.transpose(-2, -1))
 
         # Combine with vector norms
-        scores = vec_norm.float().unsqueeze(-2) * (term1 + term2)
+        scores = vec_norm.float().unsqueeze(-2) * term1
 
         return scores
 
@@ -216,8 +170,7 @@ class TurboQuantizer(nn.Module):
         """Pack compressed state into contiguous uint8 cache tensor.
 
         Layout per token per head (for tq3, head_dim=128):
-          [0:32]   MSE indices (128 coords * 2 bits / 8 = 32 bytes)
-          [32:48]  QJL signs   (128 coords * 1 bit / 8 = 16 bytes)
+          [0:48]   MSE indices (128 coords * 3 bits / 8 = 48 bytes)
           [48:50]  vec_norm    (float16 = 2 bytes)
           [50:52]  res_norm    (float16 = 2 bytes)
           Total: 52 bytes
@@ -225,7 +178,6 @@ class TurboQuantizer(nn.Module):
         d = self.config.head_dim
         mse_bits = self.config.mse_bits
         indices = compressed["mse_indices"]  # (..., d) uint8
-        signs = compressed["qjl_signs"]      # (..., d) int8
         vec_norm = compressed["vec_norm"]     # (...) float16
         res_norm = compressed["res_norm"]     # (...) float16
 
@@ -242,16 +194,12 @@ class TurboQuantizer(nn.Module):
         else:
             packed_mse = flat_idx
 
-        # Pack QJL signs (1 bit per coord, 8 per byte)
-        flat_signs = ((signs.reshape(-1, d) + 1) // 2).to(torch.uint8)  # 0 or 1
-        packed_signs = self._pack_bits(flat_signs, 1)
-
         # Pack norms as raw float16 bytes
         vec_norm_bytes = vec_norm.reshape(-1).half().view(torch.uint8).reshape(-1, 2)
         res_norm_bytes = res_norm.reshape(-1).half().view(torch.uint8).reshape(-1, 2)
 
         # Concatenate
-        packed = torch.cat([packed_mse, packed_signs, vec_norm_bytes, res_norm_bytes],
+        packed = torch.cat([packed_mse, vec_norm_bytes, res_norm_bytes],
                            dim=-1)
         return packed.reshape(*batch_shape, -1)
 
@@ -264,20 +212,14 @@ class TurboQuantizer(nn.Module):
         flat = packed.reshape(-1, packed.shape[-1])
 
         mse_bytes = math.ceil(d * mse_bits / 8)
-        qjl_bytes = math.ceil(d / 8)
 
         # Split
         packed_mse = flat[:, :mse_bytes]
-        packed_signs = flat[:, mse_bytes:mse_bytes + qjl_bytes]
-        vec_norm_bytes = flat[:, mse_bytes + qjl_bytes:mse_bytes + qjl_bytes + 2]
-        res_norm_bytes = flat[:, mse_bytes + qjl_bytes + 2:mse_bytes + qjl_bytes + 4]
+        vec_norm_bytes = flat[:, mse_bytes:mse_bytes + 2]
+        res_norm_bytes = flat[:, mse_bytes + 2:mse_bytes + 4]
 
         # Unpack MSE indices
         indices = self._unpack_bits(packed_mse, mse_bits, d)
-
-        # Unpack QJL signs
-        signs_01 = self._unpack_bits(packed_signs, 1, d)
-        signs = (signs_01.to(torch.int8) * 2 - 1)  # 0,1 -> -1,+1
 
         # Unpack norms
         vec_norm = vec_norm_bytes.view(torch.float16).reshape(-1)
@@ -285,7 +227,6 @@ class TurboQuantizer(nn.Module):
 
         return {
             "mse_indices": indices.reshape(*batch_shape, d),
-            "qjl_signs": signs.reshape(*batch_shape, d),
             "vec_norm": vec_norm.reshape(batch_shape),
             "res_norm": res_norm.reshape(batch_shape),
         }

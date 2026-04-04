@@ -2,14 +2,14 @@
 // TurboQuant fused CUDA store kernel.
 //
 // Single kernel: normalize → rotate(Pi) → bucketize → reconstruct
-//                → residual → QJL(S) → pack(MSE+QJL+norms) → value quant → scatter
+//                → residual → pack(MSE+norms) → value quant → scatter
 //
 // Optimizations:
 // - Warp-shuffle reductions for norms (no shared memory atomics)
-// - Tiled GEMV with shared memory for rotation + QJL projection
+// - Tiled GEMV with shared memory for rotation
 // - __launch_bounds__ for register pressure tuning
 // - Single kernel launch for the entire store pipeline
-// - Warp-shuffle packing for MSE/QJL/value bit-packing
+// - Warp-shuffle packing for MSE/value bit-packing
 
 #include <torch/extension.h>
 #include <cuda_fp16.h>
@@ -31,7 +31,6 @@ constexpr int NUM_WARPS = THREADS / 32;
 // TQ3: 2-bit MSE, 4 centroids
 constexpr int MSE_BITS = 2;
 constexpr int MSE_BYTES = D / 4;   // 2-bit: 4 per byte, D must be multiple of 4
-constexpr int QJL_BYTES = D / 8;   // 1-bit: 8 per byte, D must be multiple of 8
 
 // Tile size for GEMV
 constexpr int TILE_K = 32;
@@ -107,9 +106,9 @@ __device__ __forceinline__ void block_reduce_minmax(
 }
 
 // ---- Warp-shuffle pack: gather N values within groups of N lanes ----
-// For groups of 4 (MSE 2-bit packing) or 8 (QJL sign packing),
+// For groups of 4 (MSE 2-bit packing),
 // all group members are within the same warp (since D=256, each warp has 32 lanes,
-// and groups of 4 or 8 naturally fit within a warp).
+// and groups of 4 naturally fit within a warp).
 __device__ __forceinline__ int shuffle_pack_4(int shifted_val) {
     // Pack 4 lanes: lane%4 == {0,1,2,3} within a group
     int lane_id = threadIdx.x % 32;
@@ -122,21 +121,10 @@ __device__ __forceinline__ int shuffle_pack_4(int shifted_val) {
     return packed;
 }
 
-__device__ __forceinline__ int shuffle_pack_8(int shifted_val) {
-    int lane_id = threadIdx.x % 32;
-    int base = (lane_id / 8) * 8;
-    int packed = 0;
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        packed |= __shfl_sync(FULL_MASK, shifted_val, base + i);
-    }
-    return packed;
-}
-
 // =====================================================================
 // Main fused store kernel
 // =====================================================================
-template <bool NO_QJL, int VQB>
+template <int VQB>
 __global__ void __launch_bounds__(THREADS, 4)
 tq_fused_store_kernel(
     const __half* __restrict__ key_ptr,       // [N, H, D] half
@@ -144,7 +132,6 @@ tq_fused_store_kernel(
     uint8_t* __restrict__ kv_cache,           // flat byte array
     const int32_t* __restrict__ slot_mapping, // [N]
     const float* __restrict__ PiT_ptr,        // [D, D] float32
-    const float* __restrict__ Pi_S_T_ptr,     // [D, D] float32
     const float* __restrict__ centroids,      // [4] float32
     const float* __restrict__ midpoints,      // [3] float32
     int N, int H, int block_size,
@@ -184,10 +171,8 @@ tq_fused_store_kernel(
     float x_hat = x / norm_val;
 
     // ================================================================
-    // STEP 2: Rotate (tiled GEMV) or skip
-    // ================================================================
     // STEP 2: Rotate (tiled GEMV)
-    // Write x_hat to shared memory for broadcast access
+    // ================================================================
     vec_smem[tid] = x_hat;
     __syncthreads();
 
@@ -207,40 +192,20 @@ tq_fused_store_kernel(
     // STEP 3: Bucketize
     // ================================================================
     float mp0 = midpoints[0], mp1 = midpoints[1], mp2 = midpoints[2];
-    float c0 = centroids[0], c1 = centroids[1], c2 = centroids[2], c3 = centroids[3];
 
     int idx = (y < mp0) ? 0 : (y < mp1) ? 1 : (y < mp2) ? 2 : 3;
-    float y_hat = (idx == 0) ? c0 : (idx == 1) ? c1 : (idx == 2) ? c2 : c3;
 
     // ================================================================
     // STEP 4: Residual + norm
     // ================================================================
+    float c0 = centroids[0], c1 = centroids[1], c2 = centroids[2], c3 = centroids[3];
+    float y_hat = (idx == 0) ? c0 : (idx == 1) ? c1 : (idx == 2) ? c2 : c3;
     float r = y - y_hat;
     float gamma_sq = block_reduce_sum(r * r, reduce_smem);
     float gamma_val = sqrtf(gamma_sq + 1e-16f);
 
     // ================================================================
-    // STEP 5: QJL projection (optional)
-    // ================================================================
-    float projected = 0.0f;
-    if constexpr (!NO_QJL) {
-        vec_smem[tid] = r;
-        __syncthreads();
-
-        float accum = 0.0f;
-        #pragma unroll 8
-        for (int k = 0; k < D; k += TILE_K) {
-            #pragma unroll
-            for (int ki = 0; ki < TILE_K; ki++) {
-                accum += vec_smem[k + ki] * Pi_S_T_ptr[(k + ki) * D + tid];
-            }
-        }
-        projected = accum;
-        __syncthreads();
-    }
-
-    // ================================================================
-    // STEP 6: Pack MSE indices (2-bit, 4 per byte)
+    // STEP 5: Pack MSE indices (2-bit, 4 per byte)
     // ================================================================
     {
         int sub = tid % 4;
@@ -253,30 +218,10 @@ tq_fused_store_kernel(
     }
 
     // ================================================================
-    // STEP 7: Pack QJL signs (1-bit, 8 per byte)
-    // ================================================================
-    if constexpr (!NO_QJL) {
-        int sign_bit = (projected >= 0.0f) ? 1 : 0;
-        int bit_pos = tid % 8;
-        int byte_pos = tid / 8;
-        int shifted = sign_bit << bit_pos;
-        int packed = shuffle_pack_8(shifted);
-        if (bit_pos == 0 && byte_pos < QJL_BYTES) {
-            kv_cache[slot_base + MSE_BYTES + byte_pos] = (uint8_t)(packed & 0xFF);
-        }
-    } else {
-        int bit_pos = tid % 8;
-        int byte_pos = tid / 8;
-        if (bit_pos == 0 && byte_pos < QJL_BYTES) {
-            kv_cache[slot_base + MSE_BYTES + byte_pos] = 0;
-        }
-    }
-
-    // ================================================================
-    // STEP 8: Store norms
+    // STEP 6: Store norms (at MSE_BYTES offset, no QJL gap)
     // ================================================================
     if (tid == 0) {
-        int norm_off = MSE_BYTES + QJL_BYTES;
+        int norm_off = MSE_BYTES;
         __half vn_h = __float2half(norm_val);
         __half gm_h = __float2half(gamma_val);
         // Write as uint16 (2 bytes each, little-endian)
@@ -287,20 +232,17 @@ tq_fused_store_kernel(
     }
 
     // ================================================================
-    // STEP 9: Value quantization + store
+    // STEP 7: Value quantization + store
     // ================================================================
     float v = __half2float(value_ptr[kv_base + tid]);
 
     if constexpr (VQB == 8) {
         // FP8 E4M3: cast via half → truncate
-        // Safe approach: convert to fp8 via saturation
         __half v_h = __float2half(v);
-        // On SM89+ (Ada/Blackwell), use native FP8. Otherwise approximate.
         #if __CUDA_ARCH__ >= 890
         __nv_fp8_e4m3 v_fp8 = __nv_fp8_e4m3(v);
         uint8_t v_u8 = *reinterpret_cast<uint8_t*>(&v_fp8);
         #else
-        // Approximate FP8 E4M3: just store high byte of fp16
         uint16_t v_u16 = *reinterpret_cast<uint16_t*>(&v_h);
         uint8_t v_u8 = (uint8_t)((v_u16 >> 8) & 0xFF);
         #endif
@@ -341,34 +283,6 @@ tq_fused_store_kernel(
             *reinterpret_cast<uint16_t*>(&kv_cache[slot_base + sc_off + 2]) =
                 *reinterpret_cast<uint16_t*>(&zr_h);
         }
-
-    } else {  // VQB == 2
-        float v_min, v_max;
-        block_reduce_minmax(v, reduce_smem, v_min, v_max);
-
-        float v_scale = fmaxf((v_max - v_min) / 3.0f, 1e-8f);
-        int q = __float2int_rn((v - v_min) / v_scale);
-        q = max(0, min(3, q));
-
-        int sub = tid % 4;
-        int byte_pos = tid / 4;
-        int shifted = q << (sub * 2);
-        int packed = shuffle_pack_4(shifted);
-
-        int val_data_bytes = D / 4;
-        if (sub == 0 && byte_pos < val_data_bytes) {
-            kv_cache[slot_base + key_packed_size + byte_pos] = (uint8_t)(packed & 0xFF);
-        }
-
-        if (tid == 0) {
-            int sc_off = key_packed_size + val_data_bytes;
-            __half sc_h = __float2half(v_scale);
-            __half zr_h = __float2half(v_min);
-            *reinterpret_cast<uint16_t*>(&kv_cache[slot_base + sc_off]) =
-                *reinterpret_cast<uint16_t*>(&sc_h);
-            *reinterpret_cast<uint16_t*>(&kv_cache[slot_base + sc_off + 2]) =
-                *reinterpret_cast<uint16_t*>(&zr_h);
-        }
     }
 }
 
@@ -378,12 +292,12 @@ tq_fused_store_kernel(
 void tq_fused_store_launch(
     torch::Tensor key, torch::Tensor value,
     torch::Tensor kv_cache, torch::Tensor slot_mapping,
-    torch::Tensor PiT, torch::Tensor Pi_S_T,
+    torch::Tensor PiT,
     torch::Tensor centroids, torch::Tensor midpoints,
     int N, int H, int block_size,
     int64_t stride_cache_block, int stride_cache_pos, int stride_cache_head,
     int key_packed_size, int value_packed_size,
-    bool no_qjl, int value_quant_bits
+    int value_quant_bits
 ) {
     int NH = N * H;
     if (NH <= 0) return;
@@ -396,14 +310,13 @@ void tq_fused_store_launch(
 
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    #define LAUNCH(NR, NQ, VQ) \
-        tq_fused_store_kernel<NR, NQ, VQ><<<grid, block, smem_bytes, stream>>>( \
+    #define LAUNCH(VQ) \
+        tq_fused_store_kernel<VQ><<<grid, block, smem_bytes, stream>>>( \
             reinterpret_cast<const __half*>(key.data_ptr<at::Half>()), \
             reinterpret_cast<const __half*>(value.data_ptr<at::Half>()), \
             kv_cache.data_ptr<uint8_t>(), \
             slot_mapping.data_ptr<int32_t>(), \
             PiT.data_ptr<float>(), \
-            Pi_S_T.data_ptr<float>(), \
             centroids.data_ptr<float>(), \
             midpoints.data_ptr<float>(), \
             N, H, block_size, \
@@ -411,14 +324,8 @@ void tq_fused_store_launch(
             key_packed_size, value_packed_size \
         );
 
-    if (no_qjl) {
-        if      (value_quant_bits == 8) { LAUNCH(true, 8); }
-        else if (value_quant_bits == 4) { LAUNCH(true, 4); }
-        else                            { LAUNCH(true, 2); }
-    } else {
-        if      (value_quant_bits == 8) { LAUNCH(false, 8); }
-        else if (value_quant_bits == 4) { LAUNCH(false, 4); }
-        else                            { LAUNCH(false, 2); }
-    }
+    if      (value_quant_bits == 8) { LAUNCH(8); }
+    else if (value_quant_bits == 4) { LAUNCH(4); }
+    else { TORCH_CHECK(false, "Unsupported value_quant_bits=", value_quant_bits, " (only 4 and 8 supported)"); }
     #undef LAUNCH
 }

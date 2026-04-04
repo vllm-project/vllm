@@ -409,7 +409,6 @@ class Attention(nn.Module, AttentionLayerBase):
         from vllm.turboquant.config import TurboQuantConfig
         from vllm.turboquant.quantizer import (
             generate_rotation_matrix,
-            generate_qjl_matrix,
         )
         from vllm.turboquant.centroids import get_centroids
 
@@ -424,13 +423,11 @@ class Attention(nn.Module, AttentionLayerBase):
             "_tq_Pi",
             generate_rotation_matrix(head_size, seed=seed),
         )
-        self.register_buffer(
-            "_tq_S",
-            generate_qjl_matrix(head_size, seed=seed + 1),
-        )
+        # Use key_mse_bits (may differ from mse_bits when TQ_KEY_BITS is set)
+        key_bits = tq_config.key_mse_bits if not tq_config.key_fp8 else tq_config.mse_bits
         self.register_buffer(
             "_tq_centroids",
-            get_centroids(head_size, tq_config.mse_bits),
+            get_centroids(head_size, key_bits),
         )
         self._tq_config = tq_config
 

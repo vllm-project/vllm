@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
@@ -1611,6 +1612,23 @@ class EngineArgs:
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
+
+        # TurboQuant boundary layer protection: auto-populate skip layers
+        # from TQ_BOUNDARY_LAYERS env var when using tq3/tq4 cache dtype.
+        n_boundary = int(os.environ.get("TQ_BOUNDARY_LAYERS", "0"))
+        if resolved_cache_dtype in ("tq3", "tq4") and n_boundary > 0:
+            from vllm.turboquant.config import TurboQuantConfig
+            num_layers = model_config.hf_text_config.num_hidden_layers
+            boundary_layers = TurboQuantConfig.get_boundary_skip_layers(
+                num_layers, n_boundary)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            merged = sorted(
+                existing | set(boundary_layers), key=lambda x: int(x))
+            cache_config.kv_cache_dtype_skip_layers = merged
+            logger.info(
+                "TQ boundary protection: skipping layers %s "
+                "(TQ_BOUNDARY_LAYERS=%d, num_layers=%d)",
+                merged, n_boundary, num_layers)
 
         ray_runtime_env = None
         if is_ray_initialized():

@@ -46,7 +46,6 @@ template <int D, int KV_GROUP_SIZE>
 __global__ void __launch_bounds__(32 * KV_GROUP_SIZE)
 tq_decode_wph_kernel(
     const float* __restrict__ q_rot,
-    const float* __restrict__ q_proj,
     const uint8_t* __restrict__ kv_cache,
     const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens,
@@ -57,9 +56,10 @@ tq_decode_wph_kernel(
     int stride_bt_b,
     int stride_mid_b, int stride_mid_h, int stride_mid_s,
     int num_kv_splits, int block_size,
-    int mse_bytes, int qjl_bytes, int kps, int val_data_bytes,
+    int mse_bytes, int kps, int val_data_bytes,
     int value_fp8,
-    float correction, float attn_scale,
+    int mse_bits, int n_centroids, int key_fp8,
+    float attn_scale,
     float sparse_v_threshold)
 {
     constexpr int DIMS_PER_THREAD = D / 32;
@@ -73,10 +73,13 @@ tq_decode_wph_kernel(
 
     const int q_hid = kv_hid * KV_GROUP_SIZE + warp_id;
 
-    const float c0 = centroids[0];
-    const float c1 = centroids[1];
-    const float c2 = centroids[2];
-    const float c3 = centroids[3];
+    // Load centroids into shared memory (avoids stack spill with dynamic indexing).
+    // 16 floats = 64 bytes per warp, broadcast-read by all lanes.
+    __shared__ float centroids_smem[16];
+    if (threadIdx.x < n_centroids && threadIdx.x < 16) {
+        centroids_smem[threadIdx.x] = centroids[threadIdx.x];
+    }
+    __syncthreads();
 
     const int seq_len = seq_lens[bid];
     const int split_len = (seq_len + num_kv_splits - 1) / num_kv_splits;
@@ -86,14 +89,11 @@ tq_decode_wph_kernel(
     if (split_start >= split_end) return;
 
     const int q_base = bid * stride_qb + q_hid * stride_qh;
-    const bool use_qjl = (correction != 0.0f);
     float q_r[DIMS_PER_THREAD];
-    float q_p[DIMS_PER_THREAD];
     #pragma unroll
     for (int i = 0; i < DIMS_PER_THREAD; i++) {
         const int d = lane_id * DIMS_PER_THREAD + i;
         q_r[i] = q_rot[q_base + d];
-        if (use_qjl) q_p[i] = q_proj[q_base + d];
     }
 
     float m_prev = -INFINITY;
@@ -103,7 +103,7 @@ tq_decode_wph_kernel(
     for (int i = 0; i < DIMS_PER_THREAD; i++) acc[i] = 0.0f;
 
     const int bt_base = bid * stride_bt_b;
-    const int norm_off = mse_bytes + qjl_bytes;
+    const int norm_off = mse_bytes;
     const int vparam_off = kps + val_data_bytes;
 
     for (int pos = split_start; pos < split_end; pos++) {
@@ -116,41 +116,39 @@ tq_decode_wph_kernel(
             + page_off * stride_cache_pos
             + kv_hid * stride_cache_head;
 
-        float partial_t1 = 0.0f;
-        float partial_t2 = 0.0f;
-
-        #pragma unroll
-        for (int i = 0; i < DIMS_PER_THREAD; i++) {
-            const int d = lane_id * DIMS_PER_THREAD + i;
-
-            const uint8_t mse_b = slot[d >> 2];
-            const int mse_idx = (mse_b >> ((d & 3) << 1)) & 0x3;
-            float c_val = (mse_idx == 0) ? c0 : (mse_idx == 1) ? c1 : (mse_idx == 2) ? c2 : c3;
-            partial_t1 += q_r[i] * c_val;
-
-            if (use_qjl) {
-                const uint8_t qjl_b = slot[mse_bytes + (d >> 3)];
-                const float sign = ((qjl_b >> (d & 7)) & 1) ? 1.0f : -1.0f;
-                partial_t2 += q_p[i] * sign;
+        float score = 0.0f;
+        if (key_fp8) {
+            // FP8 K: raw dot product q · k_fp8
+            float partial = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < DIMS_PER_THREAD; i++) {
+                const int d = lane_id * DIMS_PER_THREAD + i;
+                partial += q_r[i] * fp8e4m3_to_float(slot[d]);
             }
-        }
-
-        float sum_t1 = warp_reduce_sum(partial_t1);
-
-        float score;
-        if (use_qjl) {
-            float sum_t2 = warp_reduce_sum(partial_t2);
+            float sum = warp_reduce_sum(partial);
             if (lane_id == 0) {
-                uint16_t n_u16 = (uint16_t)slot[norm_off]
-                               | ((uint16_t)slot[norm_off + 1] << 8);
-                float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
-
-                uint16_t g_u16 = (uint16_t)slot[norm_off + 2]
-                               | ((uint16_t)slot[norm_off + 3] << 8);
-                float res_norm = __half2float(*reinterpret_cast<const __half*>(&g_u16));
-                score = vec_norm * (sum_t1 + correction * res_norm * sum_t2) * attn_scale;
+                score = sum * attn_scale;
             }
         } else {
+            // Generic MSE unpack (supports 2/3/4-bit)
+            const int mse_mask = (1 << mse_bits) - 1;
+            float partial_t1 = 0.0f;
+
+            #pragma unroll
+            for (int i = 0; i < DIMS_PER_THREAD; i++) {
+                const int d = lane_id * DIMS_PER_THREAD + i;
+
+                // Read 2 bytes starting at bit_off/8, shift+mask for any bit width
+                const int bit_off = d * mse_bits;
+                const int byte0 = bit_off >> 3;
+                const int shift0 = bit_off & 7;
+                int raw = (int)slot[byte0] | ((int)slot[byte0 + 1] << 8);
+                int mse_idx = (raw >> shift0) & mse_mask;
+                partial_t1 += q_r[i] * centroids_smem[mse_idx];
+            }
+
+            float sum_t1 = warp_reduce_sum(partial_t1);
+
             if (lane_id == 0) {
                 uint16_t n_u16 = (uint16_t)slot[norm_off]
                                | ((uint16_t)slot[norm_off + 1] << 8);
@@ -226,7 +224,6 @@ template <int D, int KV_GROUP_SIZE, int TOKENS_PER_ITER>
 __global__ void __launch_bounds__(32 * KV_GROUP_SIZE)
 tq_decode_wph_smem_multi_kernel(
     const float* __restrict__ q_rot,
-    const float* __restrict__ q_proj,
     const uint8_t* __restrict__ kv_cache,
     const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ seq_lens,
@@ -237,10 +234,10 @@ tq_decode_wph_smem_multi_kernel(
     int stride_bt_b,
     int stride_mid_b, int stride_mid_h, int stride_mid_s,
     int num_kv_splits, int block_size,
-    int mse_bytes, int qjl_bytes, int kps, int val_data_bytes,
+    int mse_bytes, int kps, int val_data_bytes,
     int slot_bytes,
     int value_fp8,
-    float correction, float attn_scale,
+    float attn_scale,
     float sparse_v_threshold)
 {
     constexpr int DIMS_PER_THREAD = D / 32;
@@ -256,7 +253,12 @@ tq_decode_wph_smem_multi_kernel(
 
     const int q_hid = kv_hid * KV_GROUP_SIZE + warp_id;
 
-    const float c[4] = {centroids[0], centroids[1], centroids[2], centroids[3]};
+    // Load centroids into shared memory
+    __shared__ float centroids_smem[16];
+    if (threadIdx.x < 16) {
+        centroids_smem[threadIdx.x] = centroids[threadIdx.x];
+    }
+    __syncthreads();
 
     const int seq_len = seq_lens[bid];
     const int split_len = (seq_len + num_kv_splits - 1) / num_kv_splits;
@@ -266,14 +268,11 @@ tq_decode_wph_smem_multi_kernel(
     if (split_start >= split_end) return;
 
     const int q_base = bid * stride_qb + q_hid * stride_qh;
-    const bool use_qjl = (correction != 0.0f);
     float q_r[DIMS_PER_THREAD];
-    float q_p[DIMS_PER_THREAD];
     #pragma unroll
     for (int i = 0; i < DIMS_PER_THREAD; i++) {
         const int d = lane_id * DIMS_PER_THREAD + i;
         q_r[i] = q_rot[q_base + d];
-        if (use_qjl) q_p[i] = q_proj[q_base + d];
     }
 
     float m_prev = -INFINITY;
@@ -283,7 +282,7 @@ tq_decode_wph_smem_multi_kernel(
     for (int i = 0; i < DIMS_PER_THREAD; i++) acc[i] = 0.0f;
 
     const int bt_base = bid * stride_bt_b;
-    const int norm_off = mse_bytes + qjl_bytes;
+    const int norm_off = mse_bytes;
     const int vparam_off = kps + val_data_bytes;
 
     // Dynamic shared memory for TOKENS_PER_ITER tokens
@@ -308,7 +307,7 @@ tq_decode_wph_smem_multi_kernel(
                 + page_off * stride_cache_pos
                 + kv_hid * stride_cache_head;
 
-            // Vectorized uint32 copy — slot_global is aligned (padded_slot is power-of-2)
+            // Vectorized uint32 copy
             const uint32_t* src32 = reinterpret_cast<const uint32_t*>(slot_global);
             uint32_t* dst32 = reinterpret_cast<uint32_t*>(slot_smem + t * slot_bytes);
             for (int i = tid; i < slot_words; i += num_threads) {
@@ -317,49 +316,39 @@ tq_decode_wph_smem_multi_kernel(
         }
         __syncthreads();
 
-        // Process all loaded tokens — vectorized: pre-load MSE/QJL/value
-        // bytes into registers to reduce repeated smem byte-level reads.
+        // Process all loaded tokens
         for (int t = 0; t < tokens_this_iter; t++) {
             const uint8_t* slot = slot_smem + t * slot_bytes;
 
-            // Pre-load MSE bytes (2 bytes for DIMS_PER_THREAD=8 dims at 2 bits/dim)
-            const int mse_base = lane_id * (DIMS_PER_THREAD / 4);
-            const uint8_t mse_b0 = slot[mse_base];
-            const uint8_t mse_b1 = slot[mse_base + 1];
-
-            // Pre-load QJL byte (1 byte for 8 dims at 1 bit/dim)
-            uint8_t qjl_b;
-            if (use_qjl) qjl_b = slot[mse_bytes + lane_id];
-
+            // Generic MSE unpack (supports 2/3/4-bit)
+            const int mse_mask = (mse_bytes > 0) ? ((1 << ((mse_bytes * 8) / D)) - 1) : 0;
             float partial_t1 = 0.0f;
-            float partial_t2 = 0.0f;
 
             #pragma unroll
             for (int i = 0; i < DIMS_PER_THREAD; i++) {
                 const int d = lane_id * DIMS_PER_THREAD + i;
-                const uint8_t mse_byte = (i < 4) ? mse_b0 : mse_b1;
-                const int mse_idx = (mse_byte >> ((d & 3) << 1)) & 0x3;
-                partial_t1 += q_r[i] * c[mse_idx];
 
-                if (use_qjl) {
-                    const float sign = ((qjl_b >> (d & 7)) & 1) ? 1.0f : -1.0f;
-                    partial_t2 += q_p[i] * sign;
+                if (kps == D) {
+                    // FP8 K path
+                    partial_t1 += q_r[i] * fp8e4m3_to_float(slot[d]);
+                } else {
+                    // MSE unpack
+                    const int bit_off = d * ((mse_bytes * 8 + D - 1) / D);
+                    const int byte0 = bit_off >> 3;
+                    const int shift0 = bit_off & 7;
+                    int raw = (int)slot[byte0] | ((int)slot[byte0 + 1] << 8);
+                    int mse_idx = (raw >> shift0) & mse_mask;
+                    partial_t1 += q_r[i] * centroids_smem[mse_idx];
                 }
             }
 
             float sum_t1 = warp_reduce_sum(partial_t1);
 
             float score;
-            if (use_qjl) {
-                float sum_t2 = warp_reduce_sum(partial_t2);
-                uint16_t n_u16 = (uint16_t)slot[norm_off]
-                               | ((uint16_t)slot[norm_off + 1] << 8);
-                float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
-                uint16_t g_u16 = (uint16_t)slot[norm_off + 2]
-                               | ((uint16_t)slot[norm_off + 3] << 8);
-                float res_norm = __half2float(*reinterpret_cast<const __half*>(&g_u16));
+            if (kps == D) {
+                // FP8 K: no norms
                 if (lane_id == 0) {
-                    score = vec_norm * (sum_t1 + correction * res_norm * sum_t2) * attn_scale;
+                    score = sum_t1 * attn_scale;
                 }
             } else {
                 uint16_t n_u16 = (uint16_t)slot[norm_off]
@@ -382,7 +371,6 @@ tq_decode_wph_smem_multi_kernel(
 
             if (value_fp8) {
                 // FP8 E4M3 values: 1 byte per dim, no scale/zero
-                // Pre-load value bytes (DIMS_PER_THREAD bytes for FP8)
                 uint8_t fp8_bytes[DIMS_PER_THREAD];
                 const int val_base = kps + lane_id * DIMS_PER_THREAD;
                 #pragma unroll
@@ -396,7 +384,6 @@ tq_decode_wph_smem_multi_kernel(
                 }
             } else {
                 // 4-bit uniform quantized values with scale+zero
-                // All threads read v_scale/v_zero from smem (no shuffle needed)
                 uint16_t sc_u16 = (uint16_t)slot[vparam_off]
                                 | ((uint16_t)slot[vparam_off + 1] << 8);
                 float v_scale = __half2float(*reinterpret_cast<const __half*>(&sc_u16));
@@ -443,22 +430,19 @@ tq_decode_wph_smem_multi_kernel(
 // template instantiations and binary size.
 // ---------------------------------------------------------------------------
 
-// When TQ_HEAD_DIM and TQ_KV_GROUP_SIZE are defined, only instantiate that
-// specific combo (2 kernels total: original + smem). Otherwise fall back to
-// the full switch for generality.
-
 void tq_decode_wph_launch(
-    torch::Tensor q_rot, torch::Tensor q_proj,
+    torch::Tensor q_rot,
     torch::Tensor kv_cache, torch::Tensor block_table,
     torch::Tensor seq_lens, torch::Tensor centroids,
     torch::Tensor mid_o,
     int64_t num_kv_splits, int64_t head_dim,
     int64_t num_kv_heads, int64_t kv_group_size,
     int64_t block_size,
-    int64_t mse_bytes, int64_t qjl_bytes,
+    int64_t mse_bytes,
     int64_t kps, int64_t val_data_bytes,
     int64_t value_fp8,
-    double correction, double attn_scale,
+    int64_t mse_bits, int64_t n_centroids, int64_t key_fp8,
+    double attn_scale,
     double sparse_v_threshold)
 {
     const int B = q_rot.size(0);
@@ -471,7 +455,7 @@ void tq_decode_wph_launch(
 
     #define LAUNCH_WPH(D_VAL, GS_VAL) \
         tq_decode_wph_kernel<D_VAL, GS_VAL><<<grid, block, 0, stream>>>( \
-            q_rot.data_ptr<float>(), q_proj.data_ptr<float>(), \
+            q_rot.data_ptr<float>(), \
             kv_cache.data_ptr<uint8_t>(), block_table.data_ptr<int32_t>(), \
             seq_lens.data_ptr<int32_t>(), centroids.data_ptr<float>(), \
             mid_o.data_ptr<float>(), \
@@ -480,9 +464,10 @@ void tq_decode_wph_launch(
             (int)block_table.stride(0), \
             (int)mid_o.stride(0), (int)mid_o.stride(1), (int)mid_o.stride(2), \
             (int)num_kv_splits, (int)block_size, \
-            (int)mse_bytes, (int)qjl_bytes, (int)kps, (int)val_data_bytes, \
+            (int)mse_bytes, (int)kps, (int)val_data_bytes, \
             (int)value_fp8, \
-            (float)correction, (float)attn_scale, \
+            (int)mse_bits, (int)n_centroids, (int)key_fp8, \
+            (float)attn_scale, \
             (float)sparse_v_threshold)
 
 #if defined(TQ_HEAD_DIM) && defined(TQ_KV_GROUP_SIZE)
@@ -519,18 +504,18 @@ void tq_decode_wph_launch(
 }
 
 void tq_decode_wph_smem_launch(
-    torch::Tensor q_rot, torch::Tensor q_proj,
+    torch::Tensor q_rot,
     torch::Tensor kv_cache, torch::Tensor block_table,
     torch::Tensor seq_lens, torch::Tensor centroids,
     torch::Tensor mid_o,
     int64_t num_kv_splits, int64_t head_dim,
     int64_t num_kv_heads, int64_t kv_group_size,
     int64_t block_size,
-    int64_t mse_bytes, int64_t qjl_bytes,
+    int64_t mse_bytes,
     int64_t kps, int64_t val_data_bytes,
     int64_t slot_bytes,
     int64_t value_fp8,
-    double correction, double attn_scale,
+    double attn_scale,
     double sparse_v_threshold)
 {
     const int B = q_rot.size(0);
@@ -547,7 +532,7 @@ void tq_decode_wph_smem_launch(
 
     #define LAUNCH_SMEM(D_VAL, GS_VAL) \
         tq_decode_wph_smem_multi_kernel<D_VAL, GS_VAL, TOKENS_PER_ITER><<<grid, block, smem_bytes, stream>>>( \
-            q_rot.data_ptr<float>(), q_proj.data_ptr<float>(), \
+            q_rot.data_ptr<float>(), \
             kv_cache.data_ptr<uint8_t>(), block_table.data_ptr<int32_t>(), \
             seq_lens.data_ptr<int32_t>(), centroids.data_ptr<float>(), \
             mid_o.data_ptr<float>(), \
@@ -556,10 +541,10 @@ void tq_decode_wph_smem_launch(
             (int)block_table.stride(0), \
             (int)mid_o.stride(0), (int)mid_o.stride(1), (int)mid_o.stride(2), \
             (int)num_kv_splits, (int)block_size, \
-            (int)mse_bytes, (int)qjl_bytes, (int)kps, (int)val_data_bytes, \
+            (int)mse_bytes, (int)kps, (int)val_data_bytes, \
             (int)slot_bytes, \
             (int)value_fp8, \
-            (float)correction, (float)attn_scale, \
+            (float)attn_scale, \
             (float)sparse_v_threshold)
 
 #if defined(TQ_HEAD_DIM) && defined(TQ_KV_GROUP_SIZE)
@@ -612,8 +597,8 @@ tq_full_dequant_kv_kernel(
     int64_t stride_cache_block, int stride_cache_pos, int stride_cache_head,
     int stride_bt_b,
     int num_kv_heads, int block_size,
-    int mse_bytes, int qjl_bytes, int kps, int val_data_bytes,
-    float correction)
+    int mse_bytes, int kps, int val_data_bytes,
+    int mse_bits, int n_centroids, int key_fp8)
 {
     constexpr int DIMS_PER_THREAD = D / 32;
     const int pos = blockIdx.x;
@@ -644,14 +629,11 @@ tq_full_dequant_kv_kernel(
         + page_off * stride_cache_pos
         + hid * stride_cache_head;
 
-    const float c0 = centroids[0], c1 = centroids[1];
-    const float c2 = centroids[2], c3 = centroids[3];
-
-    const int norm_off = mse_bytes + qjl_bytes;
-    uint16_t n_u16 = (uint16_t)slot[norm_off] | ((uint16_t)slot[norm_off+1] << 8);
-    float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
-    uint16_t g_u16 = (uint16_t)slot[norm_off+2] | ((uint16_t)slot[norm_off+3] << 8);
-    float res_norm = __half2float(*reinterpret_cast<const __half*>(&g_u16));
+    // Load centroids into array (up to 16 for 4-bit MSE)
+    float centroids_arr[16];
+    for (int ci = 0; ci < n_centroids && ci < 16; ci++) {
+        centroids_arr[ci] = centroids[ci];
+    }
 
     const int vparam_off = kps + val_data_bytes;
     uint16_t sc_u16 = (uint16_t)slot[vparam_off] | ((uint16_t)slot[vparam_off+1] << 8);
@@ -659,19 +641,43 @@ tq_full_dequant_kv_kernel(
     uint16_t zr_u16 = (uint16_t)slot[vparam_off+2] | ((uint16_t)slot[vparam_off+3] << 8);
     float v_zero = __half2float(*reinterpret_cast<const __half*>(&zr_u16));
 
-    #pragma unroll
-    for (int i = 0; i < DIMS_PER_THREAD; i++) {
-        const int d = tid * DIMS_PER_THREAD + i;
-        const uint8_t mse_b = slot[d >> 2];
-        const int mse_idx = (mse_b >> ((d & 3) << 1)) & 0x3;
-        float k_mse = (mse_idx == 0) ? c0 : (mse_idx == 1) ? c1 : (mse_idx == 2) ? c2 : c3;
-        const uint8_t qjl_b = slot[mse_bytes + (d >> 3)];
-        const float sign = ((qjl_b >> (d & 7)) & 1) ? 1.0f : -1.0f;
-        k_out[ko_base + d] = __float2half(vec_norm * (k_mse + correction * res_norm * sign));
+    if (key_fp8) {
+        // FP8 K: copy raw FP8 bytes as fp16
+        #pragma unroll
+        for (int i = 0; i < DIMS_PER_THREAD; i++) {
+            const int d = tid * DIMS_PER_THREAD + i;
+            k_out[ko_base + d] = __float2half(fp8e4m3_to_float(slot[d]));
 
-        const uint8_t val_b = slot[kps + (d >> 1)];
-        const float v_idx = (float)((val_b >> ((d & 1) << 2)) & 0xF);
-        v_out[vo_base + d] = __float2half(v_idx * v_scale + v_zero);
+            const uint8_t val_b = slot[kps + (d >> 1)];
+            const float v_idx = (float)((val_b >> ((d & 1) << 2)) & 0xF);
+            v_out[vo_base + d] = __float2half(v_idx * v_scale + v_zero);
+        }
+    } else {
+        // Generic MSE unpack
+        const int norm_off = mse_bytes;
+        uint16_t n_u16 = (uint16_t)slot[norm_off] | ((uint16_t)slot[norm_off+1] << 8);
+        float vec_norm = __half2float(*reinterpret_cast<const __half*>(&n_u16));
+
+        const int mse_mask = (1 << mse_bits) - 1;
+
+        #pragma unroll
+        for (int i = 0; i < DIMS_PER_THREAD; i++) {
+            const int d = tid * DIMS_PER_THREAD + i;
+
+            // Generic bit unpack: read 2 bytes, shift+mask
+            const int bit_off = d * mse_bits;
+            const int byte0 = bit_off >> 3;
+            const int shift0 = bit_off & 7;
+            int raw = (int)slot[byte0] | ((int)slot[byte0 + 1] << 8);
+            int mse_idx = (raw >> shift0) & mse_mask;
+            float k_mse = centroids_arr[mse_idx];
+
+            k_out[ko_base + d] = __float2half(vec_norm * k_mse);
+
+            const uint8_t val_b = slot[kps + (d >> 1)];
+            const float v_idx = (float)((val_b >> ((d & 1) << 2)) & 0xF);
+            v_out[vo_base + d] = __float2half(v_idx * v_scale + v_zero);
+        }
     }
 }
 
@@ -737,9 +743,9 @@ void tq_full_dequant_kv_launch(
     torch::Tensor k_out, torch::Tensor v_out,
     int64_t alloc_seq_len, int64_t head_dim,
     int64_t num_kv_heads, int64_t block_size,
-    int64_t mse_bytes, int64_t qjl_bytes,
+    int64_t mse_bytes,
     int64_t kps, int64_t val_data_bytes,
-    double correction)
+    int64_t mse_bits, int64_t n_centroids, int64_t key_fp8)
 {
     const int B = seq_lens.size(0);
     const int Hk = num_kv_heads;
@@ -765,8 +771,8 @@ void tq_full_dequant_kv_launch(
             (int64_t)kv_cache.stride(0), (int)kv_cache.stride(1), (int)kv_cache.stride(2),
             (int)block_table.stride(0),
             (int)Hk, (int)block_size,
-            (int)mse_bytes, (int)qjl_bytes, (int)kps, (int)val_data_bytes,
-            (float)correction);
+            (int)mse_bytes, (int)kps, (int)val_data_bytes,
+            (int)mse_bits, (int)n_centroids, (int)key_fp8);
 #if defined(TQ_HEAD_DIM)
     // single instantiation done above
 #else
