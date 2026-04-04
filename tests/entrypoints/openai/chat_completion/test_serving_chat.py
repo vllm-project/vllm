@@ -1723,6 +1723,84 @@ class TestServingChatWithHarmony:
             ],
         )
 
+    @pytest.mark.asyncio
+    async def test_truncate_prompt_tokens(self, serving_chat):
+        """Test that truncate_prompt_tokens truncates in harmony path."""
+        messages = [{"role": "user", "content": "what is 1+1?"}]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            truncate_prompt_tokens=5,
+        )
+        _, engine_prompts = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
+        prompt_token_ids = engine_prompts[0]["prompt_token_ids"]
+        assert len(prompt_token_ids) <= 5
+
+    @pytest.mark.asyncio
+    async def test_truncate_prompt_tokens_zero(self, serving_chat):
+        """Test that truncate_prompt_tokens=0 returns empty token list."""
+        messages = [{"role": "user", "content": "what is 1+1?"}]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            truncate_prompt_tokens=0,
+        )
+        _, engine_prompts = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
+        prompt_token_ids = engine_prompts[0]["prompt_token_ids"]
+        assert len(prompt_token_ids) == 0
+
+    @pytest.mark.asyncio
+    async def test_truncate_prompt_tokens_auto(self, serving_chat):
+        """Test that truncate_prompt_tokens=-1 uses max_input_tokens."""
+        messages = [{"role": "user", "content": "what is 1+1?"}]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            truncate_prompt_tokens=-1,
+            max_completion_tokens=10,
+        )
+        _, engine_prompts = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
+        prompt_token_ids = engine_prompts[0]["prompt_token_ids"]
+        # max_model_len=100, max_completion_tokens=10, so max_input=90
+        assert len(prompt_token_ids) <= 90
+
+    @pytest.mark.asyncio
+    async def test_truncate_prompt_tokens_auto_negative_budget(self, serving_chat):
+        """Test truncate=-1 with output tokens exceeding max_model_len."""
+        messages = [{"role": "user", "content": "what is 1+1?"}]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            truncate_prompt_tokens=-1,
+            max_completion_tokens=200,  # > max_model_len(100)
+        )
+        _, engine_prompts = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
+        prompt_token_ids = engine_prompts[0]["prompt_token_ids"]
+        assert len(prompt_token_ids) == 0
+
+    @pytest.mark.asyncio
+    async def test_truncate_prompt_tokens_none_no_truncation(self, serving_chat):
+        """Test that truncate_prompt_tokens=None does not truncate."""
+        messages = [{"role": "user", "content": "what is 1+1?"}]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+        )
+        _, engine_prompts = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
+        prompt_token_ids = engine_prompts[0]["prompt_token_ids"]
+        # Without truncation, tokens should be > 0 (the full prompt)
+        assert len(prompt_token_ids) > 0
+
 
 @pytest.mark.asyncio
 async def test_tool_choice_validation_without_parser():
