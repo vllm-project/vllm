@@ -1180,6 +1180,28 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
 
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> FlashInferMetadata:
+        # On platforms where TRTLLM decode attention is unavailable (e.g.
+        # SM121/GB10 Spark), the flashinfer native decode path fails for MTP
+        # drafting with fp8 KV cache + head_dim=256. Force the prefill path by
+        # temporarily setting decode_threshold=0 so that 1-token steps are
+        # classified as prefills (computationally identical to decode).
+        original_threshold = self.reorder_batch_threshold
+        if not self.use_trtllm_decode_attention:
+            self.reorder_batch_threshold = 0
+        try:
+            return self.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+                fast_build=True,
+            )
+        finally:
+            self.reorder_batch_threshold = original_threshold
+
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
             # TODO: The cascade wrapper currently does not support setting
