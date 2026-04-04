@@ -14,13 +14,17 @@ import vllm.ir.ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
-from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 
 from ..inductor_pass import enable_fake_mode
+from ..utility.input_mutation_elimination import InputMutationEliminationPass
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
@@ -109,6 +113,7 @@ class _SequenceParallelPatternHelper:
         self.device = device
         self.tp_group = get_tp_group()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
 
     def _all_reduce(self, x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_reduce(x)
@@ -199,7 +204,15 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             # so residual is still the full size here.
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
-            residual = residual[0 : reduce_scatter.size(0), ...]
+            local_len = reduce_scatter.size(0)
+            # when the preceding VocabParallelEmbedding is excluded
+            # from the FX graph (e.g., passing `inputs_embeds` directly in VLMs),
+            # the FirstAllReduceRMSNorm pattern is never matched. we must
+            # perform a proper TP-aware slice here. simply using `[0:local_len]`
+            # would incorrectly cause all ranks to process rank 0's chunk.
+            residual = residual[
+                self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
+            ]
             rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
             all_gather = self._all_gather(rmsnorm[0])
             # shape of residual changes but that's fine,
@@ -299,7 +312,15 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             # add a temporary slice which will become a noop
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
-            residual = residual[0 : reduce_scatter.size(0), ...]
+            local_len = reduce_scatter.size(0)
+            # when the preceding VocabParallelEmbedding is excluded
+            # from the FX graph (e.g., passing `inputs_embeds` directly in VLMs),
+            # the FirstAllReduceRMSNorm pattern is never matched. we must
+            # perform a proper TP-aware slice here. simply using `[0:local_len]`
+            # would incorrectly cause all ranks to process rank 0's chunk.
+            residual = residual[
+                self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
+            ]
             rms, residual_out = self.rmsnorm_matcher(
                 reduce_scatter, rms_norm_weights, residual
             )
@@ -346,16 +367,20 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     Because the pattern matcher starts at the end of the graph, the replacement
     contains a slice that temporarily conforms the input residual to the correct size.
     After all patterns have been matched, we use a NoOpEliminationPass to clean up
-    what have now become no-op slices.
+    what have now become no-op slices. We also apply an InputMutationEliminationPass to
+    remove shape-mismatched `copy_` nodes. AOT Autograd specifically inserts
+    these epilogues only when in-place operations (e.g., `fused_add_rms_norm`)
+    mutate direct graph inputs  (like `inputs_embeds`). Mutating the original
+    input is unnecessary here, making it safe to eliminate these `copy_` nodes.
 
     Note that an older version of the pass did not need this as it operated only on
-    custom rms_norm and fused_rms_norm_add custom ops which did not complain about
+    custom rms_norm and fused_add_rms_norm custom ops which did not complain about
     mismatched shapes during replacement. So this approach has the same assumption that
     correctness is only maintained if all rms_norm operations are split across ranks.
 
     Correctness-wise, this is approach strictly better than before - before,
     the graph was incorrect semantically and shape-wise during the pass.
-    With this approach there's only semantic incorrectness during the pass.
+    With this approach the graph remains correct in both aspects during the pass.
     Both approaches restore a correct graph once all patterns are matched.
     """
 
@@ -384,6 +409,11 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         # to circumvent residual shape change issues
         self.noop_cleanup = NoOpEliminationPass(config)
         self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"
+
+        # Clean up copy_ generated by AOTAutograd,
+        # because fused_add_rms_norm have mutable inputs
+        self.copy_cleanup = InputMutationEliminationPass(config)
+        self.copy_cleanup.pass_name = f"{self.pass_name}.{self.copy_cleanup.pass_name}"
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="sequence_parallelism_pass"
@@ -447,3 +477,5 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         logger.debug("Replaced %s patterns", self.matched_count)
         # Clean up reshape nodes
         self.noop_cleanup(graph)
+        # Clean up input mutation nodes
+        self.copy_cleanup(graph)
