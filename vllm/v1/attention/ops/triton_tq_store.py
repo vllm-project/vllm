@@ -289,7 +289,7 @@ def _tq_fused_store(
     BLOCK_MSE: tl.constexpr,
     BLOCK_VAL: tl.constexpr,
     # MSE generalization
-    MSE_BITS: tl.constexpr = 2,
+    MSE_BITS: tl.constexpr = 3,
     KEY_FP8: tl.constexpr = False,
     BLOCK_GRP: tl.constexpr = 16,  # next_pow2(D//8), for 3-bit packing
 ):

@@ -15,7 +15,6 @@ Per-head per-position slot layout:
   For tq-k3v4nc head_dim=256: [100 bytes key | 512 bytes value] = 612 total
 """
 
-import math
 import os
 from dataclasses import dataclass
 from typing import ClassVar, Optional
@@ -23,13 +22,7 @@ from typing import ClassVar, Optional
 import torch
 import torch.nn.functional as F
 
-# Fused Triton KV store (opt-out via TQ_PYTHON_STORE=1)
-_USE_TRITON_STORE = os.environ.get("TQ_PYTHON_STORE", "0") != "1"
-if _USE_TRITON_STORE:
-    try:
-        from vllm.v1.attention.ops.triton_tq_store import triton_tq_store
-    except ImportError:
-        _USE_TRITON_STORE = False
+from vllm.v1.attention.ops.triton_tq_store import triton_tq_store
 
 # CUDA stream overlap: disabled by default — degrades TTFT under concurrent
 # load (489ms vs 338ms). Enable via TQ_STREAM_OVERLAP=1 for experimentation.
@@ -218,20 +211,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         from vllm.turboquant.config import TurboQuantConfig
         self.tq_config = TurboQuantConfig.from_cache_dtype(kv_cache_dtype, head_size)
 
-        # Cached shift tensor for 4-bit packing (avoid re-creating each call)
-        # Will be moved to correct device on first forward call
-        self._shift_4bit = torch.tensor([0, 4], dtype=torch.int32)
-        self._shifts_on_device = False
-
     def _ensure_on_device(self, layer, device):
         """One-time migration of TQ buffers to the correct device."""
         Pi = layer._tq_Pi
         if Pi.device != device:
             layer._tq_Pi = Pi.to(device)
             layer._tq_centroids = layer._tq_centroids.to(device)
-        if not self._shifts_on_device:
-            self._shift_4bit = self._shift_4bit.to(device)
-            self._shifts_on_device = True
         # Cache contiguous float32 matrices and precomputed midpoints
         if not hasattr(layer, '_tq_cached'):
             Pi_f = layer._tq_Pi.float().contiguous()
@@ -395,187 +380,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Pi: torch.Tensor,
         centroids: torch.Tensor,
     ):
-        """Optimized quantize + store. Batches all tokens/heads.
-
-        Optimizations vs original:
-        - Threshold quantization: 3 comparisons instead of argmin over (N*H,D,4)
-        - Rotated-domain residual: eliminates GEMM #2 (y_hat @ Pi)
-        - Cached contiguous matrices: Pi.T precomputed once
-        """
-        N, H, D = key.shape
+        """Quantize + store via fused Triton kernel."""
         layer = self._current_layer
-
-        key_fp8 = self.tq_config.key_fp8
-
-        # Fast path: fused Triton kernel for packing + scatter
-        if _USE_TRITON_STORE:
-            try:
-                PiT = layer._tq_PiT
-                midpoints = layer._tq_midpoints
-                triton_tq_store(
-                    key, value, kv_cache, slot_mapping,
-                    PiT, centroids, midpoints,
-                    mse_bits=self.tq_config.key_mse_bits,
-                    key_packed_size=self.tq_config.key_packed_size,
-                    value_quant_bits=self.tq_config.effective_value_quant_bits,
-                    value_packed_size=self.tq_config.value_packed_size,
-                    key_fp8=key_fp8,
-                )
-                return
-            except Exception as e:
-                if not getattr(self, '_triton_store_fallback_warned', False):
-                    logger.warning(
-                        "TQ: Triton store failed (%s), falling back to "
-                        "Python store for this and future calls", e)
-                    self._triton_store_fallback_warned = True
-        else:
-            if not getattr(self, '_python_store_warned', False):
-                logger.warning(
-                    "TQ: Using Python store fallback "
-                    "(TQ_PYTHON_STORE=1 or Triton store unavailable)")
-                self._python_store_warned = True
-
-        kps = self.tq_config.key_packed_size
-        block_size = kv_cache.shape[1]
-        device = key.device
-
-        if key_fp8:
-            # Hybrid mode: store keys as FP8 (no rotation/quantization)
-            k_flat = key.reshape(-1, D)
-            packed_key = k_flat.to(torch.float8_e4m3fn).view(
-                torch.uint8)  # (N*H, D)
-        else:
-            # TQ mode: rotate → quantize → pack
-            mse_bits = self.tq_config.key_mse_bits
-            mse_bytes_n = math.ceil(D * mse_bits / 8)
-
-            # Use cached contiguous matrices
-            PiT = layer._tq_PiT               # (D, D) float32 contiguous
-            midpoints = layer._tq_midpoints   # (n_centroids-1,) float32
-
-            # Batch quantize: (N, H, D) → (N*H, D)
-            k_flat = key.float().reshape(-1, D)
-
-            # 1. Normalize
-            norms = k_flat.norm(dim=1, keepdim=True)
-            x_hat = k_flat / (norms + 1e-8)
-
-            # 2. Rotate: y = x_hat @ Pi.T
-            y = x_hat @ PiT
-
-            # 3. Threshold quantize: bucketize into sorted centroid bins
-            idx = torch.bucketize(y, midpoints).to(torch.uint8)
-
-            # 4. Reconstruct in rotated domain (no GEMM needed)
-            y_hat = centroids[idx.long()]
-
-            # 5. Residual in rotated domain
-            r_rot = y - y_hat
-            gamma = r_rot.norm(dim=1, keepdim=True)
-
-            # 6. Pack MSE indices (vectorized bit packing)
-            if mse_bits == 4 and D % 2 == 0:
-                # 4-bit: 2 indices per byte — vectorized
-                idx_r = idx.reshape(-1, D // 2, 2).int()
-                packed_mse = (idx_r[:, :, 0] | (idx_r[:, :, 1] << 4)
-                              ).to(torch.uint8)
-            elif mse_bits == 3 and D % 8 == 0:
-                # 3-bit: fully vectorized packing (no Python loop).
-                # Every 8 dims → 3 bytes (24 bits). Reshape and pack
-                # all groups in one shot.
-                NH = N * H
-                n_groups = D // 8  # 16 for D=128
-                idx_i32 = idx.int().reshape(NH, n_groups, 8)  # (NH, G, 8)
-                # byte0: d0 | d1<<3 | d2<<6
-                b0 = (idx_i32[:, :, 0]
-                      | (idx_i32[:, :, 1] << 3)
-                      | (idx_i32[:, :, 2] << 6))
-                # byte1: d2>>2 | d3<<1 | d4<<4 | (d5&1)<<7
-                b1 = (((idx_i32[:, :, 2] >> 2) & 1)
-                      | (idx_i32[:, :, 3] << 1)
-                      | (idx_i32[:, :, 4] << 4)
-                      | ((idx_i32[:, :, 5] & 1) << 7))
-                # byte2: d5>>1 | d6<<2 | d7<<5
-                b2 = (((idx_i32[:, :, 5] >> 1) & 3)
-                      | (idx_i32[:, :, 6] << 2)
-                      | (idx_i32[:, :, 7] << 5))
-                # Interleave: (NH, G, 3) → (NH, G*3)
-                packed_mse = torch.stack([b0, b1, b2], dim=2).to(
-                    torch.uint8).reshape(NH, n_groups * 3)
-            else:
-                # Generic fallback
-                packed_mse = torch.zeros(N * H, mse_bytes_n,
-                                         dtype=torch.uint8, device=device)
-                idx_u8 = idx.to(torch.uint8)
-                for j in range(D):
-                    bo = j * mse_bits
-                    bi, si = bo // 8, bo % 8
-                    packed_mse[:, bi] |= (
-                        (idx_u8[:, j].int() << si) & 0xFF).to(torch.uint8)
-                    if si + mse_bits > 8 and bi + 1 < mse_bytes_n:
-                        packed_mse[:, bi + 1] |= (
-                            (idx_u8[:, j].int() >> (8 - si)) & 0xFF
-                        ).to(torch.uint8)
-
-            # 7. Pack norms
-            norm_b = norms.squeeze(-1).half().contiguous().view(
-                torch.uint8).reshape(-1, 2)
-            gamma_b = gamma.squeeze(-1).half().contiguous().view(
-                torch.uint8).reshape(-1, 2)
-
-            # 8. Concat → (N*H, kps)
-            packed_key = torch.cat(
-                [packed_mse, norm_b, gamma_b], dim=1)
-
-        # 11. Value quantization
-        vps = self.tq_config.value_packed_size
-
-        # Uniform value quantization (3-bit or 4-bit)
-        vqb = self.tq_config.value_quant_bits
-        val_data_bytes = math.ceil(D * vqb / 8)
-        qmax = (1 << vqb) - 1
-
-        v_flat = value.float().reshape(-1, D)
-        vmin = v_flat.min(dim=1, keepdim=True).values
-        vmax = v_flat.max(dim=1, keepdim=True).values
-        v_scale = ((vmax - vmin) / qmax).clamp(min=1e-8)
-        v_idx = ((v_flat - vmin) / v_scale).round().clamp(
-            0, qmax).to(torch.uint8)
-
-        if vqb == 4 and D % 2 == 0:
-            v_idx_r = v_idx.reshape(-1, D // 2, 2)
-            packed_val = (v_idx_r.int() << self._shift_4bit).sum(
-                -1).to(torch.uint8)
-        else:
-            packed_val = torch.zeros(N * H, val_data_bytes,
-                                     dtype=torch.uint8, device=device)
-            v_u8 = v_idx
-            for j in range(D):
-                bo = j * vqb
-                bi, si = bo // 8, bo % 8
-                packed_val[:, bi] |= (
-                    (v_u8[:, j].int() << si) & 0xFF).to(torch.uint8)
-
-        v_scale_b = v_scale.squeeze(-1).half().contiguous().view(
-            torch.uint8).reshape(-1, 2)
-        v_zero_b = vmin.squeeze(-1).half().contiguous().view(
-            torch.uint8).reshape(-1, 2)
-        packed_value = torch.cat(
-            [packed_val, v_scale_b, v_zero_b], dim=1)
-
-        # 12. Write to cache (vectorized — CUDA graph compatible)
-        packed_key = packed_key.reshape(N, H, kps)
-        packed_value = packed_value.reshape(N, H, vps)
-
-        # Clamp invalid slots to 0 (safe: decode always has valid slots,
-        # prefill padding writes to slot 0 harmlessly — overwritten later)
-        safe_slot = slot_mapping.clamp(min=0)
-        blk_idx = (safe_slot // block_size).long()
-        blk_off = (safe_slot % block_size).long()
-
-        # Advanced indexing scatter write: (N,) indices broadcast across H
-        kv_cache[blk_idx, blk_off, :, :kps] = packed_key
-        kv_cache[blk_idx, blk_off, :, kps:kps + vps] = packed_value
+        triton_tq_store(
+            key, value, kv_cache, slot_mapping,
+            layer._tq_PiT, centroids, layer._tq_midpoints,
+            mse_bits=self.tq_config.key_mse_bits,
+            key_packed_size=self.tq_config.key_packed_size,
+            value_quant_bits=self.tq_config.effective_value_quant_bits,
+            value_packed_size=self.tq_config.value_packed_size,
+            key_fp8=self.tq_config.key_fp8,
+        )
 
     # ------------------------------------------------------------------ #
     #  Mixed batch: split prefill + decode and dispatch separately         #
@@ -760,10 +575,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         return output
 
     # ------------------------------------------------------------------ #
-    #  Decode: Dispatch to Triton or Python fallback                      #
+    #  Decode: Triton TQ decode attention                                 #
     # ------------------------------------------------------------------ #
-    _use_triton_decode = not os.environ.get("TQ_PYTHON_DECODE", "0") == "1"
-
     def _decode_attention(
         self,
         query: torch.Tensor,      # (B, Hq, D)
@@ -772,27 +585,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Pi: torch.Tensor,
         centroids: torch.Tensor,
     ) -> torch.Tensor:
-        """Dispatch TQ decode to Triton kernel or Python fallback."""
-        if self._use_triton_decode:
-            try:
-                return self._decode_attention_triton(
-                    query, kv_cache, attn_metadata, Pi, centroids)
-            except Exception as e:
-                logger.warning(
-                    "Triton TQ decode failed (%s), falling back to Python", e)
-                self.__class__._use_triton_decode = False
-        return self._decode_attention_python(
-            query, kv_cache, attn_metadata, Pi, centroids)
-
-    def _decode_attention_triton(
-        self,
-        query: torch.Tensor,      # (B, Hq, D)
-        kv_cache: torch.Tensor,    # (num_blocks, block_size, Hk, slot_size)
-        attn_metadata: TurboQuantMetadata,
-        Pi: torch.Tensor,
-        centroids: torch.Tensor,
-    ) -> torch.Tensor:
-        """Triton-fused TQ decode attention."""
         from vllm.v1.attention.ops.triton_tq_decode import (
             triton_tq_decode_attention,
         )
@@ -812,147 +604,3 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             key_fp8=self.tq_config.key_fp8,
             norm_correction=self.tq_config.norm_correction,
         )
-
-    # ------------------------------------------------------------------ #
-    #  Decode: Vectorized Python fallback                                 #
-    # ------------------------------------------------------------------ #
-    def _decode_attention_python(
-        self,
-        query: torch.Tensor,      # (B, Hq, D)
-        kv_cache: torch.Tensor,    # (num_blocks, block_size, Hk, slot_size)
-        attn_metadata: TurboQuantMetadata,
-        Pi: torch.Tensor,
-        centroids: torch.Tensor,
-    ) -> torch.Tensor:
-        """Vectorized TQ decode: batch score + softmax + value gather.
-
-        Replaces the O(B*S*H*D) Python-loop decode with vectorized
-        torch operations. Cache slots are gathered in one advanced-index
-        op, MSE bytes are unpacked with vectorized bit shifts, and
-        scores + weighted sums use einsum.
-        """
-        B, Hq, D = query.shape
-        Hk = self.num_kv_heads
-        kps = self.tq_config.key_packed_size
-        key_fp8 = self.tq_config.key_fp8
-        block_size = kv_cache.shape[1]
-        device = query.device
-
-        if not key_fp8:
-            mse_bits = self.tq_config.key_mse_bits
-            mse_bytes_n = math.ceil(D * mse_bits / 8)
-
-            # Precompute rotated queries — fast GEMM
-            q_float = query.float()
-            q_rot = q_float @ Pi.T    # (B, Hq, D)
-        else:
-            q_float = query.float()
-
-        seq_lens_cpu = attn_metadata.seq_lens.cpu().tolist()
-        outputs = []
-        for i in range(B):
-            seq_len = seq_lens_cpu[i]
-            if seq_len <= 0:
-                outputs.append(torch.zeros(Hq, D, device=device,
-                                           dtype=query.dtype))
-                continue
-
-            # --- Gather all cache slots for this sequence ----------- #
-            pos = torch.arange(seq_len, device=device)
-            blk_idx = attn_metadata.block_table[
-                i, pos // block_size].long()
-            blk_off = (pos % block_size).long()
-            # slots: (S, Hk, slot_size) uint8
-            slots = kv_cache[blk_idx, blk_off]
-
-            if key_fp8:
-                # --- Hybrid: K as FP8, simple dot product score ----- #
-                k_raw = slots[:, :, :D]  # (S, Hk, D) uint8 = FP8 bytes
-                k_float = k_raw.view(torch.float8_e4m3fn).float()
-
-                if Hk < Hq:
-                    k_float = k_float.repeat_interleave(
-                        self.num_kv_groups, dim=1)
-
-                q_i = q_float[i]  # (Hq, D)
-                scores = torch.einsum(
-                    'hd,shd->sh', q_i, k_float) * self.scale
-            else:
-                # --- TQ: unpack MSE, compute TQ scores ---------------- #
-                # Unpack MSE indices → (S, Hk, D)
-                mse_raw = slots[:, :, :mse_bytes_n]
-                j = torch.arange(D, device=device)
-                bo = j * mse_bits
-                bi = (bo // 8).long()
-                si = (bo % 8).int()
-                b0 = mse_raw[:, :, bi]
-                val = (b0.int() >> si) & ((1 << mse_bits) - 1)
-                if mse_bits == 3:
-                    cross = si > 5
-                    bi_n = (bi + 1).clamp(max=mse_bytes_n - 1)
-                    b1 = mse_raw[:, :, bi_n]
-                    extra = (b1.int() << (8 - si)) & 0x7
-                    val = torch.where(cross, val | extra, val)
-                idx = val
-
-                c_vals = centroids[idx.long()]       # (S, Hk, D)
-
-                # Unpack norms
-                noff = mse_bytes_n
-                nd = slots[:, :, noff:noff + 2].contiguous()
-                gd = slots[:, :, noff + 2:noff + 4].contiguous()
-                vec_norms = nd.view(torch.float16).squeeze(-1).float()
-                gammas = gd.view(torch.float16).squeeze(-1).float()
-
-                # GQA head expansion
-                if Hk < Hq:
-                    g = self.num_kv_groups
-                    c_vals = c_vals.repeat_interleave(g, dim=1)
-                    vec_norms = vec_norms.repeat_interleave(g, dim=1)
-                    gammas = gammas.repeat_interleave(g, dim=1)
-
-                # TQ score computation
-                q_rot_i = q_rot[i]     # (Hq, D)
-                term1 = torch.einsum('hd,shd->sh', q_rot_i, c_vals)
-                scores = vec_norms * term1 * self.scale
-
-            # --- Softmax + value weighted sum ----------------------- #
-            attn_w = torch.softmax(scores.T, dim=-1)      # (Hq, S)
-
-            # --- Unpack values -------------------------------------- #
-            vps = self.tq_config.value_packed_size
-
-            # Uniform value dequant (3-bit or 4-bit)
-            vqb = self.tq_config.value_quant_bits
-            val_data_bytes = math.ceil(D * vqb / 8)
-            qmax = (1 << vqb) - 1
-
-            val_raw = slots[:, :, kps:kps + val_data_bytes]
-
-            if vqb == 4 and D % 2 == 0:
-                v_sh = torch.tensor([0, 4], device=device,
-                                    dtype=torch.int32)
-                v_exp = val_raw.unsqueeze(-1).int() >> v_sh
-                v_idx = (v_exp & 0xF).reshape(
-                    seq_len, Hk, -1)[:, :, :D].float()
-            else:
-                j = torch.arange(D, device=device)
-                bo = j * vqb
-                bi = (bo // 8).long()
-                si = (bo % 8).int()
-                b0 = val_raw[:, :, bi]
-                v_idx = ((b0.int() >> si) & qmax).float()
-
-            sc_off = kps + val_data_bytes
-            v_scale_raw = slots[:, :, sc_off:sc_off + 2].contiguous()
-            v_zero_raw = slots[:, :, sc_off + 2:sc_off + 4].contiguous()
-            v_scale = v_scale_raw.view(torch.float16).squeeze(-1).float()
-            v_zero = v_zero_raw.view(torch.float16).squeeze(-1).float()
-            values = v_idx * v_scale.unsqueeze(-1) + v_zero.unsqueeze(-1)
-            if Hk < Hq:
-                values = values.repeat_interleave(
-                    self.num_kv_groups, dim=1)
-            out = torch.einsum('hs,shd->hd', attn_w, values)
-            outputs.append(out.to(query.dtype))
-
-        return torch.stack(outputs, dim=0)

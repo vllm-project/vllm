@@ -110,6 +110,12 @@ def _tq_decode_stage1(
         mse_bit_shift = mse_bit_off % 8
         mse_mask = (1 << MSE_BITS) - 1
 
+    # Precompute value bit/byte index vectors (loop-invariant)
+    if VQB == 3:
+        val_bit_off = d_offs * 3
+        val_byte_idx = val_bit_off // 8
+        val_bit_shift = val_bit_off % 8
+
     # Online softmax accumulators
     m_prev = -float("inf")
     l_prev = 0.0
@@ -206,11 +212,6 @@ def _tq_decode_stage1(
         val_bases = slot_bases + KPS
 
         if VQB == 3:
-            # 3-bit value unpack: 8 values per 3 bytes, same bit layout as MSE keys
-            val_bit_off = d_offs * 3
-            val_byte_idx = val_bit_off // 8
-            val_bit_shift = val_bit_off % 8
-
             val_addrs0 = val_bases[:, None] + val_byte_idx[None, :]
             val_raw0 = tl.load(
                 KV_cache_ptr + val_addrs0,
