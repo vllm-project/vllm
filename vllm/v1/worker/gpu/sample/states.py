@@ -65,34 +65,23 @@ class SamplingStates:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
     ) -> None:
-        temp_np = self.temperature.np[idx_mapping_np]
-        if np.all((temp_np == 0.0) | (temp_np == 1.0)):
-            # No request requires temperature. Skip the kernel launch.
-            return
-
         apply_temperature(logits, expanded_idx_mapping, self.temperature.gpu)
 
     def apply_min_p(
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
     ) -> None:
-        if np.all(self.min_p.np[idx_mapping_np] == 0.0):
-            # No request uses min_p. Skip the kernel launch.
-            return
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
     def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
+        do_top_k: bool,
+        do_top_p: bool,
     ) -> torch.Tensor:
-        do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
-        do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
         if not (do_top_k or do_top_p):
             return logits
 
