@@ -4,16 +4,14 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
-from openai.types.responses import (
-    ToolChoiceFunction,
-)
+from openai.types.responses import ToolChoiceFunction
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 from starlette.datastructures import Headers
 
@@ -21,11 +19,10 @@ import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -41,9 +38,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -55,14 +50,6 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingCompletionRequest,
     PoolingResponse,
 )
-from vllm.entrypoints.pooling.score.protocol import (
-    RerankRequest,
-    ScoreDataRequest,
-    ScoreQueriesDocumentsRequest,
-    ScoreRequest,
-    ScoreResponse,
-    ScoreTextRequest,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -71,12 +58,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import create_error_response
-from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import (
-    ProcessorInputs,
-    PromptType,
-    TokensPrompt,
-)
+from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -122,13 +104,14 @@ CompletionLikeRequest: TypeAlias = (
     CompletionRequest
     | TokenizeCompletionRequest
     | DetokenizeRequest
-    | RerankRequest
-    | ScoreRequest
     | PoolingCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | TokenizeChatRequest | PoolingChatRequest
+    ChatCompletionRequest
+    | BatchChatCompletionRequest
+    | TokenizeChatRequest
+    | PoolingChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
@@ -148,7 +131,6 @@ AnyResponse: TypeAlias = (
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
-    | ScoreResponse
     | GenerateResponse
 )
 
@@ -163,7 +145,7 @@ class ServeContext(Generic[RequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[ProcessorInputs] | None = None
+    engine_inputs: list[EngineInput] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
@@ -202,7 +184,7 @@ class OpenAIServing:
 
     async def beam_search(
         self,
-        prompt: ProcessorInputs,
+        prompt: EngineInput,
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
@@ -461,7 +443,7 @@ class OpenAIServing:
             return self.create_error_response(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
-                " Please, select a smaller truncation size."
+                " Please request a smaller truncation size."
             )
         return None
 
@@ -493,21 +475,21 @@ class OpenAIServing:
         if isinstance(pooling_params, ErrorResponse):
             return pooling_params
 
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             return self.create_error_response("Engine prompts not available")
 
-        for i, engine_prompt in enumerate(ctx.engine_prompts):
+        for i, engine_input in enumerate(ctx.engine_inputs):
             request_id_item = f"{ctx.request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                engine_prompt,
+                engine_input,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
-                engine_prompt,
+                engine_input,
                 pooling_params,
                 request_id_item,
                 lora_request=ctx.lora_request,
@@ -526,10 +508,10 @@ class OpenAIServing:
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """Collect batch results from the result generator."""
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             return self.create_error_response("Engine prompts not available")
 
-        num_prompts = len(ctx.engine_prompts)
+        num_prompts = len(ctx.engine_inputs)
         final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_prompts
 
@@ -692,88 +674,6 @@ class OpenAIServing:
                         message_types.add(content_dict["type"].split("_")[0])
         return message_types
 
-    def _validate_input(
-        self,
-        request: object,
-        input_ids: list[int],
-        input_text: str,
-    ) -> TokensPrompt:
-        token_num = len(input_ids)
-        max_model_len = self.model_config.max_model_len
-
-        # Note: ScoreRequest doesn't have max_tokens
-        if isinstance(
-            request,
-            (
-                ScoreDataRequest,
-                ScoreTextRequest,
-                ScoreQueriesDocumentsRequest,
-                RerankRequest,
-            ),
-        ):
-            # Note: input length can be up to the entire model context length
-            # since these requests don't generate tokens.
-            if token_num > max_model_len:
-                operations: dict[type[AnyRequest], str] = {
-                    ScoreDataRequest: "score",
-                    ScoreTextRequest: "score",
-                    ScoreQueriesDocumentsRequest: "score",
-                }
-                operation = operations.get(type(request), "embedding generation")
-                raise VLLMValidationError(
-                    f"This model's maximum context length is "
-                    f"{max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input.",
-                    parameter="input_tokens",
-                    value=token_num,
-                )
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
-
-        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
-        # and does not require model context length validation
-        if isinstance(
-            request,
-            (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest),
-        ):
-            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
-
-        # chat completion endpoint supports max_completion_tokens
-        if isinstance(request, ChatCompletionRequest):
-            # TODO(#9845): remove max_tokens when field dropped from OpenAI API
-            max_tokens = request.max_completion_tokens or request.max_tokens
-        else:
-            max_tokens = getattr(request, "max_tokens", None)
-
-        # Note: input length can be up to model context length - 1 for
-        # completion-like requests.
-        if token_num >= max_model_len:
-            raise VLLMValidationError(
-                f"This model's maximum context length is "
-                f"{max_model_len} tokens. However, your request has "
-                f"{token_num} input tokens. Please reduce the length of "
-                "the input messages.",
-                parameter="input_tokens",
-                value=token_num,
-            )
-
-        if max_tokens is not None and token_num + max_tokens > max_model_len:
-            raise VLLMValidationError(
-                f"This model's maximum context length is "
-                f"{max_model_len} tokens. However, you requested "
-                f"{max_tokens} output tokens and your prompt contains "
-                f"{token_num} input tokens, for a total of "
-                f"{token_num + max_tokens} tokens "
-                f"({token_num} + {max_tokens} = "
-                f"{token_num + max_tokens} > {max_model_len}). "
-                f"Please reduce the length of the input prompt or the "
-                f"number of requested output tokens.",
-                parameter="max_tokens",
-                value=max_tokens,
-            )
-
-        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
-
     def _validate_chat_template(
         self,
         request_chat_template: str | None,
@@ -806,19 +706,19 @@ class OpenAIServing:
         # Apply server defaults first, then request kwargs override.
         return default_chat_template_kwargs | request_chat_template_kwargs
 
-    def _extract_prompt_components(self, prompt: PromptType | ProcessorInputs):
+    def _extract_prompt_components(self, prompt: PromptType | EngineInput):
         return extract_prompt_components(self.model_config, prompt)
 
-    def _extract_prompt_text(self, prompt: ProcessorInputs):
+    def _extract_prompt_text(self, prompt: PromptType | EngineInput):
         return self._extract_prompt_components(prompt).text
 
-    def _extract_prompt_len(self, prompt: ProcessorInputs):
+    def _extract_prompt_len(self, prompt: EngineInput):
         return extract_prompt_len(self.model_config, prompt)
 
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType | ProcessorInputs,
+        inputs: PromptType | EngineInput,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
@@ -882,7 +782,7 @@ class OpenAIServing:
         request: ResponsesRequest | ChatCompletionRequest,
         tokenizer: TokenizerLike | None,
         enable_auto_tools: bool,
-        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
@@ -929,7 +829,7 @@ class OpenAIServing:
 
             # Automatic Tool Call Parsing
             try:
-                tool_parser = tool_parser_cls(tokenizer)
+                tool_parser = tool_parser_cls(tokenizer, request.tools)
             except RuntimeError as e:
                 logger.exception("Error in tool parser creation.")
                 raise e
