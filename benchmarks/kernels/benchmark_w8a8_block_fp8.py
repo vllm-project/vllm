@@ -262,6 +262,7 @@ def save_configs(
     configs,
     save_path,
     input_type="fp8",
+    lock=None,
 ) -> None:
     os.makedirs(save_path, exist_ok=True)
     device_name = current_platform.get_device_name().replace(" ", "_")
@@ -273,9 +274,24 @@ def save_configs(
     config_file_path = os.path.join(save_path, json_file_name)
     print(f"Writing best config to {config_file_path}...")
 
-    with open(config_file_path, "w") as f:
-        json.dump(configs, f, indent=4)
-        f.write("\n")
+    if lock is not None:
+        lock.acquire()
+    try:
+        try:
+            with open(config_file_path) as f:
+                existing_configs = json.load(f)
+            existing_configs = {int(k): v for k, v in existing_configs.items()}
+        except (FileNotFoundError, json.JSONDecodeError):
+            existing_configs = {}
+
+        existing_configs.update(configs)
+
+        with open(config_file_path, "w") as f:
+            json.dump(existing_configs, f, indent=4)
+            f.write("\n")
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def tune_on_gpu(args_dict):
@@ -284,6 +300,7 @@ def tune_on_gpu(args_dict):
     batch_sizes = args_dict["batch_sizes"]
     weight_shapes = args_dict["weight_shapes"]
     args = args_dict["args"]
+    lock = args_dict["lock"]
 
     torch.accelerator.set_device_index(gpu_id)
     print(f"Starting tuning on GPU {gpu_id} with batch sizes {batch_sizes}")
@@ -316,7 +333,7 @@ def tune_on_gpu(args_dict):
             for batch_size in tqdm(batch_sizes, desc=f"GPU {gpu_id} - Batch sizes")
         ]
         best_configs = {M: config for M, config in zip(batch_sizes, benchmark_results)}
-        save_configs(N, K, block_n, block_k, best_configs, save_path, input_type)
+        save_configs(N, K, block_n, block_k, best_configs, save_path, input_type, lock)
 
     end = time.time()
     print(f"Tuning on GPU {gpu_id} took {end - start:.2f} seconds")
@@ -370,6 +387,10 @@ def main(args):
 
     batches_per_gpu = distribute_batch_sizes(batch_sizes, num_gpus)
 
+    ctx = mp.get_context("spawn")
+    manager = ctx.Manager()
+    lock = manager.Lock()
+
     process_args = []
     for gpu_id in range(num_gpus):
         process_args.append(
@@ -378,10 +399,10 @@ def main(args):
                 "batch_sizes": batches_per_gpu[gpu_id],
                 "weight_shapes": weight_shapes,  # Each GPU processes all weight shapes
                 "args": args,
+                "lock": lock,
             }
         )
 
-    ctx = mp.get_context("spawn")
     with ctx.Pool(num_gpus) as pool:
         pool.map(tune_on_gpu, process_args)
 
