@@ -68,53 +68,38 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             del layer.prob_scale
             return
 
-        # If the kv-cache is not quantized, we enforce the k/v_scale to be 1.0
-        # regardless whether the kv-scale is available in the checkpoint.
-        # No need to process kv scales after loading if we are going to
-        # calculate them on the fly.
-        if (
+        # Evaluate once; reused for both k/v resolution and q_scale fallback.
+        use_static_kv_scales = (
             is_quantized_kv_cache(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales
-        ):
+        )
+
+        # --- k_scale / v_scale ---
+        # Default to 1.0; overwritten below when the KV cache is quantized and
+        # static scales are available.
+        k_scale = 1.0
+        v_scale = 1.0
+        if use_static_kv_scales:
             if layer.k_scale > 0.0 and layer.v_scale > 0.0:
-                # We prefer to use separate k_scale and v_scale if present
+                # Separate k_scale and v_scale present in checkpoint.
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
-                if current_platform.is_fp8_fnuz():
-                    k_scale *= 2
-                    v_scale *= 2
-            elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
-                # If no scales were loaded (both scales are invalid negative
-                # values), use the default value of 1.0
-                k_scale = 1.0
-                v_scale = 1.0
-            else:
-                # If we find a single kv_scale in the checkpoint, we remap
-                # kv_scale to k_scale during weight loading, and duplicate
-                # k_scale to v_scale here
+            elif not (layer.k_scale < 0.0 and layer.v_scale < 0.0):
+                # Single kv_scale: remapped to k_scale during weight loading;
+                # duplicate to v_scale here.
                 assert layer.k_scale > 0.0
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
-                if current_platform.is_fp8_fnuz():
-                    k_scale *= 2
-                    v_scale *= 2
+            if current_platform.is_fp8_fnuz():
+                k_scale *= 2
+                v_scale *= 2
 
             if not isinstance(k_scale, float) or not isinstance(v_scale, float):
                 raise ValueError(
                     "Only support per-tensor scaling factor for fp8 KV cache"
                 )
 
-            if layer.q_scale < 0.0:
-                logger.warning_once(
-                    "Checkpoint does not provide a q scaling factor. "
-                    "Setting it to k_scale. This only matters for "
-                    "FP8 Attention backends (flash-attn or flashinfer)."
-                )
-                layer._q_scale.copy_(k_scale)
-                layer._q_scale_float = k_scale
-
-            # These are used in the final Attention.forward()
             layer._k_scale.copy_(k_scale)
             layer._v_scale.copy_(v_scale)
             layer._k_scale_float = k_scale
@@ -126,38 +111,35 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "scaling factors are properly set in the checkpoint."
                 )
 
-        if layer.q_scale > 0.0:
-            q_scale = layer.q_scale
-            if current_platform.is_fp8_fnuz():
-                q_scale *= 2
+        def _from_checkpoint(param: torch.nn.Parameter) -> float | None:
+            """Return the FNUZ-adjusted float scale, or None if absent."""
+            val = param.item()
+            if val > 0.0:
+                return val * (2 if current_platform.is_fp8_fnuz() else 1)
+            return None
+
+        # --- q_scale: checkpoint → k_scale fallback (fp8 only) → 1.0 ---
+        q = _from_checkpoint(layer.q_scale)
+        if q is not None:
+            q_scale = q
             layer.calculate_kv_scales = False
+        elif use_static_kv_scales:
+            logger.warning_once(
+                "Checkpoint does not provide a q scaling factor. "
+                "Setting it to k_scale. This only matters for "
+                "FP8 Attention backends (flash-attn or flashinfer)."
+            )
+            q_scale = k_scale
         else:
             q_scale = 1.0
-        if layer.prob_scale > 0.0:
-            prob_scale = layer.prob_scale
-            if current_platform.is_fp8_fnuz():
-                prob_scale *= 2
-        else:
-            prob_scale = 1.0
 
-        is_singleton_float = (
-            lambda x: isinstance(x, float)
-            or isinstance(x, torch.Tensor)
-            and x.numel() == 1
-            and x.is_floating_point()
-        )
-        if not is_singleton_float(q_scale) or not is_singleton_float(prob_scale):
-            raise ValueError(
-                "Only support per-tensor scaling factorfor fp8-quantized Q/prob"
-            )
+        # --- prob_scale: checkpoint → 1.0 ---
+        prob_scale = _from_checkpoint(layer.prob_scale) or 1.0
 
-        # These are used in the final Attention.forward()
         layer._q_scale.copy_(q_scale)
-        layer._q_scale_float = (
-            q_scale.item() if isinstance(q_scale, torch.Tensor) else q_scale
-        )
-
+        layer._q_scale_float = q_scale
         layer._prob_scale.copy_(prob_scale)
+        layer._prob_scale_float = prob_scale
         if layer.kv_cache_dtype == "fp8" and (q_scale == 1.0 or prob_scale == 1.0):
             logger.warning_once(
                 f"Using uncalibrated q_scale {q_scale} and/or prob_scale "
@@ -166,7 +148,4 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 "available in the fp8 checkpoint."
             )
 
-        del layer.k_scale
-        del layer.v_scale
-        del layer.q_scale
-        del layer.prob_scale
+        del layer.k_scale, layer.v_scale, layer.q_scale, layer.prob_scale
