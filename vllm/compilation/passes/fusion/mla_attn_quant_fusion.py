@@ -6,7 +6,6 @@ from collections.abc import Callable
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
-from vllm._custom_ops import create_fp4_output_tensors
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -149,6 +148,8 @@ class MLAAttnNvfp4QuantPattern(
             kv_c_normed: torch.Tensor,
             k_pe: torch.Tensor,
             output_attn: torch.Tensor,
+            output_quant: torch.Tensor,
+            output_scale: torch.Tensor,
             input_scale: torch.Tensor,
             kv_cache_dummy_dep: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -162,11 +163,6 @@ class MLAAttnNvfp4QuantPattern(
                 output_scale=None,
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
-            )
-            # Replicate what scaled_fp4_quant() does: allocate output
-            # tensors inline then call the .out variant.
-            output_quant, output_scale = create_fp4_output_tensors(
-                at1[1].shape[0], at1[1].shape[1], at1[1].device, True
             )
             at2 = auto_functionalized(
                 self._QUANT_OP,
@@ -190,6 +186,8 @@ class MLAAttnNvfp4QuantPattern(
             kv_c_normed: torch.Tensor,
             k_pe: torch.Tensor,
             output_attn: torch.Tensor,
+            _output_quant: torch.Tensor,
+            output_scale: torch.Tensor,
             input_scale: torch.Tensor,
             kv_cache_dummy_dep: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -199,10 +197,6 @@ class MLAAttnNvfp4QuantPattern(
                 dtype=FP4_DTYPE,
                 device=q.device,
             )
-            # attention output block scale
-            output_scale = create_fp4_output_tensors(
-                q.shape[0], self._output_dim, q.device, True
-            )[1]
             output_scale_view = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
             at2 = auto_functionalized(
                 MLA_ATTN_OP,
@@ -220,11 +214,15 @@ class MLAAttnNvfp4QuantPattern(
         return _replacement
 
     def get_inputs(self) -> list[torch.Tensor]:
+        from vllm.utils.math_utils import round_up
+
         return [
             self.empty(5, self._num_heads, self._qk_head_dim, dtype=self._dtype),
             self.empty(5, self._kv_lora_rank, dtype=self._dtype),
             self.empty(5, 1, self._qk_rope_head_dim, dtype=self._dtype),
             self.empty(5, self._output_dim, dtype=self._dtype),
+            self.empty(5, self._output_dim // 2, dtype=FP4_DTYPE),
+            self.empty_i32(128, round_up(self._output_dim // 16, 4)),
             self.empty_fp32(1, 1),
             self.empty(0, dtype=self._dtype),
         ]
