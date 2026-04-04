@@ -35,23 +35,6 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-wait_for_clean_gpus() {
-  local timeout=${1:-300}
-  local start=$SECONDS
-  echo "--- Waiting for clean GPU state (timeout: ${timeout}s)"
-  while true; do
-    if grep -q clean /opt/amdgpu/etc/gpu_state; then
-      echo "GPUs state is \"clean\""
-      return
-    fi
-    if (( SECONDS - start >= timeout )); then
-      echo "Error: GPUs did not reach clean state within ${timeout}s" >&2
-      exit 1
-    fi
-    sleep 3
-  done
-}
-
 cleanup_docker() {
   # Get Docker's root directory
   docker_root=$(docker info -f '{{.DockerRootDir}}')
@@ -282,7 +265,7 @@ apply_rocm_test_overrides() {
 
   # --- LoRA: disable custom paged attention ---
   if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
   fi
 
   # --- Kernel ignores ---
@@ -326,8 +309,8 @@ apply_rocm_test_overrides() {
   if [[ $cmds == *" kernels/moe"* ]]; then
     cmds="${cmds} \
     --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py \
-    fi
+    --ignore=kernels/moe/test_cutlass_moe.py"
+  fi
 
   # --- Entrypoint ignores ---
   if [[ $cmds == *" entrypoints/openai "* ]]; then
@@ -365,18 +348,11 @@ apply_rocm_test_overrides() {
 ###############################################################################
 
 # --- GPU initialization ---
-echo "--- Confirming Clean Initial State"
-wait_for_clean_gpus
-
 echo "--- ROCm info"
 rocminfo
 
 # --- Docker housekeeping ---
 cleanup_docker
-
-echo "--- Resetting GPUs"
-echo "reset" > /opt/amdgpu/etc/gpu_state
-wait_for_clean_gpus
 
 # --- Pull test image ---
 echo "--- Pulling container"
@@ -496,6 +472,7 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -511,6 +488,7 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${commands}"
