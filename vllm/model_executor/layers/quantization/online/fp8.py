@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -382,6 +383,7 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=w13,
             w2=w2,
@@ -398,17 +400,34 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            assert self.experts_cls is not None
-            self.moe_kernel = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
-            )
+        self.moe_quant_config = make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            a1_scale=w13_input_scale,
+            a2_scale=w2_input_scale,
+            block_shape=self.weight_block_size,
+        )
+        # Inject biases into the quant config if the model has them
+        # (e.g. GPT-OSS biased MoE)
+        if self.moe.has_bias:
+            w13_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
+            if w13_bias is not None:
+                self.moe_quant_config._w1.bias = w13_bias
+            if w2_bias is not None:
+                self.moe_quant_config._w2.bias = w2_bias
+
+        assert self.experts_cls is not None
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -422,35 +441,11 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig":
-        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-            make_fp8_moe_quant_config,
+        assert self.moe_quant_config is not None, (
+            "moe_quant_config is not initialized, "
+            "process_weights_after_loading should be called first"
         )
-
-        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
-        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
-        a1_scale = layer.w13_input_scale
-        a2_scale = layer.w2_input_scale
-
-        quant_config = make_fp8_moe_quant_config(
-            fp8_backend=self.fp8_backend,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            block_shape=self.weight_block_size,
-        )
-
-        # Inject biases into the quant config if the model has them
-        # (e.g. GPT-OSS biased MoE)
-        if quant_config is not None and self.moe.has_bias:
-            w13_bias = getattr(layer, "w13_bias", None)
-            w2_bias = getattr(layer, "w2_bias", None)
-            if w13_bias is not None:
-                quant_config._w1.bias = w13_bias
-            if w2_bias is not None:
-                quant_config._w2.bias = w2_bias
-
-        return quant_config
+        return self.moe_quant_config
 
     @property
     def supports_eplb(self) -> bool:
