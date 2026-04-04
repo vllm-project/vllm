@@ -774,12 +774,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits,
             total_num_logits,
         )
-        print(
-            "[spec_decode_debug][prepare_inputs] "
-            f"req_ids={req_ids[:3]} num_reqs={num_reqs} num_tokens={num_tokens} "
-            f"input_ids[:10]={self.input_buffers.input_ids[: min(10, num_tokens)].tolist()} "
-            f"positions[:10]={self.input_buffers.positions[: min(10, num_tokens)].tolist()}"
-        )
 
         return InputBatch(
             req_ids=req_ids,
@@ -840,16 +834,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
-        if input_batch.num_reqs > 0:
-            first_logits = logits[0]
-            topk_vals, topk_ids = torch.topk(first_logits.float(), 5)
-            print(
-                "[spec_decode_debug][logits] "
-                f"reqs={input_batch.num_reqs} draft={input_batch.num_draft_tokens} "
-                f"argmax={first_logits.argmax().item()} "
-                f"top5_ids={topk_ids.tolist()} "
-                f"top5_vals={[f'{v:.6f}' for v in topk_vals.tolist()]}"
-            )
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1154,14 +1138,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
-        n = min(3, input_batch.num_reqs)
-        print(
-            "[spec_decode_debug][sample_result] "
-            f"req_ids={input_batch.req_ids[:n]} "
-            f"sampled={sampler_output.sampled_token_ids[:n].tolist()} "
-            f"num_sampled={num_sampled[:n].tolist()} "
-            f"num_rejected={num_rejected[:n].tolist()}"
-        )
 
         if self.use_pp:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -1243,15 +1219,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            n = min(3, input_batch.num_reqs)
-            idxs = input_batch.idx_mapping[:n]
-            print(
-                "[spec_decode_debug][post_propose] "
-                f"req_ids={input_batch.req_ids[:n]} "
-                f"last_sampled={self.req_states.last_sampled_tokens[idxs].tolist()} "
-                f"new_draft={draft_tokens[:n].tolist()} "
-                f"computed={self.req_states.num_computed_tokens.gpu[idxs].tolist()}"
-            )
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
         if self.use_async_scheduling:
