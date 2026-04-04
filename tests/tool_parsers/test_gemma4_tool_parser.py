@@ -502,3 +502,33 @@ class TestStreamingExtraction:
         results = self._simulate_streaming(parser, mock_request, chunks)
         name = self._collect_function_name(results)
         assert name == "get_status"
+
+    def test_streaming_split_delimiter_no_invalid_json(self, parser,
+                                                       mock_request):
+        """Partial <|"|> delimiter chars must not leak into streamed JSON.
+
+        Reproduces the bug from https://github.com/vllm-project/vllm/issues/38946
+        where a token boundary splits the string delimiter, leaving fragments
+        like '<|' at the end of a parsed value which then corrupt the JSON.
+        """
+        chunks = [
+            "<|tool_call>",
+            "call:todowrite{",
+            'content:<|"|>Buy milk<|',
+            '"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+
+        # Must be valid JSON — the original bug caused a JSON parse error
+        parsed_args = json.loads(args_text)
+        assert parsed_args["content"] == "Buy milk"
+
+        # Ensure no raw delimiter fragments leaked into the JSON
+        assert "<|" not in args_text, (
+            f"Partial delimiter leaked into JSON: {args_text!r}"
+        )
