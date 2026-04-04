@@ -441,8 +441,9 @@ class MooncakeStoreWorker:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False
         )
-        self.original_block_size = vllm_config.cache_config.block_size
-        self.block_size = vllm_config.cache_config.block_size
+        self.cache_config = vllm_config.cache_config
+        self.original_block_size = self.cache_config.block_size
+        self.block_size = self.cache_config.block_size
         if self.pcp_size > 1:
             self.block_size *= self.pcp_size
         if self.dcp_size > 1:
@@ -512,26 +513,74 @@ class MooncakeStoreWorker:
         # TODO(yifan): we haven't supported hybrid HMA yet.
         first_kv_cache = next(iter(kv_caches.values()))
 
-        self.num_blocks = first_kv_cache.shape[0]
-        logger.info("num_blocks: %s", self.num_blocks)
+        # num_blocks from cache_config is authoritative (set after
+        # profiling, before KV cache allocation).
+        assert self.cache_config.num_gpu_blocks is not None
+        self.num_blocks = self.cache_config.num_gpu_blocks
 
-        # Per-block byte size: total tensor bytes / number of blocks.
-        # Works for both MLA (3D: num_blocks, block_size, head_size) and
-        # non-MLA (5D: num_blocks, 2, block_size, num_kv_heads, head_size).
-        self.block_len: list[int] = [first_kv_cache.nbytes // self.num_blocks]
+        # Detect the KV cache memory layout using the stride-based
+        # approach from simple_kv_offload/worker.py.
+        #
+        # The physical layout varies across attention backends:
+        #   FlashAttn/ROCm : (2, num_blocks, ...) → K/V outermost
+        #   FlashInfer/MLA : (num_blocks, ...)    → blocks outermost
+        #
+        # We derive page_size_bytes = storage.nbytes() // num_blocks,
+        # then classify dims: any dim whose byte-stride exceeds
+        # page_size_bytes must be an outer segment dim (e.g. the K/V
+        # dim of size 2).  For those backends we register each segment
+        # (K, V) as a separate base-address so that the per-block
+        # offset arithmetic in prepare_value() stays correct.
+        storage = first_kv_cache.untyped_storage()
+        el = first_kv_cache.element_size()
+        page_size_bytes = storage.nbytes() // self.num_blocks
+        outer_dims = [
+            d
+            for d in range(first_kv_cache.ndim)
+            if first_kv_cache.stride(d) * el > page_size_bytes
+        ]
+
+        # Register buffers with the store (deduplicate shared storages)
+        # and record per-segment base addresses for every layer.
+        seen_ptrs: set[int] = set()
+        self.kv_caches_base_addr: list[int] = []
+        self.block_len: list[int] = []
+
+        for cache in kv_caches.values():
+            cache_storage = cache.untyped_storage()
+            base_addr = cache_storage.data_ptr()
+            region_len = cache_storage.nbytes()
+
+            if base_addr not in seen_ptrs:
+                seen_ptrs.add(base_addr)
+                ret = self.store.register_buffer(base_addr, region_len)
+                if ret != 0:
+                    logger.error(
+                        "register_buffer failed for addr %#x len %d: %d",
+                        base_addr,
+                        region_len,
+                        ret,
+                    )
+
+            if not outer_dims:
+                # Blocks-first layout (FlashInfer / MLA): one segment.
+                self.kv_caches_base_addr.append(base_addr)
+                self.block_len.append(page_size_bytes)
+            else:
+                # K/V-first layout (FlashAttn / ROCm): split segments.
+                seg_stride = cache.stride(outer_dims[0]) * el
+                for idx in range(cache.shape[outer_dims[0]]):
+                    self.kv_caches_base_addr.append(base_addr + idx * seg_stride)
+                    self.block_len.append(seg_stride // self.num_blocks)
 
         logger.info(
-            "Registering KV_Caches. use_mla: %s, shape %s",
+            "Registering KV_Caches. use_mla: %s, shape %s, "
+            "num_blocks: %d, block_len: %s",
             self.use_mla,
             first_kv_cache.shape,
+            self.num_blocks,
+            list(set(self.block_len)),
         )
-
-        self.kv_caches_base_addr: list[int] = []
-        for cache in kv_caches.values():
-            base_addr = cache.data_ptr()
-            region_len = cache.nbytes
-            self.kv_caches_base_addr.append(base_addr)
-            self.store.register_buffer(base_addr, region_len)
 
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
