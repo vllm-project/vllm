@@ -1898,6 +1898,18 @@ def destroy_distributed_environment():
         torch.distributed.destroy_process_group()
 
 
+def reset_distributed_state() -> None:
+    """Reset global distributed state so init can be called again.
+
+    Must be called after destroy_model_parallel() +
+    destroy_distributed_environment() and before re-init.
+    """
+    global _INNER_DP_WORLD
+    _INNER_DP_WORLD = None
+    _group_name_counter.clear()
+    _groups.clear()
+
+
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     # Reset environment variable cache
     envs.disable_envs_cache()

@@ -642,6 +642,46 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
+    def suspend(self) -> None:
+        """Suspend engine for snapshotting: pause scheduler, tear down NCCL
+        and tracer.
+
+        Weights stay on GPU so cuda-checkpoint can snapshot them natively.
+        Only NCCL IPC memory (which cuda-checkpoint cannot handle) and
+        the OTel tracer (gRPC channels won't survive CRIU) are torn down.
+        CUDA graphs are recaptured on resume with fresh NCCL handles.
+        """
+        if not self.is_scheduler_paused():
+            self.pause_scheduler(mode="abort")
+        self.model_executor.suspend()
+        self._shutdown_tracer()
+
+    def resume(self) -> None:
+        """Resume engine after snapshot restore: rebuild NCCL and tracer,
+        resume scheduler."""
+        self._reinit_tracer()
+        self.model_executor.resume()
+        if self.is_scheduler_paused():
+            self.resume_scheduler()
+
+    def _shutdown_tracer(self) -> None:
+        from vllm.tracing import shutdown_tracer
+
+        try:
+            shutdown_tracer()
+        except Exception:
+            logger.warning("Failed to shut down tracer", exc_info=True)
+
+    def _reinit_tracer(self) -> None:
+        endpoint = self.vllm_config.observability_config.otlp_traces_endpoint
+        if endpoint:
+            from vllm.tracing import init_tracer
+
+            try:
+                init_tracer("vllm.engine_core", endpoint)
+            except Exception:
+                logger.warning("Failed to re-init tracer", exc_info=True)
+
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
 

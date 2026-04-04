@@ -205,6 +205,23 @@ class EngineClient(ABC):
         """Shutdown the engine with optional timeout."""
         ...
 
+    async def suspend(self) -> None:
+        """Suspend engine for CRIU-safe snapshots.
+
+        Tears down NCCL and distributed state while keeping model weights on
+        GPU. Call this before a CRIU checkpoint; call :meth:`resume` after
+        restore.  Currently only supported with tensor_parallel_size=1.
+        """
+        raise NotImplementedError
+
+    async def resume(self) -> None:
+        """Resume engine after a CRIU snapshot restore.
+
+        Rebuilds NCCL with fresh loopback addresses.  Must be called after
+        :meth:`suspend` and after CRIU has restored the process.
+        """
+        raise NotImplementedError
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:
