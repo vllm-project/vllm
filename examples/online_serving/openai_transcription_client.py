@@ -104,15 +104,15 @@ def stream_api_response(audio_path: str, model: str, openai_api_base: str):
         ):
             if chunk:
                 data = chunk[len("data: ") :]
+                # For long audio files, we should only check for b"[DONE]",
+                # because they are split into multiple chunks, and each chunk
+                # has its own finish_reason.
+                if data == b"[DONE]":
+                    break
                 data = json.loads(data.decode("utf-8"))
                 data = data["choices"][0]
                 delta = data["delta"]["content"]
                 print(delta, end="", flush=True)
-
-                finish_reason = data.get("finish_reason")
-                if finish_reason is not None:
-                    print(f"\n[Stream finished reason: {finish_reason}]")
-                    break
 
 
 def main(args):
