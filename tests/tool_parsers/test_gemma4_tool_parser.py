@@ -503,8 +503,7 @@ class TestStreamingExtraction:
         name = self._collect_function_name(results)
         assert name == "get_status"
 
-    def test_streaming_split_delimiter_no_invalid_json(self, parser,
-                                                       mock_request):
+    def test_streaming_split_delimiter_no_invalid_json(self, parser, mock_request):
         """Partial <|"|> delimiter chars must not leak into streamed JSON.
 
         Reproduces the bug from https://github.com/vllm-project/vllm/issues/38946
