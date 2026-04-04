@@ -123,6 +123,10 @@ def _sync_hip_cuda_env_vars():
 # Sync at import time - catches misconfigurations from process start.
 _sync_hip_cuda_env_vars()
 
+# Enable HIP online tuning early, before hipBLASLt initializes.
+if envs.VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING:
+    os.environ["HIP_ONLINE_TUNING"] = "1"
+
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
