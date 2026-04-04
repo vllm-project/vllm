@@ -412,7 +412,15 @@ class EngineCore:
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
-        if not self.async_scheduling and self.use_spec_decode and model_executed:
+        #
+        # The draft-token hook runs whenever the model was executed (not only
+        # when speculative decoding is enabled). This allows plugins such as
+        # dLLM schedulers/workers to reuse the spec-decode data path by
+        # returning draft token ids from take_draft_token_ids().
+        # The default worker returns None when not doing spec-decode,
+        # so this is backward compatible.
+        # See: https://github.com/vllm-project/vllm/issues/36155
+        if not self.async_scheduling and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
@@ -514,12 +522,13 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # If we are doing speculative decoding with structured output,
+            # If we are doing speculative decoding (or a plugin that
+            # provides draft tokens, e.g. dLLM) with structured output,
             # we need to get the draft token ids from the prior step before
             # we can compute the grammar bitmask for the deferred request.
-            if self.use_spec_decode:
-                draft_token_ids = self.model_executor.take_draft_token_ids()
-                assert draft_token_ids is not None
+            # See: https://github.com/vllm-project/vllm/issues/36155
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
                 # Update the draft token ids in the scheduler output to
                 # filter out the invalid spec tokens, which will be padded
                 # with -1 and skipped by the grammar bitmask computation.
