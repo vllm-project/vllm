@@ -71,7 +71,7 @@ def check_transformers_version():
     model_info.check_transformers_version(on_fail="skip")
 
 
-def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx, monkeypatch):
+def test_musicflamingo_chunk_counting(mock_ctx, monkeypatch):
     from vllm.model_executor.models.musicflamingo import (
         MusicFlamingoDummyInputsBuilder,
         MusicFlamingoMultiModalProcessor,
@@ -97,7 +97,6 @@ def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx, monkeypatch
         return {
             "input_ids": [1, 2, 3],
             "input_features": torch.randn(3, 80, 3000),
-            "rote_timestamps": torch.randn(3, 750),
         }
 
     monkeypatch.setattr(BaseMultiModalProcessor, "_call_hf_processor", mock_base_call)
@@ -107,7 +106,7 @@ def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx, monkeypatch
     chunk_counts = processed["chunk_counts"]
 
     assert chunk_counts.tolist() == [1, 2]
-    assert "rote_timestamps" in processed
+    assert "rote_timestamps" not in processed
 
 
 def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
@@ -172,8 +171,11 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
         text_config=text_config,
         audio_config=audio_config,
         audio_token_id=0,
-        head_dim=8,
-        rope_parameters={"rope_type": "default", "rope_theta": 2048},
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 2048,
+            "partial_rotary_factor": 0.5,
+        },
     )
     hf_model = hf_musicflamingo_modeling.MusicFlamingoForConditionalGeneration(
         config
@@ -193,14 +195,18 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
     feature_attention_mask[0, :3000] = True
     feature_attention_mask[1, :2500] = True
     feature_attention_mask[2, :1500] = True
-    rote_timestamps = (
-        torch.arange(750, dtype=torch.float32).unsqueeze(0).repeat(3, 1) * 0.04
+    chunk_counts = [2, 1]
+    post_lengths = [750 + 625, 375]
+    input_ids = torch.nn.utils.rnn.pad_sequence(
+        [torch.zeros(length, dtype=torch.long) for length in post_lengths],
+        batch_first=True,
+        padding_value=1,
     )
 
     hf_output = hf_model.get_audio_features(
         input_features,
         feature_attention_mask,
-        rote_timestamps=rote_timestamps,
+        input_ids=input_ids,
         return_dict=True,
     ).pooler_output
     vllm_attention_mask = _build_audio_encoder_attention_mask(
@@ -212,7 +218,15 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
         input_features,
         attention_mask=vllm_attention_mask,
     )
-    cos, sin = vllm_rope(rote_timestamps, seq_len=vllm_hidden_states.shape[-2])
+    from vllm.model_executor.models.musicflamingo import _build_audio_timestamps
+
+    audio_timestamps = _build_audio_timestamps(
+        feature_attention_mask,
+        chunk_counts,
+        vllm_hidden_states.shape[-2],
+        config.audio_frame_step,
+    )
+    cos, sin = vllm_rope(audio_timestamps, seq_len=vllm_hidden_states.shape[-2])
     vllm_hidden_states = apply_rotary_time_emb(vllm_hidden_states, cos, sin)
     vllm_output, _ = _flatten_valid_audio_embeddings(
         vllm_projector(vllm_hidden_states),
