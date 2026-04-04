@@ -530,6 +530,18 @@ class Llama4Model(LlamaModel):
                 # TODO: add EP support for non fused weights
                 pass
 
+            # Ensure tensor is contiguous before CPU->GPU transfer.
+            # When fused=True, transpose() (line 444) creates a
+            # non-contiguous view. Subsequent chunk + indexing preserve
+            # this non-contiguity. Non-contiguous CPU tensors cause
+            # extremely slow DMA transfers (3-4s per tensor vs ms),
+            # because the transfer cannot use a single bulk memory copy.
+            # We call contiguous() on the final slice (not the full
+            # tensor) to minimize CPU memory overhead.
+            # See: https://github.com/vllm-project/vllm/issues/31624
+            if fused and isinstance(new_loaded_weight, torch.Tensor):
+                new_loaded_weight = new_loaded_weight.contiguous()
+
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
             weight_loader(
@@ -699,7 +711,11 @@ class Llama4Model(LlamaModel):
                             and loaded_weight.dtype == torch.float8_e4m3fn
                             and loaded_weight.ndim == 3
                         ):
-                            loaded_weight = loaded_weight.transpose(-1, -2)
+                            # contiguous() needed because transpose()
+                            # returns a non-contiguous view, causing
+                            # very slow CPU->GPU DMA transfers.
+                            # See: https://github.com/vllm-project/vllm/issues/31624
+                            loaded_weight = loaded_weight.transpose(-1, -2).contiguous()
 
                         # Load the weight into the module parameter with
                         # corresponding shard id and expert id.
