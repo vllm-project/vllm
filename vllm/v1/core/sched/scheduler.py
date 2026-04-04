@@ -1063,7 +1063,7 @@ class Scheduler(SchedulerInterface):
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
-        all_token_ids: dict[str, list[int]] = {}
+        output_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
@@ -1092,8 +1092,15 @@ class Scheduler(SchedulerInterface):
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            if not scheduled_in_prev_step:
-                all_token_ids[req_id] = req.all_token_ids.copy()
+            if not scheduled_in_prev_step and self.scheduler_config.async_scheduling:
+                assert req.num_output_placeholders == 0, (
+                    "Unexpected output placeholders for request not scheduled "
+                    "in the previous step."
+                )
+            if not self.use_v2_model_runner and not scheduled_in_prev_step:
+                num_out = req.num_output_tokens + req.num_output_placeholders
+                if num_out > 0:
+                    output_token_ids[req_id] = req.output_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
@@ -1106,7 +1113,7 @@ class Scheduler(SchedulerInterface):
             req_ids=req_ids,
             resumed_req_ids=resumed_req_ids,
             new_token_ids=new_token_ids,
-            all_token_ids=all_token_ids,
+            output_token_ids=output_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
