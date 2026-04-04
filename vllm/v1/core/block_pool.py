@@ -414,13 +414,25 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Materialize the iterable to allow multiple passes.
-        blocks_list = list(ordered_blocks)
-        for block in blocks_list:
+        # Separate blocks into fresh (no hash) and cached (has hash).
+        # Fresh blocks go to front of queue (used first during allocation),
+        # cached blocks go to back (preserved longer for prefix cache hits).
+        fresh_blocks = []
+        cached_blocks = []
+        for block in ordered_blocks:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.block_hash is None:
+                    fresh_blocks.append(block)
+                else:
+                    cached_blocks.append(block)
+
+        # Fresh blocks go to front of queue (used first during allocation),
+        # cached blocks go to back (preserved longer for prefix cache hits).
+        if fresh_blocks:
+            self.free_block_queue.prepend_n(fresh_blocks)
+        if cached_blocks:
+            self.free_block_queue.append_n(cached_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
