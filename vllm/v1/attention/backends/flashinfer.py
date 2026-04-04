@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
 
-import time
-
 import numpy as np
 import torch
 from flashinfer import (
@@ -1716,14 +1714,7 @@ def fast_plan_decode(
     # Warm up with the original plan if it is first call, and always run the
     # original plan if we run for dynamic shape. For fixed shape (cudagraph),
     # this warm up is to generate the _cached_module for the decode wrapper.
-    is_first_call = getattr(self, "vllm_first_call", True)
-    if not self.is_cuda_graph_enabled or is_first_call:
-        if is_first_call:
-            logger.info(
-                "FlashInfer is JIT-compiling CUDA kernels on first use. "
-                "This may take several minutes..."
-            )
-            t0 = time.perf_counter()
+    if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
             indptr=indptr_cpu,
             indices=indices,
@@ -1748,11 +1739,6 @@ def fast_plan_decode(
             fixed_split_size=fixed_split_size,
             disable_split_kv=disable_split_kv,
         )
-        if is_first_call:
-            logger.info(
-                "FlashInfer CUDA kernel compilation complete (took %.1f s).",
-                time.perf_counter() - t0,
-            )
         self.vllm_first_call = False
         return
 
