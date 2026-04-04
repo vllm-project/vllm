@@ -1314,7 +1314,9 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     return x
 
 
-def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+def default_weight_loader(
+    param: torch.Tensor, loaded_weight: torch.Tensor, *args: object, **kwargs: object
+) -> None:
     """Default weight loader."""
     try:
         if param.numel() == 1 and loaded_weight.numel() == 1:

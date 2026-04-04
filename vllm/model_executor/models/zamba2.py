@@ -820,7 +820,7 @@ class Zamba2Model(nn.Module):
                     continue
                 chkpt_weight_name = chkpt_weight_name.replace(weight_name, param_name)
                 param = params_dict[chkpt_weight_name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:

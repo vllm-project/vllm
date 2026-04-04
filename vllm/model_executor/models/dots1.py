@@ -457,7 +457,7 @@ class Dots1Model(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -471,7 +471,9 @@ class Dots1Model(nn.Module):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = param.weight_loader
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(
                         param,
                         loaded_weight,

@@ -193,7 +193,7 @@ class OpenPanguMTP(nn.Module):
                     continue
 
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -204,7 +204,9 @@ class OpenPanguMTP(nn.Module):
                     name = name.replace(weight_name, param_name)
 
                     param = params_dict[name]
-                    weight_loader = param.weight_loader
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(
                         param,
                         loaded_weight,
