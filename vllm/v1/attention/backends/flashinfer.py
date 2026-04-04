@@ -67,6 +67,14 @@ from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
+# Temporary mitigation for Blackwell TRTLLM decode performance saddle
+# under very high decode request concurrency.
+TRTLLM_DECODE_CHUNK_TRIGGER_REQS = 512
+TRTLLM_DECODE_CHUNK_SIZE = 256
+TRTLLM_DECODE_CHUNK_THRESH_MID = 1024
+TRTLLM_DECODE_CHUNK_SIZE_MID = 384
+TRTLLM_DECODE_CHUNK_THRESH_HIGH = 1536
+TRTLLM_DECODE_CHUNK_SIZE_HIGH = 512
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -83,6 +91,17 @@ def _get_trtllm_gen_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_gen_workspace_buffer
+
+
+def _get_trtllm_decode_chunk_size(num_decodes: int) -> int:
+    # Keep smaller chunks for moderate decode concurrency to avoid the
+    # problematic kernel region, and use larger chunks at very high concurrency
+    # to reduce launch/slicing overhead.
+    if num_decodes > TRTLLM_DECODE_CHUNK_THRESH_HIGH:
+        return TRTLLM_DECODE_CHUNK_SIZE_HIGH
+    if num_decodes > TRTLLM_DECODE_CHUNK_THRESH_MID:
+        return TRTLLM_DECODE_CHUNK_SIZE_MID
+    return TRTLLM_DECODE_CHUNK_SIZE
 
 
 @triton.jit
@@ -1246,6 +1265,8 @@ class FlashInferImpl(AttentionImpl):
             self.sinks = sinks
 
         self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
+        capability = current_platform.get_device_capability()
+        self._is_sm100 = capability is not None and capability.major == 10
         vllm_config = get_current_vllm_config_or_none()
         self.supports_quant_query_input = (
             self.support_trtllm_attn
@@ -1611,40 +1632,83 @@ class FlashInferImpl(AttentionImpl):
                     f"contiguous, got strides {kv_strides}"
                 )
 
-                if output.dtype == FP4_DTYPE:
-                    assert self.o_sf_scale is not None
-                    out = FP4Tensor(
-                        data=output[:num_decode_tokens],
-                        scale=output_block_scale,
-                        scale_start_index=0,
-                        original_shape=decode_query.shape,
-                    )
-                else:
-                    assert self.o_sf_scale is None
-                    out = output[:num_decode_tokens]
-
                 if num_decode_tokens % attn_metadata.num_decodes != 0:
                     # This gets triggered when the dummy_run forces
                     # attention to be initialized with q_len = 0
                     q_len_per_req = 1
+                    has_uniform_q_len = False
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
+                    has_uniform_q_len = True
 
-                trtllm_batch_decode_with_kv_cache(
-                    query=decode_query,
-                    kv_cache=kv_cache_permute,
-                    workspace_buffer=workspace_buffer,
-                    block_tables=block_tables_decode,
-                    seq_lens=seq_lens_decode,
-                    max_seq_len=attn_metadata.decode.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
-                    bmm2_scale=self.bmm2_scale,
-                    window_left=self.window_left,
-                    sinks=self.sinks,
-                    o_sf_scale=self.o_sf_scale,
-                    out=out,
-                    q_len_per_req=q_len_per_req,
+                num_decodes = attn_metadata.num_decodes
+                use_chunked_decode = (
+                    has_uniform_q_len
+                    and self._is_sm100
+                    and output.dtype == FP4_DTYPE
+                    and attn_metadata.q_data_type == FP8_DTYPE
+                    and num_decodes > TRTLLM_DECODE_CHUNK_TRIGGER_REQS
                 )
+
+                if use_chunked_decode:
+                    assert self.o_sf_scale is not None
+                    assert output_block_scale is not None
+                    chunk_size = _get_trtllm_decode_chunk_size(num_decodes)
+                    for req_start in range(0, num_decodes, chunk_size):
+                        req_end = min(req_start + chunk_size, num_decodes)
+                        tok_start = req_start * q_len_per_req
+                        tok_end = req_end * q_len_per_req
+                        decode_query_chunk = decode_query[tok_start:tok_end]
+
+                        out_chunk = FP4Tensor(
+                            data=output[tok_start:tok_end],
+                            scale=output_block_scale,
+                            scale_start_index=tok_start,
+                            original_shape=decode_query_chunk.shape,
+                        )
+                        trtllm_batch_decode_with_kv_cache(
+                            query=decode_query_chunk,
+                            kv_cache=kv_cache_permute,
+                            workspace_buffer=workspace_buffer,
+                            block_tables=block_tables_decode[req_start:req_end],
+                            seq_lens=seq_lens_decode[req_start:req_end],
+                            max_seq_len=attn_metadata.decode.max_seq_len,
+                            bmm1_scale=self.bmm1_scale,
+                            bmm2_scale=self.bmm2_scale,
+                            window_left=self.window_left,
+                            sinks=self.sinks,
+                            o_sf_scale=self.o_sf_scale,
+                            out=out_chunk,
+                            q_len_per_req=q_len_per_req,
+                        )
+                else:
+                    if output.dtype == FP4_DTYPE:
+                        assert self.o_sf_scale is not None
+                        out = FP4Tensor(
+                            data=output[:num_decode_tokens],
+                            scale=output_block_scale,
+                            scale_start_index=0,
+                            original_shape=decode_query.shape,
+                        )
+                    else:
+                        assert self.o_sf_scale is None
+                        out = output[:num_decode_tokens]
+
+                    trtllm_batch_decode_with_kv_cache(
+                        query=decode_query,
+                        kv_cache=kv_cache_permute,
+                        workspace_buffer=workspace_buffer,
+                        block_tables=block_tables_decode,
+                        seq_lens=seq_lens_decode,
+                        max_seq_len=attn_metadata.decode.max_seq_len,
+                        bmm1_scale=self.bmm1_scale,
+                        bmm2_scale=self.bmm2_scale,
+                        window_left=self.window_left,
+                        sinks=self.sinks,
+                        o_sf_scale=self.o_sf_scale,
+                        out=out,
+                        q_len_per_req=q_len_per_req,
+                    )
         return output_padded
 
     def do_kv_cache_update(
