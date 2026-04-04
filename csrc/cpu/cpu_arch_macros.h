@@ -55,14 +55,32 @@
         vec_res = _mm512_mul_ps(vec_res, vec_two);                             \
         vec_op::FP32Vec16 res(vec_res);                                        \
         return res;                                                            \
+      };                                                                       \
+      auto fast_exp_16 = [&](const vec_op::FP32Vec16& vec) __attribute__((     \
+                          always_inline)) {                                    \
+        return fast_exp(vec);                                                  \
       };
   #endif
 
 #endif
 
 #ifdef __aarch64__
-  // Implementation copied from Arm Optimized Routines (expf AdvSIMD)
+  // Implementation of neon_expf copied from Arm Optimized Routines (expf AdvSIMD)
   // https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/expf.c
+  //
+  // Additional fast exponential intended for cases where outputs will be downcasted to
+  // FP16 / BF16 (e.g. attention softmax). Accurate within 1 ULP for FP16
+  // Accurate within 1 ULP for BF16 for inputs in [-87.683, 88.376] & clamps
+  // inputs outside this range to 0 / inf. Implementation is similar to
+  // exp_u20, but:
+  // - uses a third degree polynomial approximation for exp(r) instead of a
+  // fifth degree one, with coefficients re-tuned.
+  // - does not split natural log (ln) into high / low parts
+  // - clamps exp(x) to 0 for x < -87.683113f and inf for x > 88.3762589f
+  // exp(x) = 2^n (exp(r))
+  // r = x - n*ln2, with n = round(x/ln2)
+  // exp(r) ~ poly(r) = 1 + r + r^2 * (c3 + c2 * r)
+  // n = round(x / ln2), r = x - n*ln2
   #include <limits>
   #define DEFINE_FAST_EXP                                                      \
     const float32x4_t inv_ln2 = vdupq_n_f32(0x1.715476p+0f);                   \
@@ -105,6 +123,36 @@
                           result.val[1] = neon_expf(vec.reg.val[1]);           \
                           result.val[2] = neon_expf(vec.reg.val[2]);           \
                           result.val[3] = neon_expf(vec.reg.val[3]);           \
+                          return vec_op::FP32Vec16(result);                    \
+                        };                                                     \
+    const float32x4_t lower_bound = vdupq_n_f32(-0x1.5ebb82p+6f);              \
+    const float32x4_t upper_bound = vdupq_n_f32(0x1.61814ap+6f);               \
+    constexpr float ln2 = 0x1.62e43p-1f;                                       \
+    constexpr float f_c2 = 0x1.5592ecp-3f;                                     \
+    const float32x4_t f_c3 = vdupq_n_f32(0x1.017d34p-1f);                      \
+    auto neon_expf_f16 = [&](float32x4_t values) __attribute__((always_inline)) {  \
+    const uint32x4_t lt_lower = vcltq_f32(values, lower_bound);                \
+    const uint32x4_t gt_upper = vcgtq_f32(values, upper_bound);                \
+    float32x4_t n = vrndaq_f32(vmulq_f32(values, inv_ln2));                    \
+    float32x4_t r = vfmsq_n_f32(values, n, ln2);                               \
+    uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(vcvtq_s32_f32(n)), 23);   \
+    float32x4_t r2 = vmulq_f32(r, r);                                          \
+    float32x4_t q = vfmaq_n_f32(f_c3, r, f_c2);                                \
+    float32x4_t s = vaddq_f32(vdupq_n_f32(1.0f), r);                           \
+    float32x4_t p = vfmaq_f32(s, q, r2);                                       \
+    float32x4_t y =                                                            \
+        vreinterpretq_f32_u32(vaddq_u32(vreinterpretq_u32_f32(p), e));         \
+    y = vbslq_f32(lt_lower, vdupq_n_f32(0.0f), y);                             \
+    y = vbslq_f32(gt_upper, vdupq_n_f32(INFINITY), y);                         \
+    return y;                                                                  \
+    };                                                                         \
+    auto fast_exp_f16 = [&](const vec_op::FP32Vec16& vec)                      \
+                        __attribute__((always_inline)) {                       \
+                          float32x4x4_t result;                                \
+                          result.val[0] = neon_expf_f16(vec.reg.val[0]);       \
+                          result.val[1] = neon_expf_f16(vec.reg.val[1]);       \
+                          result.val[2] = neon_expf_f16(vec.reg.val[2]);       \
+                          result.val[3] = neon_expf_f16(vec.reg.val[3]);       \
                           return vec_op::FP32Vec16(result);                    \
                         };
 
