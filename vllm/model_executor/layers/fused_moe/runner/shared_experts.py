@@ -110,12 +110,10 @@ class SharedExperts:
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
-        if self._has_external_experts and not self._use_dp_chunking:
-            return SharedExpertsOrder.EXTERNAL
-
         if self._quant_method.mk_owns_shared_expert:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
+        # Prefer multi-stream overlap when aux stream is available
         should_run_shared_in_aux_stream = (
             current_platform.is_cuda()
             and not self._use_dp_chunking
@@ -126,8 +124,11 @@ class SharedExperts:
 
         if should_run_shared_in_aux_stream:
             return SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
-        else:
-            return SharedExpertsOrder.NO_OVERLAP
+
+        if self._has_external_experts and not self._use_dp_chunking:
+            return SharedExpertsOrder.EXTERNAL
+
+        return SharedExpertsOrder.NO_OVERLAP
 
     def maybe_sync_shared_experts_stream(
         self,
