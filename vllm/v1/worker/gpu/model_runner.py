@@ -84,6 +84,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
+from vllm.v1.worker.gpu.routed_experts_utils import RoutedExpertsCaptureHelper
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -243,6 +244,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
+        self.routed_experts = RoutedExpertsCaptureHelper()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -384,6 +386,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.cache_config.cache_dtype,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def init_routed_experts_capturer(self) -> None:
+        self.routed_experts.init(self)
 
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
@@ -912,6 +917,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self.routed_experts.before_execute()
+
         if not dummy_run:
             # Update the request states.
             self.finish_requests(scheduler_output)
@@ -996,6 +1003,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
+            self.routed_experts.record_slot_mapping(slot_mappings, num_toks)
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
@@ -1165,6 +1173,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             kv_connector_output=kv_connector_output,
         )
+        self.routed_experts.save()
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
