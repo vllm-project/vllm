@@ -326,6 +326,6 @@ void tq_fused_store_launch(
 
     if      (value_quant_bits == 8) { LAUNCH(8); }
     else if (value_quant_bits == 4) { LAUNCH(4); }
-    else { TORCH_CHECK(false, "Unsupported value_quant_bits=", value_quant_bits, " (only 4 and 8 supported)"); }
+    else { TORCH_CHECK(false, "Unsupported value_quant_bits=", value_quant_bits, " (only 4 and 8 supported in CUDA store; use Triton path for VQB=3)"); }
     #undef LAUNCH
 }

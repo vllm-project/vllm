@@ -820,6 +820,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             value_packed_size=self.tq_config.value_packed_size,
             max_seq_len=attn_metadata.max_seq_len,
             key_fp8=self.tq_config.key_fp8,
+            norm_correction=self.tq_config.norm_correction,
         )
 
     # ------------------------------------------------------------------ #

@@ -121,6 +121,10 @@ class TurboQuantizer(nn.Module):
 
         # MSE reconstruction
         reconstructed_rotated = self.centroids[flat_idx]  # (N, d)
+        if self.config.norm_correction:
+            rot_norms = reconstructed_rotated.norm(
+                dim=-1, keepdim=True).clamp(min=1e-8)
+            reconstructed_rotated = reconstructed_rotated / rot_norms
         x_mse = reconstructed_rotated @ self.Pi  # (N, d)
 
         # Rescale by original norm

@@ -75,6 +75,7 @@ def _tq_decode_stage1(
     BLOCK_D: tl.constexpr,          # next_power_of_2(HEAD_DIM)
     BLOCK_KV: tl.constexpr,         # tokens per tile (16)
     KEY_FP8: tl.constexpr,          # 1 if K is stored as FP8
+    NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
 ):
     bid = tl.program_id(0)   # batch index
     hid = tl.program_id(1)   # q_head index
@@ -171,6 +172,16 @@ def _tq_decode_stage1(
                 Centroids_ptr + mse_idx,
                 mask=kv_mask[:, None] & d_mask[None, :], other=0.0,
             )
+
+            # Norm correction: re-normalize centroid vector to unit norm
+            if NORM_CORRECTION:
+                c_norm_sq = tl.sum(
+                    tl.where(d_mask[None, :], c_vals * c_vals, 0.0),
+                    axis=1,
+                )
+                c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
+                c_vals = c_vals * c_inv_norm[:, None]
+
             term1 = tl.sum(
                 tl.where(d_mask[None, :], q_rot[None, :] * c_vals, 0.0),
                 axis=1,
@@ -204,6 +215,32 @@ def _tq_decode_stage1(
                 mask=kv_mask[:, None] & d_mask[None, :], other=0,
             )
             values = val_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+        elif VQB == 3:
+            # 3-bit value unpack: 8 values per 3 bytes, same bit layout as MSE keys
+            val_bit_off = d_offs * 3
+            val_byte_idx = val_bit_off // 8
+            val_bit_shift = val_bit_off % 8
+
+            val_addrs0 = val_bases[:, None] + val_byte_idx[None, :]
+            val_raw0 = tl.load(
+                KV_cache_ptr + val_addrs0,
+                mask=kv_mask[:, None] & d_mask[None, :], other=0,
+            ).to(tl.int32)
+            val_raw1 = tl.load(
+                KV_cache_ptr + val_addrs0 + 1,
+                mask=kv_mask[:, None] & d_mask[None, :], other=0,
+            ).to(tl.int32)
+            raw16 = val_raw0 | (val_raw1 << 8)
+            v_idx = ((raw16 >> val_bit_shift[None, :]) & 0x7).to(tl.float32)
+
+            sc_bases = val_bases + VAL_DATA_BYTES
+            sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(tl.uint16)
+            sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(tl.uint16)
+            v_scales = (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+            zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(tl.uint16)
+            zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(tl.uint16)
+            v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+            values = v_idx * v_scales[:, None] + v_zeros[:, None]
         else:  # VQB == 4
             vb_idx = d_offs // 2
             vb_shift = (d_offs % 2) * 4
@@ -264,6 +301,7 @@ def _tq_full_dequant_kv(
     N_CENTROIDS: tl.constexpr,
     KEY_FP8: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    NORM_CORRECTION: tl.constexpr = 0,
 ):
     """Full dequant: reconstruct K (MSE centroids * norm or FP8) and V to fp16."""
     pos = tl.program_id(0)
@@ -307,6 +345,12 @@ def _tq_full_dequant_kv(
 
         k_mse = tl.load(Centroids_ptr + mse_idx, mask=d_mask, other=0.0)
 
+        # Norm correction: re-normalize centroid vector to unit norm
+        if NORM_CORRECTION:
+            c_norm_sq = tl.sum(tl.where(d_mask, k_mse * k_mse, 0.0), axis=0)
+            c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
+            k_mse = k_mse * c_inv_norm
+
         # Norms at MSE_BYTES offset (no QJL bytes)
         norm_base = slot_base + MSE_BYTES
         n_lo = tl.load(KV_cache_ptr + norm_base).to(tl.uint16)
@@ -337,6 +381,26 @@ def _tq_full_dequant_kv(
         val_raw = tl.load(KV_cache_ptr + val_base + d_offs,
                           mask=d_mask, other=0)
         v_vals = val_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+    elif VQB == 3:
+        # 3-bit value unpack: 8 values per 3 bytes
+        val_bit_off = d_offs * 3
+        val_byte_idx = val_bit_off // 8
+        val_bit_shift = val_bit_off % 8
+        val_raw0 = tl.load(KV_cache_ptr + val_base + val_byte_idx,
+                           mask=d_mask, other=0).to(tl.int32)
+        val_raw1 = tl.load(KV_cache_ptr + val_base + val_byte_idx + 1,
+                           mask=d_mask, other=0).to(tl.int32)
+        raw16 = val_raw0 | (val_raw1 << 8)
+        v_idx = ((raw16 >> val_bit_shift) & 0x7).to(tl.float32)
+
+        sc_base = val_base + VAL_DATA_BYTES
+        sc_lo = tl.load(KV_cache_ptr + sc_base).to(tl.uint16)
+        sc_hi = tl.load(KV_cache_ptr + sc_base + 1).to(tl.uint16)
+        v_scale = (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+        zr_lo = tl.load(KV_cache_ptr + sc_base + 2).to(tl.uint16)
+        zr_hi = tl.load(KV_cache_ptr + sc_base + 3).to(tl.uint16)
+        v_zero = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+        v_vals = v_idx * v_scale + v_zero
     else:
         v_vals = tl.zeros([BLOCK_D], dtype=tl.float32)
 
@@ -641,6 +705,7 @@ def triton_tq_decode_attention(
     num_kv_splits: int = 128,
     max_seq_len: int = 0,
     key_fp8: bool = False,
+    norm_correction: bool = False,
 ) -> torch.Tensor:
     """Launch fused TQ decode attention.
 
@@ -700,11 +765,14 @@ def triton_tq_decode_attention(
     sparse_v_threshold = float(os.environ.get("TQ_SPARSE_V_THRESHOLD", "1e-6"))
 
     # Path 2: CUDA warp-per-head kernel
+    # Disabled for VQB=3: CUDA kernels hardcode 4-bit value unpack.
+    # Falls through to Triton stage1 which has proper 3-bit support.
     wph_mod = _get_wph_module(head_dim=D, kv_group_size=kv_group_size)
     use_wph = (wph_mod is not None
                and D in (128, 256)
                and kv_group_size in (1, 2, 4, 8, 16)
-               and 32 * kv_group_size <= 1024)
+               and 32 * kv_group_size <= 1024
+               and value_quant_bits != 3)
 
     if use_wph:
         if not getattr(triton_tq_decode_attention, '_wph_path_logged', False):
@@ -777,6 +845,7 @@ def triton_tq_decode_attention(
             BLOCK_D=cfg['BLOCK_D'],
             BLOCK_KV=BLOCK_KV,
             KEY_FP8=1 if key_fp8 else 0,
+            NORM_CORRECTION=1 if norm_correction else 0,
             num_warps=4,
             num_stages=2,
         )

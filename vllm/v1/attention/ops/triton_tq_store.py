@@ -193,6 +193,46 @@ def _tq_semifused_store(
         val_u8 = val_vec.to(tl.float8e4b15).to(tl.uint8, bitcast=True)
         tl.store(KV_cache_ptr + slot_base + val_cache_offset + d_offs,
                  val_u8, mask=d_mask)
+    elif VQB == 3:
+        val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
+        val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
+        v_scale = (val_max - val_min) / 7.0  # 2^3 - 1 = 7
+        v_scale = tl.where(v_scale > 1e-8, v_scale, 1e-8)
+
+        # Quantize all dims to 0-7
+        q_vals = tl.minimum(tl.maximum(
+            ((val_vec - val_min) / v_scale + 0.5).to(tl.int32), 0), 7)
+
+        # Pack 8 values into 3 bytes (same as MSE 3-bit packing)
+        grp_offs = tl.arange(0, BLOCK_GRP)
+        grp_mask = grp_offs < (D // 8)
+        q_grp = tl.reshape(q_vals, [BLOCK_GRP, 8])
+        shifts_3bit = tl.arange(0, 8) * 3
+        packed_24 = tl.sum(q_grp << shifts_3bit[None, :], axis=1)
+        b0 = (packed_24 & 0xFF).to(tl.uint8)
+        b1 = ((packed_24 >> 8) & 0xFF).to(tl.uint8)
+        b2 = ((packed_24 >> 16) & 0xFF).to(tl.uint8)
+        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3,
+                 b0, mask=grp_mask)
+        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3 + 1,
+                 b1, mask=grp_mask)
+        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3 + 2,
+                 b2, mask=grp_mask)
+
+        sc_offset = val_cache_offset + VAL_DATA_BYTES
+        sc_f16 = v_scale.to(tl.float16)
+        sc_u16 = sc_f16.to(tl.uint16, bitcast=True)
+        tl.store(KV_cache_ptr + slot_base + sc_offset,
+                 (sc_u16 & 0xFF).to(tl.uint8))
+        tl.store(KV_cache_ptr + slot_base + sc_offset + 1,
+                 ((sc_u16 >> 8) & 0xFF).to(tl.uint8))
+        zr_f16 = val_min.to(tl.float16)
+        zr_u16 = zr_f16.to(tl.uint16, bitcast=True)
+        tl.store(KV_cache_ptr + slot_base + sc_offset + 2,
+                 (zr_u16 & 0xFF).to(tl.uint8))
+        tl.store(KV_cache_ptr + slot_base + sc_offset + 3,
+                 ((zr_u16 >> 8) & 0xFF).to(tl.uint8))
+
     else:  # VQB == 4
         val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
         val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
@@ -354,6 +394,45 @@ def _tq_fused_store(
         val_vec = tl.load(Value_ptr + base + d_offs, mask=d_mask, other=0.0)
         val_u8 = val_vec.to(tl.float8e4b15).to(tl.uint8, bitcast=True)
         tl.store(KV_cache_ptr + slot_base + val_cache_offset + d_offs, val_u8, mask=d_mask)
+
+    elif VQB == 3:
+        d_offs = tl.arange(0, BLOCK_D)
+        d_mask = d_offs < D
+        val_vec = tl.load(Value_ptr + base + d_offs, mask=d_mask, other=0.0)
+        val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
+        val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
+        v_scale = (val_max - val_min) / 7.0  # 2^3 - 1 = 7
+        v_scale = tl.where(v_scale > 1e-8, v_scale, 1e-8)
+
+        # Quantize all dims to 0-7
+        q_vals = tl.minimum(tl.maximum(
+            ((val_vec - val_min) / v_scale + 0.5).to(tl.int32), 0), 7)
+
+        # Pack 8 values into 3 bytes (same as MSE 3-bit packing)
+        grp_offs = tl.arange(0, BLOCK_GRP)
+        grp_mask = grp_offs < (D // 8)
+        q_grp = tl.reshape(q_vals, [BLOCK_GRP, 8])
+        shifts_3bit = tl.arange(0, 8) * 3
+        packed_24 = tl.sum(q_grp << shifts_3bit[None, :], axis=1)
+        b0 = (packed_24 & 0xFF).to(tl.uint8)
+        b1 = ((packed_24 >> 8) & 0xFF).to(tl.uint8)
+        b2 = ((packed_24 >> 16) & 0xFF).to(tl.uint8)
+        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3,
+                 b0, mask=grp_mask)
+        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3 + 1,
+                 b1, mask=grp_mask)
+        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3 + 2,
+                 b2, mask=grp_mask)
+
+        sc_offset = val_cache_offset + VAL_DATA_BYTES
+        sc_f16 = v_scale.to(tl.float16)
+        sc_u16 = sc_f16.to(tl.uint16, bitcast=True)
+        tl.store(KV_cache_ptr + slot_base + sc_offset,     (sc_u16 & 0xFF).to(tl.uint8))
+        tl.store(KV_cache_ptr + slot_base + sc_offset + 1, ((sc_u16 >> 8) & 0xFF).to(tl.uint8))
+        zr_f16 = val_min.to(tl.float16)
+        zr_u16 = zr_f16.to(tl.uint16, bitcast=True)
+        tl.store(KV_cache_ptr + slot_base + sc_offset + 2, (zr_u16 & 0xFF).to(tl.uint8))
+        tl.store(KV_cache_ptr + slot_base + sc_offset + 3, ((zr_u16 >> 8) & 0xFF).to(tl.uint8))
 
     else:  # VQB == 4
         d_offs = tl.arange(0, BLOCK_D)
