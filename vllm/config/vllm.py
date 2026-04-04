@@ -1936,14 +1936,59 @@ def get_layers_from_vllm_config(
         layer_names: The names of the layers to get. If None, return all layers.
     """
 
-    if layer_names is None:
-        layer_names = list(vllm_config.compilation_config.static_forward_context.keys())
-
     forward_context = vllm_config.compilation_config.static_forward_context
 
-    return {
-        layer_name: forward_context[layer_name]
-        for layer_name in layer_names
-        if layer_name in forward_context
-        and isinstance(forward_context[layer_name], layer_type)
-    }
+    # If no explicit layer names requested, return all matching layers
+    if layer_names is None:
+        return {
+            layer_name: layer_obj
+            for layer_name, layer_obj in forward_context.items()
+            if isinstance(layer_obj, layer_type)
+        }
+
+    resolved: dict[str, T] = {}
+
+    for req_name in layer_names:
+        # Try the requested name first
+        if req_name in forward_context and isinstance(
+            forward_context[req_name], layer_type
+        ):
+            resolved[req_name] = forward_context[req_name]
+            continue
+
+        # Try variants to tolerate common prefix differences such as
+        # 'language_model.model.layers...' vs 'language_model.layers...'
+        tried = False
+        # Variant 1: remove a redundant '.model.' segment (only first occurrence)
+        alt = req_name.replace(".model.", ".", 1)
+        if alt != req_name and alt in forward_context and isinstance(
+            forward_context[alt], layer_type
+        ):
+            resolved[req_name] = forward_context[alt]
+            continue
+
+        # Variant 2: insert '.model.' after 'language_model' (common for some
+        # HF-to-vLLM mappings)
+        if req_name.startswith("language_model."):
+            alt2 = req_name.replace("language_model.", "language_model.model.", 1)
+            if alt2 in forward_context and isinstance(
+                forward_context[alt2], layer_type
+            ):
+                resolved[req_name] = forward_context[alt2]
+                continue
+
+        # Variant 3: collapse duplicate 'model.model.' to single 'model.'
+        if "model.model." in req_name:
+            alt3 = req_name.replace("model.model.", "model.")
+            if alt3 in forward_context and isinstance(
+                forward_context[alt3], layer_type
+            ):
+                resolved[req_name] = forward_context[alt3]
+                continue
+
+        # Not found; skip (caller may raise KeyError later). We intentionally
+        # don't raise here to preserve previous semantics, but returning the
+        # mapping keyed by requested names allows callers to index by the
+        # original keys without KeyError due to simple prefix mismatches.
+
+    return resolved
