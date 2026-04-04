@@ -155,6 +155,8 @@ def get_flash_attn_version(
 
 
 def flash_attn_supports_fp8() -> bool:
+    if current_platform.is_xpu():
+        return True
     return (
         get_flash_attn_version() == 3
         and current_platform.is_device_capability_family(90)
