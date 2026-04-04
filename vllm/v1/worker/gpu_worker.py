@@ -278,6 +278,9 @@ class Worker(WorkerBase):
             gc.collect()
             torch.accelerator.empty_cache()
 
+            # Ensure CUDA context is fully initialized (needed for LD_PRELOAD shims)
+            torch.zeros(1, device=self.device)
+
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(init_snapshot, self.cache_config)
