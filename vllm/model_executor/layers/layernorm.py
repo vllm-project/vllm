@@ -242,7 +242,7 @@ class RMSNorm(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         if residual is None:
             return ir.ops.rms_norm(
-                x, self.weight.data, self.variance_epsilon, self.variance_size_override
+                x, self.weight.data if self.has_weight else None, self.variance_epsilon, self.variance_size_override
             )
 
         return self.forward_static(
