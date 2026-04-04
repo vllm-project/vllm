@@ -1025,6 +1025,8 @@ class StreamingXMLToolCallParser:
             for v in variants:
                 if not isinstance(v, dict):
                     continue
+                if "$ref" in v:
+                    return "object"
                 resolved = self._first_non_null_type(v.get("type"))
                 if resolved:
                     return resolved
