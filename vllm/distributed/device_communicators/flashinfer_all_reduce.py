@@ -5,6 +5,7 @@
 import atexit
 import os
 import random
+import sys
 import threading
 
 import torch
@@ -211,18 +212,37 @@ _fi_ar_workspace_lock = threading.Lock()
 
 
 def destroy_fi_ar_workspace():
+    """Destroy the AllReduce fusion workspaces.
+
+    This function handles cleanup during shutdown. When Python is shutting down,
+    sys.meta_path may be None, so we catch and ignore ImportError in that case.
+    """
     global _fi_ar_workspace, _fi_ar_quant_workspace
+
+    # Check if Python is shutting down (sys.meta_path is None during shutdown)
+    if sys.meta_path is None:
+        return
+
     with _fi_ar_workspace_lock:
         is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
 
         if _fi_ar_workspace is not None:
-            _fi_ar_workspace.destroy()
+            try:
+                _fi_ar_workspace.destroy()
+            except (ImportError, AttributeError):
+                # Python may be shutting down, ignore errors
+                pass
         if _fi_ar_quant_workspace is not None and not is_alias:
-            _fi_ar_quant_workspace.destroy()
+            try:
+                _fi_ar_quant_workspace.destroy()
+            except (ImportError, AttributeError):
+                # Python may be shutting down, ignore errors
+                pass
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
 
 
+# Register cleanup on exit to ensure graceful shutdown
 atexit.register(destroy_fi_ar_workspace)
 
 
