@@ -254,6 +254,19 @@ class TestHarmonyToResponseOutput:
         assert output_items[0].name == "custom_tool"
         assert output_items[0].server_label == "custom_tool"
 
+    def test_analysis_with_function_recipient_creates_function_call(self):
+        """GPT-OSS models sometimes emit tool calls on analysis channel.
+        Should produce function call, not MCP call."""
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"location": "SF"}')
+        message = message.with_channel("analysis")
+        message = message.with_recipient("functions.get_weather")
+
+        output_items = harmony_to_response_output(message)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].name == "get_weather"
+
     def test_analysis_channel_creates_reasoning(self):
         """Test that analysis channel creates reasoning items."""
         message = Message.from_role_and_content(

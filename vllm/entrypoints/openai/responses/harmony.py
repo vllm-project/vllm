@@ -387,6 +387,52 @@ def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem
     return output_items
 
 
+def _try_extract_embedded_function_call(
+    message: Message,
+) -> list[ResponseOutputItem] | None:
+    """Try to extract a function call embedded in a preamble message's content.
+
+    When the model outputs a preamble (<|channel|>commentary<|message|>) and
+    then immediately embeds a function-call channel sequence as content, the
+    harmony parser stores the raw channel tokens in the message content.  This
+    helper detects that pattern and re-parses it as a function call.
+
+    Returns a list of output items if an embedded call was detected, else None.
+    """
+    if not message.content:
+        return None
+    text = message.content[0].text
+    # Match: <|channel|>(commentary|analysis) to=functions.NAME<|message|>ARGS
+    for channel_prefix in (
+        "<|channel|>commentary to=functions.",
+        "<|channel|>analysis to=functions.",
+    ):
+        if not text.startswith(channel_prefix):
+            continue
+        rest = text[len(channel_prefix) :]
+        msg_sep = "<|message|>"
+        if msg_sep not in rest:
+            continue
+        name_part, args_part = rest.split(msg_sep, 1)
+        function_name = name_part.strip()
+        if not function_name:
+            continue
+        # Strip trailing <|end|> if present in the args
+        if args_part.endswith("<|end|>"):
+            args_part = args_part[: -len("<|end|>")]
+        random_id = random_uuid()
+        return [
+            ResponseFunctionToolCall(
+                arguments=args_part,
+                call_id=f"call_{random_id}",
+                type="function_call",
+                name=function_name,
+                id=f"fc_{random_id}",
+            )
+        ]
+    return None
+
+
 def _parse_message_no_recipient(
     message: Message,
 ) -> list[ResponseOutputItem]:
@@ -398,6 +444,11 @@ def _parse_message_no_recipient(
         # Per Harmony format, preambles (commentary with no recipient) and
         # final channel content are both intended to be shown to end-users.
         # See: https://cookbook.openai.com/articles/openai-harmony
+        # But first check if the content is an embedded function call
+        # (model output a preamble whose content contains the tool call tokens).
+        embedded = _try_extract_embedded_function_call(message)
+        if embedded is not None:
+            return embedded
         return [_parse_final_message(message)]
 
     raise ValueError(f"Unknown channel: {message.channel}")
@@ -427,8 +478,11 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
         if recipient.startswith("browser."):
             output_items.append(_parse_browser_tool_call(message, recipient))
 
-        # Function calls (should only happen on commentary channel)
-        elif message.channel == "commentary" and recipient.startswith("functions."):
+        # Function calls (commentary or analysis channel — GPT-OSS models
+        # sometimes emit tool calls on analysis channel)
+        elif message.channel in ("commentary", "analysis") and recipient.startswith(
+            "functions."
+        ):
             output_items.extend(_parse_function_call(message, recipient))
 
         # Built-in MCP tools (python, browser, container)
