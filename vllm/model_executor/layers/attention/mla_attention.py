@@ -779,7 +779,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if quant_key is not None:
             # Quantize the BF16 computation result into the quantized output
             actual = output[:num_actual_toks]
-            if quant_key.scale.group_shape.is_per_group():
+            if quant_key == kNvfp4Dynamic:
+                # NVFP4: two FP4 values packed into one uint8
+                assert output_block_scale is not None
+                fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
+                quant_output[:num_actual_toks].copy_(fp4_data)
+                output_block_scale[: fp4_scales.shape[0]].copy_(fp4_scales)
+            elif quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
                 # Per-group FP8 (block quant)
                 assert output_block_scale is not None
                 cfg = self._group_quant_config
@@ -800,16 +806,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     cfg.col_major,
                     cfg.tma_aligned,
                 )
-            elif quant_key == kNvfp4Dynamic:
-                # NVFP4: two FP4 values packed into one uint8
-                assert output_block_scale is not None
-                fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
-                quant_output[:num_actual_toks].copy_(fp4_data)
-                output_block_scale[: fp4_scales.shape[0]].copy_(fp4_scales)
-            else:
+            elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
                 fp8_data, _ = self._quant_fp8_op(actual, output_scale)
                 quant_output[:num_actual_toks].copy_(fp8_data)
+            else:
+                raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
 
         return output_padded
