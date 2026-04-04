@@ -13,17 +13,19 @@ from vllm.v1.kv_offload.abstract import (
 from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
+from vllm.v1.kv_offload.cpu.policies.slru import SLRUCachePolicy
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
     "arc": ARCCachePolicy,
+    "slru": SLRUCachePolicy,
 }
 
 
 class CPUOffloadingManager(OffloadingManager):
     """
-    An OffloadingManager with a pluggable CachePolicy (LRU or ARC).
+    An OffloadingManager with a pluggable CachePolicy (LRU, ARC, or SLRU).
 
     The manager owns all shared logic: ref-counting, event emission,
     block pool management, and the prepare_store/complete_store skeletons.
@@ -35,7 +37,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         block_size: int,
         num_blocks: int,
-        cache_policy: Literal["lru", "arc"] = "lru",
+        cache_policy: Literal["lru", "arc", "slru"] = "lru",
         enable_events: bool = False,
     ):
         self.block_size: int = block_size
