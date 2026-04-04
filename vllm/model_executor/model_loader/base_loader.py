@@ -50,13 +50,12 @@ class BaseModelLoader(ABC):
             device_config.device if load_config.device is None else load_config.device
         )
         target_device = torch.device(load_device)
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(
-                    vllm_config=vllm_config,
-                    model_config=model_config,
-                    prefix=prefix,
-                )
+        with set_default_torch_dtype(model_config.dtype), target_device:
+            model = initialize_model(
+                vllm_config=vllm_config,
+                model_config=model_config,
+                prefix=prefix,
+            )
 
             log_model_inspection(model)
 
