@@ -70,6 +70,75 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
+## PR Review Dashboard — Priority Configuration
+
+The following priority scoring rules are used by the [vLLM PR Dashboard](https://github.com/functionstackx/vllm-pr-dashboard) to triage and rank pull requests.
+
+### Critical Keywords
+
+Keywords in PR titles/bodies that signal urgent issues and boost priority score:
+
+| Keyword | Priority Score |
+|---------|---------------|
+| data corruption | 30 |
+| regression | 25 |
+| crash | 25 |
+| broken | 25 |
+| segfault | 25 |
+| hang | 20 |
+| deadlock | 20 |
+| SIGABRT | 20 |
+| urgent | 20 |
+| critical | 20 |
+| hotfix | 20 |
+| OOM | 15 |
+| out of memory | 15 |
+| does not work | 15 |
+| failing | 10 |
+
+### Customer Keywords
+
+PRs mentioning these organizations receive a priority boost:
+
+| Customer | Priority Score |
+|----------|---------------|
+| Meta | 30 |
+| Facebook | 30 |
+| AWS | 30 |
+| Amazon | 30 |
+| Anthropic | 30 |
+| SemiAnalysis | 30 |
+| Microsoft | 25 |
+| Google | 25 |
+| Databricks | 25 |
+| Anyscale | 25 |
+| Oracle | 20 |
+| IBM | 20 |
+| Intel | 15 |
+| Samsung | 15 |
+| Hugging Face | 15 |
+
+### Critical Paths
+
+High-importance code areas. Changes touching these paths receive a priority boost (scores adjusted +1 from baseline):
+
+| Path / Area | Priority Score |
+|-------------|---------------|
+| attention | 16 |
+| flash_attn | 16 |
+| paged_attention | 16 |
+| quantization | 16 |
+| model_executor | 11 |
+| model_runner | 11 |
+| serving | 11 |
+| scheduler | 11 |
+| tensor_parallel | 11 |
+| pipeline_parallel | 11 |
+| distributed | 11 |
+| cuda_graph | 11 |
+| performance | 11 |
+| benchmark | 6 |
+
 ## Contributing
 
 We welcome and value any contributions and collaborations.
