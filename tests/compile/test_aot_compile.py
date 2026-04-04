@@ -21,6 +21,9 @@ from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
 )
+from vllm.compilation.compiler_interface import (
+    _patch_standalone_compile_fake_tensor_mode,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -917,3 +920,27 @@ def test_aot_counters_on_save_and_load(
         ),
     ):
         CompiledMod(vllm_config=vllm_config)(*args)
+
+
+def test_patch_standalone_compile_fake_tensor_mode_uses_function_globals():
+    fake_mode = object()
+
+    def standalone_compile_like():
+        return FakeTensorMode()  # noqa: F821
+
+    original_fake_tensor_mode = standalone_compile_like.__globals__.get(
+        "FakeTensorMode")
+
+    with _patch_standalone_compile_fake_tensor_mode(
+        standalone_compile_like,
+        fake_mode,
+    ):
+        assert standalone_compile_like() is fake_mode
+
+    if original_fake_tensor_mode is None:
+        assert "FakeTensorMode" not in standalone_compile_like.__globals__
+    else:
+        assert (
+            standalone_compile_like.__globals__["FakeTensorMode"]
+            is original_fake_tensor_mode
+        )
