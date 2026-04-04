@@ -405,6 +405,29 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     assert not hasattr(layer, "prob_scale")
 
 
+def test_process_weights_static_scale_sync():
+    """_prob_scale_float must be synced, and q_scale must fall back to k_scale."""
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+
+    layer = MagicMock()
+    layer.kv_cache_dtype = "fp8_e4m3fn"
+    layer.calculate_kv_scales = False
+    layer.k_scale = torch.nn.Parameter(torch.tensor(0.8), requires_grad=False)
+    layer.v_scale = torch.nn.Parameter(torch.tensor(0.8), requires_grad=False)
+    layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+    layer.prob_scale = torch.nn.Parameter(torch.tensor(0.5), requires_grad=False)
+    for name in ("_k_scale", "_v_scale", "_q_scale", "_prob_scale"):
+        setattr(layer, name, torch.tensor(1.0))
+        setattr(layer, name + "_float", 1.0)
+
+    method = BaseKVCacheMethod.__new__(BaseKVCacheMethod)
+    method.quant_config = MagicMock()
+    method.process_weights_after_loading(layer)
+
+    assert layer._prob_scale.item() == layer._prob_scale_float
+    assert abs(layer._q_scale.item() - 0.8) < 1e-5
+
+
 # ===========================================================================
 # 6. Triton unified_attention -- per-token-head scale cache (INT8 and FP8)
 # ===========================================================================
