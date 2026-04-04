@@ -127,20 +127,11 @@ def _tq_semifused_store(
     gamma_val = tl.sqrt(gamma_sq + 1e-16)
 
     # ================================================================
-    # STEP 4: Pack MSE indices (generic for MSE_BITS = 2, 3, or 4)
+    # STEP 4: Pack MSE indices (3-bit or 4-bit)
     # ================================================================
     idx_i32 = idx.to(tl.int32)
 
-    if MSE_BITS == 2:
-        mse_offs = tl.arange(0, BLOCK_MSE)
-        mse_mask = mse_offs < MSE_BYTES
-        idx_reshaped = tl.reshape(idx_i32, [BLOCK_MSE, 4])
-        shifts = tl.arange(0, 4) * 2
-        shifted = idx_reshaped << shifts[None, :]
-        packed_mse = tl.sum(shifted, axis=1).to(tl.uint8)
-        tl.store(KV_cache_ptr + slot_base + mse_offs, packed_mse, mask=mse_mask)
-
-    elif MSE_BITS == 4:
+    if MSE_BITS == 4:
         mse_offs = tl.arange(0, BLOCK_MSE)
         mse_mask = mse_offs < MSE_BYTES
         idx_reshaped = tl.reshape(idx_i32, [BLOCK_MSE, 2])
@@ -189,11 +180,7 @@ def _tq_semifused_store(
     val_vec = tl.load(Value_ptr + val_base + d_offs, mask=d_mask,
                       other=0.0).to(tl.float32)
 
-    if VQB == 8:
-        val_u8 = val_vec.to(tl.float8e4b15).to(tl.uint8, bitcast=True)
-        tl.store(KV_cache_ptr + slot_base + val_cache_offset + d_offs,
-                 val_u8, mask=d_mask)
-    elif VQB == 3:
+    if VQB == 3:
         val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
         val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
         v_scale = (val_max - val_min) / 7.0  # 2^3 - 1 = 7
@@ -333,16 +320,7 @@ def _tq_fused_store(
         # ============================================================
         # 1. PACK MSE INDICES
         # ============================================================
-        if MSE_BITS == 2:
-            mse_offs = tl.arange(0, BLOCK_MSE)
-            mse_mask = mse_offs < MSE_BYTES
-            i0 = tl.load(Idx_ptr + base + mse_offs * 4,     mask=mse_mask, other=0)
-            i1 = tl.load(Idx_ptr + base + mse_offs * 4 + 1, mask=mse_mask, other=0)
-            i2 = tl.load(Idx_ptr + base + mse_offs * 4 + 2, mask=mse_mask, other=0)
-            i3 = tl.load(Idx_ptr + base + mse_offs * 4 + 3, mask=mse_mask, other=0)
-            packed_mse = (i0 | (i1 << 2) | (i2 << 4) | (i3 << 6)).to(tl.uint8)
-            tl.store(KV_cache_ptr + slot_base + mse_offs, packed_mse, mask=mse_mask)
-        elif MSE_BITS == 4:
+        if MSE_BITS == 4:
             mse_offs = tl.arange(0, BLOCK_MSE)
             mse_mask = mse_offs < MSE_BYTES
             i0 = tl.load(Idx_ptr + base + mse_offs * 2,     mask=mse_mask, other=0)
@@ -388,14 +366,7 @@ def _tq_fused_store(
     # ================================================================
     val_cache_offset = KPS
 
-    if VQB == 8:
-        d_offs = tl.arange(0, BLOCK_D)
-        d_mask = d_offs < D
-        val_vec = tl.load(Value_ptr + base + d_offs, mask=d_mask, other=0.0)
-        val_u8 = val_vec.to(tl.float8e4b15).to(tl.uint8, bitcast=True)
-        tl.store(KV_cache_ptr + slot_base + val_cache_offset + d_offs, val_u8, mask=d_mask)
-
-    elif VQB == 3:
+    if VQB == 3:
         d_offs = tl.arange(0, BLOCK_D)
         d_mask = d_offs < D
         val_vec = tl.load(Value_ptr + base + d_offs, mask=d_mask, other=0.0)
@@ -464,61 +435,6 @@ def _tq_fused_store(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# CUDA fused store kernel (load_inline)
-# ═══════════════════════════════════════════════════════════════════════
-
-_cuda_store_module = None
-_cuda_store_available = None
-
-def _compile_cuda_store(head_dim=256):
-    """Compile the fused CUDA store kernel via load_inline."""
-    global _cuda_store_module, _cuda_store_available
-    if _cuda_store_available is not None:
-        return _cuda_store_module
-
-    try:
-        import os
-        cuda_path = os.path.join(os.path.dirname(__file__), "tq_store_cuda.cu")
-        with open(cuda_path, "r") as f:
-            cuda_src = f.read()
-
-        cpp_src = """
-void tq_fused_store_launch(
-    torch::Tensor key, torch::Tensor value,
-    torch::Tensor kv_cache, torch::Tensor slot_mapping,
-    torch::Tensor PiT,
-    torch::Tensor centroids, torch::Tensor midpoints,
-    int N, int H, int block_size,
-    int64_t stride_cache_block, int stride_cache_pos, int stride_cache_head,
-    int key_packed_size, int value_packed_size,
-    int value_quant_bits);
-"""
-        from torch.utils.cpp_extension import load_inline
-        _cuda_store_module = load_inline(
-            name="tq_fused_store",
-            cpp_sources=cpp_src,
-            cuda_sources=cuda_src,
-            functions=["tq_fused_store_launch"],
-            verbose=False,
-            extra_cuda_cflags=["-O3", "--use_fast_math",
-                               f"-DTQ_STORE_HEAD_DIM={head_dim}"],
-        )
-        _cuda_store_available = True
-        logger.info("TQ CUDA store kernel compiled for D=%d", head_dim)
-        return _cuda_store_module
-    except Exception as e:
-        logger.warning("TQ CUDA store kernel failed to compile, "
-                       "falling back to Triton: %s", e)
-        _cuda_store_available = False
-        return None
-
-
-# Check env var for CUDA store preference
-import os as _os
-_USE_CUDA_STORE = _os.environ.get("TQ_CUDA_STORE", "1") == "1"
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # Launcher
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -546,10 +462,7 @@ def triton_tq_store(
     mse_bytes = math.ceil(D * mse_bits / 8)
     n_centroids = 2 ** mse_bits
 
-    if value_quant_bits == 8:
-        val_data_bytes = D
-    else:
-        val_data_bytes = math.ceil(D * value_quant_bits / 8)
+    val_data_bytes = math.ceil(D * value_quant_bits / 8)
 
     BLOCK_MSE = triton.next_power_of_2(mse_bytes)
     BLOCK_VAL = triton.next_power_of_2(val_data_bytes)
@@ -585,30 +498,9 @@ def triton_tq_store(
         )
         return
 
-    # ── CUDA FUSED PATH: single CUDA kernel with float4/warp shuffles ──
-    if _USE_CUDA_STORE and mse_bits == 2:
-        mod = _compile_cuda_store(head_dim=D)
-        if mod is not None:
-            k_half = key.half().contiguous()
-            v_half = value.half().contiguous()
-            sm_i32 = slot_mapping.to(torch.int32) if slot_mapping.dtype != torch.int32 else slot_mapping
-            mod.tq_fused_store_launch(
-                k_half, v_half,
-                kv_cache.view(-1).contiguous(), sm_i32,
-                PiT,
-                centroids, midpoints,
-                N, H, block_size,
-                stride_block, stride_pos, stride_head,
-                key_packed_size, value_packed_size,
-                value_quant_bits,
-            )
-            return
-
     # ── SEMI-FUSED PATH: external GEMM + pack kernel ──
     block_grp = triton.next_power_of_2(D // 8) if D >= 8 else 1
-    if mse_bits == 2:
-        reshape_ok = (BLOCK_MSE * 4 == BLOCK_D)
-    elif mse_bits == 4:
+    if mse_bits == 4:
         reshape_ok = (BLOCK_MSE * 2 == BLOCK_D)
     elif mse_bits == 3:
         reshape_ok = (block_grp * 8 == BLOCK_D)

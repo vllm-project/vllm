@@ -1614,9 +1614,9 @@ class EngineArgs:
         )
 
         # TurboQuant boundary layer protection: auto-populate skip layers
-        # from TQ_BOUNDARY_LAYERS env var when using tq3/tq4 cache dtype.
+        # from TQ_BOUNDARY_LAYERS env var when using TQ cache dtype.
         n_boundary = int(os.environ.get("TQ_BOUNDARY_LAYERS", "2"))
-        if resolved_cache_dtype in ("tq3", "tq4") and n_boundary > 0:
+        if resolved_cache_dtype.startswith("tq-") and n_boundary > 0:
             from vllm.turboquant.config import TurboQuantConfig
             num_layers = model_config.hf_text_config.num_hidden_layers
             boundary_layers = TurboQuantConfig.get_boundary_skip_layers(
@@ -1629,15 +1629,6 @@ class EngineArgs:
                 "TQ boundary protection: skipping layers %s "
                 "(TQ_BOUNDARY_LAYERS=%d, num_layers=%d)",
                 merged, n_boundary, num_layers)
-
-        # TurboQuant norm correction: re-normalize centroid vectors before
-        # inverse rotation to fix quantization-induced norm distortion.
-        if resolved_cache_dtype in ("tq3", "tq4"):
-            nc_enabled = os.environ.get(
-                "TQ_NORM_CORRECTION", "1") == "1"
-            if nc_enabled:
-                logger.info("TQ norm correction enabled "
-                            "(TQ_NORM_CORRECTION=1)")
 
         ray_runtime_env = None
         if is_ray_initialized():

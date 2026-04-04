@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+// DEPRECATED: This kernel is hardcoded to MSE_BITS=2 (4 centroids) which is
+// not used by any of the 4 named TQ configs (k8v4, t4nc, k3v4nc, t3nc).
+// Kept for reference only. The Triton store path handles all active configs.
+//
 // TurboQuant fused CUDA store kernel.
 //
 // Single kernel: normalize → rotate(Pi) → bucketize → reconstruct

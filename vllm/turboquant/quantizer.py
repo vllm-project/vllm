@@ -131,6 +131,8 @@ class TurboQuantizer(nn.Module):
         x_recon = flat_vec_norm * x_mse
         return x_recon.reshape(orig_shape)
 
+    # -- Standalone benchmark helpers (not used in vLLM inference path) --
+
     @torch.no_grad()
     def attention_scores(
         self,

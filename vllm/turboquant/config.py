@@ -2,8 +2,37 @@
 """TurboQuant configuration."""
 
 import math
-import os
 from dataclasses import dataclass
+
+
+# Named TQ presets: each maps to frozen config parameters.
+# These are the 4 validated configs with quality benchmarks.
+TQ_PRESETS: dict[str, dict] = {
+    "tq-k8v4": {
+        "key_quant_bits": 8,  # FP8 keys
+        "total_bits": 4,
+        "value_quant_bits": 4,
+        "norm_correction": False,
+    },
+    "tq-t4nc": {
+        "key_quant_bits": 0,  # 4-bit MSE keys (16 centroids)
+        "total_bits": 4,
+        "value_quant_bits": 4,
+        "norm_correction": True,
+    },
+    "tq-k3v4nc": {
+        "key_quant_bits": 0,  # 3-bit MSE keys (8 centroids)
+        "total_bits": 3,
+        "value_quant_bits": 4,
+        "norm_correction": True,
+    },
+    "tq-t3nc": {
+        "key_quant_bits": 0,  # 3-bit MSE keys (8 centroids)
+        "total_bits": 3,
+        "value_quant_bits": 3,
+        "norm_correction": True,
+    },
+}
 
 
 @dataclass
@@ -15,16 +44,19 @@ class TurboQuantConfig:
     community consensus (5+ independent groups) found it hurts attention
     quality by amplifying variance through softmax.
 
+    Named presets (use via --kv-cache-dtype):
+        tq-k8v4:   FP8 keys + 4-bit values, 2.6x compression, +1.17% PPL
+        tq-t4nc:   4-bit MSE keys + 4-bit values + NC, 3.8x, +2.71% PPL
+        tq-k3v4nc: 3-bit MSE keys + 4-bit values + NC, ~3.5x, +10.63% PPL
+        tq-t3nc:   3-bit MSE keys + 3-bit values + NC, 4.9x, +20.59% PPL
+
     Args:
         head_dim: Attention head dimension (e.g. 64, 96, 128).
         total_bits: Bits per coordinate for key MSE quantization (3 or 4).
-            tq3 = 3 bits (8 centroids, ~4.3x compression).
-            tq4 = 4 bits (16 centroids, ~3.8x compression).
         key_quant_bits: Override bits for key quantization.
             0 = use total_bits (default). 8 = FP8 keys (hybrid mode).
         value_quant_bits: Bits per value dimension for uniform quantization.
-            4 = 16 levels (default, good quality).
-            8 = FP8 (E4M3), no packing needed.
+            3 = 8 levels, 4 = 16 levels (default).
         seed: Base seed for deterministic random matrix generation.
             Actual seed per layer = seed + layer_idx * 1337.
         norm_correction: Re-normalize centroid vectors to unit norm before
@@ -92,19 +124,11 @@ class TurboQuantConfig:
         return self.value_quant_bits
 
     @property
-    def value_fp8(self) -> bool:
-        """Whether values are stored as FP8 (E4M3) — no packing needed."""
-        return self.effective_value_quant_bits == 8
-
-    @property
     def value_packed_size(self) -> int:
         """Packed bytes for a single VALUE vector.
 
-        FP8 mode: head_dim bytes (1 byte per element, no scale/zero).
-        Uniform mode: ceil(head_dim * bits / 8) + 4 bytes (scale + zero fp16).
+        Uniform quantization: ceil(head_dim * bits / 8) + 4 bytes (scale + zero fp16).
         """
-        if self.value_fp8:
-            return self.head_dim  # 1 byte per element, no overhead
         data_bytes = math.ceil(self.head_dim * self.value_quant_bits / 8)
         return data_bytes + 4  # +2 scale(fp16) +2 zero(fp16)
 
@@ -128,11 +152,6 @@ class TurboQuantConfig:
         raw = self.slot_size
         return 1 << (raw - 1).bit_length()  # next power of 2
 
-    @property
-    def packed_size(self) -> int:
-        """Alias for slot_size (backward compat)."""
-        return self.slot_size
-
     @staticmethod
     def get_boundary_skip_layers(num_layers: int, n: int) -> list[str]:
         """Get layer indices to skip TQ compression (boundary protection).
@@ -150,28 +169,22 @@ class TurboQuantConfig:
         return [str(i) for i in indices]
 
     @staticmethod
-    def from_cache_dtype(cache_dtype: str, head_dim: int,
-                         value_quant_bits: int = 4) -> "TurboQuantConfig":
-        # Allow env var overrides for power users
-        vqb_env = os.environ.get("TQ_VALUE_BITS")
-        if vqb_env is not None:
-            value_quant_bits = int(vqb_env)
+    def from_cache_dtype(cache_dtype: str,
+                         head_dim: int) -> "TurboQuantConfig":
+        """Create config from a named preset.
 
-        kqb_env = os.environ.get("TQ_KEY_BITS")
-        key_quant_bits = int(kqb_env) if kqb_env is not None else 0
-
-        norm_correction = os.environ.get(
-            "TQ_NORM_CORRECTION", "1") == "1"
-
-        if cache_dtype == "tq3":
-            return TurboQuantConfig(head_dim=head_dim, total_bits=3,
-                                    key_quant_bits=key_quant_bits,
-                                    value_quant_bits=value_quant_bits,
-                                    norm_correction=norm_correction)
-        elif cache_dtype == "tq4":
-            return TurboQuantConfig(head_dim=head_dim, total_bits=4,
-                                    key_quant_bits=key_quant_bits,
-                                    value_quant_bits=value_quant_bits,
-                                    norm_correction=norm_correction)
-        else:
-            raise ValueError(f"Unknown TurboQuant cache dtype: {cache_dtype}")
+        Valid presets: tq-k8v4, tq-t4nc, tq-k3v4nc, tq-t3nc.
+        """
+        if cache_dtype not in TQ_PRESETS:
+            valid = ", ".join(TQ_PRESETS.keys())
+            raise ValueError(
+                f"Unknown TurboQuant cache dtype: {cache_dtype!r}. "
+                f"Valid presets: {valid}")
+        preset = TQ_PRESETS[cache_dtype]
+        return TurboQuantConfig(
+            head_dim=head_dim,
+            total_bits=preset["total_bits"],
+            key_quant_bits=preset["key_quant_bits"],
+            value_quant_bits=preset["value_quant_bits"],
+            norm_correction=preset["norm_correction"],
+        )

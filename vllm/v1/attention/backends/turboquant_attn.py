@@ -12,7 +12,7 @@ Cache layout (no leading 2 dimension):
 
 Per-head per-position slot layout:
   [key_packed (kps bytes) | value_fp16 (D*2 bytes)]
-  For tq3 head_dim=256: [100 bytes key | 512 bytes value] = 612 total
+  For tq-k3v4nc head_dim=256: [100 bytes key | 512 bytes value] = 612 total
 """
 
 import math
@@ -72,8 +72,10 @@ class TurboQuantAttentionBackend(AttentionBackend):
         torch.bfloat16,
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "tq3",
-        "tq4",
+        "tq-k8v4",
+        "tq-t4nc",
+        "tq-k3v4nc",
+        "tq-t3nc",
     ]
 
     @staticmethod
@@ -106,7 +108,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "tq3",
+        cache_dtype_str: str = "tq-t4nc",
     ) -> tuple[int, ...]:
         """Combined K+V cache shape — no leading 2 dimension.
 
@@ -123,7 +125,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return False
-        return kv_cache_dtype in ("tq3", "tq4")
+        return kv_cache_dtype is not None and kv_cache_dtype.startswith("tq-")
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
@@ -216,9 +218,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         from vllm.turboquant.config import TurboQuantConfig
         self.tq_config = TurboQuantConfig.from_cache_dtype(kv_cache_dtype, head_size)
 
-        # Cached shift tensors for bit-packing (avoid re-creating each call)
+        # Cached shift tensor for 4-bit packing (avoid re-creating each call)
         # Will be moved to correct device on first forward call
-        self._shift_2bit = torch.tensor([0, 2, 4, 6], dtype=torch.int32)
         self._shift_4bit = torch.tensor([0, 4], dtype=torch.int32)
         self._shifts_on_device = False
 
@@ -229,7 +230,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             layer._tq_Pi = Pi.to(device)
             layer._tq_centroids = layer._tq_centroids.to(device)
         if not self._shifts_on_device:
-            self._shift_2bit = self._shift_2bit.to(device)
             self._shift_4bit = self._shift_4bit.to(device)
             self._shifts_on_device = True
         # Cache contiguous float32 matrices and precomputed midpoints
@@ -474,11 +474,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             gamma = r_rot.norm(dim=1, keepdim=True)
 
             # 6. Pack MSE indices (vectorized bit packing)
-            if mse_bits == 2 and D % 4 == 0:
-                idx_r = idx.reshape(-1, D // 4, 4)
-                packed_mse = (idx_r.int() << self._shift_2bit).sum(
-                    -1).to(torch.uint8)
-            elif mse_bits == 4 and D % 2 == 0:
+            if mse_bits == 4 and D % 2 == 0:
                 # 4-bit: 2 indices per byte — vectorized
                 idx_r = idx.reshape(-1, D // 2, 2).int()
                 packed_mse = (idx_r[:, :, 0] | (idx_r[:, :, 1] << 4)
@@ -534,44 +530,38 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # 11. Value quantization
         vps = self.tq_config.value_packed_size
 
-        if self.tq_config.value_fp8:
-            # FP8 E4M3: just cast and view as bytes — no packing needed
-            v_flat = value.reshape(-1, D)
-            packed_value = v_flat.to(torch.float8_e4m3fn).view(
-                torch.uint8)  # (N*H, D)
+        # Uniform value quantization (3-bit or 4-bit)
+        vqb = self.tq_config.value_quant_bits
+        val_data_bytes = math.ceil(D * vqb / 8)
+        qmax = (1 << vqb) - 1
+
+        v_flat = value.float().reshape(-1, D)
+        vmin = v_flat.min(dim=1, keepdim=True).values
+        vmax = v_flat.max(dim=1, keepdim=True).values
+        v_scale = ((vmax - vmin) / qmax).clamp(min=1e-8)
+        v_idx = ((v_flat - vmin) / v_scale).round().clamp(
+            0, qmax).to(torch.uint8)
+
+        if vqb == 4 and D % 2 == 0:
+            v_idx_r = v_idx.reshape(-1, D // 2, 2)
+            packed_val = (v_idx_r.int() << self._shift_4bit).sum(
+                -1).to(torch.uint8)
         else:
-            # Uniform quantization (4-bit)
-            vqb = self.tq_config.value_quant_bits
-            val_data_bytes = math.ceil(D * vqb / 8)
-            qmax = (1 << vqb) - 1
+            packed_val = torch.zeros(N * H, val_data_bytes,
+                                     dtype=torch.uint8, device=device)
+            v_u8 = v_idx
+            for j in range(D):
+                bo = j * vqb
+                bi, si = bo // 8, bo % 8
+                packed_val[:, bi] |= (
+                    (v_u8[:, j].int() << si) & 0xFF).to(torch.uint8)
 
-            v_flat = value.float().reshape(-1, D)
-            vmin = v_flat.min(dim=1, keepdim=True).values
-            vmax = v_flat.max(dim=1, keepdim=True).values
-            v_scale = ((vmax - vmin) / qmax).clamp(min=1e-8)
-            v_idx = ((v_flat - vmin) / v_scale).round().clamp(
-                0, qmax).to(torch.uint8)
-
-            if vqb == 4 and D % 2 == 0:
-                v_idx_r = v_idx.reshape(-1, D // 2, 2)
-                packed_val = (v_idx_r.int() << self._shift_4bit).sum(
-                    -1).to(torch.uint8)
-            else:
-                packed_val = torch.zeros(N * H, val_data_bytes,
-                                         dtype=torch.uint8, device=device)
-                v_u8 = v_idx
-                for j in range(D):
-                    bo = j * vqb
-                    bi, si = bo // 8, bo % 8
-                    packed_val[:, bi] |= (
-                        (v_u8[:, j].int() << si) & 0xFF).to(torch.uint8)
-
-            v_scale_b = v_scale.squeeze(-1).half().contiguous().view(
-                torch.uint8).reshape(-1, 2)
-            v_zero_b = vmin.squeeze(-1).half().contiguous().view(
-                torch.uint8).reshape(-1, 2)
-            packed_value = torch.cat(
-                [packed_val, v_scale_b, v_zero_b], dim=1)
+        v_scale_b = v_scale.squeeze(-1).half().contiguous().view(
+            torch.uint8).reshape(-1, 2)
+        v_zero_b = vmin.squeeze(-1).half().contiguous().view(
+            torch.uint8).reshape(-1, 2)
+        packed_value = torch.cat(
+            [packed_val, v_scale_b, v_zero_b], dim=1)
 
         # 12. Write to cache (vectorized — CUDA graph compatible)
         packed_key = packed_key.reshape(N, H, kps)
@@ -891,24 +881,19 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 # --- TQ: unpack MSE, compute TQ scores ---------------- #
                 # Unpack MSE indices → (S, Hk, D)
                 mse_raw = slots[:, :, :mse_bytes_n]
-                if mse_bits == 2 and D % 4 == 0:
-                    expanded = mse_raw.unsqueeze(-1).int() >> mse_sh
-                    idx = (expanded & mse_mask).reshape(
-                        seq_len, Hk, -1)[:, :, :D]
-                else:
-                    j = torch.arange(D, device=device)
-                    bo = j * mse_bits
-                    bi = (bo // 8).long()
-                    si = (bo % 8).int()
-                    b0 = mse_raw[:, :, bi]
-                    val = (b0.int() >> si) & ((1 << mse_bits) - 1)
-                    if mse_bits == 3:
-                        cross = si > 5
-                        bi_n = (bi + 1).clamp(max=mse_bytes_n - 1)
-                        b1 = mse_raw[:, :, bi_n]
-                        extra = (b1.int() << (8 - si)) & 0x7
-                        val = torch.where(cross, val | extra, val)
-                    idx = val
+                j = torch.arange(D, device=device)
+                bo = j * mse_bits
+                bi = (bo // 8).long()
+                si = (bo % 8).int()
+                b0 = mse_raw[:, :, bi]
+                val = (b0.int() >> si) & ((1 << mse_bits) - 1)
+                if mse_bits == 3:
+                    cross = si > 5
+                    bi_n = (bi + 1).clamp(max=mse_bytes_n - 1)
+                    b1 = mse_raw[:, :, bi_n]
+                    extra = (b1.int() << (8 - si)) & 0x7
+                    val = torch.where(cross, val | extra, val)
+                idx = val
 
                 c_vals = centroids[idx.long()]       # (S, Hk, D)
 
@@ -937,37 +922,33 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # --- Unpack values -------------------------------------- #
             vps = self.tq_config.value_packed_size
 
-            if self.tq_config.value_fp8:
-                # FP8 E4M3: just view bytes as float8 and cast
-                val_raw = slots[:, :, kps:kps + D]  # (S, Hk, D) uint8
-                values = val_raw.view(torch.float8_e4m3fn).float()
+            # Uniform value dequant (3-bit or 4-bit)
+            vqb = self.tq_config.value_quant_bits
+            val_data_bytes = math.ceil(D * vqb / 8)
+            qmax = (1 << vqb) - 1
+
+            val_raw = slots[:, :, kps:kps + val_data_bytes]
+
+            if vqb == 4 and D % 2 == 0:
+                v_sh = torch.tensor([0, 4], device=device,
+                                    dtype=torch.int32)
+                v_exp = val_raw.unsqueeze(-1).int() >> v_sh
+                v_idx = (v_exp & 0xF).reshape(
+                    seq_len, Hk, -1)[:, :, :D].float()
             else:
-                vqb = self.tq_config.value_quant_bits
-                val_data_bytes = math.ceil(D * vqb / 8)
-                qmax = (1 << vqb) - 1
+                j = torch.arange(D, device=device)
+                bo = j * vqb
+                bi = (bo // 8).long()
+                si = (bo % 8).int()
+                b0 = val_raw[:, :, bi]
+                v_idx = ((b0.int() >> si) & qmax).float()
 
-                val_raw = slots[:, :, kps:kps + val_data_bytes]
-
-                if vqb == 4 and D % 2 == 0:
-                    v_sh = torch.tensor([0, 4], device=device,
-                                        dtype=torch.int32)
-                    v_exp = val_raw.unsqueeze(-1).int() >> v_sh
-                    v_idx = (v_exp & 0xF).reshape(
-                        seq_len, Hk, -1)[:, :, :D].float()
-                else:
-                    j = torch.arange(D, device=device)
-                    bo = j * vqb
-                    bi = (bo // 8).long()
-                    si = (bo % 8).int()
-                    b0 = val_raw[:, :, bi]
-                    v_idx = ((b0.int() >> si) & qmax).float()
-
-                sc_off = kps + val_data_bytes
-                v_scale_raw = slots[:, :, sc_off:sc_off + 2].contiguous()
-                v_zero_raw = slots[:, :, sc_off + 2:sc_off + 4].contiguous()
-                v_scale = v_scale_raw.view(torch.float16).squeeze(-1).float()
-                v_zero = v_zero_raw.view(torch.float16).squeeze(-1).float()
-                values = v_idx * v_scale.unsqueeze(-1) + v_zero.unsqueeze(-1)
+            sc_off = kps + val_data_bytes
+            v_scale_raw = slots[:, :, sc_off:sc_off + 2].contiguous()
+            v_zero_raw = slots[:, :, sc_off + 2:sc_off + 4].contiguous()
+            v_scale = v_scale_raw.view(torch.float16).squeeze(-1).float()
+            v_zero = v_zero_raw.view(torch.float16).squeeze(-1).float()
+            values = v_idx * v_scale.unsqueeze(-1) + v_zero.unsqueeze(-1)
             if Hk < Hq:
                 values = values.repeat_interleave(
                     self.num_kv_groups, dim=1)

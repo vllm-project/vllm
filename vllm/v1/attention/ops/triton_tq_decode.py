@@ -157,15 +157,12 @@ def _tq_decode_stage1(
                 KV_cache_ptr + mse_addrs0,
                 mask=kv_mask[:, None] & d_mask[None, :], other=0,
             ).to(tl.int32)
-            if MSE_BITS == 2:
-                mse_idx = (mse_raw0 >> mse_bit_shift[None, :]) & mse_mask
-            else:
-                mse_raw1 = tl.load(
-                    KV_cache_ptr + mse_addrs0 + 1,
-                    mask=kv_mask[:, None] & d_mask[None, :], other=0,
-                ).to(tl.int32)
-                raw16 = mse_raw0 | (mse_raw1 << 8)
-                mse_idx = (raw16 >> mse_bit_shift[None, :]) & mse_mask
+            mse_raw1 = tl.load(
+                KV_cache_ptr + mse_addrs0 + 1,
+                mask=kv_mask[:, None] & d_mask[None, :], other=0,
+            ).to(tl.int32)
+            raw16 = mse_raw0 | (mse_raw1 << 8)
+            mse_idx = (raw16 >> mse_bit_shift[None, :]) & mse_mask
 
             # Centroid gather + dot product
             c_vals = tl.load(
@@ -208,14 +205,7 @@ def _tq_decode_stage1(
         # ============================================================
         val_bases = slot_bases + KPS
 
-        if VQB == 8:
-            val_addrs = val_bases[:, None] + d_offs[None, :]
-            val_raw = tl.load(
-                KV_cache_ptr + val_addrs,
-                mask=kv_mask[:, None] & d_mask[None, :], other=0,
-            )
-            values = val_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
-        elif VQB == 3:
+        if VQB == 3:
             # 3-bit value unpack: 8 values per 3 bytes, same bit layout as MSE keys
             val_bit_off = d_offs * 3
             val_byte_idx = val_bit_off // 8
@@ -327,7 +317,7 @@ def _tq_full_dequant_kv(
         k_recon = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
         tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
     else:
-        # Generic MSE unpack (2/3/4-bit) + norms
+        # MSE unpack (3-bit or 4-bit) + norms
         mse_bit_off = d_offs * MSE_BITS
         mse_byte_idx = mse_bit_off // 8
         mse_bit_shift = mse_bit_off % 8
@@ -335,13 +325,10 @@ def _tq_full_dequant_kv(
 
         mse_raw0 = tl.load(KV_cache_ptr + slot_base + mse_byte_idx,
                           mask=d_mask, other=0).to(tl.int32)
-        if MSE_BITS == 2:
-            mse_idx = (mse_raw0 >> mse_bit_shift) & mse_umask
-        else:
-            mse_raw1 = tl.load(KV_cache_ptr + slot_base + mse_byte_idx + 1,
-                              mask=d_mask, other=0).to(tl.int32)
-            raw16 = mse_raw0 | (mse_raw1 << 8)
-            mse_idx = (raw16 >> mse_bit_shift) & mse_umask
+        mse_raw1 = tl.load(KV_cache_ptr + slot_base + mse_byte_idx + 1,
+                          mask=d_mask, other=0).to(tl.int32)
+        raw16 = mse_raw0 | (mse_raw1 << 8)
+        mse_idx = (raw16 >> mse_bit_shift) & mse_umask
 
         k_mse = tl.load(Centroids_ptr + mse_idx, mask=d_mask, other=0.0)
 
@@ -377,10 +364,6 @@ def _tq_full_dequant_kv(
         zr_hi = tl.load(KV_cache_ptr + sc_base + 3).to(tl.uint16)
         v_zero = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
         v_vals = v_idx * v_scale + v_zero
-    elif VQB == 8:
-        val_raw = tl.load(KV_cache_ptr + val_base + d_offs,
-                          mask=d_mask, other=0)
-        v_vals = val_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
     elif VQB == 3:
         # 3-bit value unpack: 8 values per 3 bytes
         val_bit_off = d_offs * 3
@@ -428,14 +411,10 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
     key = (D, mse_bits, value_quant_bits, key_packed_size)
     cfg = _layout_cache.get(key)
     if cfg is None:
-        if value_quant_bits == 8:
-            val_data_bytes = D  # FP8: 1 byte per element
-        else:
-            val_data_bytes = math.ceil(D * value_quant_bits / 8)
+        val_data_bytes = math.ceil(D * value_quant_bits / 8)
         cfg = {
             'mse_bytes': math.ceil(D * mse_bits / 8),
             'val_data_bytes': val_data_bytes,
-            'value_fp8': value_quant_bits == 8,
             'mse_bits': mse_bits,
             'n_centroids': 2 ** mse_bits,
             'BLOCK_D': triton.next_power_of_2(D),
@@ -781,10 +760,9 @@ def triton_tq_decode_attention(
             _l.info("TQ decode: use_wph=True, mse_bits=%d, key_fp8=%s, use_smem=%s",
                     mse_bits, key_fp8, (_wph_has_smem and not key_fp8))
             triton_tq_decode_attention._wph_path_logged = True
-        val_overhead = 0 if cfg['value_fp8'] else 4
         slot_bytes = (cfg['mse_bytes']
-                      + 4 + cfg['val_data_bytes'] + val_overhead)
-        _vfp8 = 1 if cfg['value_fp8'] else 0
+                      + 4 + cfg['val_data_bytes'] + 4)  # +4 = scale+zero
+        _vfp8 = 0  # FP8 values not supported
         _kfp8 = 1 if key_fp8 else 0
         _use_smem = (_wph_has_smem and not key_fp8)
         if _use_smem:
