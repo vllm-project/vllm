@@ -798,7 +798,25 @@ class LoRAModelManager:
                     "For the pool model, successfully loaded the LoRA weights "
                     "after removing the prefix 'model.'."
                 )
-        return lora_model.get_lora(org_module_name)
+
+        result = lora_model.get_lora(org_module_name)
+        if result is not None:
+            return result
+
+        # Fallback for indexed modules: handle PEFT checkpoints where modules
+        # inside nn.Sequential/nn.ModuleList are targeted by numeric index.
+        # E.g., the LoRA checkpoint has weights for "to_out.0" but the vLLM
+        # model registers the module as "to_out".
+        result = lora_model.get_lora_by_indexed_name(org_module_name)
+        if result is not None:
+            logger.info_once(
+                "LoRA weights for module '%s' matched using indexed-name "
+                "fallback (e.g., '%s.0'). This typically occurs with PEFT "
+                "checkpoints targeting nn.Sequential/nn.ModuleList members.",
+                org_module_name,
+                org_module_name,
+            )
+        return result
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         if adapter_id not in self._active_adapters:
