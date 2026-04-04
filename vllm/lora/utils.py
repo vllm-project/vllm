@@ -214,8 +214,8 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
         # is not empty.
         embedding_modules = getattr(module, "embedding_modules", None)
         if embedding_modules is not None:
-            for name in embedding_modules:
-                supported_lora_modules.add(name)
+            for emb_name in embedding_modules:
+                supported_lora_modules.add(emb_name)
 
         # get all the linear subfixes.
         if isinstance(module, (LinearBase,)):
