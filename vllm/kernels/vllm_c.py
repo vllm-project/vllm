@@ -11,11 +11,8 @@ current_platform.import_kernels()
 CUDA_ALIKE = current_platform.is_cuda_alike()
 """Most kernels in this file are supported on all CUDA-alike platforms."""
 
-rms_no_var_size = (
-    lambda x, weight, epsilon, variance_size=None: variance_size is None
-    and (weight is None or weight.dtype == x.dtype)
-)
-"""vLLM kernel does not support variance_size parameter or mismatched weight dtype."""
+rms_no_var_size = lambda x, weight, epsilon, variance_size=None: variance_size is None
+"""vLLM kernel does not support variance_size parameter."""
 
 
 @ir.ops.rms_norm.register_impl(
