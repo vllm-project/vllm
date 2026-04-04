@@ -74,6 +74,16 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 
 The following priority scoring rules are used by the [vLLM PR Dashboard](https://github.com/functionstackx/vllm-pr-dashboard) to triage and rank pull requests.
 
+### AMD/ROCm Tracking
+
+**Labels:** rocm, amd, hip
+
+**Keywords:** ROCm, AMD, HIP, MI200, MI210, MI250, MI300, MI300X, MI308, MI325X, MI350, MI355X, gfx90a, gfx940, gfx941, gfx942, gfx1100, gfx1101, gfx1200, gfx1201, hipblaslt, hipblas, rocblas, triton-rocm, AITER
+
+**Tracked Authors:** sunway513, jataylo, autra, hongxiayang, ROCmSupport, scxiao, carlushuang, pruthvistony, jithunnair-amd, jerryyin, xinyazhang, liangan1, KKBankol, jglaser, tjtanaa, danieltahara, chuanqiw, ashvindhawan
+
+**Tracked Email Domains:** amd.com
+
 ### Critical Keywords
 
 Keywords in PR titles/bodies that signal urgent issues and boost priority score:
