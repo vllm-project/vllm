@@ -117,7 +117,9 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        hidden_states = residual + hidden_states
+        # Apply shared_head norm before returning so multi-step MTP
+        # hidden states are properly normalized for the next step.
+        hidden_states, _ = self.shared_head.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -178,8 +180,10 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        # hidden_states are already normed by shared_head.norm in forward().
+        # Apply lm_head directly without re-norming.
         logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+            mtp_layer.shared_head.head, hidden_states
         )
         return logits
 
