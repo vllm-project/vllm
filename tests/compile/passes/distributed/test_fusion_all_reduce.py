@@ -29,7 +29,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -44,6 +44,43 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         self.hidden_size = hidden_size
         self.eps = eps
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
+        self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
+
+    def forward(self, x):
+        # avoid having graph input be an arg to a pattern directly
+        z = torch.relu(x)
+        x = resid = tensor_model_parallel_all_reduce(z)
+        y = self.norm[0](x)
+
+        z2 = torch.mm(y, self.w[0])
+        x2 = tensor_model_parallel_all_reduce(z2)
+
+        y2, resid = self.norm[1](x2, resid)
+
+        z3 = torch.mm(y2, self.w[1])
+        x3 = tensor_model_parallel_all_reduce(z3)
+
+        y3, resid = self.norm[2](x3, resid)
+
+        z4 = torch.mm(y3, self.w[2])
+        x4 = tensor_model_parallel_all_reduce(z4)
+
+        y4, resid = self.norm[3](x4, resid)
+        return y4
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_reduce.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
+
+
+class TestAllReduceGemmaRMSNormModel(torch.nn.Module):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.norm = [GemmaRMSNorm(hidden_size, eps) for i in range(4)]
         self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
 
     def forward(self, x):
@@ -188,6 +225,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     "test_model, enable_quant_fp8_custom_op",
     [
         (TestAllReduceRMSNormModel, False),
+        (TestAllReduceGemmaRMSNormModel, False),
         (TestAllReduceRMSNormStaticQuantFP8Model, True),
         (TestAllReduceRMSNormStaticQuantFP8Model, False),
         (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False),

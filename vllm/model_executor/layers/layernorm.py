@@ -373,6 +373,20 @@ class GemmaRMSNorm(CustomOp):
         self.variance_epsilon = eps
 
     @staticmethod
+    def forward_static(
+        x: torch.Tensor,
+        variance_epsilon: float,
+        weight: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch-native implementation equivalent to forward()."""
+        if residual is None:
+            return GemmaRMSNorm._forward_static_no_residual(weight, variance_epsilon, x)
+        return GemmaRMSNorm._forward_static_with_residual(
+            weight, variance_epsilon, x, residual
+        )
+
+    @staticmethod
     def _forward_static_no_residual(
         weight: torch.Tensor,
         variance_epsilon: float,
@@ -418,14 +432,7 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        if residual is None:
-            return self._forward_static_no_residual(
-                self.weight.data, self.variance_epsilon, x
-            )
-        else:
-            return self._forward_static_with_residual(
-                self.weight.data, self.variance_epsilon, x, residual
-            )
+        return self.forward_static(x, self.variance_epsilon, self.weight, residual)
 
     def forward_cuda(
         self,
