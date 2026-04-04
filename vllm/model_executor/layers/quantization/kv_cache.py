@@ -140,7 +140,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         layer._q_scale_float = q_scale
         layer._prob_scale.copy_(prob_scale)
         layer._prob_scale_float = prob_scale
-        if layer.kv_cache_dtype == "fp8" and (q_scale == 1.0 or prob_scale == 1.0):
+        if layer.kv_cache_dtype.startswith("fp8") and (q_scale == 1.0 or prob_scale == 1.0):
             logger.warning_once(
                 f"Using uncalibrated q_scale {q_scale} and/or prob_scale "
                 f"{prob_scale} with fp8 attention. This may cause accuracy "
