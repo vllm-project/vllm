@@ -344,7 +344,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 # Pure prefill batch — use prefill path for all
                 k = key[:N].view(N, self.num_kv_heads, self.head_size)
                 v = value[:N].view(N, self.num_kv_heads, self.head_size)
-                attn_out = self._prefill_attention(q, k, v, attn_metadata)
+                attn_out = self._prefill_attention(
+                    q, k, v, kv_cache, attn_metadata, Pi, centroids)
             else:
                 # Mixed batch: split into prefill and decode requests
                 attn_out = self._mixed_batch_attention(
@@ -453,21 +454,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     )
                     output[q_start:q_end] = out.transpose(0, 1)
                 else:
-                    # Continuation chunk: needs to attend to prior cached KV.
-                    # Fall back to per-request SDPA on just this request's
-                    # raw K/V (causal within the chunk). This is approximate
-                    # for continuation but matches the original behavior.
-                    Hk = k_seq.shape[1]
-                    use_gqa = (Hk < Hq)
-                    q_t = q_seq.transpose(0, 1).contiguous()
-                    k_t = k_seq.transpose(0, 1).contiguous()
-                    v_t = v_seq.transpose(0, 1).contiguous()
-                    out = F.scaled_dot_product_attention(
-                        q_t, k_t, v_t,
-                        is_causal=True, scale=self.scale,
-                        enable_gqa=use_gqa,
+                    # Continuation chunk: dequant cached K/V from TQ cache,
+                    # concatenate with current chunk, and attend to full seq.
+                    cached_len = seq_len - q_len
+                    out = self._continuation_prefill(
+                        q_seq, k_seq, v_seq, kv_cache,
+                        attn_metadata.block_table[i:i+1],
+                        cached_len, seq_len,
+                        Pi, centroids,
                     )
-                    output[q_start:q_end] = out.transpose(0, 1)
+                    output[q_start:q_end] = out.to(query.dtype)
 
         # --- Handle decode requests via _decode_attention ---
         if decode_mask.any():
@@ -511,7 +507,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         query: torch.Tensor,   # (N, Hq, D)
         key: torch.Tensor,     # (N, Hk, D)
         value: torch.Tensor,   # (N, Hk, D)
+        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
         attn_metadata: TurboQuantMetadata,
+        Pi: torch.Tensor,
+        centroids: torch.Tensor,
     ) -> torch.Tensor:
         N, Hq, D = query.shape
 
@@ -534,7 +533,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             )
             return output
 
-        # Fallback: per-request SDPA (chunked continuation or no flash_attn)
+        # Continuation or no flash_attn: per-request attention.
+        # For continuation chunks (seq_len > q_len), we must attend to
+        # previously cached K/V from the TQ cache, not just the current
+        # chunk's raw K/V.
         Hk = key.shape[1]
         use_gqa = (Hk < Hq)
         query_start_loc = attn_metadata.query_start_loc
@@ -549,24 +551,157 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if q_len <= 0:
                 continue
 
+            seq_len = attn_metadata.seq_lens[i].item()
             q_seq = query[q_start:q_end]       # (q_len, Hq, D)
             k_seq = key[q_start:q_end]         # (q_len, Hk, D)
             v_seq = value[q_start:q_end]       # (q_len, Hk, D)
 
-            # Transpose to (H, q_len, D) for SDPA
-            q_t = q_seq.transpose(0, 1).contiguous()  # (Hq, q_len, D)
-            k_t = k_seq.transpose(0, 1).contiguous()  # (Hk, q_len, D)
-            v_t = v_seq.transpose(0, 1).contiguous()  # (Hk, q_len, D)
-
-            # SDPA with native GQA support (avoids repeat_interleave)
-            out = F.scaled_dot_product_attention(
-                q_t, k_t, v_t,
-                is_causal=True, scale=self.scale,
-                enable_gqa=use_gqa,
-            )  # (Hq, q_len, D)
-            output[q_start:q_end] = out.transpose(0, 1).to(query.dtype)
+            if q_len == seq_len:
+                # First-chunk prefill: all K/V are in the current batch.
+                # Standard causal SDPA on raw K/V (lossless).
+                q_t = q_seq.transpose(0, 1).contiguous()
+                k_t = k_seq.transpose(0, 1).contiguous()
+                v_t = v_seq.transpose(0, 1).contiguous()
+                out = F.scaled_dot_product_attention(
+                    q_t, k_t, v_t,
+                    is_causal=True, scale=self.scale,
+                    enable_gqa=use_gqa,
+                )
+                output[q_start:q_end] = out.transpose(0, 1).to(query.dtype)
+            else:
+                # Continuation chunk: cached K/V from previous chunks
+                # must be dequanted from the TQ cache and included.
+                cached_len = seq_len - q_len
+                out = self._continuation_prefill(
+                    q_seq, k_seq, v_seq, kv_cache,
+                    attn_metadata.block_table[i:i+1],
+                    cached_len, seq_len,
+                    Pi, centroids,
+                )
+                output[q_start:q_end] = out.to(query.dtype)
 
         return output
+
+    def _continuation_prefill(
+        self,
+        query: torch.Tensor,      # (q_len, Hq, D)
+        key_chunk: torch.Tensor,   # (q_len, Hk, D)
+        val_chunk: torch.Tensor,   # (q_len, Hk, D)
+        kv_cache: torch.Tensor,    # (num_blocks, block_size, Hk, slot_size)
+        block_table: torch.Tensor, # (1, max_num_blocks)
+        cached_len: int,
+        seq_len: int,
+        Pi: torch.Tensor,
+        centroids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Handle continuation chunk by dequanting cached K/V from TQ cache.
+
+        Dequants previously cached K/V, concatenates with the current
+        chunk's raw K/V, then runs flash_attn with causal masking.
+        """
+        from vllm.v1.attention.ops.triton_tq_decode import _tq_full_dequant_kv
+        from vllm.triton_utils import triton
+        import math
+
+        q_len, Hq, D = query.shape
+        Hk = key_chunk.shape[1]
+        device = query.device
+        block_size = kv_cache.shape[1]
+        BLOCK_D = triton.next_power_of_2(D)
+
+        mse_bytes = math.ceil(D * self.tq_config.key_mse_bits / 8) \
+            if not self.tq_config.key_fp8 else D
+        val_data_bytes = math.ceil(
+            D * self.tq_config.effective_value_quant_bits / 8)
+        n_centroids = (2 ** self.tq_config.mse_bits
+                       if not self.tq_config.key_fp8 else 1)
+
+        # Dequant cached K/V from TQ cache
+        # Allocate slightly over to align to block_size for the grid
+        alloc_len = math.ceil(cached_len / block_size) * block_size
+        k_cached = torch.zeros(1, Hk, alloc_len, D, dtype=torch.float16,
+                               device=device)
+        v_cached = torch.zeros(1, Hk, alloc_len, D, dtype=torch.float16,
+                               device=device)
+
+        grid = (alloc_len, 1 * Hk)
+        _tq_full_dequant_kv[grid](
+            kv_cache,
+            block_table,
+            centroids.float(),
+            k_cached, v_cached,
+            k_cached.stride(0), k_cached.stride(1), k_cached.stride(2),
+            v_cached.stride(0), v_cached.stride(1), v_cached.stride(2),
+            kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
+            block_table.stride(0),
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_HEADS=Hk,
+            MSE_BYTES=mse_bytes,
+            KPS=self.tq_config.key_packed_size,
+            VQB=self.tq_config.effective_value_quant_bits,
+            VAL_DATA_BYTES=val_data_bytes,
+            MSE_BITS=self.tq_config.key_mse_bits,
+            N_CENTROIDS=n_centroids,
+            KEY_FP8=1 if self.tq_config.key_fp8 else 0,
+            BLOCK_D=BLOCK_D,
+            NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
+            num_warps=4,
+        )
+
+        # Inverse-rotate MSE keys back to original space
+        if not self.tq_config.key_fp8:
+            k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D).float()
+            k_flat = k_flat @ Pi.float()
+            k_cached_trim = k_flat.to(torch.float16).reshape(
+                Hk, cached_len, D).transpose(0, 1)  # (cached_len, Hk, D)
+        else:
+            k_cached_trim = k_cached[0, :, :cached_len, :].transpose(
+                0, 1).contiguous()  # (cached_len, Hk, D)
+
+        v_cached_trim = v_cached[0, :, :cached_len, :].transpose(
+            0, 1).contiguous()  # (cached_len, Hk, D)
+
+        # Concatenate cached + current chunk K/V (match query dtype)
+        qdtype = query.dtype
+        k_full = torch.cat([k_cached_trim.to(qdtype), key_chunk], dim=0)
+        v_full = torch.cat([v_cached_trim.to(qdtype), val_chunk], dim=0)
+
+        # Attention: q_len queries attending to seq_len K/V with causal mask
+        if _HAS_FLASH_ATTN:
+            output = torch.empty(q_len, Hq, D, device=device, dtype=query.dtype)
+            cu_seqlens_q = torch.tensor(
+                [0, q_len], device=device, dtype=torch.int32)
+            cu_seqlens_k = torch.tensor(
+                [0, seq_len], device=device, dtype=torch.int32)
+            flash_attn_varlen_func(
+                q=query,
+                k=k_full,
+                v=v_full,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q_len,
+                max_seqlen_k=seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                out=output,
+            )
+            return output
+        else:
+            # SDPA fallback: expand KV for GQA, build causal mask
+            q_t = query.transpose(0, 1).unsqueeze(0)    # (1, Hq, q_len, D)
+            k_t = k_full.transpose(0, 1).unsqueeze(0)   # (1, Hk, seq_len, D)
+            v_t = v_full.transpose(0, 1).unsqueeze(0)   # (1, Hk, seq_len, D)
+            # Build causal mask: query position p can attend to K position j
+            # where j <= cached_len + p (p is 0-indexed within chunk)
+            q_pos = torch.arange(q_len, device=device).unsqueeze(1) + cached_len
+            k_pos = torch.arange(seq_len, device=device).unsqueeze(0)
+            mask = k_pos <= q_pos  # (q_len, seq_len)
+            out = F.scaled_dot_product_attention(
+                q_t, k_t, v_t, attn_mask=mask,
+                scale=self.scale, enable_gqa=(Hk < Hq),
+            )  # (1, Hq, q_len, D)
+            return out[0].transpose(0, 1)  # (q_len, Hq, D)
 
     # ------------------------------------------------------------------ #
     #  Decode: Triton TQ decode attention                                 #

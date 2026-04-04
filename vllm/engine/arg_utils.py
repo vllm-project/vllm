@@ -1624,8 +1624,12 @@ class EngineArgs:
 
         # TurboQuant boundary layer protection: auto-populate skip layers
         # from TQ_BOUNDARY_LAYERS env var when using TQ cache dtype.
+        # Disabled for hybrid models (attention+mamba) because boundary
+        # layers use native dtype, creating a page size mismatch that
+        # breaks the required page size unification.
         n_boundary = int(os.environ.get("TQ_BOUNDARY_LAYERS", "2"))
-        if resolved_cache_dtype.startswith("tq-") and n_boundary > 0:
+        if (resolved_cache_dtype.startswith("tq-") and n_boundary > 0
+                and not model_config.is_hybrid):
             from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
             num_layers = model_config.hf_text_config.num_hidden_layers
             boundary_layers = TurboQuantConfig.get_boundary_skip_layers(
