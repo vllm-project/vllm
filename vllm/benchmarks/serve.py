@@ -1104,20 +1104,17 @@ async def benchmark(
     print("=" * 50)
 
     if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=req_model_id,
-            model_name=req_model_name,
+            model=model_id,
+            model_name=model_name,
             prompt=test_prompt,
             api_url=base_url + "/stop_profile",
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
-            multi_modal_content=mm_content,
+            multi_modal_content=test_mm_content,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
             extra_body=extra_body,
-            request_id=request_id,
         )
         profile_output = await request_func(
             request_func_input=profile_input, session=session
