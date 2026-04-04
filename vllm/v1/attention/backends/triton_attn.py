@@ -70,9 +70,6 @@ class TritonAttentionMetadata:
 
     seq_threshold_3D: int
     num_par_softmax_segments: int
-    softmax_segm_output: torch.Tensor
-    softmax_segm_max: torch.Tensor
-    softmax_segm_expsum: torch.Tensor
 
     # For cascade attention.
     use_cascade: bool
@@ -80,6 +77,12 @@ class TritonAttentionMetadata:
     cu_prefix_query_lens: torch.Tensor | None
     prefix_kv_lens: torch.Tensor | None
     suffix_kv_lens: torch.Tensor | None
+
+    # Optional on ROCm: when None, unified_attention uses 2D kernel (no segment
+    # buffer writes), avoiding "Write access to read-only page" during capture.
+    softmax_segm_output: torch.Tensor | None = None
+    softmax_segm_max: torch.Tensor | None = None
+    softmax_segm_expsum: torch.Tensor | None = None
 
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
@@ -175,26 +178,42 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
-        self.softmax_segm_output = torch.empty(
-            (
-                self.seq_threshold_3D,
-                self.num_heads_q,
-                self.num_par_softmax_segments,
-                headdim_padded,
-            ),
-            dtype=torch.float32,
-            device=device,
-        )
-        self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
-            dtype=torch.float32,
-            device=device,
-        )
-        self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
-            dtype=torch.float32,
-            device=device,
-        )
+        # On ROCm, do not allocate segment buffers so unified_attention uses the
+        # 2D kernel path (writes only to output). This avoids "Write access to
+        # read-only page" during full graph capture (#35169), like AITER unified.
+        if current_platform.is_rocm() and self.decode_cudagraph_enabled:
+            self.softmax_segm_output = None
+            self.softmax_segm_max = None
+            self.softmax_segm_expsum = None
+        else:
+            self.softmax_segm_output = torch.empty(
+                (
+                    self.seq_threshold_3D,
+                    self.num_heads_q,
+                    self.num_par_softmax_segments,
+                    headdim_padded,
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.softmax_segm_max = torch.empty(
+                (
+                    self.seq_threshold_3D,
+                    self.num_heads_q,
+                    self.num_par_softmax_segments,
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.softmax_segm_expsum = torch.empty(
+                (
+                    self.seq_threshold_3D,
+                    self.num_heads_q,
+                    self.num_par_softmax_segments,
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
