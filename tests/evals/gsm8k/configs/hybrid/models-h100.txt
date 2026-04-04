@@ -1,0 +1,3 @@
+Qwen3-Next-FP8-TP4.yaml
+Qwen3-Next-FP8-TP4-MTP.yaml
+Qwen3-Next-FP8-TP4-MTP-Align.yaml
