@@ -85,7 +85,11 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -1328,6 +1332,41 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
 
+    def _apply_hf_processor_main(
+        self,
+        prompt: str | list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+        *,
+        enable_hf_prompt_update: bool,
+    ) -> tuple[list[int], BatchFeature, bool]:
+        prompt_ids, mm_processed_data, is_update_applied = (
+            super()._apply_hf_processor_main(
+                prompt,
+                mm_items,
+                hf_processor_mm_kwargs,
+                tokenization_kwargs,
+                enable_hf_prompt_update=enable_hf_prompt_update,
+            )
+        )
+
+        # When pre-tokenized prompt_token_ids are provided together with
+        # pre-computed video embeddings (DictEmbeddingItems), the prompt
+        # already contains the expanded <|video_pad|> placeholder tokens.
+        # Signal that prompt updates are already applied so the processor
+        # uses _find_mm_placeholders (which locates existing placeholders)
+        # instead of _apply_prompt_updates (which tries to match and
+        # replace a compact target pattern that no longer exists).
+        if not is_update_applied and isinstance(prompt, list):
+            has_embed_items = any(
+                isinstance(items, DictEmbeddingItems) for items in mm_items.values()
+            )
+            if has_embed_items:
+                is_update_applied = True
+
+        return prompt_ids, mm_processed_data, is_update_applied
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -1357,6 +1396,24 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
+
+            # When pre-computed video embeddings are provided via the
+            # embedding path (enable_mm_embeds), timestamps and fps are
+            # not available because the HF processor was bypassed.
+            # Build per-frame structural tokens (vision_start + pad +
+            # vision_end) without timestamp tokens so that mRoPE
+            # position computation can still locate each frame.
+            videos = mm_items.get_items("video", (DictEmbeddingItems,))
+            is_embed = isinstance(videos, DictEmbeddingItems)
+            if is_embed or "timestamps" not in out_item:
+                num_frames = int(grid_thw[0])
+                tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
+                all_ids: list[int] = []
+                for _ in range(num_frames):
+                    all_ids.append(vision_start_token_id)
+                    all_ids.extend([video_token_id] * tokens_per_frame)
+                    all_ids.append(vision_end_token_id)
+                return PromptUpdateDetails.select_token_id(all_ids, video_token_id)
 
             sampled_fps = hf_processor_mm_kwargs.get("fps")
             if is_list_of(sampled_fps, float):
