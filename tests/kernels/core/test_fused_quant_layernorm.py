@@ -310,3 +310,39 @@ def test_rms_norm(
                 True,  # is_scale_transposed
             ),
         )
+
+
+@pytest.mark.parametrize("group_size", [None, [1, 64]])
+@pytest.mark.parametrize("add_residual", [False, True])
+@torch.inference_mode()
+def test_rms_norm_mixed_fp32_weight_matches_explicit_cast(
+    group_size: list[int] | None, add_residual: bool
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    dtype = torch.bfloat16
+    quant_dtype = current_platform.fp8_dtype()
+    num_tokens, hidden_size = 32, 128
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda") * (
+        1 / hidden_size
+    )
+    residual = torch.randn_like(x) if add_residual else None
+
+    weight_fp32 = torch.randn(hidden_size, dtype=torch.float32, device="cuda")
+    weight_cast = weight_fp32.to(dtype)
+    scale_ub = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+    if group_size is not None:
+        scale_ub = None
+
+    out_mixed, scales_mixed, residual_mixed = ops_impl(
+        weight_fp32, x, quant_dtype, residual, scale_ub, group_size, 0
+    )
+    out_cast, scales_cast, residual_cast = ops_impl(
+        weight_cast, x, quant_dtype, residual, scale_ub, group_size, 0
+    )
+
+    torch.testing.assert_close(out_mixed, out_cast)
+    torch.testing.assert_close(scales_mixed, scales_cast)
+    if add_residual:
+        torch.testing.assert_close(residual_mixed, residual_cast)

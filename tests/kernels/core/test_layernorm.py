@@ -154,3 +154,43 @@ def test_fused_rms_norm_quant(
         atol=1e-3,
         rtol=1e-3,
     )
+
+
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+def test_fused_rms_norm_static_fp8_quant_mixed_fp32_weight(
+    add_residual: bool,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    dtype = torch.bfloat16
+    num_tokens, hidden_size = 64, 1024
+    quant_scale_t = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
+    weight_fp32 = torch.randn(hidden_size, dtype=torch.float32, device="cuda")
+    weight_cast = weight_fp32.to(dtype)
+
+    out_mixed = torch.empty_like(x, dtype=FP8_DTYPE)
+    out_cast = torch.empty_like(x, dtype=FP8_DTYPE)
+
+    if add_residual:
+        residual = torch.randn_like(x)
+        residual_mixed = residual.clone()
+        residual_cast = residual.clone()
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+            out_mixed, x, residual_mixed, weight_fp32, quant_scale_t, 1e-6
+        )
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+            out_cast, x, residual_cast, weight_cast, quant_scale_t, 1e-6
+        )
+        torch.testing.assert_close(residual_mixed, residual_cast)
+    else:
+        torch.ops._C.rms_norm_static_fp8_quant(
+            out_mixed, x, weight_fp32, quant_scale_t, 1e-6
+        )
+        torch.ops._C.rms_norm_static_fp8_quant(
+            out_cast, x, weight_cast, quant_scale_t, 1e-6
+        )
+
+    torch.testing.assert_close(out_mixed.to(torch.float32), out_cast.to(torch.float32))
