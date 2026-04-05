@@ -298,7 +298,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
 
 if has_aiter():
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
     )
 
