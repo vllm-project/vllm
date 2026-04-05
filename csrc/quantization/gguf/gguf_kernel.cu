@@ -207,12 +207,27 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
 torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
                               torch::Tensor X,  // input
                               int64_t type, int64_t row) {
-  int col = X.sizes()[1];
+  int64_t x_ndim = X.dim();
+  TORCH_CHECK(x_ndim == 2 || x_ndim == 3,
+              "X must have shape [num_tokens, hidden_size] or [batch_size, "
+              "num_tokens, hidden_size]");
+
+  int col = X.sizes()[x_ndim - 1];
   int padded = (col + 512 - 1) / 512 * 512;
-  int batch = X.sizes()[0];
+
   const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
   auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  at::Tensor Y = torch::empty({batch, row}, options);
+
+  at::Tensor Y;
+  int batch;
+  if (x_ndim == 2) {
+    batch = X.sizes()[0];
+    Y = torch::empty({batch, row}, options);
+  } else if (x_ndim == 3) {
+    batch = X.sizes()[0] * X.sizes()[1];
+    Y = torch::empty({X.sizes()[0], X.sizes()[1], row}, options);
+  }
+
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
   at::Tensor quant_X = torch::empty({batch, padded / 32 * 9}, options);
