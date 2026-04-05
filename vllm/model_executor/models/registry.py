@@ -531,6 +531,10 @@ _MULTIMODAL_MODELS = {
         "qwen2_vl",
         "Tarsier2ForConditionalGeneration",
     ),
+    "T5Gemma2ForConditionalGeneration": (
+        "t5gemma2",
+        "T5Gemma2ForConditionalGeneration",
+    ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
