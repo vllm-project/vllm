@@ -99,6 +99,38 @@ else:
     convert_to_packed_tensor_based_on_current_hardware = lambda t: t
 
 
+def _check_torchao_fp8_activation_capability(torchao_config) -> None:
+    """Check if the current GPU supports FP8 activation quantization.
+
+    FP8 activation configs (e.g., Float8DynamicActivationFloat8WeightConfig)
+    require GPU compute capability >= 8.9 (Ada Lovelace / Hopper) on NVIDIA,
+    or MI300+ on AMD. This check provides a clear error message before
+    torchao's internal assertion fires with a confusing message.
+    """
+    config_name = type(torchao_config).__name__
+    if "Float8" not in config_name or "Activation" not in config_name:
+        return
+
+    from vllm.platforms import current_platform
+
+    if current_platform.supports_fp8():
+        return
+
+    capability = current_platform.get_device_capability()
+    capability_str = (
+        f" (current GPU compute capability: {capability.major}.{capability.minor})"
+        if capability is not None
+        else ""
+    )
+    raise ValueError(
+        f"torchao FP8 activation quantization config '{config_name}' "
+        f"requires GPU compute capability >= 8.9 (e.g., NVIDIA Ada Lovelace "
+        f"/ Hopper or AMD MI300+){capability_str}. "
+        f"For older GPUs, consider using a non-FP8 config such as "
+        f"Int8WeightOnlyConfig or Int4WeightOnlyConfig."
+    )
+
+
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao."""
 
@@ -269,6 +301,7 @@ def torchao_quantize_param_data(
     from torchao.quantization import quantize_
 
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
+    _check_torchao_fp8_activation_capability(torchao_config)
     """
     Avoid real weight allocation for faster load, since we will
     end up setting it to param.
