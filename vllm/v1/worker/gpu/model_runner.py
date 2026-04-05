@@ -40,6 +40,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -136,7 +137,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
-
+        if self.use_pp and self.compilation_config.pass_config.enable_sp:
+            # TODO(yewentao256): support SP with PP
+            raise AssertionError(
+                "Sequence parallelism with pipeline parallelism is not "
+                "supported in V2 model runner yet."
+            )
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
 
@@ -534,7 +540,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.reset_encoder_cache()
 
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        # SP is not supported yet.
+        # pad tokens to a multiple of TP size when SP is enabled
+        tp_size = self.parallel_config.tensor_parallel_size
+        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
+            return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
     def profile_cudagraph_memory(self) -> int:
@@ -926,13 +935,49 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
-        num_toks = scheduler_output.total_num_scheduled_tokens
+        num_toks_unpadded = scheduler_output.total_num_scheduled_tokens
+        num_toks = self._get_num_input_tokens(num_toks_unpadded)
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
-        uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+        uniform_tok_count = get_uniform_token_count(
+            num_reqs, num_toks_unpadded, max_query_len
+        )
 
         batch_desc = self.cudagraph_manager.dispatch(
             num_reqs, num_toks, uniform_tok_count
         )
+
+        if self.compilation_config.pass_config.enable_sp:
+            tp_size = self.parallel_config.tensor_parallel_size
+            if tp_size > 1:
+                assert num_toks % tp_size == 0, (
+                    f"num_input_tokens ({num_toks}) must be a multiple of "
+                    f"tensor parallel size ({tp_size}) when SP is enabled."
+                )
+
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                logger.warning_once(
+                    "Downgrading CUDA graph runtime from FULL when sequence "
+                    "parallelism is enabled in V2 model runner.",
+                    scope="local",
+                )
+                # disable decode-specialized FULL dispatch under SP.
+                uniform_tok_count = None
+                batch_desc = self.cudagraph_manager.dispatch(
+                    num_reqs, num_toks, uniform_tok_count
+                )
+                if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                    batch_desc = BatchExecutionDescriptor(
+                        cg_mode=CUDAGraphMode.NONE,
+                        num_tokens=num_toks,
+                        num_reqs=num_reqs,
+                    )
+
+            if tp_size > 1:
+                assert batch_desc.num_tokens % tp_size == 0, (
+                    f"batch_desc.num_tokens ({batch_desc.num_tokens}) must be a "
+                    f"multiple of tensor parallel size ({tp_size}) when SP is "
+                    "enabled."
+                )
         num_tokens_across_dp = None
 
         skip_compiled = False
