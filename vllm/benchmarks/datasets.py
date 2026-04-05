@@ -1637,13 +1637,13 @@ def add_random_dataset_base_args(
     parser_or_group.add_argument(
         "--random-input-len",
         type=int,
-        default=1024,
+        default=None,
         help="Number of input tokens per request, used only for random sampling.",
     )
     parser_or_group.add_argument(
         "--random-output-len",
         type=int,
-        default=128,
+        default=None,
         help="Number of output tokens per request, used only for random sampling.",
     )
     parser_or_group.add_argument(

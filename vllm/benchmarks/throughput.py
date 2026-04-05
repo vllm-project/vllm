@@ -337,6 +337,40 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
+def validate_random_dataset_args(
+    args: argparse.Namespace, dataset_name: str
+) -> tuple[int | None, int | None]:
+    """Validate and return input/output lengths for random datasets.
+
+    Args:
+        args: Command line arguments.
+        dataset_name: Name of the dataset (e.g., 'random', 'random-mm').
+
+    Returns:
+        Tuple of (random_input_len, random_output_len).
+
+    Raises:
+        ValueError: If neither random-specific nor generic length parameters
+                    are specified.
+    """
+    random_input_len = getattr(args, "random_input_len", None)
+    random_output_len = getattr(args, "random_output_len", None)
+
+    # Validate that user provided length values
+    if random_input_len is None and args.input_len is None:
+        raise ValueError(
+            f"When using --dataset-name={dataset_name}, you must specify "
+            "either --random-input-len or --input-len"
+        )
+    if random_output_len is None and args.output_len is None:
+        raise ValueError(
+            f"When using --dataset-name={dataset_name}, you must specify "
+            "either --random-output-len or --output-len"
+        )
+
+    return random_input_len, random_output_len
+
+
 def get_requests(args, tokenizer):
     # Common parameters for all dataset types.
     common_kwargs = {
@@ -361,11 +395,14 @@ def get_requests(args, tokenizer):
         sample_kwargs["prefix_len"] = (
             random_prefix_len if random_prefix_len is not None else args.prefix_len
         )
-        random_input_len = getattr(args, "random_input_len", None)
+        # Validate and get random dataset parameters
+        random_input_len, random_output_len = validate_random_dataset_args(
+            args, "random"
+        )
+
         sample_kwargs["input_len"] = (
             random_input_len if random_input_len is not None else args.input_len
         )
-        random_output_len = getattr(args, "random_output_len", None)
         sample_kwargs["output_len"] = (
             random_output_len if random_output_len is not None else args.output_len
         )
@@ -422,14 +459,16 @@ def get_requests(args, tokenizer):
         sample_kwargs["output_len"] = args.prefix_repetition_output_len
     elif args.dataset_name == "random-mm":
         dataset_cls = RandomMultiModalDataset
-        # prefer random_* arguments, fall back to regular arguments
-        random_input_len = getattr(args, "random_input_len", None)
+        # Validate and get random dataset parameters
+        random_input_len, random_output_len = validate_random_dataset_args(
+            args, "random-mm"
+        )
+
         sample_kwargs["input_len"] = (
             random_input_len
             if random_input_len is not None
             else getattr(args, "input_len", None)
         )
-        random_output_len = getattr(args, "random_output_len", None)
         sample_kwargs["output_len"] = (
             random_output_len
             if random_output_len is not None
@@ -454,14 +493,16 @@ def get_requests(args, tokenizer):
         sample_kwargs["range_ratio"] = args.random_range_ratio
     elif args.dataset_name == "random-rerank":
         dataset_cls = RandomDatasetForReranking
-        # prefer random_* arguments, fall back to regular arguments
-        random_input_len = getattr(args, "random_input_len", None)
+        # Validate and get random dataset parameters
+        random_input_len, random_output_len = validate_random_dataset_args(
+            args, "random-rerank"
+        )
+
         sample_kwargs["input_len"] = (
             random_input_len
             if random_input_len is not None
             else getattr(args, "input_len", None)
         )
-        random_output_len = getattr(args, "random_output_len", None)
         sample_kwargs["output_len"] = (
             random_output_len
             if random_output_len is not None
@@ -615,18 +656,26 @@ def validate_args(args):
         random_output_len = getattr(args, "random_output_len", None)
         random_prefix_len = getattr(args, "random_prefix_len", None)
 
-        if args.input_len is not None and random_input_len is not None:
+        if (
+            args.input_len is not None
+            and random_input_len is not None
+            and args.input_len != random_input_len
+        ):
             warnings.warn(
-                "Both --input-len and --random-input-len are specified. "
-                "The random version (--random-input-len) will be preferred "
-                "in this run.",
+                f"Both --input-len={args.input_len} and "
+                f"--random-input-len={random_input_len} are specified. "
+                f"Using --random-input-len={random_input_len}.",
                 stacklevel=2,
             )
-        if args.output_len is not None and random_output_len is not None:
+        if (
+            args.output_len is not None
+            and random_output_len is not None
+            and args.output_len != random_output_len
+        ):
             warnings.warn(
-                "Both --output-len and --random-output-len are specified. "
-                "The random version (--random-output-len) will be preferred "
-                "in this run.",
+                f"Both --output-len={args.output_len} and "
+                f"--random-output-len={random_output_len} are specified. "
+                f"Using --random-output-len={random_output_len}.",
                 stacklevel=2,
             )
         if args.prefix_len is not None and random_prefix_len is not None:
