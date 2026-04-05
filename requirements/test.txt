@@ -1286,7 +1286,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@abc417a4b6cf05e474921449641f2ff0cc93d3dd
+transformers @ git+https://github.com/huggingface/transformers.git@499ef1d7b8fcaf946be6503e01c717f238838d0e
     # via
     #   -c requirements/common.txt
     #   -r requirements/test.in
