@@ -198,8 +198,6 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
-        self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
-
         # Create profiler schedule if warmup or wait iterations are configured
         profiler_schedule = None
         if profiler_config.warmup_iterations > 0 or profiler_config.wait_iterations > 0:
@@ -244,33 +242,36 @@ class TorchProfilerWrapper(WorkerProfiler):
     def _start(self) -> None:
         self.profiler.start()
 
+    def _dump_profiler_summary(self, sort_key: str, file_suffix: str) -> None:
+        """Dump a profiler summary table sorted by the given key.
+
+        Writes the table to ``{profiler_dir}/profiler_{file_suffix}_{rank}.txt``
+        (skipped for URI paths) and prints it to stdout on rank 0.
+        """
+        profiler_dir = self.profiler_config.torch_profiler_dir
+        rank = self.local_rank
+        table = self.profiler.key_averages().table(sort_by=sort_key)
+
+        # Skip file write for URI paths (gs://, s3://, etc.)
+        # as standard file I/O doesn't work with URI schemes
+        if not _is_uri_path(profiler_dir):
+            profiler_out_file = f"{profiler_dir}/profiler_{file_suffix}_{rank}.txt"
+            with open(profiler_out_file, "w") as f:
+                print(table, file=f)
+
+        # only print profiler results on rank 0
+        if rank == 0:
+            print(table)
+
     @override
     def _stop(self) -> None:
         self.profiler.stop()
 
         profiler_config = self.profiler_config
-        rank = self.local_rank
         if profiler_config.torch_profiler_dump_cuda_time_total:
-            profiler_dir = profiler_config.torch_profiler_dir
-            sort_key = "self_cuda_time_total"
-            table = self.profiler.key_averages().table(sort_by=sort_key)
-
-            # Skip file write for URI paths (gs://, s3://, etc.)
-            # as standard file I/O doesn't work with URI schemes
-            if not _is_uri_path(profiler_dir):
-                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-                with open(profiler_out_file, "w") as f:
-                    print(table, file=f)
-
-            # only print profiler results on rank 0
-            if rank == 0:
-                print(table)
-        if self.dump_cpu_time_total and rank == 0:
-            logger.info(
-                self.profiler.key_averages().table(
-                    sort_by="self_cpu_time_total", row_limit=50
-                )
-            )
+            self._dump_profiler_summary("self_cuda_time_total", "out")
+        if profiler_config.torch_profiler_dump_cpu_time_total:
+            self._dump_profiler_summary("self_cpu_time_total", "cpu_out")
 
     @override
     def _profiler_step(self) -> bool:

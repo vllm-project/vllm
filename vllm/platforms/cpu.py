@@ -240,7 +240,10 @@ class CpuPlatform(Platform):
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
 
-        vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
+        profiler_config = vllm_config.profiler_config
+        if profiler_config.torch_profiler_dump_cuda_time_total:
+            profiler_config.torch_profiler_dump_cpu_time_total = True
+        profiler_config.torch_profiler_dump_cuda_time_total = False
 
         assert vllm_config.device_config.device_type == "cpu"
 

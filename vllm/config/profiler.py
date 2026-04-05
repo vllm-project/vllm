@@ -59,6 +59,12 @@ class ProfilerConfig:
     torch_profiler_dump_cuda_time_total: bool = True
     """If `True`, dumps total CUDA time in torch profiler traces. Enabled by default."""
 
+    torch_profiler_dump_cpu_time_total: bool = False
+    """If `True`, dumps a profiler summary sorted by self_cpu_time_total to a
+    file and (on rank 0) to stdout, mirroring the CUDA summary behavior.
+    Automatically enabled on CPU backends when torch_profiler_dump_cuda_time_total
+    is requested."""
+
     torch_profiler_record_shapes: bool = False
     """If `True`, records tensor shapes in the torch profiler. Disabled by default."""
 
