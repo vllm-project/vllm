@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -25,6 +26,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
 )
+from vllm.v1.core.priority_eviction_queue import PriorityEvictionQueue
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -178,6 +180,9 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        # Priority eviction queue for blocks with explicit retention
+        # priority. Blocks without priority stay in the LRU free_block_queue.
+        self.priority_eviction_queue = PriorityEvictionQueue()
         self.metrics_collector = metrics_collector
 
     def get_cached_block(
@@ -269,8 +274,30 @@ class BlockPool:
             )
             blk.block_hash = block_hash_with_group_id
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
+
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+
+        # Apply retention directives to ALL full blocks (including cached
+        # prefix), not just new blocks. The cached prefix blocks from
+        # previous turns need priority protection too — otherwise they
+        # stay in the LRU queue and get evicted first under pressure.
+        #
+        # When a scope is present, blocks owned by that scope but not
+        # matched by any directive are cleared (owner releasing).
+        retention = request.retention_directives
+        scope = request.retention_scope
+        if retention is not None or scope is not None:
+            directives = retention if retention else []
+            all_full_blocks = blocks[:num_full_blocks]
+            for i, blk in enumerate(all_full_blocks):
+                if blk.is_null:
+                    continue
+                token_start = i * block_size
+                token_end = token_start + block_size
+                self._apply_retention_to_block(
+                    blk, directives, token_start, token_end, scope=scope
+                )
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -320,6 +347,10 @@ class BlockPool:
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
+        Eviction order:
+            1. Unprioritized blocks from the LRU free list.
+            2. Lowest-priority blocks from the priority eviction queue.
+
         Note that we do not check block cache in this function.
 
         Args:
@@ -331,9 +362,28 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        # Fast path: no prioritized blocks → pure LRU (zero overhead).
+        if self.priority_eviction_queue.num_blocks == 0:
+            ret = self.free_block_queue.popleft_n(num_blocks)
+        else:
+            ret = list[KVCacheBlock]()
 
-        # In order to only iterate the list once, we duplicated code a bit
+            # Phase 1: Drain unprioritized blocks from LRU free list first.
+            num_from_free = min(num_blocks, self.free_block_queue.num_free_blocks)
+            if num_from_free > 0:
+                ret.extend(self.free_block_queue.popleft_n(num_from_free))
+
+            # Phase 2: If still need more, take from priority queue
+            # (lowest priority first).
+            num_remaining = num_blocks - len(ret)
+            for _ in range(num_remaining):
+                block = self.priority_eviction_queue.pop_lowest()
+                assert block is not None, (
+                    "Priority eviction queue is empty but we need more blocks"
+                )
+                ret.append(block)
+
+        # Finalize: evict cached state and increment ref counts.
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
@@ -345,6 +395,10 @@ class BlockPool:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                # Clear stale priority from previous ownership.
+                block.priority = None
+                block.priority_expiry = None
+                block.priority_scope = None
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
@@ -391,17 +445,20 @@ class BlockPool:
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
-        the block from the free queue. This is used when a block is hit by
-        another request with the same prefix.
+        the block from the free queue or priority queue. This is used when a
+        block is hit by another request with the same prefix.
 
         Args:
             blocks: A list of blocks to touch.
         """
+        has_prioritized = self.priority_eviction_queue.num_blocks > 0
         for block in blocks:
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # ref_cnt=0 means this block is in an eviction queue, remove it.
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                if has_prioritized and block in self.priority_eviction_queue:
+                    self.priority_eviction_queue.remove(block)
+                else:
+                    self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -410,17 +467,100 @@ class BlockPool:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
+        Blocks with an explicit priority are routed to the priority eviction
+        queue. Unprioritized blocks go to the LRU free list as before.
+
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
+
+        unprioritized: list[KVCacheBlock] = []
+        prioritized: list[KVCacheBlock] = []
         for block in blocks_list:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.priority is not None:
+                    prioritized.append(block)
+                else:
+                    unprioritized.append(block)
+        self.free_block_queue.append_n(unprioritized)
+
+        # Only call time.monotonic and touch the priority queue when
+        # there are actually prioritized blocks to insert.
+        if prioritized:
+            now = time.monotonic()
+            for block in prioritized:
+                block.last_freed_time = now
+                self.priority_eviction_queue.insert(block)
+
+    def _apply_retention_to_block(
+        self,
+        block: KVCacheBlock,
+        directives: list[dict],
+        token_start: int,
+        token_end: int,
+        scope: str | None = None,
+    ) -> None:
+        """Apply the highest-priority matching retention directive to a block.
+
+        A directive matches if its token range overlaps with the block's
+        token range. If multiple directives match, the highest priority wins.
+
+        Scoped ownership rules:
+          - Escalation (new > current): always allowed, new scope takes
+            ownership.
+          - Downgrade/clear (new <= current): allowed only if the requesting
+            scope matches the block's current priority_scope.
+
+        Args:
+            block: The block to annotate.
+            directives: List of retention directive dicts with keys:
+                start (int), end (int|None), priority (int),
+                duration (float|None).
+            token_start: First token index of this block.
+            token_end: Last token index (exclusive) of this block.
+            scope: Opaque scope identifier from the orchestrator.
+        """
+        best_priority = -1
+        best_duration = None
+        for d in directives:
+            d_start = d.get("start", 0)
+            d_end = d.get("end")  # None means end of sequence
+            if d_end is not None and d_end <= token_start:
+                continue
+            if d_start >= token_end:
+                continue
+            p = d.get("priority", 0)
+            if p > best_priority:
+                best_priority = p
+                best_duration = d.get("duration")
+
+        if best_priority < 0:
+            # No matching directive. If we own this block, clear it.
+            if scope is not None and block.priority_scope == scope:
+                block.priority = None
+                block.priority_expiry = None
+                block.priority_scope = None
+            return
+
+        current = block.priority if block.priority is not None else -1
+        if best_priority > current:
+            # Escalation: any scope can raise priority and take ownership.
+            block.priority = best_priority
+            block.priority_scope = scope
+            if best_duration is not None:
+                block.priority_expiry = time.monotonic() + best_duration
+            else:
+                block.priority_expiry = None
+        elif scope is not None and block.priority_scope == scope:
+            # Same scope: owner can downgrade or refresh.
+            block.priority = best_priority
+            if best_duration is not None:
+                block.priority_expiry = time.monotonic() + best_duration
+            else:
+                block.priority_expiry = None
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -462,6 +602,10 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
 
+        # Clear the priority eviction queue — all prioritized free blocks
+        # lose their priority when hashes are reset below.
+        self.priority_eviction_queue = PriorityEvictionQueue()
+
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
@@ -477,12 +621,16 @@ class BlockPool:
         return True
 
     def get_num_free_blocks(self) -> int:
-        """Get the number of free blocks in the pool.
+        """Get the number of free blocks in the pool (both unprioritized
+        and prioritized).
 
         Returns:
             The number of free blocks.
         """
-        return self.free_block_queue.num_free_blocks
+        return (
+            self.free_block_queue.num_free_blocks
+            + self.priority_eviction_queue.num_blocks
+        )
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
