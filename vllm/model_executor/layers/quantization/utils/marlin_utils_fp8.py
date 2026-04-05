@@ -3,6 +3,7 @@
 
 
 import torch
+import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from vllm.logger import init_logger
@@ -19,6 +20,21 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
+
+# Marlin kernel tile alignment requirements.
+MARLIN_TILE_N = 64  # size_n must be divisible by this
+MARLIN_TILE_K = 16  # size_k must be divisible by this
+
+
+def _pad_to_marlin_tile(size_n: int, size_k: int) -> tuple[int, int, int, int]:
+    """Return (padded_size_n, padded_size_k, pad_n, pad_k).
+
+    Computes the smallest tile-aligned sizes >= size_n and size_k.
+    pad_n / pad_k are zero when the dimension is already aligned.
+    """
+    pad_n = (-size_n) % MARLIN_TILE_N
+    pad_k = (-size_k) % MARLIN_TILE_K
+    return size_n + pad_n, size_k + pad_k, pad_n, pad_k
 
 
 def is_fp8_marlin_supported():
@@ -247,12 +263,28 @@ def prepare_fp8_moe_layer_for_marlin(
 
         assert weight.shape == (e, size_n, size_k)
 
+        # Pad size_n and size_k to Marlin tile boundaries so gptq_marlin_repack
+        # does not crash when TP sharding produces non-aligned per-rank dimensions:
+        #   tile_n_size = 64  (affects w13 gate+up, e.g. 464 → 512)
+        #   tile_k_size = 16  (affects w2  down-proj, e.g. 232 → 240)
+        _padded_size_n, _padded_size_k, _pad_n, _pad_k = _pad_to_marlin_tile(
+            size_n, size_k
+        )
         for i in range(e):
             qweight = pack_fp8_to_int32(weight[i], size_k_first=False)
+            # pad K before transposing: qweight shape is (size_n, size_k//4)
+            if _pad_k > 0:
+                qweight = F.pad(qweight, (0, _pad_k // 4))
             qweight = qweight.T.contiguous()
-
+            # pad N after transposing: qweight shape is (padded_size_k//4, size_n)
+            if _pad_n > 0:
+                qweight = F.pad(qweight, (0, _pad_n))
             marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight, perm=perm, size_k=size_k, size_n=size_n, num_bits=8
+                b_q_weight=qweight,
+                perm=perm,
+                size_k=_padded_size_k,
+                size_n=_padded_size_n,
+                num_bits=8,
             )
             tensor_list.append(marlin_qweight)
 
@@ -302,9 +334,16 @@ def prepare_fp8_moe_layer_for_marlin(
             # size_n may not divisible by block_size[0]
             scales = scales[..., :size_n].contiguous()
 
+        _padded_size_n, _padded_size_k, _pad_n, _ = _pad_to_marlin_tile(size_n, size_k)
         for i in range(e):
+            _s = scales[i]
+            if _pad_n > 0:
+                _s = F.pad(_s, (0, _pad_n))
             marlin_scales = marlin_permute_scales(
-                s=scales[i], size_k=size_k, size_n=size_n, group_size=group_size
+                s=_s,
+                size_k=_padded_size_k,
+                size_n=_padded_size_n,
+                group_size=group_size,
             )
             tensor_list.append(marlin_scales)
 
