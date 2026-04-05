@@ -4,6 +4,7 @@ import time
 from collections.abc import Sequence
 from typing import Any, TypeAlias
 
+import torch
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
@@ -96,6 +97,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ctx.engine_inputs = engine_inputs
         ctx.n_queries = len(scoring_data.data_1)
 
+    @torch.inference_mode()
     def post_process_online(
         self,
         ctx: ScoringServeContext,
@@ -117,6 +119,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         )
         return self._pre_process(ctx.prompts, tok_params)
 
+    @torch.inference_mode()
     def post_process_offline(
         self,
         ctx: OfflineOutputsContext,
@@ -416,11 +419,74 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
+class JinaRankingIOProcessor(LateInteractionIOProcessor):
+    name = "jina-reranking-scoring"
+    pooling_task: PoolingTask = "token_embed"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        from vllm.model_executor.models.jina import ensure_str, format_docs_prompts_func
+
+        self.format_docs_prompts_func = format_docs_prompts_func
+        self.ensure_str = ensure_str
+
+    #######################################
+    # helpers
+
+    def _pre_process(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        queries = self.ensure_str(scoring_data.data_1)
+        docs = self.ensure_str(scoring_data.data_2)
+
+        if len(queries) == 1:
+            prompts = self.format_docs_prompts_func(query=queries[0], docs=docs)
+        else:
+            prompts = [
+                self.format_docs_prompts_func(query=q, docs=[d])
+                for q, d in zip(queries, docs)
+            ]
+
+        return self._preprocess_completion_offline(
+            prompts=prompts, tok_params=tok_params, prompt_extras=prompt_extras
+        )
+
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
+        final_res_batch: list[PoolingRequestOutput] = []
+
+        for i in range(len(outputs)):
+            embeds = outputs[i].outputs.data.float()
+
+            # The JinaForRanking model concatenates docs first, then query.
+            # Let's stay consistent with this novel design.
+            query_embeds = embeds[-1]
+            doc_embeds = embeds[:-1]
+
+            scores = F.cosine_similarity(query_embeds, doc_embeds)
+
+            for score in scores:
+                final_res_batch.append(
+                    PoolingRequestOutput(
+                        request_id=outputs[i].request_id,
+                        outputs=score,
+                        prompt_token_ids=outputs[i].prompt_token_ids,
+                        num_cached_tokens=outputs[i].num_cached_tokens,
+                        finished=True,
+                    )
+                )
+        return final_res_batch
+
+
 ScoringIOProcessors: dict[str, type[ScoringIOProcessor]] = {
     p.name: p
     for p in [
         BiEncoderIOProcessor,
         LateInteractionIOProcessor,
+        JinaRankingIOProcessor,
         FlashLateInteractionIOProcessor,
         CrossEncoderIOProcessor,
     ]

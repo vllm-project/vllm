@@ -33,13 +33,17 @@ class TokenPoolingMethod(nn.Module, ABC):
 
 
 class AllPool(TokenPoolingMethod):
-    def __init__(self):
+    def __init__(self, requires_token_ids: bool = False):
         super().__init__()
 
         vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
 
         self.enable_chunked_prefill = scheduler_config.enable_chunked_prefill
+        self.requires_token_ids = requires_token_ids
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=self.requires_token_ids)
 
     def forward(
         self,

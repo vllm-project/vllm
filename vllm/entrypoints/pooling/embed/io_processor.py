@@ -24,7 +24,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
-from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.pooling.typing import OfflineInputsContext, PoolingServeContext
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
-    name = "embedding"
+    name = "embed"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -549,3 +549,31 @@ class EmbedIOProcessor(PoolingIOProcessor):
             request = ctx.request
             if request.truncate == "NONE" and request.max_tokens is not None:
                 self._check_cohere_max_tokens(ctx.final_res_batch, request.max_tokens)
+
+
+class TokenEmbedIOProcessor(PoolingIOProcessor):
+    name = "token_embed"
+
+
+class JinaRankingTokenEmbedIOProcessor(TokenEmbedIOProcessor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        from vllm.model_executor.models.jina import ensure_str, format_docs_prompts_func
+
+        self.format_docs_prompts_func = format_docs_prompts_func
+        self.ensure_str = ensure_str
+
+    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
+            raise ValueError("The JinaForRanking model requires at least 2 inputs.")
+
+        text_prompts = self.ensure_str(ctx.prompts)
+
+        # The JinaForRanking model concatenates docs first, then query.
+        # Let's stay consistent with this novel design.
+        ctx.prompts = self.format_docs_prompts_func(
+            query=text_prompts[-1], docs=text_prompts[:-1]
+        )
+
+        return super().pre_process_offline(ctx)
