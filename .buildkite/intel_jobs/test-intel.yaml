@@ -62,3 +62,29 @@ steps:
         pytest -v -s v1/test_serial_utils.py &&
         pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_tree_attention.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py &&
         pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_multi_connector.py --ignore=v1/kv_connector/unit/test_nixl_connector.py --ignore=v1/kv_connector/unit/test_example_connector.py --ignore=v1/kv_connector/unit/test_lmcache_integration.py'
+  - label: "XPU BMG70 performance benchmarks"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 120
+    soft_fail: true
+    device: intel_gpu
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - vllm/
+      - .buildkite/performance-benchmarks/
+      - .buildkite/intel_jobs/test-intel.yaml
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'source /opt/intel/oneapi/setvars.sh --force &&
+        source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force &&
+        export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+        export VLLM_TARGET_DEVICE=xpu &&
+        cd /workspace/vllm &&
+        SERVING_JSON=serving-tests-xpu.json
+        LATENCY_JSON=latency-tests-xpu.json
+        THROUGHPUT_JSON=throughput-tests-xpu.json
+        bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh'

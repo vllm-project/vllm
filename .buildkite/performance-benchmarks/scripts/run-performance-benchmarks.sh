@@ -27,6 +27,12 @@ check_gpus() {
     declare -g gpu_count=$(amd-smi list | grep -c 'GPU' || true)
   elif command -v hl-smi; then
     declare -g gpu_count=$(hl-smi --list | grep -ci "Module ID" || true)
+  elif command -v xpu-smi; then
+    declare -g gpu_count=$(xpu-smi discovery 2>/dev/null | grep -c 'Device ID' || true)
+    if [[ $gpu_count -eq 0 ]]; then
+      # Fallback: count Level-Zero devices via sycl-ls
+      gpu_count=$(sycl-ls 2>/dev/null | grep -c 'level_zero:gpu' || true)
+    fi
   fi
 
   if [[ $gpu_count -gt 0 ]]; then
@@ -45,6 +51,9 @@ check_gpus() {
   elif command -v hl-smi; then
     declare -g gpu_type=$(hl-smi -q | grep "Product Name" | head -n 1 | awk -F ':' '{print $2}' | sed 's/^ *//')
     arch_suffix='-hpu'
+  elif command -v xpu-smi; then
+    declare -g gpu_type=$(xpu-smi discovery 2>/dev/null | grep 'Device Name' | head -n 1 | sed 's/.*: //' | xargs)
+    arch_suffix='-xpu'
   fi
   echo "GPU type is $gpu_type"
 }
@@ -164,6 +173,9 @@ kill_gpu_processes() {
     while [ "$(hl-smi -q | grep "Used" | head -n 1 | awk '{print $3}')" -ge 1000 ]; do
       sleep 1
     done
+  elif command -v xpu-smi; then
+    # Wait for XPU memory to be released; xpu-smi stats provides memory info
+    sleep 5
   fi
 
   # remove vllm config file
