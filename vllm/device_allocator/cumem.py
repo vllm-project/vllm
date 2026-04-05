@@ -8,7 +8,6 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
-import dataclasses
 import gc
 import os
 from collections.abc import Callable, Iterator
@@ -17,6 +16,7 @@ from typing import Any
 
 import torch
 
+from vllm.device_allocator import AllocationData, HandleType
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
@@ -43,16 +43,6 @@ except ModuleNotFoundError:
     python_create_and_map = None
     python_unmap_and_release = None
     lib_name = None
-
-# py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = tuple[int, int, int, int]
-
-
-@dataclasses.dataclass
-class AllocationData:
-    handle: HandleType
-    tag: str
-    cpu_backup_tensor: torch.Tensor | None = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -196,7 +186,7 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
 
-        for ptr, data in self.pointer_to_data.items():
+        for ptr, data in list(self.pointer_to_data.items()):
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
