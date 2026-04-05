@@ -105,7 +105,12 @@ spec:
       volumes:
         - name: {{ .Release.Name }}-storage
           persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-storage-claim     
+            claimName: {{ .Release.Name }}-storage-claim
+
+      {{- if .Values.dra.enabled }}
+      resourceClaims:
+        {{- toYaml .Values.dra.resourceClaims | nindent 8 }}
+      {{- end }}
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -115,7 +120,7 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and (gt (int (index .Values.resources.requests "nvidia.com/gpu")) 0) (gt (int (index .Values.resources.limits "nvidia.com/gpu")) 0) }}
+      {{- if and (not .Values.dra.enabled) (gt (int (index .Values.resources.requests "nvidia.com/gpu")) 0) (gt (int (index .Values.resources.limits "nvidia.com/gpu")) 0) }}
       runtimeClassName: nvidia
       affinity:
         nodeAffinity:
