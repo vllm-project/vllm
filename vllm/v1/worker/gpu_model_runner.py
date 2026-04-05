@@ -1418,26 +1418,11 @@ class GPUModelRunner(
         # TODO: Remove .cpu() sync to enable fully async for hybrid model;
         # Use num_computed_tokens.gpu instead of req.num_computed_tokens to
         # support aligned mamba cache mode.
-        # Find the number of accepted tokens for each sequence.
+        # Count the number of accepted tokens for each sequence.
+        # Valid tokens are contiguous from position 0, so counting non-(-1)
+        # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
-        self.num_accepted_tokens.gpu[:num_reqs] = (
-            (
-                torch.cat(
-                    [
-                        output_token_ids,
-                        torch.full(
-                            (num_reqs, 1),
-                            -1,
-                            device=output_token_ids.device,
-                        ),
-                    ],
-                    dim=1,
-                )
-                == -1
-            )
-            .int()
-            .argmax(-1)
-        )
+        self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
         if self.cache_config.mamba_cache_mode == "align":
             for i, num_tokens in enumerate(
