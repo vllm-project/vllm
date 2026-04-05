@@ -218,6 +218,11 @@ class ModelConfig:
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
     vocab_size) logprobs are allowed to be returned and it may cause OOM."""
+    max_batched_logprobs: int = 0
+    """The maximum number of logprobs to be returned in a single batch.
+    Used to prevent OOM or high latency when multiple requests ask for many
+    logprobs. 0 disables the limit.
+    """
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
