@@ -8,11 +8,16 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 from transformers.activations import ACT2FN
 from transformers.models.whisper.modeling_whisper import sinusoids
-from flash_attn import flash_attn_func
+
+try:
+    from flash_attn import flash_attn_func
+except ModuleNotFoundError:
+    flash_attn_func = None
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -123,14 +128,24 @@ class KimiAudioWhisperAttention(nn.Module):
             self.num_heads,
             self.head_dim,
         )
-        attn_output = flash_attn_func(
-            query_states,
-            key_states,
-            value_states,
-            dropout_p=0.0,
-            softmax_scale=self.scaling,
-            causal=False,
-        )
+        if flash_attn_func is not None:
+            attn_output = flash_attn_func(
+                query_states,
+                key_states,
+                value_states,
+                dropout_p=0.0,
+                softmax_scale=self.scaling,
+                causal=False,
+            )
+        else:
+            attn_output = F.scaled_dot_product_attention(
+                query_states.transpose(1, 2),
+                key_states.transpose(1, 2),
+                value_states.transpose(1, 2),
+                dropout_p=0.0,
+                is_causal=False,
+                scale=self.scaling,
+            ).transpose(1, 2)
         attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
         return self.out_proj(attn_output)
 
