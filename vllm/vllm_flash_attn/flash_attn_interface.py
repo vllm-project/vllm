@@ -374,7 +374,7 @@ def flash_attn_varlen_func(
                 "FA4 with paged KV is not supported on SM90 (Hopper). "
                 "Use FA3 or upgrade to Blackwell (SM100+)."
             )
-        from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+        from flash_attn.cute.interface import _flash_attn_fwd
 
         out, softmax_lse = _flash_attn_fwd(
             q,
