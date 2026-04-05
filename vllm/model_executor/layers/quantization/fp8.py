@@ -1015,22 +1015,28 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             return
 
         fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = torch.ones(
-            layer.num_experts, device=w13.device, dtype=torch.float32
+        w13_scale = torch.empty(
+            layer.num_experts, device=layer.w13_weight.device, dtype=torch.float32
         )
-        w2_scale = torch.ones(layer.num_experts, device=w2.device, dtype=torch.float32)
+        w2_scale = torch.empty(
+            layer.num_experts, device=layer.w2_weight.device, dtype=torch.float32
+        )
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
+        # Minimize memory usage by writing quantized values into input buffer;
+        # Linear processing guarantees that reads happen before writes
+        w13 = layer.w13_weight.view(dtype=fp8_dtype).view(2, *layer.w13_weight.shape)
+        w2 = layer.w2_weight.view(dtype=fp8_dtype).view(2, *layer.w2_weight.shape)
         for expert in range(layer.local_num_experts):
-            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
+            w13[0, expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
                 layer.w13_weight[expert, :, :]
             )
-            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
+            w2[0, expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
                 layer.w2_weight[expert, :, :]
             )
+        del layer.w13_weight, layer.w2_weight
+        w13, w2 = w13[0], w2[0]
 
         if current_platform.is_xpu():
             w13.data = w13.transpose(-1, -2).contiguous()
