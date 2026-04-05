@@ -350,6 +350,13 @@ def _get_backend_priorities(
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
     if use_sparse:
+        if not rocm_aiter_ops.is_mla_enabled():
+            raise ValueError(
+                "Sparse MLA attention on ROCm requires AITER MLA to be "
+                "enabled (VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MLA=1)."
+                " There is currently no fallback backend for sparse MLA "
+                "on ROCm."
+            )
         return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
 
     if use_mla:
