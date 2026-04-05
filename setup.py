@@ -1000,9 +1000,7 @@ if _is_cpu():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
-    # also _is_hip() once https://github.com/vllm-project/vllm/issues/35163 is
-    # fixed
-    if _is_cuda():
+    if _is_cuda() or _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
