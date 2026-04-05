@@ -25,6 +25,20 @@ from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
+# b12x dense FP4 GEMM support (optional dependency)
+_has_b12x = False
+try:
+    from b12x.cute.fp4 import as_grouped_scale_view as _b12x_as_grouped_scale_view
+    from b12x.gemm.dense import dense_gemm as _b12x_dense_gemm
+
+    _has_b12x = True
+except ImportError:
+    pass
+
+
+def has_b12x() -> bool:
+    return _has_b12x
+
 
 class NvFp4LinearBackend(Enum):
     VLLM_CUTLASS = "cutlass"
@@ -34,6 +48,7 @@ class NvFp4LinearBackend(Enum):
     FBGEMM = "fbgemm"
     MARLIN = "marlin"
     EMULATION = "emulation"
+    B12X = "b12x"
 
 
 def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
@@ -62,6 +77,13 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
         # so we gate them on the same check.
         if (
             cutlass_fp4_supported()
+            and current_platform.has_device_capability(120)
+            and has_b12x()
+        ):
+            # b12x dense FP4 GEMM is fastest on SM120 (Blackwell)
+            backend = NvFp4LinearBackend.B12X
+        elif (
+            cutlass_fp4_supported()
             and current_platform.has_device_capability(100)
             and has_flashinfer()
         ):
@@ -80,6 +102,12 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
         NvFp4LinearBackend.FLASHINFER_CUDNN,
     ):
         assert has_flashinfer(), f"FlashInfer is required for {backend}"
+        assert cutlass_fp4_supported(), (
+            f"{backend} requires vLLM NVFP4 quantization kernels compiled "
+            f"for the current GPU (SM {current_platform.get_device_capability()})"
+        )
+    elif backend == NvFp4LinearBackend.B12X:
+        assert has_b12x(), "b12x package is required for B12X backend"
         assert cutlass_fp4_supported(), (
             f"{backend} requires vLLM NVFP4 quantization kernels compiled "
             f"for the current GPU (SM {current_platform.get_device_capability()})"
@@ -129,6 +157,29 @@ def prepare_weights_for_nvfp4_cutlass(
     return padded_weight, swizzled_weight_scale, weights_padding_cols
 
 
+def prepare_weights_for_nvfp4_b12x(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Prepare weights and scales for b12x dense FP4 GEMM.
+
+    b12x requires N (rows) divisible by 128.  The swizzle_blockscale
+    helper already pads rows to 128 boundaries internally, so the scale
+    tensor is ready.  We only need to pad the packed weight tensor's N
+    dimension to 128 and swizzle the block-scale.
+    """
+    swizzled_weight_scale = swizzle_blockscale(weight_scale)
+
+    # Pad weight N dimension to 128 (b12x requirement)
+    N = weight.shape[0]
+    N_padded = round_up(N, 128)
+    if N_padded != N:
+        pad_rows = N_padded - N
+        weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_rows)).contiguous()
+
+    return weight, swizzled_weight_scale
+
+
 def prepare_weights_for_nvfp4_fbgemm(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -168,6 +219,12 @@ def convert_to_nvfp4_linear_kernel_format(
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
     elif backend == NvFp4LinearBackend.FBGEMM:
         weight, weight_scale = prepare_weights_for_nvfp4_fbgemm(
+            layer.weight.data, layer.weight_scale.data
+        )
+        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+    elif backend == NvFp4LinearBackend.B12X:
+        weight, weight_scale = prepare_weights_for_nvfp4_b12x(
             layer.weight.data, layer.weight_scale.data
         )
         layer.weight = torch.nn.Parameter(weight, requires_grad=False)
@@ -241,6 +298,15 @@ def apply_nvfp4_linear(
     assert weight_scale.dtype in (torch.float8_e4m3fn, torch.uint8)
     assert alpha.dtype == torch.float32
 
+    if backend == NvFp4LinearBackend.B12X:
+        out = _b12x_fp4_linear_gemm(
+            x_fp4, weight, x_blockscale, weight_scale, alpha, output_dtype
+        )
+        out = slice_nvfp4_output(out, output_size)
+        if bias is not None:
+            out = out + bias
+        return out.view(*output_shape)
+
     # Pad activations to match weight K-dimension padding
     weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
     x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
@@ -279,6 +345,86 @@ def apply_nvfp4_linear(
         out = out + bias
 
     return out.view(*output_shape)
+
+
+def _b12x_fp4_linear_gemm(
+    x_fp4: torch.Tensor,
+    weight: torch.Tensor,
+    x_blockscale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dense FP4 GEMM via b12x kernel for SM120 (Blackwell).
+
+    Scale factors arrive in vLLM's swizzled 128x4 interleaved layout
+    (from swizzle_blockscale / scaled_fp4_quant with is_sf_swizzled_layout=True),
+    which is byte-identical to b12x's swizzle_block_scale() output.
+    We infer the padded 2D shape from the total element count and reshape
+    into the 6D MMA view that b12x expects.
+
+    Args:
+        x_fp4: Packed FP4 activations [M, K//2] (uint8)
+        weight: Packed FP4 weights [N_padded, K//2] (uint8, N already padded to 128)
+        x_blockscale: Swizzled activation scales [M_padded, K_scale_padded] (fp8)
+        weight_scale: Swizzled weight scales [N_padded, K_scale_padded] (fp8)
+        alpha: Global scale factor (fp32 scalar)
+        output_dtype: Desired output dtype (bf16 or fp16)
+
+    Returns:
+        Output tensor [M, N_padded] in output_dtype
+    """
+    M_orig = x_fp4.shape[0]
+    K = x_fp4.shape[1] * 2  # FP4 packed: 2 values per byte
+    N = weight.shape[0]  # Already padded to 128 by prepare_weights_for_nvfp4_b12x
+
+    # b12x requires M divisible by 128
+    M = round_up(M_orig, 128)
+
+    # Pad activations in M dimension if needed
+    if M != M_orig:
+        pad_rows = M - M_orig
+        x_fp4 = torch.nn.functional.pad(x_fp4, (0, 0, 0, pad_rows))
+
+    # Reshape to 3D: [rows, K//2, 1] as expected by dense_gemm
+    a_3d = x_fp4.unsqueeze(2)  # [M, K//2, 1]
+    b_3d = weight.unsqueeze(2)  # [N, K//2, 1]
+
+    # Convert swizzled scale factors to b12x 6D MMA view.
+    # The swizzled layout from vLLM is byte-identical to what b12x expects:
+    #   flat storage: [rows_padded // 128, K_sf_padded // 4, 32, 4, 4]
+    # as_grouped_scale_view reshapes and permutes to the 6D MMA layout.
+    def _sf_to_6d(
+        sf: torch.Tensor, rows_padded: int, cols: int
+    ) -> torch.Tensor:
+        sf_u8 = sf.contiguous().view(torch.uint8)
+        cols_sf_padded = sf_u8.numel() // rows_padded
+        return _b12x_as_grouped_scale_view(
+            sf_u8.reshape(1, rows_padded, cols_sf_padded),
+            rows_padded,
+            cols,
+        )
+
+    # For activations: if we padded M, the scale factor from scaled_fp4_quant
+    # was produced for M_orig rows but swizzle pads to round_up(M_orig, 128).
+    # Since M == round_up(M_orig, 128), the padding already matches.
+    sfa_6d = _sf_to_6d(x_blockscale, M, K)
+    sfb_6d = _sf_to_6d(weight_scale, N, K)
+
+    c_dtype = "bfloat16" if output_dtype == torch.bfloat16 else "float16"
+
+    out = _b12x_dense_gemm(
+        (a_3d.view(torch.float4_e2m1fn_x2), sfa_6d),
+        (b_3d.view(torch.float4_e2m1fn_x2), sfb_6d),
+        alpha=alpha.view(1),
+        ab_dtype="float4_e2m1fn",
+        sf_dtype="float8_e4m3fn",
+        c_dtype=c_dtype,
+        sf_vec_size=16,
+    )
+
+    # Unpad M dimension and squeeze the trailing L=1 dimension
+    return out[:M_orig, :, 0]
 
 
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
