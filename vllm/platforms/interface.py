@@ -630,6 +630,13 @@ class Platform:
             )
 
     @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Register custom KVCacheSpec class on current platform.
+        """
+        pass
+
+    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         """
         Verify whether the current platform supports the specified model
