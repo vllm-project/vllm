@@ -246,12 +246,11 @@ class PromptTokenStats:
         local_cache_hit: Tokens from local prefix cache.
         external_kv_transfer: Tokens from external KV transfer.
         cached_tokens: Tokens skipped during prefill (from scheduler).
-        recomputed_tokens: Cached tokens that were recomputed (see below).
         total: Total prompt tokens.
 
     Invariants:
-        computed + local_cache_hit + external_kv_transfer - recomputed_tokens = total
-        local_cache_hit + external_kv_transfer - recomputed_tokens = cached_tokens
+        computed + local_cache_hit + external_kv_transfer = total
+        local_cache_hit + external_kv_transfer = cached_tokens
     """
 
     ALL_SOURCES: tuple[str, ...] = (
@@ -264,7 +263,6 @@ class PromptTokenStats:
     local_cache_hit: int = 0
     external_kv_transfer: int = 0
     cached_tokens: int = 0
-    recomputed_tokens: int = 0
     total: int = 0
 
     def update_from_output(
@@ -274,11 +272,6 @@ class PromptTokenStats:
         prompt_len: int,
     ) -> None:
         """Update stats from a prefill output."""
-        # When all tokens are cached, the scheduler reduces num_cached_tokens
-        # by 1 to force the model to recompute the last token, since the model
-        # needs at least one input token to run a forward pass.
-        recomputed = 1 if (num_cached_tokens + 1 == prompt_len) else 0
-
         self.computed += prompt_len - num_cached_tokens
         self.external_kv_transfer += num_external_computed_tokens
         # FIXME(yifan): local_cache_hit can go negative after preemption.
@@ -290,10 +283,9 @@ class PromptTokenStats:
         # as a separate metric rather than reusing num_external_computed_tokens
         # for metric directly.
         self.local_cache_hit += max(
-            0, (num_cached_tokens + recomputed - num_external_computed_tokens)
+            0, (num_cached_tokens - num_external_computed_tokens)
         )
         self.cached_tokens += num_cached_tokens
-        self.recomputed_tokens += recomputed
         self.total += prompt_len
 
     def get_by_source(self, source: str) -> int:
