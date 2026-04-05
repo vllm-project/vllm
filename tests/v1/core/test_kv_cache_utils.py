@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -2135,5 +2136,62 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_2": new_chunked_local_attention_spec(attention_chunk_size=512),
     }
 
+    with pytest.raises(ValueError):
+        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    # 5. FullAttentionSpec + MambaSpec (e.g., Qwen3.5), should not raise
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 64), (1, 128)),
+        dtypes=(torch.float32, torch.float32),
+        page_size_padded=32 * 1024,
+    )
+    kv_cache_spec = {
+        "attn_layer_1": new_kv_cache_spec(page_size_padded=32 * 1024),
+        "attn_layer_2": new_kv_cache_spec(page_size_padded=32 * 1024),
+        "mamba_layer_1": mamba_spec,
+    }
+    # Should not raise - MambaSpec + attention specs are handled by
+    # _get_kv_cache_groups_uniform_page_size downstream
+    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    # Attention specs should be unchanged
+    assert kv_cache_spec["attn_layer_1"] == new_kv_cache_spec(
+        page_size_padded=32 * 1024
+    )
+    assert kv_cache_spec["attn_layer_2"] == new_kv_cache_spec(
+        page_size_padded=32 * 1024
+    )
+    # MambaSpec should be unchanged
+    assert kv_cache_spec["mamba_layer_1"] == mamba_spec
+
+    # 6. FullAttentionSpec + SlidingWindowSpec + MambaSpec, should not raise
+    #    SlidingWindow should be converted to FullAttention, Mamba stays
+    kv_cache_spec = {
+        "attn_layer": new_kv_cache_spec(page_size_padded=32 * 1024),
+        "sw_layer": new_sliding_window_spec(
+            page_size_padded=32 * 1024, sliding_window=1024
+        ),
+        "mamba_layer": mamba_spec,
+    }
+    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    # SlidingWindow should be converted to FullAttention
+    assert isinstance(kv_cache_spec["sw_layer"], FullAttentionSpec)
+    assert kv_cache_spec["sw_layer"].sliding_window == 1024
+    # MambaSpec should be unchanged
+    assert kv_cache_spec["mamba_layer"] == mamba_spec
+
+    # 7. CrossAttentionSpec + MambaSpec, should still raise ValueError
+    #    (unsupported mix - not all non-Mamba specs are unified)
+    cross_attn_spec = CrossAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.float32,
+    )
+    kv_cache_spec = {
+        "cross_attn_layer": cross_attn_spec,
+        "attn_layer": new_kv_cache_spec(),
+        "mamba_layer": mamba_spec,
+    }
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)

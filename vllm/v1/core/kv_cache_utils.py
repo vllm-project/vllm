@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -1213,10 +1214,31 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         is_kv_cache_spec_uniform(kv_cache_spec)
         or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec)
     ):
-        raise ValueError(
-            "Hybrid KV cache manager is disabled but failed to "
-            "convert the KV cache specs to one unified type."
+        # For hybrid Attention+Mamba models (e.g., Qwen3.5), we cannot unify
+        # MambaSpec with attention specs. This is fine because
+        # _get_kv_cache_groups_uniform_page_size can handle them as separate
+        # groups with equalized page sizes.
+        # We only allow this bypass when the non-Mamba specs have been
+        # successfully unified (all FullAttentionSpec), to avoid masking
+        # unsupported mixes like CrossAttentionSpec + MambaSpec.
+        non_mamba_specs = {
+            name: spec
+            for name, spec in kv_cache_spec.items()
+            if not isinstance(spec, MambaSpec)
+        }
+        mamba_bypass = (
+            len(non_mamba_specs) < len(kv_cache_spec)
+            and len(non_mamba_specs) > 0
+            and (
+                is_kv_cache_spec_uniform(non_mamba_specs)
+                or UniformTypeKVCacheSpecs.is_uniform_type(non_mamba_specs)
+            )
         )
+        if not mamba_bypass:
+            raise ValueError(
+                "Hybrid KV cache manager is disabled but failed to "
+                "convert the KV cache specs to one unified type."
+            )
 
 
 def get_kv_cache_groups(
