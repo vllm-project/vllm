@@ -496,6 +496,7 @@ class ResponsesRequest(OpenAIBaseModel):
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
+    completed_at: int | None = None
     # error: Optional[ResponseError] = None
     incomplete_details: IncompleteDetails | None = None
     instructions: str | None = None
