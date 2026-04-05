@@ -1781,8 +1781,27 @@ class Scheduler(SchedulerInterface):
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
             request = self.requests.get(req_id)
-            if request is None or request.is_finished():
+            if request is None:
                 # Invalid request ID.
+                continue
+
+            if request.is_finished():
+                # If the request is already finished, only FINISHED_ABORTED is
+                # allowed, which is used to force resource cleanup.
+                assert finished_status == RequestStatus.FINISHED_ABORTED, (
+                    "Only FINISHED_ABORTED is allowed for requests that are "
+                    "already finished."
+                )
+                logger.info("Aborting finished request %s.", req_id)
+                # Set status to FINISHED_ABORTED so connector can detect this
+                # case and participate in cleanup.
+                request.status = RequestStatus.FINISHED_ABORTED
+                # Notify connector to participate in cleanup. Blocks will be
+                # freed when connector reports finished_sending.
+                # A finished request can only exist in self.requests when
+                # connector delays block freeing (P/D scenario).
+                assert self.connector is not None
+                self._connector_finished(request)
                 continue
 
             valid_requests.append(request)

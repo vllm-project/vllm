@@ -250,15 +250,22 @@ def test_abort_during_kv_transfer():
     # Request removed from PB but blocks should not be freed.
     assert len(scheduler.requests) == 1
 
-    # Abort the request, and check the blocks are still not freed
+    # Abort the request. Since the request is already finished
+    # (FINISHED_LENGTH_CAPPED), this becomes an "abort after finished" scenario.
+    # Blocks will NOT be freed immediately; instead they wait for the connector
+    # to report finished_sending.
     scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
-    assert len(scheduler.requests) == 1
 
-    # Simulate a finished sending notification
+    # After abort, the request should still exist (waiting for finished_sending).
+    # This is the new behavior for "abort after finished" scenario.
+    assert len(scheduler.requests) == 1
+    assert request.status == RequestStatus.FINISHED_ABORTED
+
+    # Simulate a finished sending notification - now blocks will be freed
     scheduler_output = scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request.request_id]
+        finished_sending=set([request.request_id])
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
