@@ -248,9 +248,8 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
 
 
 class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
-    """Shared base for online FP8 MoE methods. Adds FP8-specific backend
-    selection, kernel format conversion, and dispatch on top of
-    :class:`OnlineMoEMethodBase`."""
+    """Shared base for online FP8 MoE methods. Loads fp16/bf16 checkpoint
+    weights onto meta device and materializes them just-in-time."""
 
     # Declared here for mypy; actual values are set in __init__.
     fp8_backend: "Fp8MoeBackend"
