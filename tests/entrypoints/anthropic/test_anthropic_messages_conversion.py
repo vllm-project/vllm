@@ -452,8 +452,9 @@ class TestThinkingBlockConversion:
         asst = asst_msgs[0]
 
         assert asst.get("reasoning") == "Just thinking..."
-        # No visible text → content should be absent or None.
-        assert asst.get("content") is None
+        # No visible text → content should be empty string (not absent),
+        # because some tokenizers (e.g. mistral-common) require the field.
+        assert asst.get("content") == ""
 
     def test_thinking_plus_tool_use_in_assistant_message(self):
         """thinking + tool_use: reasoning field set, tool_calls populated."""
@@ -498,8 +499,115 @@ class TestThinkingBlockConversion:
         tool_calls = list(asst.get("tool_calls", []))
         assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "calculator"
-        # No text content alongside reasoning + tool_use.
-        assert asst.get("content") is None
+        # No text content alongside reasoning + tool_use → empty string
+        # (not absent) for tokenizer compatibility.
+        assert asst.get("content") == ""
+
+    def test_tool_use_only_in_assistant_message(self):
+        """tool_use only (no text, no thinking): content must be empty str."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "What is 2+2?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_001",
+                            "name": "calculator",
+                            "input": {"expression": "2+2"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_001",
+                            "content": "4",
+                        }
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        asst_msgs = [m for m in result.messages if m.get("role") == "assistant"]
+        assert len(asst_msgs) == 1
+        asst = asst_msgs[0]
+
+        assert asst.get("content") == ""
+        tool_calls = list(asst.get("tool_calls", []))
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "calculator"
+
+    def test_multi_turn_tool_calling_content_always_set(self):
+        """Multi-turn tool calling must always set content on assistant msgs.
+
+        Regression test for https://github.com/vllm-project/vllm/issues/38738.
+        """
+        request = _make_request(
+            [
+                {"role": "user", "content": "Search for vLLM"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_001",
+                            "name": "search",
+                            "input": {"query": "vLLM"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_001",
+                            "content": "vLLM is a fast LLM inference engine",
+                        }
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Based on the search...",
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call_002",
+                            "name": "search",
+                            "input": {"query": "vLLM performance"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_002",
+                            "content": "vLLM achieves high throughput",
+                        }
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        asst_msgs = [m for m in result.messages if m.get("role") == "assistant"]
+        assert len(asst_msgs) == 2
+        # First assistant: tool_use only → content must be ""
+        assert asst_msgs[0].get("content") == ""
+        assert len(list(asst_msgs[0].get("tool_calls", []))) == 1
+        # Second assistant: text + tool_use → content is the text
+        assert asst_msgs[1].get("content") == "Based on the search..."
+        assert len(list(asst_msgs[1].get("tool_calls", []))) == 1
 
     def test_multiple_thinking_blocks_concatenated(self):
         """Multiple thinking blocks should be joined in order."""
