@@ -128,6 +128,21 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     ],
 }
 
+_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        MarlinFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        # To be added
+    ],
+    PlatformEnum.CPU: [
+        # To be added
+    ],
+    PlatformEnum.XPU: [
+        # To be added
+    ],
+}
+
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CUDA: [
@@ -367,6 +382,35 @@ def choose_mp_linear_kernel(
     )
 
 
+# TODO: add force_kernel option to choose_mp_linear_kernel and use it in
+# init_mp_linear_kernel, # similar to init_fp8_linear_kernel and
+# init_int8_linear_kernel, to allow forcing a specific kernel for testing and
+# debugging purposes.
+def choose_wfp8_a16_linear_kernel(
+    config: FP8ScaledMMLinearLayerConfig, compute_capability: int | None = None
+) -> type[FP8ScaledMMLinearKernel]:
+    if compute_capability is None:
+        if current_platform is None:
+            raise ValueError("Cannot determine compute capability")
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+
+    failure_reason_list = []
+    for kernel in _POSSIBLE_WFP8A16_KERNELS[current_platform._enum]:
+        is_supported_and_can_implement, failure_reason = (
+            is_supported_and_can_implement_kernel(kernel, config, compute_capability)
+        )
+        if is_supported_and_can_implement:
+            return kernel
+        failure_reason_list.append(failure_reason)
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "WFP8A16 linear layer. Reasons: \n" + "\n".join(failure_reason_list)
+    )
+
+
 def register_linear_kernel(
     kernel_class: type,
     platform: PlatformEnum,
@@ -405,6 +449,7 @@ __all__ = [
     "init_int8_linear_kernel",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
+    "choose_wfp8_a16_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
     "ScaledMMLinearKernel",
