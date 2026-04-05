@@ -66,6 +66,56 @@ def expand_block_ids(
         output_idx = output_end_idx
 
 
+def compute_sub_block_ptrs(
+    block_ids: np.ndarray,
+    block_size_factor: int,
+    output: np.ndarray,
+    tensor: torch.Tensor,
+    skip_count: int = 0,
+):
+    """
+    Compute byte pointers for sub-blocks of the given block IDs.
+
+    Each block in block_ids contains block_size_factor sub-blocks.
+    The pointer for sub-block j of block b is:
+        base_ptr + b * row_stride + j * sub_block_size
+
+    where sub_block_size = tensor.shape[1] // block_size_factor (gpu page size).
+
+    This handles tensors where row_stride != block_size_factor * sub_block_size
+    (e.g. non-contiguous CPU tensors).
+
+    Args:
+        block_ids: array of block IDs at the tensor's native granularity.
+        block_size_factor: number of sub-blocks per block.
+        output: pre-allocated int64 array to write pointers into.
+        tensor: the source or destination tensor.
+        skip_count: sub-blocks to skip in the first block.
+    """
+    assert skip_count < block_size_factor
+
+    num_sub_blocks = len(output)
+    base_ptr = tensor.data_ptr()
+    row_stride = tensor.stride(0)
+
+    if block_size_factor == 1:
+        # Fast path: 1:1 mapping, no sub-block expansion needed.
+        output[:] = base_ptr + block_ids[:num_sub_blocks] * row_stride
+        return
+
+    # Vectorized expansion for block_size_factor > 1.
+    assert tensor.shape[1] % block_size_factor == 0
+    sub_block_size = tensor.shape[1] // block_size_factor
+    sub_offsets = np.arange(block_size_factor, dtype=np.int64) * sub_block_size
+    # (num_blocks, 1) + (1, block_size_factor) -> (num_blocks, block_size_factor)
+    all_ptrs = (
+        base_ptr + block_ids.astype(np.int64)[:, np.newaxis] * row_stride
+    ) + sub_offsets[np.newaxis, :]
+    # Flatten and apply skip_count / truncation
+    flat = all_ptrs.ravel()
+    output[:] = flat[skip_count : skip_count + num_sub_blocks]
+
+
 def pin_mmap_region(region: SharedMmapRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
     tp_rank = get_tensor_model_parallel_rank()
@@ -146,7 +196,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             assert cpu_tensor.device.type == "cpu"
             _, gpu_page_size = gpu_tensor.shape
             _, cpu_page_size = cpu_tensor.shape
-            assert cpu_page_size == gpu_page_size  # * block_size_factor
+            assert cpu_page_size == gpu_page_size * block_size_factor
 
         self.src_tensors: list[torch.Tensor] = (
             gpu_tensors if gpu_to_cpu else cpu_tensors
@@ -188,13 +238,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
-        # Pre-compute base pointers and block sizes for batch copies.
-        self._src_base_ptrs = np.array(
-            [t.data_ptr() for t in self.src_tensors], dtype=np.int64
-        )
-        self._dst_base_ptrs = np.array(
-            [t.data_ptr() for t in self.dst_tensors], dtype=np.int64
-        )
+        # Pre-compute block sizes for batch copies.
         self._block_size_in_bytes_arr = np.array(
             self.tensor_block_size_in_bytes, dtype=np.int64
         )
@@ -215,17 +259,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
-        src_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
-        dst_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
-        expand_block_ids(
-            src_blocks,
-            self.src_block_size_factor,
-            src_block_ids,
-            skip_count=src_sub_blocks_to_skip,
-        )
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, dst_block_ids)
-
-        # Build flat pointer arrays for all tensors × all block pairs.
         num_pairs = dst_sub_block_count
         num_tensors = len(self.src_tensors)
         total = num_pairs * num_tensors
@@ -234,11 +267,23 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         all_dst = np.empty(total, dtype=np.int64)
         all_sizes = np.empty(total, dtype=np.int64)
 
-        for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
+        for t_idx in range(num_tensors):
+            bsz = self._block_size_in_bytes_arr[t_idx]
             start = t_idx * num_pairs
             end = start + num_pairs
-            all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
-            all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
+            compute_sub_block_ptrs(
+                block_ids=src_blocks,
+                block_size_factor=self.src_block_size_factor,
+                output=all_src[start:end],
+                tensor=self.src_tensors[t_idx],
+                skip_count=src_sub_blocks_to_skip,
+            )
+            compute_sub_block_ptrs(
+                block_ids=dst_blocks,
+                block_size_factor=self.dst_block_size_factor,
+                output=all_dst[start:end],
+                tensor=self.dst_tensors[t_idx],
+            )
             all_sizes[start:end] = bsz
 
         batch_src = torch.from_numpy(all_src)
@@ -321,7 +366,6 @@ class CpuGpuOffloadingHandlers:
         block_size_factor: int,
         num_cpu_blocks: int,
         mmap_region: SharedMmapRegion | None = None,
-        num_workers: int = 1,
     ):
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
@@ -339,9 +383,7 @@ class CpuGpuOffloadingHandlers:
             cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
 
             if mmap_region is not None:
-                cpu_tensor = mmap_region.alloc_tensor(
-                    gpu_page_size_bytes, block_size_factor
-                )
+                cpu_tensor = mmap_region.alloc_tensor(cpu_page_size_bytes)
             else:
                 cpu_tensor = torch.zeros(
                     (num_cpu_blocks, cpu_page_size_bytes),

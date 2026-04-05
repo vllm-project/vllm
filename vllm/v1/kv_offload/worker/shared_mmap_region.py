@@ -86,7 +86,7 @@ class SharedMmapRegion:
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         atexit.register(self.cleanup)
 
-    def alloc_tensor(self, tensor_size: int, block_size_factor: int) -> torch.Tensor:
+    def alloc_tensor(self, tensor_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
 
         Must be called once per canonical tensor. The full mmap layout is:
@@ -106,12 +106,11 @@ class SharedMmapRegion:
         address arithmetic works without any dtype conversion.
 
         Args:
-            tensor_size: Bytes per block for this canonical tensor
-                         (= CanonicalKVCacheTensor.page_size_bytes * block_size_factor).
+            tensor_size: Bytes per block for this  tensor.
         """
         worker_layer_view = torch.as_strided(
             self._base,
-            size=(self.num_blocks, block_size_factor * tensor_size),
+            size=(self.num_blocks, tensor_size),
             stride=(self._row_stride, 1),
             storage_offset=self._worker_offset,
         )
