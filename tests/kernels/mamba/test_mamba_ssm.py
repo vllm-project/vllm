@@ -8,33 +8,13 @@ from einops import rearrange, repeat
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn,
-)
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    initialize_mamba_ssu_backend,
     selective_state_update,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-
-try:
-    import flashinfer.mamba  # noqa: F401
-
-    HAS_FLASHINFER = True
-except ImportError:
-    HAS_FLASHINFER = False
-
-_SSU_BACKENDS = [
-    pytest.param("triton", id="triton"),
-    pytest.param(
-        "flashinfer",
-        id="flashinfer",
-        marks=pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed"),
-    ),
-]
 
 
 def selective_state_update_ref(
@@ -413,13 +393,11 @@ def test_selective_scan(
     )
 
 
-@pytest.mark.parametrize("backend", _SSU_BACKENDS)
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
-def test_selective_state_update(dim, dstate, has_z, itype, backend):
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum[backend.upper()]))
+def test_selective_state_update(dim, dstate, has_z, itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
@@ -451,28 +429,18 @@ def test_selective_state_update(dim, dstate, has_z, itype, backend):
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("backend", _SSU_BACKENDS)
 @pytest.mark.parametrize("philox_rounds", [0, 4])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
-def test_selective_state_update_stochastic_rounding(
-    dim, dstate, has_z, philox_rounds, backend
-):
-    if backend == "triton" and not (
+@pytest.mark.skipif(
+    not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ):
-        pytest.skip(
-            "Stochastic rounding in triton is only supported"
-            " on compute capability 10.0 CUDA devices."
-        )
-    initialize_mamba_ssu_backend(
-        MambaConfig(
-            backend=MambaBackendEnum[backend.upper()],
-            enable_stochastic_rounding=True,
-            stochastic_rounding_philox_rounds=philox_rounds,
-        )
-    )
+    ),
+    reason="Stochastic rounding in triton is only supported"
+    " on compute capability 10.0 CUDA devices.",
+)
+def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_rounds):
     device = "cuda"
     rtol, atol = 5e-3, 1e-1
     # set seed
@@ -502,6 +470,8 @@ def test_selective_state_update_stochastic_rounding(
         dt_bias=dt_bias,
         dt_softplus=True,
         out=out,
+        enable_stochastic_rounding=True,
+        cache_philox_rounds=philox_rounds,
     )
     out_ref = selective_state_update_ref(
         state_ref, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=True
@@ -512,14 +482,12 @@ def test_selective_state_update_stochastic_rounding(
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("backend", _SSU_BACKENDS)
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 @pytest.mark.parametrize("max_seq_len", [1, 2, 4])
-def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len, backend):
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum[backend.upper()]))
+def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
@@ -773,7 +741,6 @@ def test_selective_scan_varlen(
     )
 
 
-@pytest.mark.parametrize("backend", _SSU_BACKENDS)
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [True])
 @pytest.mark.parametrize("dstate", [16, 64])
@@ -781,9 +748,8 @@ def test_selective_scan_varlen(
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [True, False])
 def test_selective_state_update_with_batch_indices(
-    with_padding, dim, dstate, has_z, itype, backend
+    with_padding, dim, dstate, has_z, itype
 ):
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum[backend.upper()]))
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
@@ -867,7 +833,6 @@ def test_selective_state_update_with_batch_indices(
     assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("backend", _SSU_BACKENDS)
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("tie_hdim", [False, True])
@@ -875,9 +840,8 @@ def test_selective_state_update_with_batch_indices(
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 def test_selective_state_update_with_heads_with_batch_indices(
-    dim, dstate, ngroups, has_z, tie_hdim, itype, backend
+    dim, dstate, ngroups, has_z, tie_hdim, itype
 ):
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum[backend.upper()]))
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 3e-2)
     if itype == torch.bfloat16:
@@ -943,16 +907,14 @@ def test_selective_state_update_with_heads_with_batch_indices(
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("backend", _SSU_BACKENDS)
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.parametrize("max_seq_len", [2, 4])
 def test_selective_state_update_with_num_accepted_tokens(
-    dim, dstate, has_z, itype, max_seq_len, backend
+    dim, dstate, has_z, itype, max_seq_len
 ):
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum[backend.upper()]))
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
@@ -1071,16 +1033,14 @@ def test_selective_state_update_with_num_accepted_tokens(
             assert torch.allclose(state[dst_slot], state_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("backend", _SSU_BACKENDS)
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.parametrize("max_seq_len", [2, 4])
 def test_selective_state_update_varlen_with_num_accepted(
-    dim, dstate, has_z, itype, max_seq_len, backend
+    dim, dstate, has_z, itype, max_seq_len
 ):
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum[backend.upper()]))
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:

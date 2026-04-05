@@ -176,7 +176,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
             pad_slot_id=null_block_id,
             out=out,
             rand_seed=rand_seed,
-            philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds,
+            philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds or 10,
         )
 
 
