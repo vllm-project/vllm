@@ -7,8 +7,9 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
-from vllm import SamplingParams
+from vllm import PoolingParams, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -20,7 +21,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs import PromptType
-from vllm.outputs import RequestOutput
+from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -96,6 +97,75 @@ async def generate(
         await asyncio.sleep(0.0)
 
     return count, request_id
+
+
+@pytest.mark.asyncio
+async def test_encode_accepts_pooling_task():
+    engine = object.__new__(AsyncLLM)
+
+    class FakeCollector:
+        def __init__(self):
+            self.request_id = "request-1"
+            self._output: PoolingRequestOutput[PoolingOutput] | None = (
+                PoolingRequestOutput(
+                    request_id="request-1",
+                    outputs=PoolingOutput(data=torch.empty(0)),
+                    prompt_token_ids=[],
+                    num_cached_tokens=0,
+                    finished=True,
+                )
+            )
+
+        def get_nowait(self) -> PoolingRequestOutput[PoolingOutput] | None:
+            output, self._output = self._output, None
+            return output
+
+        async def get(self):
+            raise AssertionError("encode should not await when output is ready")
+
+        def close(self):
+            return None
+
+    async def fake_add_request(
+        request_id: str,
+        prompt: PromptType,
+        params: PoolingParams,
+        **_: object,
+    ):
+        assert request_id == "request-1"
+        assert prompt == TEXT_PROMPT
+        assert params.task == "embed"
+        return FakeCollector()
+
+    engine.add_request = fake_add_request  # type: ignore[method-assign]
+    engine.log_requests = False
+
+    outputs = []
+    async for output in engine.encode(
+        TEXT_PROMPT,
+        PoolingParams(),
+        request_id="request-1",
+        pooling_task="embed",
+    ):
+        outputs.append(output)
+
+    assert len(outputs) == 1
+    assert outputs[0].finished
+
+
+@pytest.mark.asyncio
+async def test_encode_rejects_conflicting_pooling_task():
+    engine = object.__new__(AsyncLLM)
+    engine.log_requests = False
+
+    with pytest.raises(ValueError, match="cannot overwrite"):
+        async for _ in engine.encode(
+            TEXT_PROMPT,
+            PoolingParams(task="token_embed"),
+            request_id="request-1",
+            pooling_task="embed",
+        ):
+            pass
 
 
 @pytest.mark.parametrize(
