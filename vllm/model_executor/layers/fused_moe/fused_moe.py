@@ -54,6 +54,22 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
+# swap_ab benefits SM90 GPUs (H20, H100, H200, etc.) for certain block shapes.
+@functools.lru_cache(maxsize=8)
+def should_enable_swap_ab(
+    BLOCK_SIZE_M: int,
+    BLOCK_SIZE_N: int,
+) -> bool:
+    if not current_platform.is_cuda() or envs.VLLM_BATCH_INVARIANT:
+        return False
+
+    return (
+        current_platform.has_device_capability((9, 0))
+        and BLOCK_SIZE_M < 64
+        and BLOCK_SIZE_N >= 64
+    )
+
+
 @triton.jit
 def write_zeros_to_output(
     c_ptr,
@@ -362,6 +378,7 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    swap_ab: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -386,6 +403,8 @@ def fused_moe_kernel(
     - naive_block_assignment: A boolean flag indicating whether to use naive
         token wise block assignment. If True, each block corresponds to a
         single token.
+    - swap_ab: When True, swap A and B operands in tl.dot to better utilize
+        SM90 Tensor Core layout for small M / large N block shapes.
     This kernel performs the multiplication of a token by its corresponding
     expert matrix as determined by `expert_ids`. The sorting of
     `sorted_token_ids` by expert index and padding ensures divisibility by
@@ -496,7 +515,10 @@ def fused_moe_kernel(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    if swap_ab:
+        accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
@@ -518,10 +540,15 @@ def fused_moe_kernel(
                 )
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
+                if swap_ab:
+                    a, b = tl.trans(b, (1, 0)), tl.trans(a, (1, 0))
+                    a_scale, b_scale = b_scale, a_scale
                 accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
             else:
                 if use_fp8_w8a8:
                     # acc used to enable fp8_fast_accum
+                    if swap_ab:
+                        a, b = tl.trans(b, (1, 0)), tl.trans(a, (1, 0))
                     accumulator = tl.dot(a, b, acc=accumulator)
                 else:
                     accumulator += tl.dot(a, b)
@@ -530,6 +557,9 @@ def fused_moe_kernel(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    if swap_ab:
+        accumulator = tl.trans(accumulator, (1, 0))
 
     # Dequantization for supported quantization schemes:
     #   - int8_w8a16
@@ -783,6 +813,11 @@ def invoke_fused_moe_triton_kernel(
     )
     HAS_BIAS = B_bias is not None
 
+    if use_fp8_w8a8:
+        swap_ab = should_enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
+    else:
+        swap_ab = False
+
     config = config.copy()
     config["SPLIT_K"] = 1
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
@@ -828,6 +863,7 @@ def invoke_fused_moe_triton_kernel(
         per_channel_quant=per_channel_quant,
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
+        swap_ab=swap_ab,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         **config,
     )
