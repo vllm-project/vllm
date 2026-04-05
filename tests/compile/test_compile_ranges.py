@@ -210,9 +210,6 @@ def test_compile_sizes_produce_static_shapes(use_fresh_inductor_cache):
 
 
 def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
-    # To force multiple compilations, we disable the compile cache
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
     post_grad_range_checker = PostGradRangeChecker(
         ranges=[
             Range(start=1, end=8),
@@ -235,6 +232,9 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
                 inductor_compile_config={
                     "post_grad_custom_post_pass": post_grad_range_checker,
                 },
+                # disable compile cache so that we can count the number of compilations
+                # appropriately
+                enable_vllm_compile_cache=False,
             ),
         )
 
