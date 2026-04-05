@@ -15,6 +15,8 @@ logger = init_logger(__name__)
 
 
 class DraftModelProposer(SpecDecodeBaseProposer):
+    _supports_dsl: bool = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
