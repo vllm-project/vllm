@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -884,3 +885,27 @@ def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
     return feature_layer_index
+
+
+def maybe_compress_lm_head_to_fp8(
+    model: nn.Module,
+    logger: "logging.Logger",
+) -> None:
+    """Compress lm_head weight to float8_e4m3fn in-place to reduce VRAM.
+
+    Called from ``load_weights`` when ``--fp8-lm-head`` is set.
+    Has no effect if lm_head is already quantized or tied to embeddings.
+    The :class:`~vllm.model_executor.layers.linear.UnquantizedLinearMethod`
+    handles the FP8-to-compute-dtype cast at runtime.
+    """
+    lm_head = getattr(model, "lm_head", None)
+    if lm_head is None or not hasattr(lm_head, "weight"):
+        return
+    if lm_head.weight.dtype == torch.float8_e4m3fn:
+        return
+    saved_mb = lm_head.weight.numel() / 1024**2
+    lm_head.weight = nn.Parameter(
+        lm_head.weight.data.to(torch.float8_e4m3fn),
+        requires_grad=False,
+    )
+    logger.info("Compressed lm_head to float8_e4m3fn (saved %.0f MB VRAM)", saved_mb)

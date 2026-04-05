@@ -211,6 +211,12 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    fp8_lm_head: bool = False
+    """Compress the lm_head weight to float8_e4m3fn after loading to reduce
+    VRAM usage on models with large vocabularies. Saves ~640 MB for a 131K
+    vocab × 5120 hidden-dim model. The UnquantizedLinearMethod handles the
+    FP8-to-compute-dtype cast at runtime. Has no effect when
+    tie_word_embeddings is True or when lm_head is already quantized."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
     max_logprobs: int = 20
