@@ -1,7 +1,5 @@
 #include <algorithm>
 #include <array>
-#include <cstdint>
-
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -115,7 +113,10 @@ torch::Tensor fused_bmm_fp8_reduce_scatter(
       torch::empty({chunk_rows, n}, slot_options),
       torch::empty({chunk_rows, n}, slot_options),
   };
-  std::array<uint32_t, 2> slot_generations{0, 0};
+  std::array<torch::Tensor, 2> reduced_slots{
+      torch::empty({chunk_rows, n}, slot_options),
+      torch::empty({chunk_rows, n}, slot_options),
+  };
 
   auto caller_stream = c10::cuda::getCurrentCUDAStream(a.get_device());
   auto compute_stream = c10::cuda::getStreamFromPool(false, a.get_device());
@@ -135,6 +136,10 @@ torch::Tensor fused_bmm_fp8_reduce_scatter(
       at::cuda::CUDAEvent(cudaEventDisableTiming),
   };
 
+  const int64_t owned_rows = m / world_size;
+  const int64_t owned_start = rank * owned_rows;
+  const int64_t owned_end = owned_start + owned_rows;
+
   int64_t tile_idx = 0;
   for (int64_t row_start = 0; row_start < m;
        row_start += chunk_rows, ++tile_idx) {
@@ -149,7 +154,6 @@ torch::Tensor fused_bmm_fp8_reduce_scatter(
 
     auto a_chunk = a.narrow(0, row_start, rows);
     auto temp_chunk = temp_slots[slot].narrow(0, 0, rows);
-    ++slot_generations[slot];
     {
       c10::cuda::CUDAStreamGuard guard(compute_stream);
       call_cutlass_scaled_mm(temp_chunk, a_chunk, b, a_scale, b_scale);
@@ -162,15 +166,30 @@ torch::Tensor fused_bmm_fp8_reduce_scatter(
       int64_t prev_rows = std::min<int64_t>(chunk_rows, m - prev_row_start);
       auto prev_temp_chunk = temp_slots[prev_slot].narrow(0, 0, prev_rows);
       auto prev_reg_chunk = reg_slots[prev_slot].narrow(0, 0, prev_rows);
-      auto out_chunk =
-          out.narrow(0, prev_row_start / world_size, prev_rows / world_size);
+      auto prev_reduced_chunk =
+          reduced_slots[prev_slot].narrow(0, 0, prev_rows);
       {
         c10::cuda::CUDAStreamGuard guard(comm_stream);
         gemm_done[prev_slot].block(comm_stream);
-        reduce_scatter_with_publish(
-            custom_ar_ptr, prev_temp_chunk, out_chunk,
-            reinterpret_cast<fptr_t>(prev_reg_chunk.data_ptr()),
-            prev_rows * bytes_per_row, prev_slot, slot_generations[prev_slot]);
+        // Tile-wise reduce_scatter is not globally correct once M is split
+        // into multiple tiles: each tile returns a tile-local shard, and
+        // concatenating those shards does not equal the full-tensor
+        // reduce_scatter result. Instead, reduce the full tile and then copy
+        // only the owner rank's contiguous global row interval into `out`.
+        all_reduce(custom_ar_ptr, prev_temp_chunk, prev_reduced_chunk,
+                   reinterpret_cast<fptr_t>(prev_reg_chunk.data_ptr()),
+                   prev_rows * bytes_per_row);
+
+        int64_t copy_start = std::max(prev_row_start, owned_start);
+        int64_t copy_end = std::min(prev_row_start + prev_rows, owned_end);
+        if (copy_start < copy_end) {
+          int64_t copy_rows = copy_end - copy_start;
+          int64_t src_offset = copy_start - prev_row_start;
+          int64_t dst_offset = copy_start - owned_start;
+          auto src_chunk = prev_reduced_chunk.narrow(0, src_offset, copy_rows);
+          auto dst_chunk = out.narrow(0, dst_offset, copy_rows);
+          dst_chunk.copy_(src_chunk);
+        }
         rs_done[prev_slot].record(comm_stream);
       }
     }
@@ -181,15 +200,24 @@ torch::Tensor fused_bmm_fp8_reduce_scatter(
   int64_t last_rows = std::min<int64_t>(chunk_rows, m - last_row_start);
   auto last_temp_chunk = temp_slots[last_slot].narrow(0, 0, last_rows);
   auto last_reg_chunk = reg_slots[last_slot].narrow(0, 0, last_rows);
-  auto last_out =
-      out.narrow(0, last_row_start / world_size, last_rows / world_size);
+  auto last_reduced_chunk = reduced_slots[last_slot].narrow(0, 0, last_rows);
   {
     c10::cuda::CUDAStreamGuard guard(comm_stream);
     gemm_done[last_slot].block(comm_stream);
-    reduce_scatter_with_publish(
-        custom_ar_ptr, last_temp_chunk, last_out,
-        reinterpret_cast<fptr_t>(last_reg_chunk.data_ptr()),
-        last_rows * bytes_per_row, last_slot, slot_generations[last_slot]);
+    all_reduce(custom_ar_ptr, last_temp_chunk, last_reduced_chunk,
+               reinterpret_cast<fptr_t>(last_reg_chunk.data_ptr()),
+               last_rows * bytes_per_row);
+
+    int64_t copy_start = std::max(last_row_start, owned_start);
+    int64_t copy_end = std::min(last_row_start + last_rows, owned_end);
+    if (copy_start < copy_end) {
+      int64_t copy_rows = copy_end - copy_start;
+      int64_t src_offset = copy_start - last_row_start;
+      int64_t dst_offset = copy_start - owned_start;
+      auto src_chunk = last_reduced_chunk.narrow(0, src_offset, copy_rows);
+      auto dst_chunk = out.narrow(0, dst_offset, copy_rows);
+      dst_chunk.copy_(src_chunk);
+    }
     rs_done[last_slot].record(comm_stream);
   }
   rs_done[last_slot].block(caller_stream);
