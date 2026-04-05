@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
+    VLLM_USE_INDEXCACHE: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -1225,6 +1226,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
         "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
     ),
+    # Enable IndexCache for DeepSeek models to reduce redundant top-k
+    # token selection computations in sparse attention.
+    "VLLM_USE_INDEXCACHE": lambda: bool(int(os.getenv("VLLM_USE_INDEXCACHE", "0"))),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
     # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).

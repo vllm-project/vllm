@@ -33,6 +33,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -967,6 +968,8 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.is_v32 = hasattr(config, "index_topk")
 
+        _skip_topk = False
+        _next_skip_topk = False
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
@@ -984,6 +987,21 @@ class DeepseekV2MLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
+            # IndexCache config
+            indexcache_enabled = envs.VLLM_USE_INDEXCACHE
+            if indexcache_enabled:
+                _index_topk_freq = getattr(config, "index_topk_freq", 1)
+                _index_topk_pattern = getattr(config, "index_topk_pattern", None)
+                layer_id = int(prefix.split(".")[-2]) if "." in prefix else 0
+                if _index_topk_pattern is None:
+                    _skip_topk = max(layer_id - 1, 0) % _index_topk_freq != 0
+                    _next_skip_topk = layer_id % _index_topk_freq != 0
+                else:
+                    _skip_topk = _index_topk_pattern[layer_id] == "S"
+                    if layer_id < len(_index_topk_pattern) - 1:
+                        _next_skip_topk = _index_topk_pattern[layer_id + 1] == "S"
+                    else:
+                        _next_skip_topk = False
         else:
             self.indexer_rope_emb = None
             self.indexer = None
@@ -1022,14 +1040,22 @@ class DeepseekV2MLAAttention(nn.Module):
             quant_config,
             prefix,
         )
+        self.mla_attn.skip_topk = _skip_topk
+        self.mla_attn.next_skip_topk = _next_skip_topk
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None,
-    ) -> torch.Tensor:
-        return self.mla_attn(positions, hidden_states, llama_4_scaling)
+        prev_topk_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
+        return self.mla_attn(
+            positions,
+            hidden_states,
+            llama_4_scaling,
+            prev_topk_indices=prev_topk_indices,
+        )
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -1122,6 +1148,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
+        prev_topk_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -1136,7 +1163,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         }
         if not self.use_mha:
             attn_kwargs["llama_4_scaling"] = llama_4_scaling
+            attn_kwargs["prev_topk_indices"] = prev_topk_indices
         hidden_states = self.self_attn(**attn_kwargs)
+        if isinstance(hidden_states, tuple):
+            hidden_states, topk_indices = hidden_states
+        else:
+            topk_indices = None
 
         if (
             not isinstance(self.self_attn, DeepseekAttention)
@@ -1163,7 +1195,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             # of DeepseekV2MOE
             hidden_states *= 1.0 / self.routed_scaling_factor
 
-        return hidden_states, residual
+        return hidden_states, residual, topk_indices
 
 
 @support_torch_compile
@@ -1259,14 +1291,19 @@ class DeepseekV2Model(nn.Module):
             llama_4_scaling = None
 
         aux_hidden_states = []
+        topk_indices = None
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, llama_4_scaling
+            hidden_states, residual, topk_indices = layer(
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling,
+                prev_topk_indices=topk_indices,
             )
 
         if not get_pp_group().is_last_rank:

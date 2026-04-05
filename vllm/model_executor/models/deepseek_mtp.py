@@ -111,7 +111,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
         )
 
-        hidden_states, residual = self.mtp_block(
+        hidden_states, residual, _ = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
         hidden_states = residual + hidden_states
