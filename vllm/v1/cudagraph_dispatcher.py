@@ -119,8 +119,14 @@ class CudagraphDispatcher:
 
         # LoRA is enabled - capture graphs based on cudagraph_specialize_lora
         if self.compilation_config.cudagraph_specialize_lora:
+            # Cap at max_num_seqs: with N concurrent sequences at most N
+            # distinct LoRA adapters can be active simultaneously, so there
+            # is no need to capture graphs for higher active-LoRA counts.
+            max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
             captured_counts = get_captured_lora_counts(
-                lora_config.max_loras, self.specialize_lora_count
+                lora_config.max_loras,
+                self.specialize_lora_count,
+                max_concurrent_loras=max_num_seqs,
             )
             # Specialize: capture separate graphs for with and without LoRA
             return [0] + captured_counts
