@@ -316,6 +316,14 @@ class ParallelConfig:
     Block_size should be divisible by cp_kv_cache_interleave_size.
     """
 
+    tensor_parallel_size_attention: int | None = None
+    """Tensor parallel size for attention heads (TPA). When set smaller than
+    tensor_parallel_size, attention heads are sharded by TPA while FFN layers
+    use full TP. Requires decode_context_parallel_size = TP / TPA.
+
+    Reference: https://arxiv.org/abs/2507.07120
+    """
+
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
     and not overridden for dense models."""
@@ -412,7 +420,42 @@ class ParallelConfig:
                 "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
             )
 
+        # TPA (tensor parallel for attention) validation
+        if self.tensor_parallel_size_attention is not None:
+            tpa = self.tensor_parallel_size_attention
+            tp = self.tensor_parallel_size
+            if tp % tpa != 0:
+                raise ValueError(
+                    f"tensor_parallel_size ({tp}) must be divisible by "
+                    f"tensor_parallel_size_attention ({tpa})."
+                )
+            dcp = tp // tpa
+            if dcp > 1 and self.decode_context_parallel_size != dcp:
+                raise ValueError(
+                    f"When tensor_parallel_size_attention ({tpa}) < "
+                    f"tensor_parallel_size ({tp}), "
+                    f"decode_context_parallel_size must equal "
+                    f"tensor_parallel_size / tensor_parallel_size_attention "
+                    f"(= {dcp}), but got "
+                    f"{self.decode_context_parallel_size}. "
+                    f"Use --decode-context-parallel-size {dcp} "
+                    f"--tensor-parallel-size-attention {tpa}."
+                )
+
         return self
+
+    @property
+    def tpa_size(self) -> int:
+        """TPA (tensor parallel for attention) size.
+        Returns tensor_parallel_size_attention if set, else tensor_parallel_size."""
+        if self.tensor_parallel_size_attention is not None:
+            return self.tensor_parallel_size_attention
+        return self.tensor_parallel_size
+
+    @property
+    def dcp_size(self) -> int:
+        """DCP (decode context parallel) size."""
+        return self.decode_context_parallel_size
 
     @property
     def world_size_across_dp(self) -> int:

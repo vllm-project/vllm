@@ -1232,6 +1232,48 @@ def get_dcp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_context_model_parallel_group = get_dcp_group
 
+_TPA_SIZE: int = 0  # TPA size (head parallelism for attention)
+
+
+def is_tpa_gqa_mode() -> bool:
+    """Check if TPA GQA mode is enabled (TPA > 1).
+
+    TPA GQA mode is enabled when tensor_parallel_size_attention is set
+    AND TPA < TP (meaning DCP > 1 with head separation).
+
+    For MLA models, TPA=1 so this returns False.
+    """
+    return _TPA_SIZE > 1
+
+
+def get_attention_tp_world_size(disable_parallel: bool = False) -> int:
+    """Get the world size for attention head parallelism.
+
+    In TPA GQA mode, attention heads are sharded by TPA (not full TP).
+    In standard mode or TPA MLA mode, heads are sharded by full TP.
+    """
+    if disable_parallel:
+        return 1
+    if _TPA_SIZE > 0:
+        return _TPA_SIZE
+    return get_tensor_model_parallel_world_size()
+
+
+def get_attention_tp_rank(disable_parallel: bool = False) -> int:
+    """Get the rank for attention head parallelism.
+
+    In TPA GQA mode, attention heads are indexed by TPA rank
+    (TP rank // DCP size). In standard mode, returns the full TP rank.
+    """
+    if disable_parallel:
+        return 0
+    if _TPA_SIZE > 0:
+        tp_rank = get_tensor_model_parallel_rank()
+        dcp_size = get_dcp_group().world_size
+        return tp_rank // dcp_size
+    return get_tensor_model_parallel_rank()
+
+
 _PP: GroupCoordinator | None = None
 
 
@@ -1602,6 +1644,20 @@ def initialize_model_parallel(
         group_name="dcp",
     )
 
+    # TPA reuses the DCP group (same rank topology).
+    global _TPA_SIZE
+    if (
+        config is not None
+        and config.parallel_config.tpa_size
+        < config.parallel_config.tensor_parallel_size
+    ):
+        _TPA_SIZE = config.parallel_config.tpa_size
+        logger.info(
+            "TPA enabled: TPA=%d, DCP=%d (using DCP group for communication)",
+            _TPA_SIZE,
+            config.parallel_config.dcp_size,
+        )
+
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
     group_ranks = (
@@ -1861,6 +1917,9 @@ def destroy_model_parallel():
     if _DCP:
         _DCP.destroy()
     _DCP = None
+
+    global _TPA_SIZE
+    _TPA_SIZE = 0
 
     global _PCP
     if _PCP:
