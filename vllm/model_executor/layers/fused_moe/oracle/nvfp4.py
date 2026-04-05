@@ -17,9 +17,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
-    prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -39,7 +41,6 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
-    FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
 
@@ -48,7 +49,6 @@ FLASHINFER_NVFP4_MOE_BACKENDS = [
     NvFp4MoeBackend.FLASHINFER_TRTLLM,
     NvFp4MoeBackend.FLASHINFER_CUTLASS,
     NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-    NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
 ]
 
 fi_2_vllm_backend_map: dict[FlashinferMoeBackend, NvFp4MoeBackend] = {
@@ -94,13 +94,6 @@ def backend_to_kernel_cls(
         )
 
         return [FlashInferCuteDSLExperts]
-
-    elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
-        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
-            FlashInferCuteDSLBatchedExperts,
-        )
-
-        return [FlashInferCuteDSLBatchedExperts]
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -150,7 +143,6 @@ def select_nvfp4_moe_backend(
     AVAILABLE_BACKENDS = [
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-        NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
@@ -206,12 +198,6 @@ def select_nvfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
-        # For batched activation format, use batched variant if available.
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
-        ):
-            requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
@@ -302,28 +288,7 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
     torch.Tensor,
 ]:
-    if nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
-        (
-            w13,
-            w13_scale,
-            w13_scale_2,
-            a13_scale,
-            w2,
-            w2_scale,
-            w2_scale_2,
-            a2_scale,
-        ) = prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
-            layer=layer,
-            w13=w13,
-            w13_scale=w13_scale,
-            w13_scale_2=w13_scale_2,
-            a13_scale=a13_scale,
-            w2=w2,
-            w2_scale=w2_scale,
-            w2_scale_2=w2_scale_2,
-            a2_scale=a2_scale,
-        )
-    elif (
+    if (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
     ):
@@ -415,13 +380,7 @@ def make_nvfp4_moe_quant_config(
         # NOTE(rob): this is a hack until the MoE kernels
         # create their own quant configs. TRTLLM kernel
         # does not accept swizzled input quant scales.
-        is_nvfp4_scale_swizzled=(
-            backend
-            not in (
-                NvFp4MoeBackend.FLASHINFER_TRTLLM,
-                NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-            )
-        ),
+        is_nvfp4_scale_swizzled=(backend != NvFp4MoeBackend.FLASHINFER_TRTLLM),
     )
 
 
@@ -430,7 +389,7 @@ def make_nvfp4_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
+    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -466,12 +425,7 @@ def make_nvfp4_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if moe_config.moe_parallel_config.use_deepep_ll_kernels
-            else None
-        ),
-        moe_parallel_config=moe_config.moe_parallel_config,
+        shared_experts=shared_experts,
         inplace=False,
     )
 
