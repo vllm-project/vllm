@@ -211,6 +211,8 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+    promoting_mm_hashes: list[str]
+    cpu_get_encoder_mm_hashes: list[str]
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.

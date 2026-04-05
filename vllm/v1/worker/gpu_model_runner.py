@@ -29,9 +29,9 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
-    set_current_vllm_config,
     update_config,
 )
+from vllm.config.score_encoder_cache import get_score_encoder_cache_config
 from vllm.config.cache import CacheConfig
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -853,6 +853,11 @@ class GPUModelRunner(
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
 
+        # score encoder cache
+        self.tmp_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cpu_encoder_cache: dict[str, torch.Tensor] = {}
+        self.cached: dict[str, set[str]] = {}
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:
@@ -1046,7 +1051,57 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.accelerator.synchronize()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+    def free_tmp_cache(self, req_id, request):
+        if not get_score_encoder_cache_config(self.vllm_config).enabled:
+            self.cached.clear()
+            return
+        free_mm_hashes = set()
+        if request.mm_features is None:
+            return
+        for mm_feature in request.mm_features:
+            free_mm_hashes.add(mm_feature.identifier)
+
+        for mm_hash in free_mm_hashes:
+            self.cached[mm_hash].discard(req_id)
+            if not self.cached.get(mm_hash):
+                del self.cached[mm_hash]
+                if mm_hash in self.tmp_encoder_cache:
+                    del self.tmp_encoder_cache[mm_hash]
+    
+    def _async_process_scheduler_output(self, scheduler_output: "SchedulerOutput") -> None:
+        # Free the cached encoder outputs.
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            value = self.encoder_cache.pop(mm_hash, None)
+            if value is None and mm_hash not in scheduler_output.promoting_mm_hashes:
+                self.cpu_encoder_cache.pop(mm_hash, None)
+
+        # Handle promotion: move selected cache entries from CPU to device (e.g., GPU/NPU).
+        for mm_hash in scheduler_output.promoting_mm_hashes:
+            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+            if cpu_value is None:
+                continue
+            
+            staging = cpu_value.pin_memory()
+            gpu_value = staging.detach().to(self.device, non_blocking=True)
+            gpu_value.record_stream(torch.cuda.current_stream())
+
+            self.encoder_cache[mm_hash] = gpu_value
+            del staging
+
+        # Handle CPU fetch requests: load required cache entries from CPU to temporary device cache.
+        for mm_hash in scheduler_output.cpu_get_encoder_mm_hashes:
+            if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
+                continue
+            cpu_value = self.cpu_encoder_cache.get(mm_hash, None)
+            if cpu_value is None:
+                continue
+            staging = cpu_value.pin_memory()
+            gpu_value = staging.detach().to(self.device, non_blocking=True)
+            gpu_value.record_stream(torch.cuda.current_stream())
+            self.tmp_encoder_cache[mm_hash] = gpu_value
+            del staging
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -1058,7 +1113,8 @@ class GPUModelRunner(
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
-            self.requests.pop(req_id, None)
+            req = self.requests.pop(req_id, None)
+            self.free_tmp_cache(req_id, req)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
@@ -1071,6 +1127,9 @@ class GPUModelRunner(
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
+
+        # Free the cached encoder outputs.
+        self._async_process_scheduler_output(scheduler_output)
 
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
@@ -1156,6 +1215,9 @@ class GPUModelRunner(
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
+            for mm_feature in new_req_data.mm_features:
+                cur_hash = mm_feature.identifier
+                self.cached.setdefault(cur_hash, set()).add(req_id)
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
@@ -2813,23 +2875,17 @@ class GPUModelRunner(
         ):
             batch_outputs: MultiModalEmbeddings
 
-            # EVS and dynamic res video related change.
+            # EVS-related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
             # processing multimodal data. This solves the issue with scheduler
             # putting too many video samples into a single batch. Scheduler
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
-            # dynamic res video for nemotron temporarily uses this hack via
-            # requires_sequential_video_encoding
-            # because it doesn't yet support video batching.
             # TODO(ywang96): Fix memory profiling to take EVS into account and
             # remove this hack.
             if (
-                (
-                    self.is_multimodal_pruning_enabled
-                    or self.requires_sequential_video_encoding
-                )
+                self.is_multimodal_pruning_enabled
                 and modality == "video"
                 and num_items > 1
             ):
@@ -2887,7 +2943,27 @@ class GPUModelRunner(
 
         # Cache the encoder outputs by mm_hash
         for mm_hash, output in zip(mm_hashes, encoder_outputs):
-            self.encoder_cache[mm_hash] = output
+            if get_score_encoder_cache_config(self.vllm_config).enabled:
+                staging = torch.empty_like(
+                    output,
+                    device="cpu",
+                    pin_memory=True
+                )
+                staging.copy_(output.detach(), non_blocking=True)
+                self.cpu_encoder_cache[mm_hash] = staging
+
+                if (
+                    mm_hash in scheduler_output.promoting_mm_hashes and
+                    mm_hash not in scheduler_output.free_encoder_mm_hashes
+                ):
+                    # If the entry is marked for promotion and not marked for eviction,
+                    # keep it in the device (GPU) cache as well.
+                    self.encoder_cache[mm_hash] = output
+                else:
+                    self.tmp_encoder_cache[mm_hash] = output
+            else:
+                self.encoder_cache[mm_hash] = output
+
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
@@ -2949,7 +3025,9 @@ class GPUModelRunner(
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                if encoder_output is None:
+                    encoder_output = self.tmp_encoder_cache.get(mm_hash, None)
+                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}"
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
