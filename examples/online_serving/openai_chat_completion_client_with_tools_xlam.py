@@ -12,7 +12,9 @@ OR
 vllm serve --model Salesforce/xLAM-2-3b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
 """
 
+import ast
 import json
+import operator
 import time
 
 from openai import OpenAI
@@ -27,11 +29,49 @@ def get_weather(location: str, unit: str):
     return f"Weather in {location} is 22 degrees {unit}."
 
 
+# Supported operators for safe math evaluation.
+# SECURITY: Never use eval() on LLM outputs — it allows arbitrary code
+# execution via prompt injection. This safe evaluator only permits basic
+# arithmetic operations on numeric values.
+_SAFE_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+    ast.FloorDiv: operator.floordiv,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval_node(node: ast.AST):
+    """Recursively evaluate an AST node containing only numbers and
+    basic arithmetic operators."""
+    if isinstance(node, ast.Expression):
+        return _safe_eval_node(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp):
+        op_fn = _SAFE_OPERATORS.get(type(node.op))
+        if op_fn is None:
+            raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+        return op_fn(_safe_eval_node(node.left), _safe_eval_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        op_fn = _SAFE_OPERATORS.get(type(node.op))
+        if op_fn is None:
+            raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+        return op_fn(_safe_eval_node(node.operand))
+    raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+
+
 def calculate_expression(expression: str):
     try:
-        result = eval(expression)
+        tree = ast.parse(expression, mode="eval")
+        result = _safe_eval_node(tree)
         return f"The result of {expression} is {result}"
-    except Exception as e:
+    except (SyntaxError, ValueError) as e:
         return f"Could not calculate {expression}: {e}"
 
 
@@ -69,7 +109,7 @@ tools = [
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "Mathematical expression to evaluate, needs to be a valid python expression",
+                        "description": "Mathematical expression to evaluate, e.g., '25 * 17 + 31'",
                     }
                 },
                 "required": ["expression"],
