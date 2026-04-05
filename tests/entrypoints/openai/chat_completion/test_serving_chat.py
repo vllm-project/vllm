@@ -2063,7 +2063,7 @@ class TestCreateRemainingArgsDelta:
         tc = result.tool_calls[0]
         assert tc.index == 5
         assert tc.id is None
-        assert tc.type is None
+        assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"arg": 1}'
 
