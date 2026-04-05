@@ -88,6 +88,10 @@ class VllmIRLoweringPass(VllmInductorPass):
             # Use str(shape) because dynamic shapes contain SymInt
             # which is not hashable.
             return (str(val.shape), val.dtype, val.device)
+        if isinstance(val, (list, tuple)):
+            return tuple(VllmIRLoweringPass._make_arg_meta(v) for v in val)
+        if isinstance(val, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+            return str(val)
         return val
 
     def _get_or_trace_replacement(
