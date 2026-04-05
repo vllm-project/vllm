@@ -147,6 +147,8 @@ class AutoWeightsLoader:
         skip_substrs: list[str] | None = None,
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
+        stacked_params_mapping: list[tuple[str, str, Any]] | None = None,
+        expert_params_mapping: list[tuple[str, str, Any, Any]] | None = None,
     ) -> None:
         super().__init__()
 
@@ -155,6 +157,8 @@ class AutoWeightsLoader:
         self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
+        self.stacked_params_mapping = stacked_params_mapping or []
+        self.expert_params_mapping = expert_params_mapping or []
         # update default skip_substrs
         self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
@@ -347,12 +351,106 @@ class AutoWeightsLoader:
     ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
+
         # filter out weights with first-prefix/substr to skip in name
         weights = (
             (name, weight) for name, weight in weights if not self._can_skip(name)
         )
 
-        autoloaded_weights = set(self._load_module("", self.module, weights))
+        autoloaded_weights = set()
+        remaining_weights: list[tuple[str, torch.Tensor]] = []
+
+        params_dict = None
+
+        def get_params_dict():
+            nonlocal params_dict
+            if params_dict is None:
+                params_dict = dict(self.module.named_parameters())
+            return params_dict
+
+        from vllm.model_executor.model_loader.weight_utils import (
+            default_weight_loader,
+            maybe_remap_kv_scale_name,
+        )
+
+        for name, loaded_weight in weights:
+            handled = False
+
+            # 1. KV Cache Scales
+            quant_config = getattr(self.module, "quant_config", None)
+            if quant_config is not None and getattr(
+                quant_config, "get_cache_scale", None
+            ):
+                scale_name = quant_config.get_cache_scale(name)
+                if scale_name:
+                    p_dict = get_params_dict()
+                    if scale_name in p_dict:
+                        param = p_dict[scale_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(
+                            param,
+                            loaded_weight
+                            if loaded_weight.dim() == 0
+                            else loaded_weight[0],
+                        )
+                        autoloaded_weights.add(scale_name)
+                        handled = True
+
+            # FP8 / KV scale remapping handling (scale or zero_point)
+            if not handled and ("scale" in name or "zero_point" in name):
+                name = maybe_remap_kv_scale_name(name, get_params_dict())
+                if name is None:
+                    handled = True
+
+            # 2. Stacked Params Mapping (e.g., qkv_proj)
+            if not handled and self.stacked_params_mapping:
+                for param_name, weight_name, shard_id in self.stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+
+                    mapped_name = name.replace(weight_name, param_name)
+                    # Skip extra bias for GPTQ models
+                    p_dict = get_params_dict()
+                    if mapped_name.endswith(".bias") and mapped_name not in p_dict:
+                        continue
+
+                    if mapped_name in p_dict:
+                        param = p_dict[mapped_name]
+                        weight_loader = param.weight_loader
+                        weight_loader(param, loaded_weight, shard_id)
+                        autoloaded_weights.add(mapped_name)
+                        handled = True
+                        break
+
+            # 3. Expert Params Mapping (e.g., MoE w1/w2/w3)
+            if not handled and self.expert_params_mapping:
+                for (
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    shard_id,
+                ) in self.expert_params_mapping:
+                    if weight_name not in name:
+                        continue
+
+                    mapped_name = name.replace(weight_name, param_name)
+                    p_dict = get_params_dict()
+                    if mapped_name in p_dict:
+                        param = p_dict[mapped_name]
+                        weight_loader = param.weight_loader
+                        weight_loader(
+                            param, loaded_weight, weight_name, shard_id, expert_id
+                        )
+                        autoloaded_weights.add(mapped_name)
+                        handled = True
+                        break
+
+            if not handled:
+                remaining_weights.append((name, loaded_weight))
+
+        autoloaded_weights.update(self._load_module("", self.module, remaining_weights))
         return autoloaded_weights
 
 
