@@ -66,7 +66,7 @@ __global__ void rms_norm_kernel(
   }
   __syncthreads();
 
-  scalar_t* out_row = out + blockIdx.x * hidden_size;
+  scalar_t* out_row = out + static_cast<int64_t>(blockIdx.x) * hidden_size;
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
   auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
@@ -114,7 +114,7 @@ fused_add_rms_norm_kernel(
       reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
+    int64_t id = static_cast<int64_t>(blockIdx.x) * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = input_v[strided_id];
     temp += residual_v[id];
@@ -132,7 +132,7 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
+    int64_t id = static_cast<int64_t>(blockIdx.x) * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
     temp *= s_variance;
@@ -157,10 +157,10 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * hidden_size + idx];
+    z += residual[static_cast<int64_t>(blockIdx.x) * hidden_size + idx];
     float x = (float)z;
     variance += x * x;
-    residual[blockIdx.x * hidden_size + idx] = z;
+    residual[static_cast<int64_t>(blockIdx.x) * hidden_size + idx] = z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -173,7 +173,8 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float x =
+        (float)residual[static_cast<int64_t>(blockIdx.x) * hidden_size + idx];
     input[blockIdx.x * input_stride + idx] =
         ((scalar_t)(x * s_variance)) * weight[idx];
   }
