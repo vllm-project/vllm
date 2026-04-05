@@ -43,10 +43,13 @@ class BlockStored(KVCacheEvent):
     prompt embeddings data, etc. for that specific block.
     """
 
+    group_idx: int | None = None
+
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
+    group_idx: int | None = None
 
 
 class AllBlocksCleared(KVCacheEvent):
