@@ -82,9 +82,7 @@ class ExpertsInt8MoEMethod(OnlineMoEMethodBase):
     ):
         super().__init__(moe)
         self.quant_config = quant_config
-        self.int8_backend, self.experts_cls = select_int8_moe_backend(
-            config=self.moe,
-        )
+        self.experts_cls = select_int8_moe_backend(config=self.moe)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
