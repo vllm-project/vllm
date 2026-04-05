@@ -20,6 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -44,8 +45,17 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    ECConnectorOutput,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+    make_empty_encoder_model_runner_output,
+)
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.ec_connector_model_runner_mixin import (
+    ECConnectorModelRunnerMixin,
+)
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
@@ -115,6 +125,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
+        self.mm_config = self.model_config.multimodal_config
+        self.is_ec_producer_only = (
+            self.vllm_config.ec_transfer_config is not None
+            and self.vllm_config.ec_transfer_config.is_ec_producer
+            and not self.vllm_config.ec_transfer_config.is_ec_consumer
+        )
+        self.is_encoder_only = bool(
+            (self.mm_config is not None and self.mm_config.mm_encoder_only)
+            or self.is_ec_producer_only
+        )
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.
@@ -237,6 +257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        self.ec_connector = ECConnectorModelRunnerMixin()
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -332,6 +353,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return torch.cuda.current_stream(self.device)
 
     def get_kv_cache_spec(self):
+        if self.is_encoder_only:
+            return {}
         return get_kv_cache_spec(self.vllm_config)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
@@ -397,6 +420,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if self.is_encoder_only:
+            empty = torch.empty(0, device=self.device)
+            return empty, empty
+
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
@@ -509,6 +536,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        if self.is_encoder_only:
+            return
+
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True, is_profile=True
         )
@@ -543,6 +573,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def capture_model(self) -> int:
+        if self.is_encoder_only:
+            return 0
+
         if not self.cudagraph_manager.needs_capture():
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -920,9 +953,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
             if scheduler_output.total_num_scheduled_tokens == 0:
+                if self.is_encoder_only:
+                    return make_empty_encoder_model_runner_output(scheduler_output)
                 # No need to run the model.
-                empty_output = self.kv_connector.no_forward(scheduler_output)
-                return empty_output
+                return self.kv_connector.no_forward(scheduler_output)
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
@@ -960,15 +994,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         if batch_desc.num_tokens == 0:
+            if self.is_encoder_only:
+                return make_empty_encoder_model_runner_output(scheduler_output)
             # All DP ranks have zero tokens to run.
-            empty_output = self.kv_connector.no_forward(scheduler_output)
-            return empty_output
+            return self.kv_connector.no_forward(scheduler_output)
 
+        block_tables = None
+        slot_mappings = None
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
-            block_tables, slot_mappings = self.prepare_attn(input_batch)
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -992,6 +1028,54 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings = None
             # FIXME(woosuk): Fix warmup for LoRA.
 
+        inputs_embeds = None
+        if self.supports_mm_inputs and self.is_first_pp_rank:
+            assert self.encoder_cache is not None
+            encoder_outputs = self.encoder_cache.encoder_outputs
+            ec_context: AbstractContextManager[ECConnectorOutput | None] = nullcontext()  # type: ignore[assignment]
+            mm_hashes_to_save: list[str] = []
+            if (
+                not self.is_encoder_decoder
+                and scheduler_output.ec_connector_metadata is not None
+            ):
+                ec_context = self.ec_connector.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=encoder_outputs,
+                )
+                if self.is_ec_producer_only:
+                    mm_hashes_to_save, _ = (
+                        self.model_state.encoder_runner.prepare_mm_inputs(
+                            scheduler_output.scheduled_encoder_inputs
+                        )
+                    )
+
+            with ec_context as ec_connector_output:
+                # Run MM encoder (if needed) and get multimodal embeddings.
+                # Only first PP rank prepares multimodal embeddings.
+                # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
+                # to obtain inputs_embeds, because the compiled model
+                # expects this input.
+                inputs_embeds = self.model_state.get_mm_embeddings(
+                    scheduler_output.scheduled_encoder_inputs,
+                    input_batch,
+                    self.req_states,
+                )
+                for mm_hash in mm_hashes_to_save:
+                    self.ec_connector.maybe_save_ec_to_connector(
+                        encoder_outputs,
+                        mm_hash,
+                    )
+
+                if self.is_encoder_only:
+                    output = make_empty_encoder_model_runner_output(scheduler_output)
+                    output.ec_connector_output = ec_connector_output
+                    return output
+        elif self.is_encoder_only:
+            return make_empty_encoder_model_runner_output(scheduler_output)
+
+        if not dummy_run:
+            block_tables, slot_mappings = self.prepare_attn(input_batch)
+
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
@@ -1007,18 +1091,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
-            )
-
-        inputs_embeds = None
-        if self.supports_mm_inputs and self.is_first_pp_rank:
-            # Run MM encoder (if needed) and get multimodal embeddings.
-            # Only first PP rank prepares multimodal embeddings.
-            # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
-            # to obtain inputs_embeds, because the compiled model expects this input.
-            inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs,
-                input_batch,
-                self.req_states,
             )
 
         model_inputs = {
