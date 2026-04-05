@@ -156,10 +156,28 @@ runAsUser:
 {{- end }}
 
 {{/*
+  Create the chart name and version used for the helm.sh/chart label
+*/}}
+{{- define "chart.chartLabel" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
+{{- end  }}
+
+{{/*
+  Define labels used for selector
+*/}}
+{{- define "chart.selectorLabels" -}}
+app.kubernetes.io/name: {{ .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
   Define chart labels
 */}}
 {{- define "chart.labels" -}}
-{{-   with .Values.labels -}}
+{{ include "chart.selectorLabels" . }}
+helm.sh/chart: {{ include "chart.chartLabel" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Values.labels }}
 {{      toYaml . }}
-{{-   end }}
+{{- end }}
 {{- end }}

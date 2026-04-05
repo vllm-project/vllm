@@ -4,6 +4,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: "{{ .Release.Name }}-storage-claim"
   namespace: {{ .Release.Namespace }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
 spec:
   accessModes:
     - ReadWriteOnce

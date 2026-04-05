@@ -3,5 +3,7 @@ kind: PodDisruptionBudget
 metadata:
   name: "{{ .Release.Name }}-pdb"
   namespace: {{ .Release.Namespace }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
 spec:
   maxUnavailable: {{ default 1 .Values.maxUnavailablePodDisruptionBudget }}

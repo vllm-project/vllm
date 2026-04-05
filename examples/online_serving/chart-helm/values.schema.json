@@ -291,18 +291,9 @@
         },
         "labels": {
             "type": "object",
-            "properties": {
-                "environment": {
-                    "type": "string"
-                },
-                "release": {
-                    "type": "string"
-                }
-            },
-            "required": [
-                "environment",
-                "release"
-            ]
+            "additionalProperties": {
+              "type": "string"
+            }
         }
     },
     "required": [
