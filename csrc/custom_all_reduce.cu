@@ -209,6 +209,41 @@ void reduce_scatter(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
       "reduce_scatter");
 }
 
+void reduce_scatter_with_publish(fptr_t _fa, torch::Tensor& inp,
+                                 torch::Tensor& out, fptr_t _reg_buffer,
+                                 int64_t reg_buffer_sz_bytes,
+                                 int64_t ready_slot, int64_t ready_gen) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+
+  TORCH_CHECK(_reg_buffer != 0,
+              "reduce_scatter_with_publish requires a registered buffer");
+  TORCH_CHECK(ready_slot >= 0 && ready_slot < vllm::kReadySlots,
+              "ready_slot out of range");
+  TORCH_CHECK(ready_gen > 0, "ready_gen must be > 0");
+  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
+  TORCH_CHECK(_is_weak_contiguous(out));
+  TORCH_CHECK(_is_weak_contiguous(inp));
+  TORCH_CHECK_EQ(inp.numel() % fa->world_size_, 0);
+  TORCH_CHECK_EQ(inp.numel() / fa->world_size_, out.numel());
+
+  auto reg_buffer =
+      prepare_reg_buffer(stream, inp, _reg_buffer, reg_buffer_sz_bytes);
+  fa->publish_slot_ready(stream, static_cast<int>(ready_slot),
+                         static_cast<vllm::FlagType>(ready_gen));
+  dispatch_custom_ar_out_dtype(
+      out.scalar_type(),
+      [&](auto* type_tag) {
+        using T = std::remove_pointer_t<decltype(type_tag)>;
+        fa->reduce_scatter<T>(stream, reinterpret_cast<T*>(reg_buffer),
+                              reinterpret_cast<T*>(out.data_ptr()), inp.numel(),
+                              static_cast<int>(ready_slot),
+                              static_cast<vllm::FlagType>(ready_gen));
+      },
+      "reduce_scatter_with_publish");
+}
+
 void dispose(fptr_t _fa) {
   delete reinterpret_cast<vllm::CustomAllreduce*>(_fa);
 }

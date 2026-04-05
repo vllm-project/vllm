@@ -34,6 +34,7 @@ namespace vllm {
 
 // Maximal number of blocks in allreduce kernel.
 constexpr int kMaxBlocks = 36;
+constexpr int kReadySlots = 2;
 
 // Default number of blocks in allreduce kernel.
 #ifndef USE_ROCM
@@ -59,6 +60,7 @@ using FlagType = uint32_t;
 struct Signal {
   alignas(128) FlagType start[kMaxBlocks][8];
   alignas(128) FlagType end[kMaxBlocks][8];
+  alignas(128) FlagType ready[kReadySlots][8];
   alignas(128) FlagType _flag[kMaxBlocks];  // incremental flags for each rank
 };
 
@@ -75,6 +77,10 @@ struct RegisteredBuffer {
 struct __align__(16) RankSignals {
   Signal* signals[8];
 };
+
+template <int ngpus>
+__global__ void publish_slot_ready_kernel(RankSignals sg, int rank, int slot,
+                                          FlagType gen);
 
 // like std::array, but aligned
 template <typename T, int sz>
@@ -252,6 +258,26 @@ DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
 
 #else
 
+static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
+  __scoped_atomic_store_n(flag_addr, flag, __ATOMIC_RELEASE,
+                          __MEMORY_SCOPE_SYSTEM);
+}
+
+static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
+  return __scoped_atomic_load_n(flag_addr, __ATOMIC_ACQUIRE,
+                                __MEMORY_SCOPE_DEVICE);
+}
+
+static DINLINE void st_flag_volatile(FlagType* flag_addr, FlagType flag) {
+  __scoped_atomic_store_n(flag_addr, flag, __ATOMIC_RELAXED,
+                          __MEMORY_SCOPE_SYSTEM);
+}
+
+static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
+  return __scoped_atomic_load_n(flag_addr, __ATOMIC_RELAXED,
+                                __MEMORY_SCOPE_DEVICE);
+}
+
 template <int ngpus>
 DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
                               int rank) {
@@ -294,6 +320,15 @@ DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
 }
 
 #endif
+
+template <int ngpus>
+DINLINE void wait_ready_for_slot(Signal* self_sg, int slot, FlagType gen) {
+  if (threadIdx.x < ngpus) {
+    auto ready_ptr = &self_sg->ready[slot][threadIdx.x];
+    while (ld_flag_acquire(ready_ptr) < gen);
+  }
+  __syncthreads();
+}
 
 template <typename P, int ngpus, typename A>
 DINLINE P packed_reduce(const P* ptrs[], int idx) {
@@ -474,7 +509,8 @@ template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_scatter_1stage(RankData* _dp, RankSignals sg,
                                        Signal* self_sg, T* __restrict__ result,
-                                       int rank, int size) {
+                                       int rank, int size, int ready_slot,
+                                       FlagType ready_gen) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
@@ -486,6 +522,9 @@ __global__ void __launch_bounds__(512, 1)
   const P* ptrs[ngpus];
   load_peer_ptrs<P, ngpus>(dp, ptrs);
 
+  if (ready_slot >= 0) {
+    wait_ready_for_slot<ngpus>(self_sg, ready_slot, ready_gen);
+  }
   barrier_at_start<ngpus>(sg, self_sg, rank);
 
   for (int idx = start + tid; idx < end; idx += stride) {
@@ -829,6 +868,7 @@ class CustomAllreduce {
 
   template <typename T>
   void reduce_scatter(cudaStream_t stream, T* input, T* output, int size,
+                      int ready_slot = -1, FlagType ready_gen = 0,
                       int threads = 512, int block_limit = defaultBlockLimit) {
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
@@ -860,9 +900,23 @@ class CustomAllreduce {
           constexpr int ngpus = decltype(ngpus_tag)::value;
           cross_device_reduce_scatter_1stage<T, ngpus>
               <<<launch.blocks, launch.threads, 0, stream>>>(
-                  ptrs, sg_, self_sg_, output, rank_, size);
+                  ptrs, sg_, self_sg_, output, rank_, size, ready_slot,
+                  ready_gen);
         },
         "reduce_scatter");
+  }
+
+  void publish_slot_ready(cudaStream_t stream, int slot, FlagType gen) {
+    if (slot < 0 || slot >= kReadySlots) {
+      throw std::runtime_error("ready slot out of range");
+    }
+    dispatch_by_world_size(
+        [&](auto ngpus_tag) {
+          constexpr int ngpus = decltype(ngpus_tag)::value;
+          publish_slot_ready_kernel<ngpus>
+              <<<1, 32, 0, stream>>>(sg_, rank_, slot, gen);
+        },
+        "publish_slot_ready");
   }
 
   ~CustomAllreduce() {
@@ -871,6 +925,15 @@ class CustomAllreduce {
     }
   }
 };
+
+template <int ngpus>
+__global__ void publish_slot_ready_kernel(RankSignals sg, int rank, int slot,
+                                          FlagType gen) {
+  if (threadIdx.x < ngpus) {
+    auto peer_ready_ptr = &sg.signals[threadIdx.x]->ready[slot][rank];
+    st_flag_release(peer_ready_ptr, gen);
+  }
+}
 
 /**
  * To inspect PTX/SASS, copy paste this header file to compiler explorer and

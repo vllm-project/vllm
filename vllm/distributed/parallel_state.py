@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -321,6 +322,48 @@ def fused_bmm_fp8_reduce_scatter_fake(
     return torch.empty((m, n), dtype=out_dtype, device=A.device)
 
 
+def _maybe_hard_assert_collective_fp8_path(
+    path: str,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    backend: str,
+) -> None:
+    enabled_paths = {
+        entry.strip()
+        for entry in os.getenv("VLLM_DEBUG_COLLECTIVE_FP8_HARD_ASSERT", "").split(",")
+        if entry.strip()
+    }
+    if path in enabled_paths or "all" in enabled_paths:
+        raise RuntimeError(
+            "VLLM_DEBUG_COLLECTIVE_FP8_HARD_ASSERT hit "
+            f"path={path} backend={backend} A_shape={tuple(A.shape)} "
+            f"B_shape={tuple(B.shape)}"
+        )
+
+
+def _get_fused_collective_fp8_mode() -> str:
+    mode = os.getenv("VLLM_DEBUG_COLLECTIVE_FP8_MODE", "fast").strip() or "fast"
+    valid_modes = {"fast", "fallback_bmm", "fallback_cutlass"}
+    if mode not in valid_modes:
+        raise ValueError(
+            "Invalid VLLM_DEBUG_COLLECTIVE_FP8_MODE="
+            f"{mode!r}. Expected one of {sorted(valid_modes)}."
+        )
+    return mode
+
+
+def _cutlass_scaled_mm_fp8(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    from vllm import _custom_ops as ops
+
+    return ops.cutlass_scaled_mm(A, B, A_scale, B_scale, out_dtype)
+
+
 def _fallback_all_gather_bmm_fp8(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -330,11 +373,26 @@ def _fallback_all_gather_bmm_fp8(
     backend: str,
     group: "GroupCoordinator",
 ) -> torch.Tensor:
+    _maybe_hard_assert_collective_fp8_path("fallback_ag_bmm", A, B, backend)
     ag_out = group._all_gather_out_place(A, 0)
     bmm_out = torch.ops.vllm.bmm_fp8.default(
         ag_out.unsqueeze(0), B.unsqueeze(0), A_scale, B_scale, out_dtype, backend
     )
     return bmm_out.view(ag_out.shape[0], B.shape[1])
+
+
+def _fallback_all_gather_cutlass_bmm_fp8(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+    backend: str,
+    group: "GroupCoordinator",
+) -> torch.Tensor:
+    _maybe_hard_assert_collective_fp8_path("fallback_ag_bmm_cutlass", A, B, backend)
+    ag_out = group._all_gather_out_place(A, 0)
+    return _cutlass_scaled_mm_fp8(ag_out, B, A_scale, B_scale, out_dtype)
 
 
 def fused_all_gather_bmm_fp8(
@@ -352,6 +410,16 @@ def fused_all_gather_bmm_fp8(
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
     world_size = group.world_size
+
+    mode = _get_fused_collective_fp8_mode()
+    if mode == "fallback_bmm":
+        return _fallback_all_gather_bmm_fp8(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+    if mode == "fallback_cutlass":
+        return _fallback_all_gather_cutlass_bmm_fp8(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
 
     if (
         not hasattr(torch.ops, "_C")
@@ -387,6 +455,7 @@ def fused_all_gather_bmm_fp8(
             A, B, A_scale, B_scale, out_dtype, backend, group
         )
 
+    _maybe_hard_assert_collective_fp8_path("fast_ag_bmm", A, B, backend)
     return torch.ops._C.fused_all_gather_bmm_fp8(
         A,
         B,
@@ -410,10 +479,25 @@ def _fallback_bmm_fp8_reduce_scatter(
     backend: str,
     group: "GroupCoordinator",
 ) -> torch.Tensor:
+    _maybe_hard_assert_collective_fp8_path("fallback_bmm_rs", A, B, backend)
     bmm_out = torch.ops.vllm.bmm_fp8.default(
         A.unsqueeze(0), B.unsqueeze(0), A_scale, B_scale, out_dtype, backend
     )
     mm_out = bmm_out.view(A.shape[0], B.shape[1])
+    return group._reduce_scatter_out_place(mm_out, 0)
+
+
+def _fallback_cutlass_bmm_fp8_reduce_scatter(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+    backend: str,
+    group: "GroupCoordinator",
+) -> torch.Tensor:
+    _maybe_hard_assert_collective_fp8_path("fallback_bmm_rs_cutlass", A, B, backend)
+    mm_out = _cutlass_scaled_mm_fp8(A, B, A_scale, B_scale, out_dtype)
     return group._reduce_scatter_out_place(mm_out, 0)
 
 
@@ -432,6 +516,16 @@ def fused_bmm_fp8_reduce_scatter(
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
     world_size = group.world_size
+
+    mode = _get_fused_collective_fp8_mode()
+    if mode == "fallback_bmm":
+        return _fallback_bmm_fp8_reduce_scatter(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+    if mode == "fallback_cutlass":
+        return _fallback_cutlass_bmm_fp8_reduce_scatter(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
 
     if (
         A.ndim != 2
@@ -466,6 +560,7 @@ def fused_bmm_fp8_reduce_scatter(
             A, B, A_scale, B_scale, out_dtype, backend, group
         )
 
+    _maybe_hard_assert_collective_fp8_path("fast_bmm_rs", A, B, backend)
     return torch.ops._C.fused_bmm_fp8_reduce_scatter(
         A,
         B,

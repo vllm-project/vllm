@@ -287,6 +287,10 @@ void all_gather(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                 fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
 void reduce_scatter(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                     fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
+void reduce_scatter_with_publish(fptr_t _fa, torch::Tensor& inp,
+                                 torch::Tensor& out, fptr_t reg_buffer,
+                                 int64_t reg_buffer_sz_bytes,
+                                 int64_t ready_slot, int64_t ready_gen);
 void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs,
                      int64_t buffer_bytes);
 std::tuple<std::vector<int64_t>, std::vector<int64_t>>
