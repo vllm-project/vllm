@@ -60,7 +60,6 @@ class PrepareStoreOutput:
 @dataclass
 class OffloadingEvent:
     block_hashes: list[BlockHash]
-    block_size: int
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
