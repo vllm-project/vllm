@@ -57,7 +57,9 @@ class ProfilerConfig:
     """If `True`, saves torch profiler traces in gzip format. Enabled by default"""
 
     torch_profiler_dump_cuda_time_total: bool = True
-    """If `True`, dumps total CUDA time in torch profiler traces. Enabled by default."""
+    """If `True`, dumps a backend-specific self-time summary from torch profiler
+    traces. Uses CUDA time on GPU backends and CPU time on CPU backends.
+    Enabled by default."""
 
     torch_profiler_record_shapes: bool = False
     """If `True`, records tensor shapes in the torch profiler. Disabled by default."""

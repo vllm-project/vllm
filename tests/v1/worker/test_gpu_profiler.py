@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
+from types import SimpleNamespace
 
-from vllm.config import ProfilerConfig
+import pytest
+import torch
+
+from vllm.config import CompilationMode, ProfilerConfig
 from vllm.config.profiler import _is_uri_path
-from vllm.profiler.wrapper import WorkerProfiler
+from vllm.platforms.cpu import CpuPlatform
+from vllm.profiler.wrapper import TorchProfilerWrapper, WorkerProfiler
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -236,3 +240,67 @@ class TestIsUriPath:
     def test_is_uri_path(self, path, expected):
         """Test that _is_uri_path correctly identifies URI vs local paths."""
         assert _is_uri_path(path) == expected
+
+
+def test_cpu_torch_profiler_writes_summary_file(tmp_path):
+    profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_dump_cuda_time_total=True,
+        delay_iterations=0,
+        warmup_iterations=0,
+        active_iterations=1,
+        wait_iterations=0,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=None,
+        cache_config=SimpleNamespace(
+            user_specified_block_size=False,
+            block_size=0,
+            enable_prefix_caching=False,
+            cache_dtype="auto",
+            cpu_kvcache_space_bytes=0,
+        ),
+        scheduler_config=SimpleNamespace(
+            async_scheduling=True,
+            enable_chunked_prefill=False,
+        ),
+        kv_transfer_config=None,
+        parallel_config=SimpleNamespace(
+            world_size=1,
+            tensor_parallel_size=1,
+            distributed_executor_backend=None,
+            worker_cls="auto",
+            enable_dbo=False,
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_capture_sizes=[1],
+            mode=CompilationMode.NONE,
+            backend=None,
+            inductor_compile_config={},
+        ),
+        lora_config=None,
+        device_config=SimpleNamespace(device_type="cpu"),
+        profiler_config=profiler_config,
+    )
+
+    CpuPlatform.check_and_update_config(vllm_config)
+
+    assert vllm_config.profiler_config.torch_profiler_dump_cuda_time_total is True
+
+    profiler = TorchProfilerWrapper(
+        profiler_config=vllm_config.profiler_config,
+        worker_name="cpu-profiler-test",
+        local_rank=0,
+        activities=["CPU"],
+    )
+
+    profiler.start()
+    x = torch.ones(32, 32)
+    y = x @ x
+    _ = y.sum().item()
+    profiler.stop()
+
+    summary_file = tmp_path / "profiler_out_0.txt"
+    assert summary_file.exists()
+    assert "Self CPU time total" in summary_file.read_text()
