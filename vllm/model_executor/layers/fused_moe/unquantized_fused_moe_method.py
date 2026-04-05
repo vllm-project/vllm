@@ -222,6 +222,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
                 self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+        elif current_platform.is_xpu():
+            w13 = layer.w13_weight
+            w2 = layer.w2_weight
+
+            w13.data = w13.transpose(-1, -2).contiguous()
+            w2.data = w2.transpose(-1, -2).contiguous()
+
+            self._setup_kernel(
+                layer=layer,
+                w13=w13,
+                w2=w2,
+            )
         else:
             self._setup_kernel(
                 layer=layer,
