@@ -3,6 +3,7 @@
 import dataclasses
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -31,7 +32,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    LogprobsLists,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -4157,3 +4163,276 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+# ---------------------------------------------------------------------------
+# Jump-forward decoding tests
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_grammar(ff_tokens: list[int]):
+    """Create a mock grammar that returns the given ff_tokens."""
+    grammar = Mock()
+    grammar.accept_tokens = Mock(return_value=True)
+    grammar.is_terminated = Mock(return_value=False)
+    grammar.advance_ff_tokens = Mock(return_value=ff_tokens)
+    return grammar
+
+
+def test_jump_forward_tokens_injected():
+    """ff_tokens from grammar are appended to the request and stored in
+    pending_ff_tokens."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    requests = create_requests(num_requests=1, max_tokens=20)
+    req = requests[0]
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+
+    # Attach mock grammar that produces ff_tokens [100, 101, 102].
+    grammar = _make_mock_grammar([100, 101, 102])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],  # normal token from model
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # The output should contain the sampled token + all ff_tokens.
+    assert list(req.output_token_ids) == [7, 100, 101, 102]
+    # ff_tokens should be stored for the next schedule step.
+    assert scheduler.pending_ff_tokens[req.request_id] == [100, 101, 102]
+    # Request should still be running.
+    assert not req.is_finished()
+
+
+def test_jump_forward_tokens_logprobs():
+    """When logprobs are requested, ff_tokens should get synthetic logprob
+    entries (logprob=0.0 for the deterministic token, -inf for the rest)."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    requests = create_requests(num_requests=1, max_tokens=20)
+    req = requests[0]
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    req.sampling_params.logprobs = 3
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+
+    grammar = _make_mock_grammar([100, 101, 102])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    # Build LogprobsLists for 1 sampled token with top_logprobs=3.
+    # Shape: [1, 4] — column 0 is sampled token, columns 1-3 are top-k.
+    sampled_token_ids = np.array([[7, 10, 11, 12]], dtype=np.int32)
+    sampled_logprobs = np.array([[-0.5, -1.0, -2.0, -3.0]], dtype=np.float32)
+    sampled_ranks = np.array([0], dtype=np.int32)
+    logprobs = LogprobsLists(sampled_token_ids, sampled_logprobs, sampled_ranks)
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],
+        logprobs=logprobs,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    engine_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    # Extract the EngineCoreOutput for our request.
+    output = engine_outputs[req.client_index].outputs[0]
+    assert output.new_token_ids == [7, 100, 101, 102]
+
+    # Logprobs should have 4 rows: 1 sampled + 3 ff_tokens.
+    assert output.new_logprobs is not None
+    lp = output.new_logprobs
+    assert lp.logprob_token_ids.shape[0] == 4
+    assert lp.logprobs.shape[0] == 4
+    assert lp.sampled_token_ranks.shape[0] == 4
+
+    # First row: original sampled logprobs (unchanged).
+    assert lp.logprob_token_ids[0, 0] == 7
+    np.testing.assert_allclose(lp.logprobs[0, 0], -0.5)
+
+    # ff_token rows: logprob=0.0 at position 0, -inf elsewhere.
+    for i, tok in enumerate([100, 101, 102], start=1):
+        assert lp.logprob_token_ids[i, 0] == tok
+        assert lp.logprobs[i, 0] == 0.0
+        assert np.all(np.isneginf(lp.logprobs[i, 1:]))
+        assert lp.sampled_token_ranks[i] == 0
+
+
+def test_jump_forward_tokens_stop_eos():
+    """ff_tokens containing an EOS token should truncate the sequence and
+    stop the request."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    requests = create_requests(num_requests=1, max_tokens=20)
+    req = requests[0]
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+
+    # ff_tokens: 100, EOS, 102 — should truncate after EOS.
+    grammar = _make_mock_grammar([100, EOS_TOKEN_ID, 102])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # Should stop at EOS — token 102 must NOT appear.
+    assert list(req.output_token_ids) == [7, 100, EOS_TOKEN_ID]
+    assert req.status == RequestStatus.FINISHED_STOPPED
+    # Stored ff_tokens should be truncated to what was actually used.
+    assert scheduler.pending_ff_tokens[req.request_id] == [100, EOS_TOKEN_ID]
+
+
+def test_jump_forward_tokens_stop_max_tokens():
+    """ff_tokens that would exceed max_tokens should be truncated."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    # max_tokens=3: sampled token (7) = 1, so 2 ff_tokens fit before cap.
+    requests = create_requests(num_requests=1, max_tokens=3)
+    req = requests[0]
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+
+    grammar = _make_mock_grammar([100, 101, 102, 103])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # 1 sampled + 2 ff = 3 = max_tokens → length capped.
+    assert list(req.output_token_ids) == [7, 100, 101]
+    assert req.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert scheduler.pending_ff_tokens[req.request_id] == [100, 101]
+
+
+def test_jump_forward_tokens_retained_for_unscheduled_requests():
+    """pending_ff_tokens for requests NOT scheduled in a step must be
+    preserved (Bug 1 fix).
+
+    req_a goes through the proper lifecycle (add → schedule → update)
+    so it ends up RUNNING with a decode token to schedule.  req_b is
+    NOT in the running list (e.g. preempted or waiting).  After
+    schedule(), req_b's ff_tokens must still be in pending_ff_tokens.
+    """
+    scheduler = create_scheduler(
+        max_model_len=100,
+        enable_jump_decoding=True,
+    )
+
+    requests = create_requests(num_requests=2, max_tokens=20)
+    req_a, req_b = requests
+
+    # Put req_a through the normal lifecycle: add → prefill → update.
+    scheduler.add_request(req_a)
+    prefill_output = scheduler.schedule()
+
+    prefill_model_output = ModelRunnerOutput(
+        req_ids=[req_a.request_id],
+        req_id_to_index={req_a.request_id: 0},
+        sampled_token_ids=[[99]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(prefill_output, prefill_model_output)
+
+    # req_a is now RUNNING with 1 decode token to schedule.
+    # req_b was never added — simulates a preempted/waiting request.
+
+    # Simulate pending ff_tokens from a previous step.
+    scheduler.pending_ff_tokens[req_a.request_id] = [10, 11]
+    scheduler.pending_ff_tokens[req_b.request_id] = [20, 21]
+
+    output = scheduler.schedule()
+
+    # req_a was scheduled, so its ff_tokens should appear in the output.
+    assert req_a.request_id in output.num_scheduled_tokens
+    assert output.jump_forward_tokens == {req_a.request_id: [10, 11]}
+
+    # req_b was NOT scheduled, so its ff_tokens must still be pending.
+    assert req_b.request_id not in output.num_scheduled_tokens
+    assert scheduler.pending_ff_tokens == {req_b.request_id: [20, 21]}
