@@ -80,10 +80,3 @@ def get_centroids(d: int, bits: int) -> torch.Tensor:
     """Get precomputed Lloyd-Max centroids (cached)."""
     centroids, _ = solve_lloyd_max(d, bits)
     return centroids
-
-
-@lru_cache(maxsize=32)
-def get_boundaries(d: int, bits: int) -> torch.Tensor:
-    """Get precomputed Lloyd-Max boundaries (cached)."""
-    _, boundaries = solve_lloyd_max(d, bits)
-    return boundaries

@@ -9,6 +9,5 @@ Distortion Rate" (ICLR 2026), Zandieh et al.
 """
 
 from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
-from vllm.model_executor.layers.quantization.turboquant.quantizer import TurboQuantizer
 
-__all__ = ["TurboQuantConfig", "TurboQuantizer"]
+__all__ = ["TurboQuantConfig"]

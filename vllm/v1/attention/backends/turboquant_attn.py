@@ -599,7 +599,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Dequants previously cached K/V, concatenates with the current
         chunk's raw K/V, then runs flash_attn with causal masking.
         """
-        from vllm.v1.attention.ops.triton_tq_decode import _tq_full_dequant_kv
+        from vllm.v1.attention.ops.triton_tq_decode import _tq_full_dequant_kv, _use_fp8_e4b15
         from vllm.triton_utils import triton
         import math
 
@@ -646,6 +646,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             KEY_FP8=1 if self.tq_config.key_fp8 else 0,
             BLOCK_D=BLOCK_D,
             NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
+            FP8_E4B15=_use_fp8_e4b15(device.index or 0),
             num_warps=4,
         )
 

@@ -17,6 +17,7 @@ from vllm.triton_utils import tl, triton
 logger = init_logger(__name__)
 
 _SM_COUNT: int | None = None
+_FP8_E4B15: int | None = None
 
 
 def _get_sm_count(device: int = 0) -> int:
@@ -25,6 +26,15 @@ def _get_sm_count(device: int = 0) -> int:
         _SM_COUNT = torch.cuda.get_device_properties(
             device).multi_processor_count
     return _SM_COUNT
+
+
+def _use_fp8_e4b15(device: int = 0) -> int:
+    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
+    global _FP8_E4B15
+    if _FP8_E4B15 is None:
+        cap = torch.cuda.get_device_capability(device)
+        _FP8_E4B15 = 1 if cap < (8, 9) else 0
+    return _FP8_E4B15
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +82,7 @@ def _tq_decode_stage1(
     BLOCK_KV: tl.constexpr,         # tokens per tile (16)
     KEY_FP8: tl.constexpr,          # 1 if K is stored as FP8
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
+    FP8_E4B15: tl.constexpr = 0,   # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
 ):
     bid = tl.program_id(0)   # batch index
     hid = tl.program_id(1)   # q_head index
@@ -146,7 +157,10 @@ def _tq_decode_stage1(
                 KV_cache_ptr + k_addrs,
                 mask=kv_mask[:, None] & d_mask[None, :], other=0,
             )
-            k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+            if FP8_E4B15:
+                k_float = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+            else:
+                k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
             scores = tl.sum(
                 tl.where(d_mask[None, :], q_rot[None, :] * k_float, 0.0),
                 axis=1,
@@ -289,6 +303,7 @@ def _tq_full_dequant_kv(
     KEY_FP8: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NORM_CORRECTION: tl.constexpr = 0,
+    FP8_E4B15: tl.constexpr = 0,   # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
 ):
     """Full dequant: reconstruct K (MSE centroids * norm or FP8) and V to fp16."""
     pos = tl.program_id(0)
@@ -311,7 +326,10 @@ def _tq_full_dequant_kv(
     if KEY_FP8:
         k_raw = tl.load(KV_cache_ptr + slot_base + d_offs,
                         mask=d_mask, other=0)
-        k_recon = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        if FP8_E4B15:
+            k_recon = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+        else:
+            k_recon = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
         tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
     else:
         # MSE unpack (3-bit or 4-bit) + norms
@@ -501,6 +519,7 @@ def triton_tq_decode_attention(
     )
 
     sparse_v_threshold = float(os.environ.get("TQ_SPARSE_V_THRESHOLD", "1e-6"))
+    fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
 
     # Triton stage 1: split-KV tiled attention scoring + value accumulation
     BLOCK_KV = 4
@@ -534,6 +553,7 @@ def triton_tq_decode_attention(
         BLOCK_KV=BLOCK_KV,
         KEY_FP8=1 if key_fp8 else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
+        FP8_E4B15=fp8_e4b15,
         num_warps=4,
         num_stages=2,
     )
