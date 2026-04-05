@@ -19,17 +19,26 @@ logger = logging.getLogger(__name__)
 def vllm_version_matches_substr(substr: str) -> bool:
     """
     Check to see if the vLLM version matches a substring.
+
+    Returns False if the vLLM package is not installed (e.g. when running
+    directly from source without ``pip install -e .``). Re-raising
+    ``PackageNotFoundError`` here would propagate through the platform
+    detection plugins and cause the CUDA plugin to be silently skipped,
+    leaving ``current_platform`` as ``UnspecifiedPlatform`` with an empty
+    ``device_type``, which later causes a ``RuntimeError`` when
+    ``torch.device("")`` is called.
     """
     from importlib.metadata import PackageNotFoundError, version
 
     try:
         vllm_version = version("vllm")
-    except PackageNotFoundError as e:
+    except PackageNotFoundError:
         logger.warning(
             "The vLLM package was not found, so its version could not be "
-            "inspected. This may cause platform detection to fail."
+            "inspected. Assuming the version does not match '%s'.",
+            substr,
         )
-        raise e
+        return False
     return substr in vllm_version
 
 
