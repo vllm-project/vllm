@@ -297,9 +297,9 @@ FastTopKParams get_params(
 
   TORCH_CHECK(score.dim() == 2 && score.stride(1) == 1,
               "score must be 2D with contiguous rows");
-  TORCH_CHECK(lengths.dim() == 1 && lengths.is_contiguous() &&
-                  lengths.size(0) == batch_size,
-              "lengths must be 1D contiguous with size matching batch");
+  // lengths can be 1D (B,) or 2D (B, next_n) with total elements == batch_size
+  TORCH_CHECK(lengths.is_contiguous() && lengths.numel() == batch_size,
+              "lengths must be contiguous with numel matching batch");
 
   const int32_t* row_starts_ptr = nullptr;
   if (row_starts_opt.has_value()) {
