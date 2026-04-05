@@ -1101,6 +1101,10 @@ def try_get_safetensors_metadata(
     *,
     revision: str | None = None,
 ):
+    # Skip HF Hub API calls for local paths (absolute or relative)
+    if not model or os.path.isabs(model) or model.startswith(("./", "../")):
+        return None
+
     get_safetensors_metadata_partial = partial(
         get_safetensors_metadata, model, revision=revision
     )
