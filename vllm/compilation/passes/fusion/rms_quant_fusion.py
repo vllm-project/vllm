@@ -38,28 +38,20 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 
-def _node_or_tensor_dtype(value: Any) -> torch.dtype | None:
-    if isinstance(value, fx.Node):
-        node_val = value.meta.get("val")
-        if isinstance(node_val, torch.Tensor):
-            return node_val.dtype
-        tensor_meta = value.meta.get("tensor_meta")
-        if tensor_meta is not None:
-            return tensor_meta.dtype
-        return None
-    return value.dtype if isinstance(value, torch.Tensor) else None
+_RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
 
 
+# TODO: extend rmsnorm quant kernels to support mixed input/weight dtypes,
+# and remove this check.
 def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
-    # All RMSNorm+quant patterns use (input, weight, ...) as their first args.
-    if len(match.args) < 2:
-        return True
-    input_dtype = _node_or_tensor_dtype(match.args[0])
-    weight_dtype = _node_or_tensor_dtype(match.args[1])
-    # If dtype metadata is unavailable, keep previous behavior.
-    if input_dtype is None or weight_dtype is None:
-        return True
-    return input_dtype == weight_dtype
+    """Prevent fusion when rms_norm input and weight dtypes differ."""
+    for node in match.nodes:
+        if node.target == _RMS_NORM_OP:
+            # rms_norm(x, weight, epsilon, variance_size)
+            x, weight = node.args[0], node.args[1]
+            if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
+                return x.meta["val"].dtype == weight.meta["val"].dtype
+    return True
 
 
 def empty_bf16(*args: Any, **kwargs: Any) -> torch.Tensor:
