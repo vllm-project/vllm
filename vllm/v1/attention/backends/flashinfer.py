@@ -60,7 +60,11 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import (
+    cp_all_gather_heads,
+    cp_lse_ag_out_rs,
+    reserve_cp_collective_workspace,
+)
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
@@ -278,8 +282,8 @@ class BatchDCPPrefillWrapper:
         value: torch.Tensor,
         out: torch.Tensor,
     ):
-        prefill_query_across_dcp = get_dcp_group().all_gather(
-            prefill_query.contiguous(), dim=1
+        prefill_query_across_dcp = cp_all_gather_heads(
+            prefill_query.contiguous(), get_dcp_group()
         )
         output_context_tmp, lse_context_tmp = self._context.run(
             prefill_query_across_dcp,
@@ -1266,6 +1270,17 @@ class FlashInferImpl(AttentionImpl):
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 
+        if vllm_config is not None and self.dcp_world_size > 1:
+            reserve_cp_collective_workspace(
+                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                total_heads=self.num_heads * self.dcp_world_size,
+                gather_head_dim=self.head_size,
+                reduce_scatter_head_dim=self.head_size,
+                cp_world_size=self.dcp_world_size,
+                dtype=vllm_config.model_config.dtype,
+                reserve_a2a=dcp_a2a,
+            )
+
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
             self.support_trtllm_attn
@@ -1550,8 +1565,8 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
+                    decode_query = cp_all_gather_heads(
+                        decode_query.contiguous(), get_dcp_group()
                     )
                     output_tmp = torch.empty_like(decode_query)
                     lse = torch.empty(

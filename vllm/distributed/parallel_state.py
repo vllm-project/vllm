@@ -157,6 +157,22 @@ def reduce_scatter_fake(
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
+def reduce_scatter_tensor(
+    output_tensor: torch.Tensor, input_tensor: torch.Tensor, group_name: str
+) -> None:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    group._reduce_scatter_tensor(output_tensor, input_tensor)
+
+
+def reduce_scatter_tensor_fake(
+    output_tensor: torch.Tensor, input_tensor: torch.Tensor, group_name: str
+) -> None:
+    return
+
+
 def all_gather(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
@@ -173,6 +189,22 @@ def all_gather_fake(
     new_shape = list(tensor.shape)
     new_shape[dim] = tensor.shape[dim] * world_size
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
+def all_gather_into_tensor(
+    output_tensor: torch.Tensor, input_tensor: torch.Tensor, group_name: str
+) -> None:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    group._all_gather_into_tensor(output_tensor, input_tensor)
+
+
+def all_gather_into_tensor_fake(
+    output_tensor: torch.Tensor, input_tensor: torch.Tensor, group_name: str
+) -> None:
+    return
 
 
 def patched_fused_scaled_matmul_reduce_scatter_fake(
@@ -272,9 +304,23 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
+    op_name="reduce_scatter_tensor",
+    op_func=reduce_scatter_tensor,
+    mutates_args=["output_tensor"],
+    fake_impl=reduce_scatter_tensor_fake,
+)
+
+direct_register_custom_op(
     op_name="all_gather",
     op_func=all_gather,
     fake_impl=all_gather_fake,
+)
+
+direct_register_custom_op(
+    op_name="all_gather_into_tensor",
+    op_func=all_gather_into_tensor,
+    mutates_args=["output_tensor"],
+    fake_impl=all_gather_into_tensor_fake,
 )
 
 # TODO: Remove this once the pytorch fix
@@ -518,6 +564,27 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_reduce(input_)
 
+    def _all_gather_into_tensor(
+        self, output_tensor: torch.Tensor, input_: torch.Tensor
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.all_gather_into_tensor(output_tensor, input_)
+
+    def all_gather_into_tensor(
+        self, output_tensor: torch.Tensor, input_: torch.Tensor
+    ) -> torch.Tensor:
+        if self.world_size == 1:
+            if output_tensor.data_ptr() != input_.data_ptr():
+                output_tensor.copy_(input_)
+            return output_tensor
+        if self.use_custom_op_call:
+            torch.ops.vllm.all_gather_into_tensor(
+                output_tensor, input_, group_name=self.unique_name
+            )
+            return output_tensor
+        return self._all_gather_into_tensor(output_tensor, input_)
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
@@ -571,6 +638,29 @@ class GroupCoordinator:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
+
+    def _reduce_scatter_tensor(
+        self, output_tensor: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.reduce_scatter_tensor(
+            output_tensor, input_tensor
+        )
+
+    def reduce_scatter_tensor(
+        self, output_tensor: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        if self.world_size == 1:
+            if output_tensor.data_ptr() != input_tensor.data_ptr():
+                output_tensor.copy_(input_tensor)
+            return output_tensor
+        if self.use_custom_op_call:
+            torch.ops.vllm.reduce_scatter_tensor(
+                output_tensor, input_tensor, group_name=self.unique_name
+            )
+            return output_tensor
+        return self._reduce_scatter_tensor(output_tensor, input_tensor)
 
     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
         if self.device_communicator is None:
