@@ -198,6 +198,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
     if not has_flashinfer_moe():
         return False
     required_functions = [
+        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
         ("flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
@@ -761,6 +762,7 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
 
 __all__ = [
     "has_flashinfer",
+    "flashinfer_trtllm_bf16_moe",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
