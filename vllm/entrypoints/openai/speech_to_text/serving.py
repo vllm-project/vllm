@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import UsagePolicy
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -40,7 +41,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -48,7 +49,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="transcribe",
-            enable_force_include_usage=enable_force_include_usage,
+            usage_policy=usage_policy,
         )
 
     async def create_transcription(
@@ -111,7 +112,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -119,7 +120,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="translate",
-            enable_force_include_usage=enable_force_include_usage,
+            usage_policy=usage_policy,
         )
 
     async def create_translation(

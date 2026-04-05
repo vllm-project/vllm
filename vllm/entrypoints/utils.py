@@ -21,7 +21,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
     GenerationError,
-    StreamOptions,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
@@ -231,21 +230,6 @@ def log_non_default_args(args: Namespace | EngineArgs):
         )
 
     logger.info("non-default args: %s", non_default_args)
-
-
-def should_include_usage(
-    stream_options: "StreamOptions | None", enable_force_include_usage: bool
-) -> tuple[bool, bool]:
-    if enable_force_include_usage:
-        return True, True
-    if stream_options:
-        include_usage = bool(stream_options.include_usage)
-        include_continuous_usage = include_usage and bool(
-            stream_options.continuous_usage_stats
-        )
-    else:
-        include_usage, include_continuous_usage = False, False
-    return include_usage, include_continuous_usage
 
 
 def process_lora_modules(

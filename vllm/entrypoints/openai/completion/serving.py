@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import UsagePolicy
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -31,7 +32,7 @@ from vllm.entrypoints.openai.engine.serving import (
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -58,18 +59,18 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            usage_policy=usage_policy,
         )
 
         self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -283,9 +284,16 @@ class OpenAIServingCompletion(OpenAIServing):
         num_cached_tokens = None
         first_iteration = True
 
-        stream_options = request.stream_options
-        include_usage, include_continuous_usage = should_include_usage(
-            stream_options, self.enable_force_include_usage
+        include_usage, include_continuous_usage = self.should_include_usage(
+            is_streaming=True,
+            include_usage=(
+                request.stream_options.include_usage if request.stream_options else None
+            ),
+            continuous_usage=(
+                request.stream_options.continuous_usage_stats
+                if request.stream_options
+                else None
+            ),
         )
 
         try:
@@ -564,6 +572,30 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
             kv_transfer_params=kv_transfer_params,
         )
+
+    def should_include_usage(
+        self,
+        *,
+        is_streaming: bool,
+        include_usage: bool | None = None,
+        continuous_usage: bool | None = None,
+    ) -> tuple[bool, bool]:
+        if not is_streaming:
+            return (True, False)
+
+        include_usage = False if include_usage is None else include_usage
+        include_continuous_usage = (
+            False if continuous_usage is None or not include_usage else continuous_usage
+        )
+
+        policy = self.usage_policy
+        if policy is not None:
+            if policy.include_usage == "always":
+                include_usage = True
+            if policy.continuous_usage == "always":
+                include_continuous_usage = True
+
+        return (include_usage, include_continuous_usage)
 
     def _create_completion_logprobs(
         self,

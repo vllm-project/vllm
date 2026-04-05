@@ -22,7 +22,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
+from vllm.entrypoints.openai.engine.serving import (
+    OpenAIServing,
+    SpeechToTextRequest,
+    UsagePolicy,
+)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
@@ -81,13 +85,14 @@ class OpenAISpeechToText(OpenAIServing):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
-        enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            usage_policy=usage_policy,
         )
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -96,8 +101,6 @@ class OpenAISpeechToText(OpenAIServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
         )
-
-        self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
         if self.model_cls.supports_segment_timestamp:
@@ -588,11 +591,10 @@ class OpenAISpeechToText(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        include_usage = self.enable_force_include_usage or request.stream_include_usage
-        include_continuous_usage = (
-            request.stream_continuous_usage_stats
-            if include_usage and request.stream_continuous_usage_stats
-            else False
+        include_usage, include_continuous_usage = self.should_include_usage(
+            is_streaming=True,
+            include_usage=request.stream_include_usage,
+            continuous_usage=request.stream_continuous_usage_stats,
         )
 
         try:

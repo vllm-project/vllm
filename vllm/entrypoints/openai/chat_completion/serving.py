@@ -18,6 +18,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    UsagePolicy,
     get_history_tool_calls_cnt,
     get_tool_call_id_type,
     make_tool_call_id,
@@ -62,7 +63,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -102,7 +103,7 @@ class OpenAIServingChat(OpenAIServing):
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -112,6 +113,7 @@ class OpenAIServingChat(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            usage_policy=usage_policy,
         )
 
         self.openai_serving_render = openai_serving_render
@@ -137,7 +139,6 @@ class OpenAIServingChat(OpenAIServing):
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -577,9 +578,16 @@ class OpenAIServingChat(OpenAIServing):
             yield "data: [DONE]\n\n"
             return
 
-        stream_options = request.stream_options
-        include_usage, include_continuous_usage = should_include_usage(
-            stream_options, self.enable_force_include_usage
+        include_usage, include_continuous_usage = self.should_include_usage(
+            is_streaming=True,
+            include_usage=(
+                request.stream_options.include_usage if request.stream_options else None
+            ),
+            continuous_usage=(
+                request.stream_options.continuous_usage_stats
+                if request.stream_options
+                else None
+            ),
         )
 
         try:
@@ -1652,6 +1660,30 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
         return response
+
+    def should_include_usage(
+        self,
+        *,
+        is_streaming: bool,
+        include_usage: bool | None = None,
+        continuous_usage: bool | None = None,
+    ) -> tuple[bool, bool]:
+        if not is_streaming:
+            return (True, False)
+
+        include_usage = False if include_usage is None else include_usage
+        include_continuous_usage = (
+            False if continuous_usage is None or not include_usage else continuous_usage
+        )
+
+        policy = self.usage_policy
+        if policy is not None:
+            if policy.include_usage == "always":
+                include_usage = True
+            if policy.continuous_usage == "always":
+                include_continuous_usage = True
+
+        return (include_usage, include_continuous_usage)
 
     def _get_top_logprobs(
         self,

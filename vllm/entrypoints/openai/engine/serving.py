@@ -19,7 +19,10 @@ import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateContentFormatOption,
+    UsagePolicy,
+)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -167,6 +170,7 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__()
 
@@ -176,6 +180,7 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+        self.usage_policy = usage_policy
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
@@ -880,6 +885,61 @@ class OpenAIServing:
         if not model_name:
             return True
         return self.models.is_base_model(model_name)
+
+    def should_include_usage(
+        self,
+        *,
+        is_streaming: bool,
+        include_usage: bool | None = None,
+        continuous_usage: bool | None = None,
+    ) -> tuple[bool, bool]:
+        """
+        Determine whether usage information should be included in the response.
+
+        Args:
+            is_streaming: Whether the request is streaming.
+            include_usage: Request-level preference to include usage in final
+                response. If None, uses usage_policy or default behavior.
+            continuous_usage: Request-level preference to include usage in each
+                streaming chunk. If None, uses usage_policy or default behavior.
+
+        Returns:
+            tuple[bool, bool]: (include_in_final, include_in_chunks)
+                - include_in_final: Whether to include usage in the final
+                  response/chunk.
+                - include_in_chunks: Whether to include usage in each streaming
+                  chunk.
+
+        Priority:
+            1. usage_policy.include_usage="always" overrides request-level
+               preferences.
+            2. Request-level include_usage/continuous_usage if provided.
+            3. Default behavior: non-streaming returns usage, streaming returns
+               usage in final chunk.
+
+        Subclass override note:
+            Subclasses may override this method to customize usage behavior.
+            When overridden, the method can either:
+            1. Consult self.usage_policy and request-level parameters, or
+            2. Ignore all parameters and implement fixed behavior
+               (e.g., always return (False, False) for APIs that never
+               return usage, or always return (True, True) for APIs that
+               always include usage in every chunk).
+
+        """
+        if not is_streaming:
+            return (True, False)
+
+        policy = self.usage_policy
+        if policy is not None and policy.include_usage == "always":
+            in_chunks = policy.continuous_usage == "always"
+            return (True, in_chunks)
+
+        if include_usage is not None:
+            in_chunks = continuous_usage if continuous_usage else False
+            return (include_usage, in_chunks)
+
+        return (True, False)
 
 
 def clamp_prompt_logprobs(
