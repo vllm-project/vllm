@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import functools
+
 import numpy
 import torch
 
@@ -21,6 +23,79 @@ from vllm.utils.platform_utils import num_compute_units
 from .quant_utils import pack_cols, unpack_cols
 
 logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# CUDA driver / toolkit version helpers shared by all Marlin-based configs
+# ---------------------------------------------------------------------------
+
+
+def _parse_cuda_version(version: str | None) -> tuple[int, int] | None:
+    if not version:
+        return None
+    try:
+        major_s, minor_s, *_ = version.split(".")
+        return int(major_s), int(minor_s)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _get_driver_cuda_version() -> tuple[int, int] | None:
+    try:
+        from vllm.utils.import_utils import import_pynvml
+
+        pynvml = import_pynvml()
+        pynvml.nvmlInit()
+        try:
+            version_raw = pynvml.nvmlSystemGetCudaDriverVersion_v2()
+        except Exception:
+            version_raw = pynvml.nvmlSystemGetCudaDriverVersion()
+        finally:
+            pynvml.nvmlShutdown()
+
+        # NVML encodes as e.g. 12080 => (12, 8)
+        major = version_raw // 1000
+        minor = (version_raw % 1000) // 10
+        return major, minor
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def warn_marlin_cuda_driver_mismatch() -> None:
+    """Emit a one-time warning when the CUDA driver is older than the PyTorch
+    CUDA toolkit and CUDA forward compatibility is disabled.
+
+    A driver/toolkit mismatch can cause ``cudaErrorUnsupportedPtxVersion``
+    when any Marlin kernel is loaded, because PTX compiled for a newer toolkit
+    cannot be JIT-assembled by an older driver.  This function is called by
+    every Marlin-based quantization config so the check is centralised and the
+    warning appears exactly once regardless of which config triggers it.
+    """
+    driver_cuda = _get_driver_cuda_version()
+    torch_cuda = _parse_cuda_version(getattr(torch.version, "cuda", None))
+    if (
+        driver_cuda is not None
+        and torch_cuda is not None
+        and driver_cuda < torch_cuda
+        and not envs.VLLM_ENABLE_CUDA_COMPATIBILITY
+    ):
+        torch_cuda_str = getattr(torch.version, "cuda", None)
+        driver_cuda_str = ".".join(map(str, driver_cuda))
+        logger.warning(
+            "Detected torch CUDA %s but CUDA driver %s with "
+            "VLLM_ENABLE_CUDA_COMPATIBILITY=0. Marlin kernels may fail with "
+            "cudaErrorUnsupportedPtxVersion at load time. "
+            "To fix: restart with VLLM_ENABLE_CUDA_COMPATIBILITY=1 (requires "
+            "CUDA forward-compat libs at /usr/local/cuda-%s/compat or "
+            "VLLM_CUDA_COMPATIBILITY_PATH), or update your NVIDIA driver to "
+            "one that supports CUDA >= %s.",
+            torch_cuda_str,
+            driver_cuda_str,
+            torch_cuda_str,
+            torch_cuda_str,
+        )
+
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -148,6 +223,8 @@ def check_marlin_supported(
     device_capability: int | None = None,
 ) -> bool:
     cond, _ = _check_marlin_supported(quant_type, group_size, has_zp, device_capability)
+    if cond and current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
     return cond
 
 
@@ -158,6 +235,12 @@ def verify_marlin_supported(
     if not cond:
         assert err_msg is not None
         raise ValueError(err_msg)
+    # Warn once if the CUDA driver/toolkit mismatch was not resolved at
+    # startup (e.g. no compat libs available).  Centralised here so every
+    # Marlin-based config (awq_marlin, gptq_marlin, compressed_tensors, fp8,
+    # moe_wna16, modelopt, …) gets the check without per-config boilerplate.
+    if current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
 
 
 def verify_marlin_supports_shape(
@@ -218,12 +301,15 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
         getattr(layer, "input_size_per_partition", None) or layer.input_size
     )
 
-    return check_marlin_supports_shape(
+    supported = check_marlin_supports_shape(
         output_size_per_partition=output_size_per_partition,
         input_size_per_partition=input_size_per_partition,
         input_size=layer.input_size,
         group_size=group_size,
     )[0]
+    if supported and current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
+    return supported
 
 
 def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
@@ -242,7 +328,10 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
         and intermediate_size_per_partition % max(64, group_size) == 0
     )
     supports_group_size = group_size in [-1, 32, 64, 128]
-    return supports_shape and supports_group_size and supports_router_weight
+    supported = supports_shape and supports_group_size and supports_router_weight
+    if supported and current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
+    return supported
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
