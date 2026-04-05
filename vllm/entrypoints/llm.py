@@ -415,6 +415,28 @@ class LLM:
         """Create an LLM instance from EngineArgs."""
         return cls(**vars(engine_args))
 
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Explicitly shut down the engine and release all resources.
+
+        Args:
+            timeout: Maximum seconds to wait for queued work to complete.
+                If ``None``, uses ``VllmConfig.shutdown_timeout``.
+                If ``0``, abort immediately.
+
+        This method is idempotent — it is safe to call multiple times.
+        """
+        engine = getattr(self, "llm_engine", None)
+        if engine is None:
+            return
+
+        if timeout is None:
+            timeout = engine.vllm_config.shutdown_timeout
+
+        engine.engine_core.shutdown(timeout=timeout)
+
+    def __del__(self):
+        self.shutdown(timeout=0)
+
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
