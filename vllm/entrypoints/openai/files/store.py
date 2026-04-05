@@ -15,6 +15,7 @@ import json
 import os
 import secrets
 import shutil
+import tempfile
 import time
 import unicodedata
 from collections.abc import AsyncIterator
@@ -194,34 +195,58 @@ class FileUploadStore:
     def __init__(self, config: FileUploadConfig) -> None:
         self._config = config
 
-        # Resolve upload directory. Empty default = $TMPDIR/vllm-uploads-<pid>.
+        # Resolve upload directory. Two paths:
+        #   1. No --file-upload-dir: use tempfile.mkdtemp() which enforces
+        #      0o700 permissions, uses a random suffix (no PID-predictable
+        #      path for pre-creation attacks on shared hosts), and creates
+        #      the directory atomically. No rmtree or marker needed.
+        #   2. Operator-supplied dir: acquire a PID lockfile, then apply
+        #      the marker-file safety check before clearing.
         using_default_dir = not config.dir
-        if config.dir:
-            self._dir = Path(config.dir)
+        self._lockfile: Path | None = None
+        if using_default_dir:
+            self._dir = Path(tempfile.mkdtemp(prefix="vllm-uploads-"))
         else:
-            tmp = Path(os.environ.get("TMPDIR", "/tmp"))
-            self._dir = tmp / f"vllm-uploads-{os.getpid()}"
+            self._dir = Path(config.dir)
+            # Acquire a PID lockfile adjacent to the dir BEFORE touching
+            # its contents, so two vLLM processes configured with the
+            # same --file-upload-dir can't race on rmtree + mkdir and
+            # wipe each other's in-memory records. The lockfile lives
+            # next to the dir (not inside) since the dir is cleared.
+            self._lockfile = self._dir.with_name(self._dir.name + ".lock")
+            self._lockfile.parent.mkdir(parents=True, exist_ok=True)
+            self._acquire_dir_lock()
 
-        # Clear on startup — non-persistent across restarts is a security
-        # invariant. Refuse to rmtree a user-supplied directory unless we
-        # previously marked it ourselves, so a typo like `--file-upload-dir /`
-        # never destroys unrelated data.
-        marker = self._dir / ".vllm-upload-store"
-        if self._dir.exists():
-            if using_default_dir or marker.exists():
-                shutil.rmtree(self._dir, ignore_errors=True)
-            else:
-                raise ValueError(
-                    f"Refusing to clear file upload directory {self._dir!r}: "
-                    "it is not marked as managed by vLLM. Point "
-                    "--file-upload-dir at an empty or dedicated path, "
-                    "or at a directory previously initialised by the "
-                    "upload store."
-                )
-        self._dir.mkdir(parents=True, exist_ok=True)
-        # Drop the marker so subsequent restarts can safely re-init.
-        marker.touch(exist_ok=True)
-        if not using_default_dir:
+            # Clear on startup — non-persistent across restarts is a
+            # security invariant. Refuse to rmtree a user-supplied
+            # directory unless we previously marked it ourselves, so a
+            # typo like --file-upload-dir / never destroys unrelated
+            # data. Surface rmtree failures instead of swallowing them.
+            marker = self._dir / ".vllm-upload-store"
+            if self._dir.exists():
+                if marker.exists():
+                    try:
+                        shutil.rmtree(self._dir)
+                    except OSError as e:
+                        self._release_dir_lock()
+                        raise ValueError(
+                            f"Failed to clear file upload directory "
+                            f"{self._dir!r}: {e}. Remove stale files "
+                            f"manually or point --file-upload-dir at a "
+                            f"writable path."
+                        ) from e
+                else:
+                    self._release_dir_lock()
+                    raise ValueError(
+                        f"Refusing to clear file upload directory "
+                        f"{self._dir!r}: it is not marked as managed "
+                        f"by vLLM. Point --file-upload-dir at an empty "
+                        f"or dedicated path, or at a directory "
+                        f"previously initialised by the upload store."
+                    )
+            self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # Drop the marker so subsequent restarts can safely re-init.
+            marker.touch(mode=0o600, exist_ok=True)
             logger.info("File upload store using directory %s", self._dir)
 
         self._records: dict[str, FileRecord] = {}
@@ -234,6 +259,67 @@ class FileUploadStore:
         self._max_total_bytes = config.max_total_gb * 1024 * 1024 * 1024
         self._ttl_enabled = config.ttl_seconds >= 0
         self._ttl_seconds = config.ttl_seconds
+
+    # ------------------------------------------------------------------
+    # directory lock (operator-supplied --file-upload-dir only)
+    # ------------------------------------------------------------------
+
+    def _acquire_dir_lock(self) -> None:
+        """Take exclusive ownership of the upload directory via a PID file.
+
+        On conflict, probe the holder with os.kill(pid, 0). Stale locks
+        (dead PIDs) are reclaimed; live holders raise ValueError.
+        """
+        if self._lockfile is None:
+            return
+        my_pid = os.getpid()
+        while True:
+            try:
+                fd = os.open(
+                    str(self._lockfile),
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+            except FileExistsError:
+                try:
+                    holder = int(self._lockfile.read_text().strip())
+                except (OSError, ValueError):
+                    # Lockfile is corrupt — treat as stale and reclaim.
+                    self._lockfile.unlink(missing_ok=True)
+                    continue
+                if holder == my_pid:
+                    return
+                try:
+                    os.kill(holder, 0)
+                except ProcessLookupError:
+                    # Holder is dead — steal the lock.
+                    self._lockfile.unlink(missing_ok=True)
+                    continue
+                except PermissionError:
+                    # PID exists and is not ours — refuse.
+                    pass
+                raise ValueError(
+                    f"File upload directory {self._dir!r} is locked by "
+                    f"PID {holder}. Another vLLM server is using it. "
+                    f"Stop the other server or use a different "
+                    f"--file-upload-dir."
+                ) from None
+            try:
+                os.write(fd, str(my_pid).encode())
+            finally:
+                os.close(fd)
+            return
+
+    def _release_dir_lock(self) -> None:
+        """Remove the PID lockfile if we own it."""
+        if self._lockfile is None:
+            return
+        try:
+            holder = int(self._lockfile.read_text().strip())
+        except (OSError, ValueError):
+            return
+        if holder == os.getpid():
+            self._lockfile.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # public API
@@ -284,10 +370,19 @@ class FileUploadStore:
             head = b""
             loop = asyncio.get_running_loop()
             try:
+                # Create with 0o600 so only the vLLM process user can
+                # read uploaded bytes, even if the enclosing directory
+                # permissions regress. O_EXCL guards against the
+                # theoretical (but sha256-random) path collision.
                 # `out.write` is run in an executor to keep the event
                 # loop responsive under concurrent uploads; the
                 # containing `open`/`close` is one-shot, not looped.
-                with open(on_disk, "wb") as out:
+                fd = os.open(
+                    on_disk,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+                with os.fdopen(fd, "wb") as out:
                     async for chunk in stream:
                         if not chunk:
                             continue

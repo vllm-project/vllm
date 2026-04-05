@@ -185,6 +185,26 @@ def init_files_state(state, args) -> None:
         state.file_upload_store = None
         return
 
+    # Reject multi-API-server deployments. Each API server process
+    # holds a separate in-memory upload store and a separate
+    # _GLOBAL_STORE, so an upload handled by process A returns a
+    # vllm-file:// ID that process B cannot resolve. The kernel
+    # load-balances HTTP traffic across API server processes, so
+    # (N-1)/N of subsequent resolve requests would fail.
+    api_count = getattr(args, "api_server_count", None)
+    dp_size = getattr(args, "data_parallel_size", None) or 1
+    effective_api_count = api_count if api_count is not None else dp_size
+    if effective_api_count > 1:
+        raise ValueError(
+            "--enable-file-uploads is not supported with multiple API "
+            f"server processes (detected count={effective_api_count}). "
+            "Each process would hold a separate upload store, so "
+            "vllm-file:// IDs returned by one process would fail to "
+            "resolve on another. Re-run with --api-server-count=1 "
+            "(and --data-parallel-size=1 if set), or deploy behind an "
+            "external sticky-session proxy with per-backend state."
+        )
+
     config = FileUploadConfig(  # type: ignore[call-arg]
         enabled=True,
         dir=args.file_upload_dir,
