@@ -1470,10 +1470,11 @@ void concat_mla_q(torch::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   VLLM_DISPATCH_FLOATING_TYPES(ql_nope.scalar_type(), "concat_mla_q", [&] {
-    vllm::ConcatMLAQKernel<scalar_t, 512><<<grid_size, block_size, 0, stream>>>(
-        q_out.data_ptr<scalar_t>(), ql_nope.data_ptr<scalar_t>(),
-        q_pe.data_ptr<scalar_t>(), num_tokens, num_heads, q_out.stride(0),
-        q_out.stride(1), ql_nope.stride(0), ql_nope.stride(1), q_pe.stride(0),
-        q_pe.stride(1));
+    vllm::ConcatMLAQKernel<scalar_t, 512, 64>
+        <<<grid_size, block_size, 0, stream>>>(
+            q_out.data_ptr<scalar_t>(), ql_nope.data_ptr<scalar_t>(),
+            q_pe.data_ptr<scalar_t>(), num_tokens, num_heads, q_out.stride(0),
+            q_out.stride(1), ql_nope.stride(0), ql_nope.stride(1),
+            q_pe.stride(0), q_pe.stride(1));
   });
 }

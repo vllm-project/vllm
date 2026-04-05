@@ -13,7 +13,7 @@ namespace vllm {
 // into q_out [num_tokens, num_heads, NOPE_DIM+64].
 // Currently instantiated only for NOPE_DIM=512.
 // Rope dim is hardcoded to 64 (DeepSeek V3.2 MLA)
-template <typename DType, int NOPE_DIM>
+template <typename DType, int NOPE_DIM, int ROPE_DIM>
 __global__ void ConcatMLAQKernel(
     DType* __restrict__ q_out, const DType* __restrict__ ql_nope,
     const DType* __restrict__ q_pe, const int num_tokens, const int num_heads,
@@ -47,12 +47,19 @@ __global__ void ConcatMLAQKernel(
     }
   }
 
+  constexpr int rope_vec_loads =
+      (ROPE_DIM * sizeof(DType)) / (sizeof(int) * 32);
+
   const int* rope_src = reinterpret_cast<const int*>(
       q_pe + token_id * pe_stride_0 + head_id * pe_stride_1);
   int* rope_dst = reinterpret_cast<int*>(q_out + token_id * out_stride_0 +
                                          head_id * out_stride_1 + NOPE_DIM);
 
-  st32_cs(rope_dst + lane_id, ld32_cs(rope_src + lane_id));
+#pragma unroll
+  for (int i = 0; i < rope_vec_loads; i++) {
+    const int offset = i * 32 + lane_id;
+    st32_cs(rope_dst + offset, ld32_cs(rope_src + offset));
+  }
 }
 
 }  // namespace vllm
