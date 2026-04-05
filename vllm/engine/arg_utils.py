@@ -514,6 +514,11 @@ class EngineArgs:
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
+    image_pruning_rate: float | None = MultiModalConfig.image_pruning_rate
+    extract_vit_attention_score: bool = MultiModalConfig.extract_vit_attention_score
+    vit_attention_score_layer_index: int = (
+        MultiModalConfig.vit_attention_score_layer_index
+    )
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     # LoRA fields
     enable_lora: bool = False
@@ -1137,6 +1142,17 @@ class EngineArgs:
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
         multimodal_group.add_argument(
+            "--image-pruning-rate", **multimodal_kwargs["image_pruning_rate"]
+        )
+        multimodal_group.add_argument(
+            "--extract-vit-attention-score",
+            **multimodal_kwargs["extract_vit_attention_score"],
+        )
+        multimodal_group.add_argument(
+            "--vit-attention-score-layer-index",
+            **multimodal_kwargs["vit_attention_score_layer_index"],
+        )
+        multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
 
@@ -1472,6 +1488,9 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            image_pruning_rate=self.image_pruning_rate,
+            extract_vit_attention_score=self.extract_vit_attention_score,
+            vit_attention_score_layer_index=self.vit_attention_score_layer_index,
             mm_tensor_ipc=self.mm_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,

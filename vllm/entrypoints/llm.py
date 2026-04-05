@@ -21,6 +21,7 @@ from vllm.beam_search import (
 from vllm.config import (
     AttentionConfig,
     CompilationConfig,
+    MultiModalConfig,
     PoolerConfig,
     ProfilerConfig,
     StructuredOutputsConfig,
@@ -338,6 +339,19 @@ class LLM:
                 "the explicit multi-process data-parallel example at "
                 "'examples/offline_inference/data_parallel.py'."
             )
+
+        if "multimodal_config" in kwargs:
+            multimodal_config = kwargs.pop("multimodal_config")
+            if isinstance(multimodal_config, MultiModalConfig):
+                pruning_fields = {
+                    "video_pruning_rate": multimodal_config.video_pruning_rate,
+                    "image_pruning_rate": multimodal_config.image_pruning_rate,
+                    "extract_vit_attention_score": multimodal_config.extract_vit_attention_score,
+                    "vit_attention_score_layer_index": multimodal_config.vit_attention_score_layer_index,
+                }
+                for key, value in pruning_fields.items():
+                    if key not in kwargs:
+                        kwargs[key] = value
 
         engine_args = EngineArgs(
             model=model,
