@@ -216,7 +216,7 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
+        self, is_start: bool = True, profile_prefix: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -1048,9 +1048,10 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("is_scheduler_paused")
 
     async def profile_async(
-        self, is_start: bool = True, profile_prefix: str | None = None
-    ) -> None:
-        await self.call_utility_async("profile", is_start, profile_prefix)
+        self, is_start: bool = True, profile_prefix: str | None = None, max_steps: int = 0,
+    ) -> float | None:
+        return await self.call_utility_async("profile", is_start, profile_prefix,
+                                             max_steps)
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
@@ -1284,6 +1285,22 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
+
+    async def call_utility_async(self, method: str, *args) -> Any:
+        """Broadcast utility call to ALL DP engine cores.
+
+        Returns the result from the first engine only (consistent with
+        DPLBAsyncMPClient). This ensures sleep/wake_up/set_prefill_only
+        reach all DP ranks, not just rank 0.
+        """
+        return (
+            await asyncio.gather(
+                *[
+                    self._call_utility_async(method, *args, engine=engine)
+                    for engine in self.core_engines
+                ]
+            )
+        )[0]
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

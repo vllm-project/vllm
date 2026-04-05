@@ -110,6 +110,10 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        # Step timing stats for server-side latency measurement
+        self._step_stats: list[tuple[str, int, float]] = []
+        self._steady_state_toks: int | None = None
+
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
@@ -216,6 +220,10 @@ class EngineCore:
 
         self._idle_state_callbacks: list[Callable] = []
 
+        # Profiling state: auto-stop after max_steps engine steps.
+        self._profiling_steps_remaining: int | None = None
+        self._profiling_stop_pending: bool = False
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -224,6 +232,9 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+        # Pause state for "keep" mode - freezes requests in queue.
+        self._scheduler_paused = False
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -331,6 +342,40 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def pause_scheduler(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue.
+
+        Requests are kept frozen in queue and can be resumed later.
+        """
+        self._scheduler_paused = True
+
+    def resume_scheduler(self) -> None:
+        """Resume the scheduler after a pause.
+
+        Resumes processing of frozen requests in the queue.
+        """
+        self._scheduler_paused = False
+
+    def get_request_counts(self) -> tuple[int, int]:
+        """Return (num_running, num_waiting) request counts.
+
+        Used by the /debug/batch_info endpoint to detect when all
+        requests have finished prefill and entered decode (i.e.,
+        num_waiting == 0).
+        """
+        return self.scheduler.get_request_counts()
+
+    def set_prefill_only(self, enabled: bool) -> None:
+        """Skip decode scheduling while waiting requests remain.
+
+        When enabled, the scheduler gives the full token budget to
+        prefilling waiting requests and does not schedule any decode
+        tokens for running requests.  This ensures all requests finish
+        prefill before any decode begins, so the full batch reaches
+        steady-state together (used by benchmarking).
+        """
+        self.scheduler.prefill_only = enabled
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -384,11 +429,24 @@ class EngineCore:
         was executed.
         """
 
+        # If paused, don't schedule any work.
+        if self._scheduler_paused:
+            return {}, False
+
+        # Auto-stop profiling from previous step's max_steps trigger.
+        # Must happen BEFORE execute_model so the decode step is excluded
+        # from the trace, but AFTER the device has flushed trace data
+        # from the previous (profiled) step.
+        if self._profiling_stop_pending:
+            self._profiling_stop_pending = False
+            self.model_executor.profile(False)
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        _dispatch_t0 = time.perf_counter()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -399,12 +457,32 @@ class EngineCore:
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
+        # Record step timing for server-side latency measurement
+        _toks = scheduler_output.total_num_scheduled_tokens
+        if _toks > 0:
+            _num_reqs = len(scheduler_output.num_scheduled_tokens)
+            _phase = "prefill" if _toks > _num_reqs * 2 else "decode"
+            _elapsed = (time.perf_counter() - _dispatch_t0) * 1000
+            logger.info("engine_step_e2e: %s %d toks, %.1fms",
+                        _phase, _toks, _elapsed)
+            if _phase == "decode":
+                if self._steady_state_toks is None:
+                    self._steady_state_toks = _toks
+                if _toks == self._steady_state_toks:
+                    self._step_stats.append((_phase, _toks, _elapsed))
+            else:
+                self._step_stats.append((_phase, _toks, _elapsed))
+
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        # Auto-stop profiling after max_steps (e.g. prefill-only trace)
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self._maybe_auto_stop_profile()
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -474,7 +552,7 @@ class EngineCore:
 
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
+                batch_queue.appendleft((future, scheduler_output, exec_future, time.perf_counter()))
                 if (
                     model_executed
                     and len(batch_queue) < self.batch_queue_size
@@ -491,7 +569,7 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        future, scheduler_output, exec_model_fut, _dispatch_t0 = batch_queue.pop()
         with (
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
@@ -502,6 +580,22 @@ class EngineCore:
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
+
+        # Record step timing for server-side latency measurement
+        _toks = scheduler_output.total_num_scheduled_tokens
+        if _toks > 0:
+            _num_reqs = len(scheduler_output.num_scheduled_tokens)
+            _phase = "prefill" if _toks > _num_reqs * 2 else "decode"
+            _elapsed = (time.perf_counter() - _dispatch_t0) * 1000
+            logger.info("engine_step_e2e: %s %d toks, %.1fms",
+                        _phase, _toks, _elapsed)
+            if _phase == "decode":
+                if self._steady_state_toks is None:
+                    self._steady_state_toks = _toks
+                if _toks == self._steady_state_toks:
+                    self._step_stats.append((_phase, _toks, _elapsed))
+            else:
+                self._step_stats.append((_phase, _toks, _elapsed))
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -532,7 +626,7 @@ class EngineCore:
                 deferred_scheduler_output
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
-            batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+            batch_queue.appendleft((future, deferred_scheduler_output, exec_future, time.perf_counter()))
 
         return engine_core_outputs, model_executed
 
@@ -553,8 +647,52 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        self.model_executor.profile(is_start, profile_prefix)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, max_steps: int = 0):
+        results = self.model_executor.profile(is_start, profile_prefix)
+        if is_start and max_steps > 0:
+            self._profiling_steps_remaining = max_steps
+        elif not is_start:
+            self._profiling_steps_remaining = None
+        # Return elapsed_ms from worker on stop (first worker's value)
+        if not is_start and results:
+            return results[0]
+        return None
+
+    def get_step_stats(self) -> dict:
+        """Return accumulated engine step timing stats."""
+        decode_times = [ms for phase, _, ms in self._step_stats
+                        if phase == "decode"]
+        prefill_times = [ms for phase, _, ms in self._step_stats
+                         if phase == "prefill"]
+        decode_toks = [toks for phase, toks, _ in self._step_stats
+                       if phase == "decode"]
+        return {
+            "decode_steps": len(decode_times),
+            "decode_avg_ms": (sum(decode_times) / len(decode_times)
+                              if decode_times else 0),
+            "decode_toks_per_step": decode_toks[-1] if decode_toks else 0,
+            "prefill_steps": len(prefill_times),
+            "prefill_avg_ms": (sum(prefill_times) / len(prefill_times)
+                               if prefill_times else 0),
+        }
+
+    def reset_step_stats(self) -> None:
+        """Reset step timing accumulator."""
+        self._step_stats.clear()
+        self._steady_state_toks = None
+
+    def _maybe_auto_stop_profile(self):
+        """Mark profiling for auto-stop after max_steps engine steps.
+
+        Sets _profiling_stop_pending which is checked at the beginning
+        of the next step() call.  This gives the TPU device time to
+        flush trace data between the last profiled step and stop_trace.
+        """
+        if self._profiling_steps_remaining is not None:
+            self._profiling_steps_remaining -= 1
+            if self._profiling_steps_remaining <= 0:
+                self._profiling_steps_remaining = None
+                self._profiling_stop_pending = True
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -654,6 +792,11 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
         """
+        if level < 1:
+            # Use pause_scheduler with clear_cache=False to avoid
+            # _reset_caches() → reset_encoder_cache() which is not
+            # implemented on TPU workers.
+            return self.pause_scheduler(mode="keep", clear_cache=False)
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
@@ -1139,7 +1282,13 @@ class EngineCoreProc(EngineCore):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            #    Skip if scheduling is paused (level 0 sleep)
+            if not self._scheduler_paused:
+                self._process_engine_step()
+            else:
+                # When scheduling is paused, still need to check for wake up
+                # by processing any utility requests that might resume scheduling
+                pass
 
         raise SystemExit
 
@@ -1147,7 +1296,7 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.has_work() and self.is_running():
+        while not self.has_work() and self.is_running() and (not self.scheduler.has_requests() or self._scheduler_paused):
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1709,10 +1858,15 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
+            # Skip processing if scheduling is paused (level 0 sleep)
+            if self._scheduler_paused:
+                continue
+
+            # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
-
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.

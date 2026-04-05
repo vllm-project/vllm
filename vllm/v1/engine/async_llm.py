@@ -206,6 +206,7 @@ class AsyncLLM(EngineClient):
             )
         else:
             self.profiler = None
+        self._profiler_running = False
 
     @classmethod
     def from_vllm_config(
@@ -876,17 +877,25 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
-    async def start_profile(self, profile_prefix: str | None = None) -> None:
-        coros = [self.engine_core.profile_async(True, profile_prefix)]
+    async def start_profile(self, profile_prefix: str | None = None,
+                            max_steps: int = 0) -> None:
+        coros = [self.engine_core.profile_async(True, profile_prefix,
+                                                max_steps=max_steps)]
         if self.profiler is not None:
             coros.append(asyncio.to_thread(self.profiler.start))
+            self._profiler_running = True
         await asyncio.gather(*coros)
 
-    async def stop_profile(self) -> None:
-        coros = [self.engine_core.profile_async(False)]
-        if self.profiler is not None:
+    async def stop_profile(self) -> float | None:
+        """Stop profiling. Returns decode-only elapsed_ms if delay was used."""
+        profile_coro = self.engine_core.profile_async(False)
+        coros = [profile_coro]
+        if self.profiler is not None and self._profiler_running:
             coros.append(asyncio.to_thread(self.profiler.stop))
-        await asyncio.gather(*coros)
+            self._profiler_running = False
+        results = await asyncio.gather(*coros)
+        # First result is from profile_async (elapsed_ms or None)
+        return results[0] if results else None
 
     async def reset_mm_cache(self) -> None:
         await self.renderer.clear_mm_cache_async()
