@@ -3,11 +3,12 @@
 
 setuptools==77.0.3 # this version can reuse CMake build dir
 
-numba == 0.61.2; platform_machine != "s390x" # Required for N-gram speculative decoding
+numba == 0.61.2; platform_machine != "s390x" and platform_machine != "riscv64" # Required for N-gram speculative decoding (llvmlite has no riscv64 support)
 
 # Dependencies for CPUs
 torch==2.10.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
-torch==2.10.0; platform_machine == "aarch64" or platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "riscv64"
+torch==2.10.0; platform_machine == "aarch64" or platform_system == "Darwin" or platform_machine == "ppc64le"
+torch; platform_machine == "riscv64" # no official wheel; allow system or source-built torch
 
 # required for the image processor of minicpm-o-2_6, this must be updated alongside torch
 torchaudio; platform_machine != "s390x" and platform_machine != "riscv64"
