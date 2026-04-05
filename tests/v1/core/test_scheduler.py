@@ -3797,6 +3797,55 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_ignore_late_finished_recving_after_abort_cleanup():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    # add a single request
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # abort after recv completed but before the scheduler promotes the request
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.finished_recving_kv_req_ids.add(request.request_id)
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+
+    assert request.request_id not in scheduler.requests
+
+    # a late worker callback should be ignored rather than crashing
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_recving={request.request_id}),
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.finished_recving_kv_req_ids
+
+
+def test_ignore_late_finished_sending_after_request_cleanup():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    # add and finish a single request so it is fully removed
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+
+    assert request.request_id not in scheduler.requests
+
+    # a stale async send completion should also be ignored
+    scheduler_output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_sending={request.request_id}),
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
