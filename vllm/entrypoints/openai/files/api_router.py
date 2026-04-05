@@ -168,14 +168,21 @@ def attach_router(app: FastAPI) -> None:
     app.include_router(router)
 
 
-def init_files_state(state, args) -> None:
+async def init_files_state(state, args) -> None:
     """Populate app.state.openai_serving_files from CLI args.
 
     Called from api_server.init_app_state when --enable-file-uploads is set.
     Creates the FileUploadConfig, FileUploadStore, and serving handler, and
     attaches both the store and the handler to app.state so downstream
     consumers (MediaConnector, shutdown hooks) can access them.
+
+    Async so that the FileUploadStore's blocking filesystem setup
+    (shutil.rmtree on the upload dir, PID lockfile acquisition) runs in
+    the default thread pool instead of stalling the event loop — the
+    rmtree can take seconds on NFS or large stale upload trees.
     """
+    import asyncio
+
     from vllm.config import FileUploadConfig
     from vllm.entrypoints.openai.files.serving import OpenAIServingFiles
     from vllm.entrypoints.openai.files.store import FileUploadStore
@@ -215,7 +222,11 @@ def init_files_state(state, args) -> None:
         scope_header=args.file_upload_scope_header,
         disable_listing=args.file_upload_disable_listing,
     )
-    store = FileUploadStore(config)
+    # FileUploadStore.__init__ does blocking filesystem I/O (mkdtemp or
+    # rmtree+mkdir+lockfile acquisition). Dispatch it to the default
+    # thread pool so the event loop stays responsive during startup.
+    loop = asyncio.get_running_loop()
+    store = await loop.run_in_executor(None, FileUploadStore, config)
     state.file_upload_store = store
     state.openai_serving_files = OpenAIServingFiles(store, config)
     # Expose the store to MediaConnector so vllm-file:// URLs resolve in

@@ -324,14 +324,19 @@ class MediaConnector:
         """Event-loop-safe resolver for `vllm-file://<id>` URLs.
 
         Runs the store metadata lookup on the event loop thread (so the
-        store's single-writer invariants hold) and dispatches only the
-        blocking disk read to a thread-pool executor inside the store.
+        store's single-writer invariants hold) and dispatches the
+        blocking disk read (inside the store) AND the media decode
+        (via media_io.load_bytes) to the thread pool. Video decoders
+        in particular can block the loop for hundreds of ms to seconds
+        on large clips, matching the pattern used by the http/data/
+        file branches of `load_from_url_async`.
         """
         file_id, store = self._resolve_vllm_file_id(url_spec)
         data = await store.read_bytes_by_id_async(file_id)  # type: ignore[attr-defined]
         if data is None:
             raise ValueError(f"Unknown vllm-file id: {file_id!r}")
-        return media_io.load_bytes(data)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (

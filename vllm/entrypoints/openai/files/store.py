@@ -395,12 +395,12 @@ class FileUploadStore:
                             head += chunk[: SNIFF_HEAD_BYTES - len(head)]
                         await loop.run_in_executor(None, out.write, chunk)
             except BaseException:
-                on_disk.unlink(missing_ok=True)
+                await self._unlink_paths([on_disk])
                 raise
 
             mime_type = sniff_mime(head)
             if mime_type is None or not self._is_allowed_mime(mime_type):
-                on_disk.unlink(missing_ok=True)
+                await self._unlink_paths([on_disk])
                 self._audit(
                     "file.reject",
                     file_id=file_id,
@@ -576,7 +576,9 @@ class FileUploadStore:
                         return
                     yield chunk
             finally:
-                fh.close()
+                # Dispatch close to the executor too — close() can block
+                # on a buffer flush / metadata update on slow filesystems.
+                await loop.run_in_executor(None, fh.close)
 
         return _stream()
 
@@ -738,6 +740,11 @@ class FileUploadStore:
         Never holds any store lock — safe to call with `self._lock`
         released. POSIX semantics ensure concurrent open file handles
         remain valid across the unlink.
+
+        Any OSError beyond FileNotFoundError (e.g., permission denied
+        on a ro-mount, EBUSY on Windows) is logged and swallowed —
+        unlinks are best-effort cleanup and an unlink failure should
+        never cascade into a request-handling failure.
         """
         if not paths:
             return
@@ -745,7 +752,10 @@ class FileUploadStore:
 
         def _bulk_unlink() -> None:
             for p in paths:
-                p.unlink(missing_ok=True)
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError as e:
+                    logger.warning("file upload: failed to unlink %s: %s", p, e)
 
         await loop.run_in_executor(None, _bulk_unlink)
 

@@ -420,7 +420,7 @@ async def init_app_state(
     if args.enable_file_uploads:
         from vllm.entrypoints.openai.files.api_router import init_files_state
 
-        init_files_state(state, args)
+        await init_files_state(state, args)
 
     if "realtime" in supported_tasks:
         from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
