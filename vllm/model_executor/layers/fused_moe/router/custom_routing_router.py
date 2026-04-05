@@ -21,6 +21,7 @@ class CustomRoutingRouter(BaseRouter):
         renormalize: bool = True,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        layer_index: int = 0,
     ):
         super().__init__(
             top_k=top_k,
@@ -28,6 +29,7 @@ class CustomRoutingRouter(BaseRouter):
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_index=layer_index,
         )
         self.custom_routing_function = custom_routing_function
         self.renormalize = renormalize

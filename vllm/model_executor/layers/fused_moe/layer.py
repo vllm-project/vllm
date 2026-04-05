@@ -337,6 +337,13 @@ class FusedMoE(CustomOp):
             vllm_config.parallel_config.expert_placement_strategy
         )
 
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        self.layer_index = (
+            extract_layer_index(prefix)
+            - vllm_config.model_config.get_total_num_dense_moe_layers()
+        )
+
         # ROCm aiter shared experts fusion
         # AITER only supports gated activations (silu/gelu), so disable it
         # for non-gated MoE (is_act_and_mul=False)
@@ -460,6 +467,7 @@ class FusedMoE(CustomOp):
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,
+            layer_index=self.layer_index,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
