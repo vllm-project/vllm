@@ -50,9 +50,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# This oneccl contains the BMG support which is not the case for default version of oneapi 2025.2.
-ARG ONECCL_INSTALLER="intel-oneccl-2021.15.7.8_offline.sh"
-RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/${ONECCL_INSTALLER}" && \
+# This oneccl contains the BMG support which is not the case for default version of oneapi 2025.3.
+ARG ONECCL_INSTALLER="intel-oneccl-2021.15.8.4_offline.sh"
+RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.8/${ONECCL_INSTALLER}" && \
     bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
     rm "${ONECCL_INSTALLER}" && \
     echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc && \
@@ -170,7 +170,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # FIX triton
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip uninstall triton triton-xpu && \
-    uv pip install triton-xpu==3.6.0
+    uv pip install triton-xpu==3.7.0
 
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/uv \
