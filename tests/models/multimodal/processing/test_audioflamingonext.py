@@ -27,8 +27,8 @@ from transformers import PretrainedConfig
 from tests.models.registry import HF_EXAMPLE_MODELS
 
 
-class MockMusicFlamingoConfig(PretrainedConfig):
-    model_type = "musicflamingo"
+class MockAudioFlamingoNextConfig(PretrainedConfig):
+    model_type = "audioflamingonext"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -36,7 +36,7 @@ class MockMusicFlamingoConfig(PretrainedConfig):
         self.text_config = PretrainedConfig()
 
 
-class MockMusicFlamingoProcessor:
+class MockAudioFlamingoNextProcessor:
     def __init__(self):
         self.audio_token = "<sound>"
         self.audio_token_id = 12345
@@ -44,7 +44,7 @@ class MockMusicFlamingoProcessor:
         self.audio_bos_token_id = 12346
         self.audio_eos_token = "<|sound_eos|>"
         self.audio_eos_token_id = 12347
-        self.max_audio_len = 1200
+        self.max_audio_len = 1800
         self.feature_extractor = MockFeatureExtractor()
 
 
@@ -56,31 +56,33 @@ class MockFeatureExtractor:
 
 @pytest.fixture
 def mock_ctx():
-    config = MockMusicFlamingoConfig()
+    config = MockAudioFlamingoNextConfig()
 
     ctx = MagicMock()
     ctx.get_hf_config.return_value = config
-    ctx.get_hf_processor.return_value = MockMusicFlamingoProcessor()
+    ctx.get_hf_processor.return_value = MockAudioFlamingoNextProcessor()
     ctx.model_config.hf_config = config
     return ctx
 
 
 @pytest.fixture(autouse=True)
 def check_transformers_version():
-    model_info = HF_EXAMPLE_MODELS.get_hf_info("MusicFlamingoForConditionalGeneration")
+    model_info = HF_EXAMPLE_MODELS.get_hf_info(
+        "AudioFlamingoNextForConditionalGeneration"
+    )
     model_info.check_transformers_version(on_fail="skip")
 
 
-def test_musicflamingo_chunk_counting(mock_ctx, monkeypatch):
-    from vllm.model_executor.models.musicflamingo import (
-        MusicFlamingoDummyInputsBuilder,
-        MusicFlamingoMultiModalProcessor,
-        MusicFlamingoProcessingInfo,
+def test_audioflamingonext_chunk_counting(mock_ctx, monkeypatch):
+    from vllm.model_executor.models.audioflamingonext import (
+        AudioFlamingoNextDummyInputsBuilder,
+        AudioFlamingoNextMultiModalProcessor,
+        AudioFlamingoNextProcessingInfo,
     )
 
-    info = MusicFlamingoProcessingInfo(mock_ctx)
-    processor = MusicFlamingoMultiModalProcessor(
-        info, MusicFlamingoDummyInputsBuilder(info)
+    info = AudioFlamingoNextProcessingInfo(mock_ctx)
+    processor = AudioFlamingoNextMultiModalProcessor(
+        info, AudioFlamingoNextDummyInputsBuilder(info)
     )
 
     sr = 16000
@@ -102,41 +104,41 @@ def test_musicflamingo_chunk_counting(mock_ctx, monkeypatch):
     monkeypatch.setattr(BaseMultiModalProcessor, "_call_hf_processor", mock_base_call)
 
     processed = processor._call_hf_processor(prompt, mm_data, {}, {})
-
     chunk_counts = processed["chunk_counts"]
 
     assert chunk_counts.tolist() == [1, 2]
     assert "rote_timestamps" not in processed
 
 
-def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
-    from vllm.model_executor.models.musicflamingo import (
-        MusicFlamingoDummyInputsBuilder,
-        MusicFlamingoProcessingInfo,
+def test_audioflamingonext_dummy_text_uses_plain_audio_tokens(mock_ctx):
+    from vllm.model_executor.models.audioflamingonext import (
+        AudioFlamingoNextDummyInputsBuilder,
+        AudioFlamingoNextProcessingInfo,
     )
 
-    info = MusicFlamingoProcessingInfo(mock_ctx)
-    builder = MusicFlamingoDummyInputsBuilder(info)
+    info = AudioFlamingoNextProcessingInfo(mock_ctx)
+    builder = AudioFlamingoNextDummyInputsBuilder(info)
 
     assert builder.get_dummy_text({"audio": 2}) == "<sound><sound>"
 
 
-def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
-    from transformers.models.musicflamingo import (
-        modeling_musicflamingo as hf_musicflamingo_modeling,
+def test_audioflamingonext_audio_feature_pipeline_matches_hf_small_config():
+    from transformers.models.audioflamingonext import (
+        modeling_audioflamingonext as hf_audioflamingonext_modeling,
     )
-    from transformers.models.musicflamingo.configuration_musicflamingo import (
-        MusicFlamingoConfig,
+    from transformers.models.audioflamingonext.configuration_audioflamingonext import (
+        AudioFlamingoNextConfig,
     )
 
     from vllm.model_executor.models.audioflamingo3 import (
         _build_audio_encoder_attention_mask,
         _flatten_valid_audio_embeddings,
     )
-    from vllm.model_executor.models.musicflamingo import (
-        MusicFlamingoEncoder,
-        MusicFlamingoMultiModalProjector,
-        MusicFlamingoRotaryEmbedding,
+    from vllm.model_executor.models.audioflamingonext import (
+        AudioFlamingoNextEncoder,
+        AudioFlamingoNextMultiModalProjector,
+        AudioFlamingoNextRotaryEmbedding,
+        _build_audio_timestamps,
         apply_rotary_time_emb,
     )
 
@@ -154,6 +156,7 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
         "use_mrope": False,
     }
     audio_config = {
+        "model_type": "audioflamingo3_encoder",
         "hidden_size": 16,
         "num_attention_heads": 4,
         "intermediate_size": 32,
@@ -167,7 +170,7 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
     }
 
     torch.manual_seed(0)
-    config = MusicFlamingoConfig(
+    config = AudioFlamingoNextConfig(
         text_config=text_config,
         audio_config=audio_config,
         audio_token_id=0,
@@ -177,17 +180,17 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
             "partial_rotary_factor": 0.5,
         },
     )
-    hf_model = hf_musicflamingo_modeling.MusicFlamingoForConditionalGeneration(
+    hf_model = hf_audioflamingonext_modeling.AudioFlamingoNextForConditionalGeneration(
         config
     ).eval()
 
-    vllm_encoder = MusicFlamingoEncoder(config.audio_config).eval()
+    vllm_encoder = AudioFlamingoNextEncoder(config.audio_config).eval()
     vllm_encoder.load_state_dict(hf_model.audio_tower.state_dict())
 
-    vllm_projector = MusicFlamingoMultiModalProjector(config).eval()
+    vllm_projector = AudioFlamingoNextMultiModalProjector(config).eval()
     vllm_projector.load_state_dict(hf_model.multi_modal_projector.state_dict())
 
-    vllm_rope = MusicFlamingoRotaryEmbedding(config).eval()
+    vllm_rope = AudioFlamingoNextRotaryEmbedding(config).eval()
     vllm_rope.load_state_dict(hf_model.pos_emb.state_dict(), strict=False)
 
     input_features = torch.randn(3, 80, 3000)
@@ -218,8 +221,6 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
         input_features,
         attention_mask=vllm_attention_mask,
     )
-    from vllm.model_executor.models.musicflamingo import _build_audio_timestamps
-
     audio_timestamps = _build_audio_timestamps(
         feature_attention_mask,
         chunk_counts,

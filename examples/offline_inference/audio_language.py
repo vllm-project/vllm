@@ -69,6 +69,45 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# AudioFlamingoNext
+def run_audioflamingonext(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "nvidia/audio-flamingo-next-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    # AudioFlamingoNext prompt placeholders use <sound>; vLLM's
+    # AudioFlamingoNext multimodal processor expands each one into
+    # <|sound_bos|> + audio tokens + <|sound_eos|> based on extracted
+    # audio feature lengths.
+    audio_placeholder = "<sound>" * audio_count
+    system_prompt = (
+        "You are Audio Flamingo-Next, a multimodal assistant for language and audio. "
+        "On each turn you receive an optional audio clip which may contain speech, "
+        "music, or ambient sounds and optional text, you will receive at least one "
+        "or both; use your world knowledge and reasoning to help the user with any "
+        "task. Interpret the entirety of the content of any input audio—regardless "
+        "of whether the user calls it audio, speech, music, or sound."
+    )
+
+    prompt = (
+        "<|im_start|>system\n"
+        f"{system_prompt}<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_placeholder}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # CohereASR
 def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
     assert audio_count == 1, "CohereASR only support single audio input per prompt"
@@ -539,6 +578,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
+    "audioflamingonext": run_audioflamingonext,
     "cohere_asr": run_cohere_asr,
     "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,

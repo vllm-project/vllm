@@ -337,6 +337,10 @@ _MULTIMODAL_MODELS = {
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
     ),
+    "AudioFlamingoNextForConditionalGeneration": (
+        "audioflamingonext",
+        "AudioFlamingoNextForConditionalGeneration",
+    ),
     "MusicFlamingoForConditionalGeneration": (
         "musicflamingo",
         "MusicFlamingoForConditionalGeneration",
