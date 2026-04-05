@@ -11,7 +11,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    PreloadedMoEConfigMixin,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNaiveBatched,
@@ -874,7 +876,7 @@ def batched_moe_kernel_quantize_input(
         return A_q, A_q_scale
 
 
-class BatchedTritonExperts(mk.FusedMoEExpertsModular):
+class BatchedTritonExperts(PreloadedMoEConfigMixin, mk.FusedMoEExpertsModular):
     """
     A Triton based MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the batched
@@ -898,6 +900,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
+        self._init_preloaded_moe_config_state()
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1030,15 +1033,12 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         assert w1.size(0) == E
         assert w2.size(0) == E
 
-        config_dtype = self.quant_config.config_name(hidden_states.dtype)
-
-        config = try_get_optimal_moe_config(
-            w1.size(),
-            w2.size(),
-            top_k_num,
-            config_dtype,
-            max_num_tokens,
-            block_shape=self.block_shape,
+        config = self._resolve_runtime_moe_config(
+            hidden_states_dtype=hidden_states.dtype,
+            M=max_num_tokens,
+            w1_shape=tuple(w1.size()),
+            w2_shape=tuple(w2.size()),
+            top_k=top_k_num,
         )
 
         if hidden_states.dtype == torch.bfloat16:

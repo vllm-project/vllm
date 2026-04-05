@@ -17,6 +17,7 @@ class MoERunner(ABC):
     @abstractmethod
     def forward(
         self,
+        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:

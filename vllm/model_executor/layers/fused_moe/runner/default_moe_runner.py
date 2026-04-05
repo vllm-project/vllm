@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
@@ -222,9 +223,76 @@ class DefaultMoERunner(MoERunner):
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer.layer_name
 
-        self.forward_entry, self.forward_impl = self._select_forward(layer)
+        # Treat quant-method behavior toggles as runner invariants so the
+        # unwrapped forward path does not trace through Python properties.
+        self.quant_method_is_monolithic = bool(self.quant_method.is_monolithic)
+        self.quant_method_skip_forward_padding = bool(
+            self.quant_method.skip_forward_padding
+        )
 
-    def _select_forward(self, layer: torch.nn.Module) -> tuple[Callable, Callable]:
+        self.forward_mode = self._resolve_forward_mode(layer)
+        self.forward_entry, self.forward_impl = self._select_wrapped_forward()
+        if self.forward_mode == "unwrapped":
+            backend = getattr(self.quant_method, "unquantized_backend", None)
+            backend_name = f" ({backend.name})" if backend is not None else ""
+            logger.info_once(
+                "Using unwrapped FusedMoE forward path for %s%s.",
+                self.quant_method.__class__.__name__,
+                backend_name,
+                scope="local",
+            )
+
+    def _supports_unwrapped_forward(self, layer: torch.nn.Module) -> bool:
+        if current_platform.is_tpu() or current_platform.is_cpu():
+            # TODO: Once the OOM issue for the TPU backend is resolved, we
+            # will switch to using the moe_forward custom op.
+            # Note: CPU doesn't require wrapped forward_impl.
+            return True
+
+        # The Transformers backend still routes through its own wrapper op and
+        # stores topk ids in the layer at runtime.
+        if getattr(layer.__class__, "name", None) == "transformers_fused_moe":
+            return False
+
+        return self.moe_config.dp_size == 1
+
+    def _supports_auto_unwrapped_forward(self, layer: torch.nn.Module) -> bool:
+        if not self._supports_unwrapped_forward(layer):
+            return False
+
+        if current_platform.is_tpu() or current_platform.is_cpu():
+            return True
+
+        quant_method = getattr(layer, "quant_method", None)
+        if quant_method is None:
+            return True
+
+        if quant_method.__class__.__name__ != "UnquantizedFusedMoEMethod":
+            return True
+
+        backend = getattr(quant_method, "unquantized_backend", None)
+        return backend is not None and backend.name in {"TRITON", "BATCHED_TRITON"}
+
+    def _resolve_forward_mode(
+        self, layer: torch.nn.Module
+    ) -> Literal["wrapped", "unwrapped"]:
+        configured_mode = envs.VLLM_FUSED_MOE_WRAP_MODE
+
+        if configured_mode == "wrapped":
+            return "wrapped"
+        if configured_mode == "unwrapped":
+            if not self._supports_unwrapped_forward(layer):
+                raise ValueError(
+                    "VLLM_FUSED_MOE_WRAP_MODE=unwrapped is only supported for "
+                    "native non-DP FusedMoE/SharedFusedMoE paths."
+                )
+            return "unwrapped"
+
+        return (
+            "unwrapped" if self._supports_auto_unwrapped_forward(layer) else "wrapped"
+        )
+
+    def _select_wrapped_forward(self) -> tuple[Callable, Callable]:
         # Select implementation based on presence of DP chunking.
         forward_impl_fn = (
             self._forward_impl_chunked if self.use_dp_chunking else self._forward_impl
@@ -408,6 +476,22 @@ class DefaultMoERunner(MoERunner):
 
         return hidden_states, orig_hidden_dims
 
+    def _forward_unwrapped(
+        self,
+        layer: torch.nn.Module,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.moe_config.dp_size == 1
+        assert not self.use_dp_chunking
+        return self.forward_dispatch(
+            layer,
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+        )
+
     def _maybe_apply_shared_experts(
         self,
         shared_experts_input: torch.Tensor | None,
@@ -431,7 +515,7 @@ class DefaultMoERunner(MoERunner):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.quant_method.is_monolithic:
+        if self.quant_method_is_monolithic:
             fused_out = self.quant_method.apply_monolithic(
                 layer=layer,
                 x=hidden_states,
@@ -464,6 +548,11 @@ class DefaultMoERunner(MoERunner):
         )
 
     def _sequence_parallel_context(self):
+        # Layer-local unwrapped forwards used by tests and compilation checks do
+        # not run under a model forward context.
+        if not is_forward_context_available():
+            return nullcontext()
+
         ctx = get_forward_context()
         return (
             ctx.dp_metadata.sp_local_sizes(self.moe_config.sp_size)
@@ -574,6 +663,7 @@ class DefaultMoERunner(MoERunner):
 
     def forward(
         self,
+        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -616,12 +706,20 @@ class DefaultMoERunner(MoERunner):
             hidden_states,
         )
 
-        fused_output = self.forward_entry(
-            hidden_states,
-            router_logits,
-            shared_experts_input,
-            self._encode_layer_name(),
-        )
+        if self.forward_mode == "unwrapped":
+            fused_output = self._forward_unwrapped(
+                layer=layer,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                shared_experts_input=shared_experts_input,
+            )
+        else:
+            fused_output = self.forward_entry(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                self._encode_layer_name(),
+            )
 
         return self._maybe_reduce_output(fused_output, og_hidden_dims)
 

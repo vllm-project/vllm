@@ -1029,6 +1029,132 @@ def get_config_file_name(
     return f"E={E},N={N},device_name={device_name}{dtype_selector}{block_shape_selector}.json"  # noqa: E501
 
 
+def preload_moe_tuned_configs(
+    w1_shape: tuple[int, ...],
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    block_shape: list[int] | None = None,
+) -> tuple[tuple[int, ...] | None, tuple[dict[str, int], ...] | None]:
+    """Load static MoE tuning tables ahead of compiled execution."""
+    from vllm.model_executor.layers.fused_moe import get_config
+
+    override_config = get_config()
+    if override_config:
+        return (0,), (override_config,)
+
+    E, _, N = w2_shape
+    if dtype == "int4_w4a16":
+        N = N * 2
+
+    block_n = block_shape[0] if block_shape else 0
+    block_k = block_shape[1] if block_shape else 0
+    configs = get_moe_configs(E, N, dtype, block_n, block_k)
+    if not configs:
+        return None, None
+
+    tuned_ms = tuple(sorted(configs))
+    tuned_configs = tuple(configs[m] for m in tuned_ms)
+    return tuned_ms, tuned_configs
+
+
+def resolve_preloaded_moe_config(
+    M: int,
+    w1_shape: tuple[int, ...],
+    w2_shape: tuple[int, ...],
+    top_k: int,
+    dtype: str | None,
+    block_shape: list[int] | None = None,
+    tuned_ms: tuple[int, ...] | None = None,
+    tuned_configs: tuple[dict[str, int], ...] | None = None,
+) -> dict[str, int]:
+    """Resolve a MoE kernel config without filesystem or device-name lookup."""
+    if tuned_ms and tuned_configs:
+        best_idx = min(range(len(tuned_ms)), key=lambda idx: abs(tuned_ms[idx] - M))
+        return tuned_configs[best_idx]
+
+    E, _, N = w2_shape
+    if dtype == "int4_w4a16":
+        N = N * 2
+    return get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+
+
+class PreloadedMoEConfigMixin:
+    """Helper for kernels that need compile-safe MoE config lookup."""
+
+    moe_config: FusedMoEConfig
+    quant_config: FusedMoEQuantConfig
+    block_shape: list[int] | None
+    _preloaded_config_dtype: str | None
+    _preloaded_w1_shape: tuple[int, ...] | None
+    _preloaded_w2_shape: tuple[int, ...] | None
+    _preloaded_top_k: int | None
+    _preloaded_tuned_ms: tuple[int, ...] | None
+    _preloaded_tuned_configs: tuple[dict[str, int], ...] | None
+
+    def _init_preloaded_moe_config_state(self) -> None:
+        self._preloaded_config_dtype: str | None = None
+        self._preloaded_w1_shape: tuple[int, ...] | None = None
+        self._preloaded_w2_shape: tuple[int, ...] | None = None
+        self._preloaded_top_k: int | None = None
+        self._preloaded_tuned_ms: tuple[int, ...] | None = None
+        self._preloaded_tuned_configs: tuple[dict[str, int], ...] | None = None
+
+    def preload_runtime_moe_config(
+        self,
+        w1_shape: tuple[int, ...],
+        w2_shape: tuple[int, ...],
+        top_k: int,
+    ) -> None:
+        config_dtype = self.quant_config.config_name(self.moe_config.in_dtype)
+        tuned_ms, tuned_configs = preload_moe_tuned_configs(
+            w1_shape=w1_shape,
+            w2_shape=w2_shape,
+            dtype=config_dtype,
+            block_shape=self.block_shape,
+        )
+        self._preloaded_config_dtype = config_dtype
+        self._preloaded_w1_shape = tuple(w1_shape)
+        self._preloaded_w2_shape = tuple(w2_shape)
+        self._preloaded_top_k = top_k
+        self._preloaded_tuned_ms = tuned_ms
+        self._preloaded_tuned_configs = tuned_configs
+
+    def _resolve_runtime_moe_config(
+        self,
+        hidden_states_dtype: torch.dtype,
+        M: int,
+        w1_shape: tuple[int, ...],
+        w2_shape: tuple[int, ...],
+        top_k: int,
+    ) -> dict[str, int]:
+        config_dtype = self.quant_config.config_name(hidden_states_dtype)
+        if (
+            config_dtype == self._preloaded_config_dtype
+            and tuple(w1_shape) == self._preloaded_w1_shape
+            and tuple(w2_shape) == self._preloaded_w2_shape
+            and top_k == self._preloaded_top_k
+        ):
+            return resolve_preloaded_moe_config(
+                M=M,
+                w1_shape=w1_shape,
+                w2_shape=w2_shape,
+                top_k=top_k,
+                dtype=config_dtype,
+                block_shape=self.block_shape,
+                tuned_ms=self._preloaded_tuned_ms,
+                tuned_configs=self._preloaded_tuned_configs,
+            )
+
+        return try_get_optimal_moe_config(
+            w1_shape,
+            w2_shape,
+            top_k,
+            config_dtype,
+            M,
+            block_shape=self.block_shape,
+        )
+
+
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
 @functools.lru_cache
 def get_moe_configs(
@@ -1894,7 +2020,7 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-class TritonExperts(mk.FusedMoEExpertsModular):
+class TritonExperts(PreloadedMoEConfigMixin, mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
     def __init__(
@@ -1903,6 +2029,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
+        self._init_preloaded_moe_config_state()
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -2042,13 +2169,12 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         if global_num_experts == -1:
             global_num_experts = E
 
-        config = try_get_optimal_moe_config(
-            w1.size(),
-            w2.size(),
-            top_k_num,
-            self.quant_config.config_name(hidden_states.dtype),
-            num_tokens,
-            block_shape=self.block_shape,
+        config = self._resolve_runtime_moe_config(
+            hidden_states_dtype=hidden_states.dtype,
+            M=num_tokens,
+            w1_shape=tuple(w1.size()),
+            w2_shape=tuple(w2.size()),
+            top_k=top_k_num,
         )
 
         if hidden_states.dtype == torch.bfloat16:

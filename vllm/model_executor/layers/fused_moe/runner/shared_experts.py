@@ -120,6 +120,7 @@ class SharedExperts:
             current_platform.is_cuda()
             and not self._use_dp_chunking
             and self._stream is not None
+            and not torch.compiler.is_compiling()
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
         )

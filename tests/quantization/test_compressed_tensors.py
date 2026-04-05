@@ -61,6 +61,41 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def _make_moe_inputs(layer, num_tokens: int = 4) -> tuple[torch.Tensor, torch.Tensor]:
+    device = next(layer.parameters()).device
+    hidden_states = torch.randn(
+        num_tokens,
+        layer.hidden_size,
+        device=device,
+        dtype=layer.moe_config.in_dtype,
+    )
+    router_logits = torch.randn(
+        num_tokens,
+        layer.moe_config.num_logical_experts,
+        device=device,
+        dtype=layer.moe_config.router_logits_dtype,
+    )
+    return hidden_states, router_logits
+
+
+def _assert_moe_outputs_close(
+    actual: tuple[torch.Tensor, ...],
+    expected: tuple[torch.Tensor, ...],
+) -> None:
+    assert isinstance(actual, tuple)
+    assert isinstance(expected, tuple)
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        assert actual_tensor is not None
+        assert expected_tensor is not None
+        torch.testing.assert_close(
+            actual_tensor,
+            expected_tensor,
+            rtol=1e-2,
+            atol=1e-2,
+            equal_nan=True,
+        )
+
+
 @pytest.mark.parametrize(
     "model_args",
     [
@@ -545,27 +580,98 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
         assert output
 
 
-def test_w4a16_moe_torch_compile(vllm_runner):
-    """Regression test: MoE quant_config must be initialized inside the
-    moe_forward custom op, not just in forward_native which is compiled by
-    Dynamo (attribute mutations are not replayed at runtime).
+def test_w4a16_moe_torch_compile(vllm_runner, monkeypatch):
+    """Regression test for quantized and unquantized unwrapped compile paths.
 
-    Without the fix in _moe_forward/_moe_forward_shared, this hits:
-        AssertionError: Hidden size mismatch 2048 != 1024
-    because use_int4_w4a16 is False (moe_quant_config stays None).
+    This model mixes quantized and ignored-unquantized MoE layers. In auto mode,
+    both layers should unwrap on compile-safe backends, and neither path should
+    depend on runtime config lookup or lazy MoE quant-config initialization.
     """
     model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
+    monkeypatch.setenv("VLLM_FUSED_MOE_WRAP_MODE", "auto")
 
-    with vllm_runner(
-        model_path,
-        enforce_eager=False,
-        max_model_len=256,
-        compilation_config={
-            "cudagraph_mode": "NONE",
-        },
-    ) as llm:
-        output = llm.generate_greedy("Hi", max_tokens=1)
-        assert output
+    with vllm_runner(model_path, enforce_eager=True, max_model_len=256) as llm:
+
+        def check_model(model):
+            layer_quantized = model.model.layers[0].mlp.experts
+            layer_unquantized = model.model.layers[3].mlp.experts
+
+            assert layer_quantized.runner.forward_mode == "unwrapped"
+            assert layer_unquantized.runner.forward_mode == "unwrapped"
+            assert layer_quantized.quant_method.moe_quant_config is not None
+
+            def check_compiled_layer(layer):
+                hidden_states, router_logits = _make_moe_inputs(layer)
+
+                with torch.inference_mode():
+                    eager_out = layer.forward_native(
+                        hidden_states.clone(),
+                        router_logits.clone(),
+                    )
+
+                    torch.compiler.reset()
+                    compiled_forward = torch.compile(
+                        layer.forward_native,
+                        backend="inductor",
+                        fullgraph=True,
+                    )
+                    compiled_out = compiled_forward(
+                        hidden_states.clone(),
+                        router_logits.clone(),
+                    )
+
+                _assert_moe_outputs_close(compiled_out, eager_out)
+
+            check_compiled_layer(layer_quantized)
+            check_compiled_layer(layer_unquantized)
+
+        llm.apply_model(check_model)
+
+
+def test_w4a16_moe_unquantized_explicit_unwrap(vllm_runner, monkeypatch):
+    """Ignored unquantized MoE layers can opt into the unwrapped path."""
+    model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
+    monkeypatch.setenv("VLLM_FUSED_MOE_WRAP_MODE", "unwrapped")
+
+    with vllm_runner(model_path, enforce_eager=True, max_model_len=256) as llm:
+
+        def check_model(model):
+            layer_unquantized = model.model.layers[3].mlp.experts
+            assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
+            assert layer_unquantized.runner.forward_mode == "unwrapped"
+
+            hidden_states, router_logits = _make_moe_inputs(layer_unquantized)
+
+            eager_out = layer_unquantized.forward_native(
+                hidden_states.clone(),
+                router_logits.clone(),
+            )
+
+            routed_hidden_states, shared_experts_input = (
+                layer_unquantized.runner.apply_routed_input_transform(
+                    hidden_states.clone()
+                )
+            )
+            routed_hidden_states, original_hidden_dims = (
+                layer_unquantized.runner._maybe_pad_hidden_states(
+                    shared_experts_input,
+                    routed_hidden_states,
+                )
+            )
+            manual_out = layer_unquantized.runner.forward_dispatch(
+                layer_unquantized,
+                routed_hidden_states,
+                router_logits.clone(),
+                shared_experts_input,
+            )
+            manual_out = layer_unquantized.runner._maybe_reduce_output(
+                manual_out,
+                original_hidden_dims,
+            )
+
+            _assert_moe_outputs_close(eager_out, manual_out)
+
+        llm.apply_model(check_model)
 
 
 def _make_ct_config(*, target: str = "Linear") -> CompressedTensorsConfig:
