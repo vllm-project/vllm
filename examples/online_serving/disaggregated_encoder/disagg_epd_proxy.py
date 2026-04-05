@@ -562,8 +562,8 @@ if __name__ == "__main__":
         "--prefill-servers-urls",
         required=True,
         help=(
-            'Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") ',
-            'to enable E->P->D, set "disable" or "none" to enable E->PD',
+            'Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") '
+            'to enable E->P->D, set "disable" or "none" to enable E->PD'
         ),
     )
     parser.add_argument(
