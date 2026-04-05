@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import argparse
 import itertools
 import logging
@@ -27,7 +28,7 @@ async def lifespan(app: FastAPI):
 
     # Create prefill clients
     for i, (host, port) in enumerate(global_args.prefiller_instances):
-        prefiller_base_url = f"http://{host}:{port}/v1"
+        prefiller_base_url = f"http://{host}:{port}/"
         app.state.prefill_clients.append(
             {
                 "client": httpx.AsyncClient(
@@ -46,7 +47,7 @@ async def lifespan(app: FastAPI):
 
     # Create decode clients
     for i, (host, port) in enumerate(global_args.decoder_instances):
-        decoder_base_url = f"http://{host}:{port}/v1"
+        decoder_base_url = f"http://{host}:{port}/"
         app.state.decode_clients.append(
             {
                 "client": httpx.AsyncClient(
@@ -256,7 +257,7 @@ async def _handle_completions(api: str, request: Request):
 
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
-    return await _handle_completions("/completions", request)
+    return await _handle_completions("v1/completions", request)
 
 
 @app.post("/v1/chat/completions")
@@ -272,6 +273,60 @@ async def healthcheck():
         "prefill_instances": len(app.state.prefill_clients),
         "decode_instances": len(app.state.decode_clients),
     }
+
+
+async def send_profile_cmd(request: Request, req_data, profiler_cmd):
+    assert profiler_cmd in ["start", "stop"]
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    # Send to all prefiller and decoder, leaving iterator in same state.
+    tasks = []
+    for _ in range(len(app.state.prefill_clients)):
+        for client in ['prefill', 'decode']:
+            client_info = get_next_client(request.app, client)
+
+            tasks.append(client_info['client'].post(f"/{profiler_cmd}_profile",
+                                                    json=req_data,
+                                                    headers=headers))
+
+    responses = await asyncio.gather(*tasks)
+    for r in responses:
+        r.raise_for_status()
+
+    return responses[0].json()
+
+
+@app.post("/start_profile")
+async def start_profile(request: Request):
+    try:
+        req_data = await request.json()
+        return await send_profile_cmd(request, req_data, "start")
+
+    except Exception as e:
+        import sys
+        import traceback
+        exc_info = sys.exc_info()
+        print("Error occurred in disagg prefill proxy server"
+              " - start_profile endpoint")
+        print(e)
+        print("".join(traceback.format_exception(*exc_info)))
+
+
+@app.post("/stop_profile")
+async def stop_profile(request: Request):
+    try:
+        req_data = await request.json()
+        return await send_profile_cmd(request, req_data, "stop")
+
+    except Exception as e:
+        import sys
+        import traceback
+        exc_info = sys.exc_info()
+        print("Error occurred in disagg prefill proxy server"
+              " - stop_profile endpoint")
+        print(e)
+        print("".join(traceback.format_exception(*exc_info)))
 
 
 if __name__ == "__main__":
