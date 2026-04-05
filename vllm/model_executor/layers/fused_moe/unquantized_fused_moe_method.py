@@ -243,15 +243,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
             _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-            # Swap halves to arrange as [w3; w1] (kernel expectation)
-            w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
-            w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
-            layer.w13_weight.data = w13_weight_swapped.contiguous()
+            is_gated = self.moe.is_act_and_mul
+            if is_gated:
+                # Swap halves to arrange as [w3; w1] (kernel expectation)
+                w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
+                w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
+                layer.w13_weight.data = w13_weight_swapped.contiguous()
             w13_weights_shuffled, w2_weights_shuffled = (
                 convert_moe_weights_to_flashinfer_trtllm_block_layout(
                     _cache_permute_indices,
                     layer.w13_weight.data,
                     layer.w2_weight.data,
+                    is_gated_act=is_gated,
                 )
             )
             layer.w13_weight = Parameter(w13_weights_shuffled, requires_grad=False)

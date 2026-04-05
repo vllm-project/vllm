@@ -138,11 +138,18 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     cache_permute_indices: dict[torch.Size, torch.Tensor],
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    is_gated_act: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert expert weights to FlashInfer's block layout.
 
     This reorders W13 and W2 into the expected epilogue-tiled block layout and
     returns the shuffled weight tensors.
+
+    Args:
+        is_gated_act: Whether the MoE uses gated activation (e.g. SiLU).
+            When True, w13 rows are interleaved for fused gated activation.
+            When False (e.g. Relu2 non-gated), rows are only shuffled for
+            block layout without gated interleaving.
     """
     if w13_weight.dtype != torch.bfloat16 or w2_weight.dtype != torch.bfloat16:
         raise ValueError(
@@ -172,6 +179,7 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             cache_permute_indices,
             w13_weight[i].view(torch.uint8),
             epilogue_tile_m,
+            is_gated_act_gemm=is_gated_act,
         )
         tmp_weights1 = (
             w13_weight[i]
