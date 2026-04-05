@@ -687,8 +687,10 @@ class ParallelConfig:
             self.data_parallel_size = envs.VLLM_DP_SIZE
             self.data_parallel_rank = envs.VLLM_DP_RANK
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
-            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
-            self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+            if "VLLM_DP_MASTER_IP" in os.environ:
+                self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
+            if "VLLM_DP_MASTER_PORT" in os.environ:
+                self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
 
             if self.data_parallel_size > 1 and self.is_moe_model is False:
                 raise ValueError(
