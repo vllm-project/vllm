@@ -582,6 +582,7 @@ class FusedMoE(CustomOp):
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            num_ubatches=max(self.vllm_config.parallel_config.num_ubatches, 1),
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py

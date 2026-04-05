@@ -54,7 +54,7 @@ class SharedExperts:
         moe_config: FusedMoEConfig,
         quant_method: QuantizeMethodBase,
         reduce_results: bool,
-        enable_dbo: bool,
+        num_ubatches: int = 1,
     ):
         from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
             FusedMoEMethodBase,
@@ -66,10 +66,10 @@ class SharedExperts:
 
         # The SharedExperts need to handle DBO since they can be called from
         # an MK's finalize method.  We keep a list of outputs indexed by current
-        # DBO ubatch id to handle this case.  If DBO is not enabled, the
+        # DBO ubatch id to handle this case.  If ubatching is not enabled, the
         # index is always 0 and only one output slot is needed.
-        self.enable_dbo = enable_dbo
-        self._output: list[torch.Tensor | None] = [None] * (2 if enable_dbo else 1)
+        self._num_ubatches = num_ubatches
+        self._output: list[torch.Tensor | None] = [None] * self._num_ubatches
         self._layer = layer
         self._moe_config = moe_config
         self._quant_method = quant_method
@@ -177,7 +177,7 @@ class SharedExperts:
 
     @property
     def _output_idx(self) -> int:
-        return dbo_current_ubatch_id() if self.enable_dbo else 0
+        return dbo_current_ubatch_id() if self._num_ubatches > 1 else 0
 
     @property
     def output(self) -> torch.Tensor:
