@@ -34,7 +34,9 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -276,6 +278,54 @@ class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
         )
 
 
+class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
+    """Test model for MLA Attention + per-group FP8 (block quant) fusion."""
+
+    quant_key = kFp8Dynamic128Sym
+    quant_config = Fp8Config()
+
+    def __init__(self, *args, **kwargs):
+        from tests.utils import TestBlockFP8Layer
+
+        super().__init__(*args, **kwargs)
+
+        self.block_fp8_linear = TestBlockFP8Layer(
+            weight_shape=(self.output_dim, self.output_dim),
+            group_shape=GroupShape(1, 128),
+        )
+        self.block_fp8_linear.weight = self.block_fp8_linear.weight.to(
+            kwargs.get("device", torch.device("cuda:0"))
+        )
+        self.block_fp8_linear.weight_scale = self.block_fp8_linear.weight_scale.to(
+            kwargs.get("device", torch.device("cuda:0"))
+        )
+
+        w = kwargs.get("w")
+        if w is not None:
+            self.block_fp8_linear.weight = w["weight"]
+            self.block_fp8_linear.weight_scale = w["wscale"]
+
+        self.w = {
+            "weight": self.block_fp8_linear.weight,
+            "wscale": self.block_fp8_linear.weight_scale,
+        }
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+    ):
+        """Forward pass: MLA attention -> block FP8 linear (group quant)."""
+        attn_output = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(q.shape[0], self.output_dim),
+        )
+        return self.block_fp8_linear(attn_output)
+
+
 def is_nvfp4_supported():
     return current_platform.has_device_capability(100)
 
@@ -283,6 +333,7 @@ def is_nvfp4_supported():
 # MLA test configuration
 MLA_DIMS: list[tuple[int, int, int, int, int]] = []
 PATTERN_TEST_MODELS_MLA_FP8: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_MLA_GROUP_FP8: list[tuple[str, type]] = []
 PATTERN_TEST_MODELS_MLA_FP4: list[tuple[str, type]] = []
 BACKENDS_MLA_FP8: list[AttentionBackendEnum] = []
 BACKENDS_MLA_FP4: list[AttentionBackendEnum] = []
@@ -294,6 +345,12 @@ if current_platform.is_cuda():
         (
             "deepseek-ai/DeepSeek-V2-Lite",
             TestMLAAttentionFp8StaticQuantPatternModel,
+        )
+    ]
+    PATTERN_TEST_MODELS_MLA_GROUP_FP8 = [
+        (
+            "deepseek-ai/DeepSeek-V3",
+            TestMLAAttentionFp8GroupQuantPatternModel,
         )
     ]
     PATTERN_TEST_MODELS_MLA_FP4 = [
@@ -319,6 +376,13 @@ if current_platform.is_cuda():
             BACKENDS_MLA_FP8,
             PATTERN_TEST_MODELS_MLA_FP8,
             ["+quant_fp8", "-quant_fp8"],
+        )
+    )
+    + list(
+        flat_product(
+            BACKENDS_MLA_FP8,
+            PATTERN_TEST_MODELS_MLA_GROUP_FP8,
+            ["+quant_fp8"],
         )
     )
     + list(flat_product(BACKENDS_MLA_FP4, PATTERN_TEST_MODELS_MLA_FP4, [""])),
@@ -467,12 +531,13 @@ def test_mla_attention_quant_pattern(
     )
 
     # Check quantization ops in the graph
+    is_per_group = quant_key.scale.group_shape.is_per_group()
     quant_op = (
         torch.ops.aten.reciprocal
         if "-quant_fp8" in custom_ops_list
         else QUANT_OPS[quant_key]
     )
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
+    test_backend.check_before_ops([quant_op], fully_replaced=is_per_group)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
@@ -484,25 +549,24 @@ def test_mla_attention_quant_pattern(
     assert len(attn_nodes_pre) == len(attn_nodes_post), (
         "Should have same number of MLA attention nodes before and after fusion"
     )
-    assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
-        "MLA attention should not have output_scale before fusion"
-    )
-    assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
-        "MLA attention should have output_scale after fusion"
-    )
 
-    assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
-        "MLA attention should not have output_block_scale before fusion"
-    )
+    # Before fusion: neither scale should be set
+    assert attn_nodes_pre[0].kwargs.get("output_scale") is None
+    assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None
 
-    if quant_key.dtype == FP8_DTYPE:
-        assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
-            "MLA attention should not have output_block_scale after FP8 fusion"
-        )
-    elif quant_key.dtype == FP4_DTYPE:
-        assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
-            "MLA attention should have output_block_scale after FP4 fusion"
-        )
+    # After fusion: derive expected scale presence from quant_key properties.
+    # - output_scale: present for static quant or non-FP8 (NVFP4 carries input_scale)
+    # - output_block_scale: present when quant uses per-group/block scaling
+    has_output_scale = attn_nodes_post[0].kwargs.get("output_scale") is not None
+    has_block_scale = attn_nodes_post[0].kwargs.get("output_block_scale") is not None
+
+    expects_output_scale = quant_key.scale.static or quant_key.dtype != FP8_DTYPE
+    assert has_output_scale == expects_output_scale, (
+        f"output_scale: expected present={expects_output_scale}, got {has_output_scale}"
+    )
+    assert has_block_scale == is_per_group, (
+        f"output_block_scale: expected present={is_per_group}, got {has_block_scale}"
+    )
 
     # Check numerical correctness
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)

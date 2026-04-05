@@ -11,6 +11,8 @@ import torch
 from typing_extensions import deprecated
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -884,7 +886,12 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
-        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+        return quant_key in (
+            kFp8StaticTensorSym,
+            kNvfp4Dynamic,
+            kFp8Dynamic128Sym,
+            kFp8Dynamic64Sym,
+        )
 
     def do_kv_cache_update(
         self,
@@ -922,7 +929,12 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         Since MLA quantization is done manually in forward_impl (common code),
         all MLA backends support it by default.
         """
-        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+        return quant_key in (
+            kFp8StaticTensorSym,
+            kNvfp4Dynamic,
+            kFp8Dynamic128Sym,
+            kFp8Dynamic64Sym,
+        )
 
     @abstractmethod
     def __init__(
