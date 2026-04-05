@@ -110,7 +110,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         # Check if start token is present in previous or delta.
         # Keep compatibility with models that don't generate start tokens.
         if self.start_token_id in previous_token_ids:
-            if self.end_token_id in delta_token_ids:
+            if self.end_token in delta_text:
                 # start token in previous, end token in delta,
                 # extract reasoning content
                 end_index = delta_text.find(self.end_token)
@@ -119,6 +119,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return DeltaMessage(
                     reasoning=reasoning, content=content if content else None
                 )
+            elif self.end_token_id in delta_token_ids:
+                # end token ID arrived but text is still buffered
+                # (output_text_buffer_length delay); wait for text flush
+                return None
             elif self.end_token_id in previous_token_ids:
                 # start token in previous, end token in previous,
                 # reasoning content continues
@@ -128,7 +132,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # reasoning content continues
                 return DeltaMessage(reasoning=delta_text)
         elif self.start_token_id in delta_token_ids:
-            if self.end_token_id in delta_token_ids:
+            if self.end_token in delta_text and self.start_token in delta_text:
                 # start token in delta, end token in delta,
                 # extract reasoning content
                 start_index = delta_text.find(self.start_token)
@@ -138,6 +142,9 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return DeltaMessage(
                     reasoning=reasoning, content=content if content else None
                 )
+            elif self.end_token_id in delta_token_ids:
+                # end token ID arrived but text is still buffered; wait
+                return None
             else:
                 # start token in delta, no end token in delta,
                 # reasoning content continues
