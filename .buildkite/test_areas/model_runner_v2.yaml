@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: Model Runner V2 Core Tests
   timeout_in_minutes: 45
-  device: h200_18gb
   source_file_dependencies:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
@@ -27,7 +26,6 @@ steps:
 
 - label: Model Runner V2 Examples
   timeout_in_minutes: 45
-  device: h200_18gb
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
     - vllm/v1/worker/gpu/
@@ -97,7 +95,6 @@ steps:
 
 - label: Model Runner V2 Spec Decode
   timeout_in_minutes: 30
-  device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/worker/gpu/

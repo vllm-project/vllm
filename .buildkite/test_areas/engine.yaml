@@ -35,7 +35,6 @@ steps:
 
 - label: e2e Core (1 GPU)
   timeout_in_minutes: 30
-  device: h200_18gb
   source_file_dependencies:
     - vllm/v1/
     - tests/v1/e2e/general/

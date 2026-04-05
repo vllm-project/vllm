@@ -15,7 +15,6 @@ steps:
 
 - label: Kernels Core Operation Test
   timeout_in_minutes: 75
-  device: h200_18gb
   source_file_dependencies:
   - csrc/
   - tests/kernels/core

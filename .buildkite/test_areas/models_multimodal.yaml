@@ -36,7 +36,6 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
   timeout_in_minutes: 45
-  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -91,7 +90,6 @@ steps:
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
   timeout_in_minutes: 70
-  device: h200_18gb
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - vllm/multimodal/
@@ -102,7 +100,6 @@ steps:
 
 - label: Multi-Modal Models (Extended Generation 1)
   optional: true
-  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal/generation
@@ -119,7 +116,6 @@ steps:
 
 - label: Multi-Modal Models (Extended Generation 2)
   optional: true
-  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal/generation
@@ -129,7 +125,6 @@ steps:
 
 - label: Multi-Modal Models (Extended Generation 3)
   optional: true
-  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal/generation

@@ -16,7 +16,6 @@ steps:
 
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
-  device: h200_18gb
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/

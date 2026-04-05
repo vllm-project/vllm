@@ -44,7 +44,6 @@ steps:
 
 - label: Entrypoints Integration (API Server openai - Part 2)
   timeout_in_minutes: 50
-  device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -74,7 +73,6 @@ steps:
 
 - label: Entrypoints Integration (API Server 2)
   timeout_in_minutes: 130
-  device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -89,7 +87,6 @@ steps:
 
 - label: Entrypoints Integration (Pooling)
   timeout_in_minutes: 50
-  device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/

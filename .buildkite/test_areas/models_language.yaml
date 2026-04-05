@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  device: h200_18gb
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -31,7 +30,6 @@ steps:
 
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
-  device: h200_18gb
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -79,7 +77,6 @@ steps:
 
 - label: Language Models Test (Extended Pooling)  # 36min
   timeout_in_minutes: 50
-  device: h200_18gb
   optional: true
   source_file_dependencies:
   - vllm/
