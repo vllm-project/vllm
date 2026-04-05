@@ -383,51 +383,6 @@ class OffloadingConnectorWorker:
 
         return finished_sending, finished_recving
 
-    def flush_pending_store(self) -> set[str]:
-        """Wait for all in-flight store transfers and return finished req IDs.
-
-        This is called (via collective_rpc) before reset_prefix_cache so that
-        the scheduler can free GPU blocks that were deferred while stores were
-        in progress. Without this, the engine stops stepping after the last
-        request finishes and never polls get_finished(), leaving GPU blocks
-        permanently held.
-
-        Returns:
-            Set of request IDs whose stores are now complete and whose GPU
-            blocks can be freed by the scheduler.
-        """
-        # Submit deferred store jobs
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
-            assert success
-        self._unsubmitted_store_jobs.clear()
-
-        # Collect outstanding store jobs
-        all_store_job_ids: set[int] = set()
-        for job_ids in self._store_jobs.values():
-            all_store_job_ids.update(job_ids)
-
-        if all_store_job_ids:
-            self.worker.wait(all_store_job_ids)
-
-        # Drain completed results
-        finished_sending: set[str] = set()
-        for transfer_result in self.worker.get_finished():
-            job_id = transfer_result.job_id
-            assert transfer_result.success
-            req_id, store = self._jobs.pop(job_id)
-            if store:
-                req_jobs = self._store_jobs[req_id]
-                req_jobs.discard(job_id)
-                if not req_jobs:
-                    self._finished_reqs_waiting_for_store.discard(req_id)
-                    finished_sending.add(req_id)
-                    del self._store_jobs[req_id]
-            else:
-                self._load_job.pop(req_id, None)
-
-        return finished_sending
-
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
         Get the KV transfer stats for the connector.

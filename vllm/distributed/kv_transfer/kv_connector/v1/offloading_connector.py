@@ -105,10 +105,6 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished(finished_req_ids)
 
-    def flush_pending_store(self) -> set[str]:
-        assert self.connector_worker is not None
-        return self.connector_worker.flush_pending_store()
-
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:

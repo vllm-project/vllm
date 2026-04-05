@@ -496,20 +496,6 @@ class Worker(WorkerBase):
         tp_rank = get_tp_group().rank_in_group
         return {tp_rank: metadata}
 
-    def flush_kv_transfers(self) -> set[str]:
-        """Synchronously flush all pending KV store transfers.
-
-        Called via collective_rpc from EngineCore before reset_prefix_cache
-        so that the scheduler can learn about completed stores and free the
-        GPU blocks that were deferred during async offloading.
-
-        Returns:
-            Set of request IDs whose async stores have completed.
-        """
-        if not has_kv_transfer_group():
-            return set()
-        return get_kv_transfer_group().flush_pending_store()
-
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
