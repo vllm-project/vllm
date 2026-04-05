@@ -46,27 +46,48 @@ class JambaToolParser(ToolParser):
             str
         ] = []  # map what has been streamed for each tool so far to a list
 
-        self.tool_calls_start_token: str = "<tool_calls>"
-        self.tool_calls_end_token: str = "</tool_calls>"
-
-        self.tool_calls_regex = re.compile(
-            rf"{self.tool_calls_start_token}(.*?){self.tool_calls_end_token}", re.DOTALL
-        )
-
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction."
             )
-        self.tool_calls_start_token_id = self.vocab.get(self.tool_calls_start_token)
-        self.tool_calls_end_token_id = self.vocab.get(self.tool_calls_end_token)
-        if (
-            self.tool_calls_start_token_id is None
-            or self.tool_calls_end_token_id is None
+
+        # Detect tool call format from tokenizer vocabulary.
+        # Some models (e.g., Apriel-Nemotron) use a single [TOOL_CALLS]
+        # token (Mistral-style), while others (e.g., AI21 Jamba 1.5)
+        # use <tool_calls>...</tool_calls> XML-style tags.
+        single_token = "[TOOL_CALLS]"
+        tagged_start = "<tool_calls>"
+        tagged_end = "</tool_calls>"
+
+        if self.vocab.get(single_token) is not None:
+            # Single-token format: one start token, no end token
+            self.tool_calls_start_token: str = single_token
+            self.tool_calls_end_token: str | None = None
+            self.tool_calls_start_token_id: int = self.vocab[single_token]
+            self.tool_calls_end_token_id: int | None = None
+            self.tool_calls_regex = re.compile(
+                rf"{re.escape(self.tool_calls_start_token)}\s*(\[.*\])",
+                re.DOTALL,
+            )
+        elif (
+            self.vocab.get(tagged_start) is not None
+            and self.vocab.get(tagged_end) is not None
         ):
+            # Tagged format: start and end tokens
+            self.tool_calls_start_token = tagged_start
+            self.tool_calls_end_token = tagged_end
+            self.tool_calls_start_token_id = self.vocab[tagged_start]
+            self.tool_calls_end_token_id = self.vocab[tagged_end]
+            self.tool_calls_regex = re.compile(
+                rf"{self.tool_calls_start_token}(.*?){self.tool_calls_end_token}",
+                re.DOTALL,
+            )
+        else:
             raise RuntimeError(
-                "Jamba Tool parser could not locate tool calls start/end "
-                "tokens in the tokenizer!"
+                "Jamba tool parser could not locate tool call tokens in "
+                "the tokenizer. Expected either '[TOOL_CALLS]' or both "
+                "'<tool_calls>' and '</tool_calls>'."
             )
 
     def adjust_request(
@@ -91,12 +112,16 @@ class JambaToolParser(ToolParser):
 
         else:
             try:
-                # use a regex to find the tool call between the tags
-                function_calls = self.tool_calls_regex.findall(model_output)[0]
+                # use a regex to find the tool call JSON array
+                matches = self.tool_calls_regex.findall(model_output)
+                if not matches:
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
 
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
-                raw_function_calls = json.loads(function_calls)
+                raw_function_calls = json.loads(matches[0])
                 tool_calls = [
                     ToolCall(
                         type="function",
@@ -158,10 +183,12 @@ class JambaToolParser(ToolParser):
         # seen) allows sending the entire tool/ function name at once.
         flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
         try:
-            # Extract the tool calls between the special tool call tokens
-            parsable_arr = current_text.split(self.tool_calls_start_token)[-1].split(
-                self.tool_calls_end_token
-            )[0]
+            # Extract the tool call JSON after the start token
+            raw = current_text.split(self.tool_calls_start_token)[-1]
+            if self.tool_calls_end_token is not None:
+                parsable_arr = raw.split(self.tool_calls_end_token)[0]
+            else:
+                parsable_arr = raw.strip()
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array

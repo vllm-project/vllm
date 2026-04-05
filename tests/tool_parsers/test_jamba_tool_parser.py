@@ -13,7 +13,8 @@ from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.jamba_tool_parser import JambaToolParser
 
-MODEL = "ai21labs/Jamba-tiny-dev"
+MODEL = "ai21labs/Jamba-tiny-dev"  # uses <tool_calls>...</tool_calls> tags
+SINGLE_TOKEN_MODEL = "ServiceNow-AI/Apriel-Nemotron-15b-Thinker"  # uses [TOOL_CALLS]
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +25,16 @@ def jamba_tokenizer():
 @pytest.fixture
 def jamba_tool_parser(jamba_tokenizer):
     return JambaToolParser(jamba_tokenizer)
+
+
+@pytest.fixture(scope="module")
+def single_token_tokenizer():
+    return get_tokenizer(tokenizer_name=SINGLE_TOKEN_MODEL)
+
+
+@pytest.fixture
+def single_token_tool_parser(single_token_tokenizer):
+    return JambaToolParser(single_token_tokenizer)
 
 
 def assert_tool_calls(
@@ -287,6 +298,204 @@ def test_extract_tool_calls_streaming(
                     # make sure they're a string and then add them to the list
                     assert isinstance(tool_call.function.arguments, str)
 
+                    function_args_strs[tool_call.index] += tool_call.function.arguments
+
+    assert other_content == expected_content
+
+    actual_tool_calls = [
+        ToolCall(
+            id=tool_call_id,
+            function=FunctionCall(
+                name=function_name,
+                arguments=partial_json_parser.ensure_json(
+                    function_args_str, Allow.OBJ | Allow.STR
+                ),
+            ),
+        )
+        for tool_call_id, function_name, function_args_str in zip(
+            tool_call_ids, function_names, function_args_strs
+        )
+    ]
+    assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+def test_tagged_parser_ignores_single_token_output(jamba_tool_parser):
+    # parser with <tool_calls> vocab must not extract [TOOL_CALLS] output
+    model_output = '[TOOL_CALLS] [{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]'  # noqa: E501
+    extracted = jamba_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )  # type: ignore[arg-type]
+    assert not extracted.tools_called
+    assert extracted.tool_calls == []
+
+
+@pytest.mark.parametrize(
+    ids=[
+        "single_tool",
+        "single_tool_with_content",
+        "parallel_tools",
+        "array_in_arguments",
+    ],
+    argnames=["model_output", "expected_tool_calls", "expected_content"],
+    argvalues=[
+        (
+            """[TOOL_CALLS] [{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                        ),
+                    )
+                )
+            ],
+            None,
+        ),
+        (
+            """Sure! let me call the tool for you.[TOOL_CALLS] [{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                        ),
+                    )
+                )
+            ],
+            "Sure! let me call the tool for you.",
+        ),
+        (
+            """[TOOL_CALLS] [{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}, {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}]""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                        ),
+                    )
+                ),
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
+                        ),
+                    )
+                ),
+            ],
+            None,
+        ),
+        (
+            """[TOOL_CALLS] [{"name": "filter_items", "arguments": {"ids": [1, 2, 3], "active": true}}]""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="filter_items",
+                        arguments=json.dumps(
+                            {"ids": [1, 2, 3], "active": True}
+                        ),
+                    )
+                )
+            ],
+            None,
+        ),
+    ],
+)
+def test_extract_tool_calls_single_token(
+    single_token_tool_parser, model_output, expected_tool_calls, expected_content
+):
+    extracted = single_token_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )  # type: ignore[arg-type]
+    assert extracted.tools_called
+    assert_tool_calls(extracted.tool_calls, expected_tool_calls)
+    assert extracted.content == expected_content
+
+
+@pytest.mark.parametrize(
+    ids=[
+        "no_tools",
+        "single_tool",
+        "single_tool_with_content",
+    ],
+    argnames=["model_output", "expected_tool_calls", "expected_content"],
+    argvalues=[
+        ("""This is a test""", [], """This is a test"""),
+        (
+            """[TOOL_CALLS] [{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                        ),
+                    )
+                )
+            ],
+            "",
+        ),
+        (
+            """Sure! let me call the tool for you.[TOOL_CALLS] [{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+                        ),
+                    )
+                )
+            ],
+            "Sure! let me call the tool for you.",
+        ),
+    ],
+)
+def test_extract_tool_calls_streaming_single_token(
+    single_token_tool_parser,
+    single_token_tokenizer,
+    model_output,
+    expected_tool_calls,
+    expected_content,
+):
+    other_content: str = ""
+    function_names: list[str] = []
+    function_args_strs: list[str] = []
+    tool_call_idx: int = -1
+    tool_call_ids: list[str | None] = []
+
+    for delta_message in stream_delta_message_generator(
+        single_token_tool_parser, single_token_tokenizer, model_output
+    ):
+        assert not delta_message.role
+
+        if delta_message.content:
+            other_content += delta_message.content
+
+        streamed_tool_calls = delta_message.tool_calls
+
+        if streamed_tool_calls and len(streamed_tool_calls) > 0:
+            assert len(streamed_tool_calls) == 1
+            tool_call = streamed_tool_calls[0]
+
+            if tool_call.index != tool_call_idx:
+                tool_call_idx = tool_call.index
+                function_args_strs.append("")
+                tool_call_ids.append(None)
+
+            if tool_call.id and not tool_call_ids[tool_call.index]:
+                tool_call_ids[tool_call.index] = tool_call.id
+
+            if tool_call.function:
+                if tool_call.function.name:
+                    assert isinstance(tool_call.function.name, str)
+                    function_names.append(tool_call.function.name)
+
+                if tool_call.function.arguments:
+                    assert isinstance(tool_call.function.arguments, str)
                     function_args_strs[tool_call.index] += tool_call.function.arguments
 
     assert other_content == expected_content

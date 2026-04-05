@@ -278,10 +278,13 @@ Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_ch
 
 ### Jamba Models (`jamba`)
 
-AI21's Jamba-1.5 models are supported.
+Models using either `<tool_calls>`/`</tool_calls>` XML-style tags or the Mistral-style `[TOOL_CALLS]` single token are supported. The parser auto-detects the format from the tokenizer vocabulary at startup.
+
+Supported models include:
 
 * `ai21labs/AI21-Jamba-1.5-Mini`
 * `ai21labs/AI21-Jamba-1.5-Large`
+* `ServiceNow-AI/Apriel-Nemotron-15b-Thinker`
 
 Flags: `--tool-call-parser jamba`
 
