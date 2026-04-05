@@ -4112,6 +4112,22 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        try:
+            return self._sample_tokens_impl(grammar_output)
+        finally:
+            # Re-record the prepare_inputs_event AFTER sample_tokens
+            # (which includes the spec-decode proposer) so the NEXT
+            # batch's execute_model waits for ALL GPU work from this
+            # step -- not just execute_model but also the proposer.
+            # Without this, the batch queue allows the next batch's
+            # _update_states to modify block tables while the current
+            # batch's proposer is still reading them on the GPU.
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.record()
+
+    def _sample_tokens_impl(
+        self, grammar_output: "GrammarOutput | None"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         if self.execute_model_state is None:
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
