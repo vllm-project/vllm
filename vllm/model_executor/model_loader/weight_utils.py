@@ -473,13 +473,12 @@ def download_gguf(
     revision: str | None = None,
     ignore_patterns: str | list[str] | None = None,
 ) -> str:
-    # Use patterns that snapshot_download can handle directly
-    # Patterns to match:
+    # Backbone patterns: match the main model GGUF file(s)
     # - *-{quant_type}.gguf (root)
     # - *-{quant_type}-*.gguf (root sharded)
     # - */*-{quant_type}.gguf (subdir)
     # - */*-{quant_type}-*.gguf (subdir sharded)
-    allow_patterns = [
+    backbone_patterns = [
         f"*-{quant_type}.gguf",
         f"*-{quant_type}-*.gguf",
         f"*/*-{quant_type}.gguf",
@@ -490,15 +489,32 @@ def download_gguf(
     folder = download_weights_from_hf(
         model_name_or_path=repo_id,
         cache_dir=cache_dir,
-        allow_patterns=allow_patterns,
+        allow_patterns=backbone_patterns,
         revision=revision,
         ignore_patterns=ignore_patterns,
     )
 
-    # Find the downloaded file(s) in the folder
+    # Also download multimodal projector files (e.g. mmproj-*.gguf for Gemma3)
+    # if they exist in the repo. We use snapshot_download directly because
+    # download_weights_from_hf's pattern optimization can interfere with
+    # simple glob patterns.
+    try:
+        snapshot_download(
+            repo_id,
+            allow_patterns=["mmproj*.gguf", "*/mmproj*.gguf"],
+            ignore_patterns=ignore_patterns,
+            cache_dir=cache_dir,
+            tqdm_class=DisabledTqdm,
+            revision=revision,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        )
+    except Exception as e:
+        # mmproj files are optional — not all GGUF repos have them
+        logger.debug("Skipping optional mmproj download for %s: %s", repo_id, e)
+
+    # Find the downloaded backbone file(s) — exclude mmproj from candidates
     local_files = []
-    for pattern in allow_patterns:
-        # Convert pattern to glob pattern for local filesystem
+    for pattern in backbone_patterns:
         glob_pattern = os.path.join(folder, pattern)
         local_files.extend(glob.glob(glob_pattern))
 
