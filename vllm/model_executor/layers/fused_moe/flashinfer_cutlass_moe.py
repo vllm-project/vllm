@@ -5,6 +5,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -31,6 +35,51 @@ from vllm.utils.flashinfer import (
 )
 
 logger = init_logger(__name__)
+
+
+def _iter_slot_mapping_tensors(slot_mapping):
+    if slot_mapping is None:
+        return
+    if isinstance(slot_mapping, list):
+        for mapping_group in slot_mapping:
+            if not mapping_group:
+                continue
+            for tensor in mapping_group.values():
+                if isinstance(tensor, torch.Tensor):
+                    yield tensor
+        return
+    for tensor in slot_mapping.values():
+        if isinstance(tensor, torch.Tensor):
+            yield tensor
+
+
+def _mask_padded_rows_for_flashinfer_moe(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+) -> None:
+    if not is_forward_context_available():
+        return
+
+    ctx = get_forward_context()
+    num_rows = hidden_states.shape[0]
+    pad_rows = None
+    for slot_mapping in _iter_slot_mapping_tensors(ctx.slot_mapping):
+        if (
+            slot_mapping.ndim == 1
+            and slot_mapping.shape[0] == num_rows
+            and slot_mapping.device == topk_ids.device
+        ):
+            pad_rows = slot_mapping.eq(-1)
+            break
+
+    if pad_rows is None:
+        return
+
+    # Padded rows should not participate in MoE routing.
+    pad_rows = pad_rows.unsqueeze(-1)
+    topk_ids.masked_fill_(pad_rows, -1)
+    topk_weights.masked_fill_(pad_rows, 0)
 
 
 def is_valid_flashinfer_cutlass_fused_moe(
@@ -365,6 +414,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             a1q_scale = None
             fc1_expert_weights = w1
             fc2_expert_weights = w2
+
+        _mask_padded_rows_for_flashinfer_moe(
+            hidden_states=hidden_states,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+        )
 
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
