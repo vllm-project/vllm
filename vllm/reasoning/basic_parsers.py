@@ -154,16 +154,16 @@ class BaseThinkingReasoningParser(ReasoningParser):
         content_parts = []
         last_end = 0
 
-        for match in matches:
-            _ = match.group(1)
-            reasoning_text = match.group(2)
-            
-            # Text before the start tag belongs to main content
-            content_parts.append(model_output[last_end : match.start()])
-            # Text inside tags belongs to reasoning
-            reasoning_parts.append(reasoning_text.strip())
-            # Update cursor
-            last_end = match.end()
+     for match in matches:
+    	_ = match.group(1)
+    	reasoning_text = match.group(2)
+
+   	 # Text before the start tag belongs to main content
+    	content_parts.append(model_output[last_end : match.start()])
+   	 # Text inside tags belongs to reasoning
+   	 reasoning_parts.append(reasoning_text.strip())
+   	 # Update cursor
+    	last_end = match.end()
 
         # Add remaining trailing text to main content
         content_parts.append(model_output[last_end:].strip())
