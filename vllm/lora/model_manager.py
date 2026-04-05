@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import math
 from collections.abc import Callable
 from typing import TypeVar
@@ -271,9 +270,9 @@ class LoRAModelManager:
             return False
         first_free_slot = next(
             (
-                (i, lora_id)
-                for i, lora_id in enumerate(self.lora_index_to_id)
-                if lora_id is None
+                (i, active_lora_id)
+                for i, active_lora_id in enumerate(self.lora_index_to_id)
+                if active_lora_id is None
             ),
             None,
         )
@@ -286,7 +285,12 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
+
+        seen_live_modules: set[BaseLayerWithLoRA] = set()
         for module_name, module in self.modules.items():
+            if module in seen_live_modules:
+                continue
+            seen_live_modules.add(module)
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
@@ -314,7 +318,7 @@ class LoRAModelManager:
         self._create_merged_loras_inplace(lora)
         self._registered_adapters[lora.id] = lora
 
-    def pin_adapter(self, lora_id: int) -> bool:
+    def pin_adapter(self, _adapter_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
         raise NotImplementedError(
             "Pinning is not supported in LoRAModelManager. "
@@ -360,9 +364,14 @@ class LoRAModelManager:
             #  - given an input 'x' return ''
             return module_name.rpartition(".")[0]
 
+        seen_modules: set[nn.Module] = set()
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
                 continue
+
+            if module in seen_modules:
+                continue
+            seen_modules.add(module)
 
             if not self._match_target_modules(module_name):
                 continue
@@ -411,6 +420,17 @@ class LoRAModelManager:
                     self.model.config,
                 ),
             )
+            seen_modules.add(module)
+            seen_modules.add(new_module)
+
+            if module_name.endswith(".shared_expert_gate"):
+                parent_module_name = _parent_module(module_name)
+                parent_module = self.model.get_submodule(parent_module_name)
+                shared_expert = getattr(parent_module, "shared_expert", None)
+                if shared_expert is not None and getattr(
+                    shared_expert, "expert_gate", None
+                ) is module:
+                    shared_expert.expert_gate = new_module
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:

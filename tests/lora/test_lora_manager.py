@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections import OrderedDict
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -11,6 +13,7 @@ from torch import nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
+    BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
@@ -27,6 +30,13 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.platforms import current_platform
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.models.interfaces import SupportsLoRA
 
 from .utils import create_peft_lora
 
@@ -35,14 +45,61 @@ EMBEDDING_MODULES = {
     "lm_head": "output_embeddings",
 }
 
-DEVICE_TYPE = current_platform.device_type
+
 DEVICES = (
-    [f"{DEVICE_TYPE}:{i}" for i in range(min(torch.accelerator.device_count(), 2))]
+    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
     if current_platform.is_cuda_alike()
     else ["cpu"]
 )
 
 DEFAULT_DTYPE = torch.get_default_dtype()
+
+
+class DummyLoRAModel(nn.Sequential, SupportsLoRA):
+    pass
+
+
+class DummySharedExpertContainer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self._shared_experts = None
+
+
+class DummySharedExpertModel(nn.Module, SupportsLoRA):
+    pass
+
+
+@pytest.fixture
+def dummy_shared_expert_model(default_vllm_config) -> nn.Module:
+    shared_expert_gate = ReplicatedLinear(16, 1)
+    shared_expert = nn.Sequential(
+        OrderedDict(
+            [
+                ("gate_up_proj", MergedColumnParallelLinear(16, [8, 8])),
+                ("down_proj", RowParallelLinear(8, 16)),
+            ]
+        )
+    )
+    shared_expert.expert_gate = shared_expert_gate
+
+    experts = DummySharedExpertContainer()
+    experts._shared_experts = shared_expert
+
+    mlp = nn.Module()
+    mlp.shared_expert_gate = shared_expert_gate
+    mlp.shared_expert = shared_expert
+    mlp.experts = experts
+
+    layer = nn.Module()
+    layer.mlp = mlp
+
+    model = DummySharedExpertModel()
+    model.layer = layer
+    model.config = MagicMock()
+    model.embedding_modules = {}
+    model.unpadded_vocab_size = 0
+    model.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    return model
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -642,6 +699,124 @@ def test_worker_adapter_manager(
 
 
 @pytest.mark.parametrize("device", DEVICES)
+def test_shared_expert_alias_activation(
+    default_vllm_config, dist_init, dummy_shared_expert_model, device
+):
+    model = dummy_shared_expert_model
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=1, max_loras=1, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+    )
+
+    loras = {
+        "layer.mlp.shared_expert_gate": LoRALayerWeights(
+            "layer.mlp.shared_expert_gate",
+            8,
+            16,
+            torch.rand([8, 16], device=device),
+            torch.rand([1, 8], device=device),
+        ),
+        "layer.mlp.shared_expert.gate_proj": LoRALayerWeights(
+            "layer.mlp.shared_expert.gate_proj",
+            8,
+            16,
+            torch.rand([8, 16], device=device),
+            torch.rand([8, 8], device=device),
+        ),
+        "layer.mlp.shared_expert.up_proj": LoRALayerWeights(
+            "layer.mlp.shared_expert.up_proj",
+            8,
+            16,
+            torch.rand([8, 16], device=device),
+            torch.rand([8, 8], device=device),
+        ),
+        "layer.mlp.shared_expert.down_proj": LoRALayerWeights(
+            "layer.mlp.shared_expert.down_proj",
+            8,
+            16,
+            torch.rand([8, 8], device=device),
+            torch.rand([16, 8], device=device),
+        ),
+    }
+    lora_model = LoRAModel(1, 8, loras)
+
+    assert manager.add_adapter(lora_model)
+    assert manager.activate_adapter(1)
+
+    shared_expert = manager.model.layer.mlp.shared_expert
+    assert isinstance(shared_expert.gate_up_proj, MergedColumnParallelLinearWithLoRA)
+    assert isinstance(shared_expert.down_proj, RowParallelLinearWithLoRA)
+    assert isinstance(shared_expert.expert_gate, BaseLayerWithLoRA)
+
+    assert torch.count_nonzero(shared_expert.gate_up_proj.lora_a_stacked[0]).item() > 0
+    assert torch.count_nonzero(shared_expert.gate_up_proj.lora_a_stacked[1]).item() > 0
+    assert torch.count_nonzero(shared_expert.gate_up_proj.lora_b_stacked[0]).item() > 0
+    assert torch.count_nonzero(shared_expert.gate_up_proj.lora_b_stacked[1]).item() > 0
+    assert torch.count_nonzero(shared_expert.down_proj.lora_a_stacked[0]).item() > 0
+    assert torch.count_nonzero(shared_expert.down_proj.lora_b_stacked[0]).item() > 0
+    assert torch.count_nonzero(shared_expert.expert_gate.lora_a_stacked[0]).item() > 0
+    assert torch.count_nonzero(shared_expert.expert_gate.lora_b_stacked[0]).item() > 0
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_shared_expert_gate_alias_updated_after_lora_replacement(
+    default_vllm_config, dist_init, dummy_shared_expert_model, device
+):
+    """Regression test for the Qwen3.5 shared-expert alias bug.
+
+    After LoRA module replacement, ``shared_expert.expert_gate`` must point to
+    the same live LoRA-wrapped object as ``mlp.shared_expert_gate``.
+
+    Before the fix in ``LoRAModelManager._create_lora_modules``, the gate was
+    replaced under the ``mlp.shared_expert_gate`` path but the alias reference
+    ``shared_expert.expert_gate`` was never updated.  This caused the LoRA to
+    be invisible to the forward path that uses the alias.
+
+    PR before: FAIL — ``shared_expert.expert_gate`` remains the original base
+               ``ReplicatedLinear``, so the assert below raises.
+    PR after:  PASS — ``_create_lora_modules`` explicitly re-points the alias
+               at the new LoRA wrapper.
+    """
+    model = dummy_shared_expert_model
+    LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=1, max_loras=1, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+    )
+
+    mlp = model.layer.mlp
+    shared_expert_gate_wrapper = mlp.shared_expert_gate
+    expert_gate_alias = mlp.shared_expert.expert_gate
+
+    # Both must be LoRA wrappers after replacement.
+    assert isinstance(shared_expert_gate_wrapper, BaseLayerWithLoRA), (
+        "mlp.shared_expert_gate was not replaced with a LoRA wrapper"
+    )
+    assert isinstance(expert_gate_alias, BaseLayerWithLoRA), (
+        "shared_expert.expert_gate is not a LoRA wrapper — alias was not updated"
+    )
+
+    # Critical: they must be the SAME live object.
+    # Without the fix, expert_gate still points at the original ReplicatedLinear
+    # while shared_expert_gate points at the new wrapper — they are different.
+    assert expert_gate_alias is shared_expert_gate_wrapper, (
+        "shared_expert.expert_gate and mlp.shared_expert_gate are different "
+        "objects — the alias was not updated after LoRA replacement"
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
     model_lora = create_packed_lora(
@@ -900,3 +1075,4 @@ def test_load_adapter_warns_on_target_modules_restriction(
         assert found, (
             f"Expected warning about target_modules restriction, got: {warning_args}"
         )
+
