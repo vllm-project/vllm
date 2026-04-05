@@ -18,6 +18,10 @@ from torch.utils import _pytree as pytree
 import vllm.envs as envs
 from vllm.compilation.compiler_interface import get_inductor_factors
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.graph_serialization import (
+    deserialize_graph_structure,
+    serialize_graph_structure,
+)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
@@ -214,6 +218,19 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
     def serialize_graph_module(cls, graph_module: torch.fx.GraphModule) -> bytes:
         import sympy
 
+        if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+            # Fast path: serialise only graph topology, skip metadata.
+            return serialize_graph_structure(graph_module)
+
+        for node in graph_module.graph.nodes:
+            node.meta.pop("source_fn_stack", None)
+            node.meta.pop("nn_module_stack", None)
+        for name, submod in graph_module.named_children():
+            if hasattr(submod, "graph"):
+                for node in submod.graph.nodes:
+                    node.meta.pop("source_fn_stack", None)
+                    node.meta.pop("nn_module_stack", None)
+
         graph_reducer_override = GraphPickler.reducer_override
 
         def _graph_reducer_override(
@@ -237,10 +254,16 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
     @classmethod
     def deserialize_graph_module(
-        cls, data: bytes, fake_mode: FakeTensorMode
+        cls, data: bytes, fake_mode: FakeTensorMode, use_fast: bool
     ) -> torch.fx.GraphModule:
+        if use_fast:
+            # Fast path: graph was serialised with serialize_graph_structure.
+            return deserialize_graph_structure(data)
+
         with patch_pytree_map_over_slice():
-            return GraphPickler.loads(data, fake_mode)
+            graph_module = GraphPickler.loads(data, fake_mode)
+            graph_module.recompile()
+            return graph_module
 
     @classmethod
     def serialize_compile_artifacts(
@@ -251,14 +274,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         state.pop("shape_env")
         state.pop("vllm_backend", None)
         state.pop("_fake_mode", None)
-        for node in state["graph_module"].graph.nodes:
-            node.meta.pop("source_fn_stack", None)
-            node.meta.pop("nn_module_stack", None)
-        for name, submod in state["graph_module"].named_children():
-            if hasattr(submod, "graph"):
-                for node in submod.graph.nodes:
-                    node.meta.pop("source_fn_stack", None)
-                    node.meta.pop("nn_module_stack", None)
 
         if state.get("sym_tensor_indices"):
             # put tensor inputs on meta device since their data
@@ -277,6 +292,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
             )
 
         state["graph_module"] = cls.serialize_graph_module(state["graph_module"])
+        if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+            state["_fast_graph"] = True
         state["example_inputs"] = GraphPickler.dumps(state["example_inputs"])
 
         if compiled_fn.vllm_backend:
@@ -299,9 +316,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
 
         state["graph_module"] = cls.deserialize_graph_module(
-            state["graph_module"], fake_mode
+            state["graph_module"], fake_mode, state.pop("_fast_graph", False)
         )
-        state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
 
         standalone_compile_artifacts = state.pop("standalone_compile_artifacts", None)
