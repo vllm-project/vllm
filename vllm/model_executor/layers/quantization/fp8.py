@@ -1011,30 +1011,33 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             return
 
         fp8_dtype = current_platform.fp8_dtype()
-        # w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        # w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = torch.ones(
+        w13_scale = torch.empty(
             layer.num_experts, device=layer.w13_weight.device, dtype=torch.float32
         )
-        w2_scale = torch.ones(
+        w2_scale = torch.empty(
             layer.num_experts, device=layer.w2_weight.device, dtype=torch.float32
         )
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13 = layer.w13_weight.view(dtype=fp8_dtype).view(2, *layer.w13_weight.shape)
+        # Minimize memory usage by writing quantized values into input buffer;
+        # Linear processing guarantees that reads happen before writes
         w2 = layer.w2_weight.view(dtype=fp8_dtype).view(2, *layer.w2_weight.shape)
-
         for expert in range(layer.local_num_experts):
-            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert, :, :]
-            )
-            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
+            w2[0, expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
                 layer.w2_weight[expert, :, :]
             )
+        del layer.w2_weight
+        w2 = w2[0]
 
-        w13 = layer.w13_weight[0]
-        w2 = layer.w2_weight[0]
+        # Process w13 after w2 because w2 is smaller
+        w13 = layer.w13_weight.view(dtype=fp8_dtype).view(2, *layer.w13_weight.shape)
+        for expert in range(layer.local_num_experts):
+            w13[0, expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
+                layer.w13_weight[expert, :, :]
+            )
+        del layer.w13_weight
+        w13 = w13[0]
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
