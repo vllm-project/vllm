@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm import LLM
+from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
+from vllm.v1.metrics.stats import IterationStats
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
@@ -235,3 +239,58 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+def test_abort_request_records_to_logger_manager():
+    """Test that abort_request() calls logger_manager.record()
+    for each aborted request state.
+    """
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        dtype="half",
+        max_model_len=128,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+    engine = LLMEngine.from_engine_args(engine_args)
+
+    # Mock logger_manager.record to verify it's called
+    if engine.logger_manager:
+        original_record = engine.logger_manager.record
+        engine.logger_manager.record = MagicMock(side_effect=original_record)
+
+    # Add some requests
+    request_ids = ["test-abort-1", "test-abort-2", "test-abort-3"]
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
+
+    for request_id in request_ids:
+        engine.add_request(request_id, "Hello", sampling_params)
+
+    # Abort the requests
+    engine.abort_request(request_ids)
+
+    # Verify logger_manager.record was called for each aborted request
+    if engine.logger_manager and isinstance(engine.logger_manager.record, MagicMock):
+        assert engine.logger_manager.record.called, (
+            "logger_manager.record should be called when aborting requests"
+        )
+
+        # Verify the number of calls matches the number of aborted requests
+        call_count = engine.logger_manager.record.call_count
+        assert call_count == len(request_ids), (
+            f"Expected {len(request_ids)} calls to logger_manager.record, "
+            f"got {call_count}"
+        )
+
+        # Verify each call has the correct structure
+        for call in engine.logger_manager.record.call_args_list:
+            call_kwargs = call.kwargs
+            assert call_kwargs["scheduler_stats"] is None, (
+                "scheduler_stats should be None for aborted requests"
+            )
+            assert call_kwargs["iteration_stats"] is not None, (
+                "iteration_stats should not be None for aborted requests"
+            )
+            assert isinstance(call_kwargs["iteration_stats"], IterationStats), (
+                "iteration_stats should be an IterationStats instance"
+            )
