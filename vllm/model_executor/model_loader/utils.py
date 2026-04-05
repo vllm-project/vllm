@@ -21,7 +21,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.model_loader.reload import (
-    record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
@@ -55,7 +54,6 @@ def initialize_model(
         # new-style model class
         with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
-            record_metadata_for_reloading(model)
             return model
 
     msg = (
@@ -87,7 +85,6 @@ def initialize_model(
         kwargs["scheduler_config"] = vllm_config.scheduler_config
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
-        record_metadata_for_reloading(model)
 
     return model
 

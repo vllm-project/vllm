@@ -76,10 +76,11 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     """
     Set up layerwise weight loading with deferred processing.
 
-    Must be called after `record_metadata_for_reloading`. This function:
-    1. Saves current kernel tensors for later copying
-    2. Restores layer parameters/buffers from metadata (on meta device)
-    3. Wraps weight loaders to defer processing until all weights are loaded
+    This function:
+    1. Records layer metadata for restoration (on-demand)
+    2. Saves current kernel tensors for later copying
+    3. Restores layer parameters/buffers from metadata (on meta device)
+    4. Wraps weight loaders to defer processing until all weights are loaded
 
     When all weights for a layer are loaded, the wrapped loaders will:
     1. Materialize the layer onto the target device
@@ -87,6 +88,11 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
+    # Capture metadata on-demand rather than eagerly at model init.
+    # Previously this was called unconditionally in initialize_model(),
+    # but it is only needed when reload_weights() is actually used.
+    record_metadata_for_reloading(model)
+
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
