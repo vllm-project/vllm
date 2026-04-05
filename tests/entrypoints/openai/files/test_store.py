@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -405,6 +406,33 @@ def test_startup_refuses_to_wipe_unmarked_user_dir(tmp_path):
     assert (upload_dir / "do_not_delete.txt").exists()
 
 
+def test_default_dir_uses_secure_tempdir(tmp_path, monkeypatch):
+    """Default --file-upload-dir must use Python's mkdtemp primitive
+    (0o700 perms + random suffix) rather than a PID-predictable
+    /tmp/vllm-uploads-<pid> path. On a shared host this blocks both
+    cross-user reads and pre-creation/symlink attacks."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    store = FileUploadStore(_mk_config(tmp_path, dir=""))
+    # Random suffix, not ending in the process PID.
+    assert store._dir.name.startswith("vllm-uploads-")  # noqa: SLF001
+    assert not store._dir.name.endswith(f"-{os.getpid()}")  # noqa: SLF001
+    # mkdtemp enforces 0o700 on POSIX.
+    assert (store._dir.stat().st_mode & 0o777) == 0o700  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_uploaded_file_is_owner_only(tmp_path):
+    """Uploaded bytes on disk must be 0o600 (owner read/write only).
+    Defense against cross-user reads on shared hosts - the 128-bit
+    capability handle is the access control layer, not filesystem
+    permissions."""
+    store = FileUploadStore(_mk_config(tmp_path))
+    rec = await store.create_file(
+        stream=_stream(_PNG_BYTES), filename="a.png", purpose="vision", scope=None
+    )
+    assert (rec.on_disk.stat().st_mode & 0o777) == 0o600
+
+
 # ---------------------------------------------------------------------------
 # audit logging
 # ---------------------------------------------------------------------------
@@ -458,9 +486,10 @@ async def test_audit_log_emits_on_every_operation_with_required_fields(
         request_id="req-123",
     )
     # Retrieve + delete emit audit lines too.
-    async for _ in await store.stream_content(
+    stream, _ = await store.stream_content(
         rec.id, scope="team", client_host="203.0.113.7", request_id="req-124"
-    ):
+    )
+    async for _ in stream:
         pass
     await store.delete(
         rec.id, scope="team", client_host="203.0.113.7", request_id="req-125"

@@ -29,6 +29,14 @@ _MP4_M4V = b"\x00\x00\x00\x20ftypM4V " + b"\x00" * 4
 _M4A = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 4
 _MOV = b"\x00\x00\x00\x20ftypqt  " + b"\x00" * 4
 _MP4_UNKNOWN_BRAND = b"\x00\x00\x00\x20ftypXXXX" + b"\x00" * 4
+_HEIC = b"\x00\x00\x00\x20ftypheic" + b"\x00" * 4
+_HEIC_MIF1 = b"\x00\x00\x00\x20ftypmif1" + b"\x00" * 4
+_AVIF = b"\x00\x00\x00\x20ftypavif" + b"\x00" * 4
+# MP3 frame-sync with a RESERVED bitrate index (0xF) in byte 2 — byte 2
+# bits EEEE.FFGH, 0xFC = 1111_1100, so bitrate=0xF (reserved), must reject.
+_MP3_SYNC_BAD_BITRATE = b"\xff\xfb\xfc\x00" + b"\x00" * 12
+# MP3 frame-sync with a RESERVED sample-rate index (0x3) in byte 2 — 0x0C = 0000_1100
+_MP3_SYNC_BAD_SAMPLERATE = b"\xff\xfb\x0c\x00" + b"\x00" * 12
 
 
 @pytest.mark.parametrize(
@@ -49,10 +57,29 @@ _MP4_UNKNOWN_BRAND = b"\x00\x00\x00\x20ftypXXXX" + b"\x00" * 4
         (_M4A, "audio/mp4"),
         (_MOV, "video/quicktime"),
         (_MP4_UNKNOWN_BRAND, "video/mp4"),
+        (_HEIC, "image/heic"),
+        (_HEIC_MIF1, "image/heic"),
+        (_AVIF, "image/avif"),
     ],
 )
 def test_inline_sniffer_recognises_supported_formats(head, expected):
     assert _sniff_inline(head) == expected
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        _MP3_SYNC_BAD_BITRATE,
+        _MP3_SYNC_BAD_SAMPLERATE,
+    ],
+)
+def test_mp3_frame_sync_validates_header_bits(head):
+    """Random binary blobs that start with \\xff\\xfb (or similar) but
+    have a reserved bitrate/sample-rate index must NOT be classified as
+    audio/mpeg — the frame-sync prefix alone is only 12 bits and
+    collides ~1/2048. The byte-2 bitrate and sample-rate bits guard
+    against false positives on random data."""
+    assert _sniff_inline(head) is None
 
 
 @pytest.mark.parametrize(
