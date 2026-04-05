@@ -170,4 +170,7 @@ class TestGlm47Streaming:
                 delta_token_ids=[],
                 request=mock_request,
             )
-        assert glm47_tool_parser.prev_tool_call_arr[0]["arguments"]["city"] == "Beijing"
+        assert (
+            json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"])["city"]
+            == "Beijing"
+        )

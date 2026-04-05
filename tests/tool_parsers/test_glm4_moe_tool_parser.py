@@ -566,12 +566,12 @@ def test_streaming_empty_tool_call(glm4_moe_tool_parser, mock_request):
 
 
 def test_streaming_prev_tool_call_arr_updates(glm4_moe_tool_parser, mock_request):
-    """Test that prev_tool_call_arr contains parsed dict after tool call."""
+    """Test that prev_tool_call_arr stores arguments as JSON string."""
     _reset_streaming_state(glm4_moe_tool_parser)
 
     # Stream a complete tool call
-    name_only = {"name": "get_weather", "arguments": {}}
-    name_and_args = {"name": "get_weather", "arguments": {"city": "Beijing"}}
+    name_only = {"name": "get_weather", "arguments": "{}"}
+    name_and_args = {"name": "get_weather", "arguments": '{"city": "Beijing"}'}
     chunks = [
         # Delta, expected streamed_args_for_tool, expected prev_tool_call_arr
         ("<tool_call>get_weather\n", "", name_only),
@@ -594,20 +594,20 @@ def test_streaming_prev_tool_call_arr_updates(glm4_moe_tool_parser, mock_request
         assert glm4_moe_tool_parser.streamed_args_for_tool[0] == exp_streamed
         assert glm4_moe_tool_parser.prev_tool_call_arr[0] == exp_prev_tc
 
-    # After the tool call completes, prev_tool_call_arr should have parsed dict
+    # After the tool call completes, prev_tool_call_arr should have JSON string
     assert len(glm4_moe_tool_parser.prev_tool_call_arr) == 1
     tool_entry = glm4_moe_tool_parser.prev_tool_call_arr[0]
     assert tool_entry.get("name") == "get_weather"
-    # arguments should be a dict, not a string
+    # arguments should be a JSON string to avoid double serialization
     args = tool_entry.get("arguments")
-    assert isinstance(args, dict), f"Expected dict, got {type(args)}"
-    assert args.get("city") == "Beijing"
+    assert isinstance(args, str), f"Expected str, got {type(args)}"
+    assert json.loads(args)["city"] == "Beijing"
 
     # Test equivalence of prev_tool_call_arr and streamed_args_for_tool
     # Simulates logic in chat_completion/serving.py:chat_completion_stream_generator
-    tool_call_json = json.dumps(tool_entry.get("arguments", {}))
+    # Since arguments is now stored as a string, it should match directly
     streamed_content = glm4_moe_tool_parser.streamed_args_for_tool[0]
-    assert tool_call_json.startswith(streamed_content)
+    assert args == streamed_content
 
 
 def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser, mock_request):
@@ -639,8 +639,14 @@ def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser, mock_req
 
     # Should have two tool calls in prev_tool_call_arr
     assert len(glm4_moe_tool_parser.prev_tool_call_arr) == 2
-    assert glm4_moe_tool_parser.prev_tool_call_arr[0]["arguments"]["city"] == "Beijing"
-    assert glm4_moe_tool_parser.prev_tool_call_arr[1]["arguments"]["city"] == "Shanghai"
+    assert (
+        json.loads(glm4_moe_tool_parser.prev_tool_call_arr[0]["arguments"])["city"]
+        == "Beijing"
+    )
+    assert (
+        json.loads(glm4_moe_tool_parser.prev_tool_call_arr[1]["arguments"])["city"]
+        == "Shanghai"
+    )
 
 
 def test_streaming_json_escape_in_string(glm4_moe_tool_parser, mock_request):
