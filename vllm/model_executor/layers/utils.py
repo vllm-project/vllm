@@ -223,8 +223,8 @@ def dispatch_cpu_unquantized_gemm(
     layer: torch.nn.Module,
     remove_weight: bool,
 ) -> None:
-    # skip for missing layers
-    if layer.weight.is_meta:
+    # skip for missing layers or non-2D weights (e.g., conv1d in hybrid models)
+    if layer.weight.is_meta or layer.weight.ndim != 2:
         layer.cpu_linear = torch.nn.functional.linear
         return
 
