@@ -88,6 +88,7 @@ def pack_bitmatrix(
     offsets = offsets_m[:, None] * n_expts_act + offsets_k[None, :]
     mask = (offsets_m < n_rows)[:, None] & (offsets_k < n_expts_act)[None, :]
     indices = tl.load(topk_ids + offsets, mask=mask, other=-1)
+    valid = indices >= 0
     div = indices // 32
     rem = indices % 32
     one = tl.cast(1, tl.uint32)
@@ -98,8 +99,13 @@ def pack_bitmatrix(
         offs = tl.arange(0, BLOCK_SIZE_K // 32) + i * (BLOCK_SIZE_K // 32)
         # All topks that need to go into this column has the correct bit set.
         # Other bits are 0. x is a 2D tensor.
+        # Guard with `valid` to prevent negative indices from producing
+        # spurious bits (on HIP, -1 // 32 == 0 and 1 << (-1 % 32) sets
+        # bit 31).
         x = tl.where(
-            div[:, :, None] == offs[None, None, :], (one << rem)[:, :, None], 0
+            valid[:, :, None] & (div[:, :, None] == offs[None, None, :]),
+            (one << rem)[:, :, None],
+            0,
         )
         # Reduce x to get a single int32_t bitpack.
         y = tl.reduce_or(x, axis=1)
