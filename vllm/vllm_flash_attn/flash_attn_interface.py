@@ -366,14 +366,7 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
-        # FA4 on SM90 doesn't support paged KV; SM100+ does
-        from vllm.platforms import current_platform
 
-        if block_table is not None and current_platform.is_device_capability_family(90):
-            raise NotImplementedError(
-                "FA4 with paged KV is not supported on SM90 (Hopper). "
-                "Use FA3 or upgrade to Blackwell (SM100+)."
-            )
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
         out, softmax_lse = _flash_attn_fwd(
