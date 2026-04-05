@@ -388,7 +388,8 @@ class RequestState:
         # Prepare text and token_ids, based on delta mode
         text = self.detokenizer.get_next_output_text(finished, delta)
         if not delta:
-            token_ids = self.detokenizer.output_token_ids
+            # Snapshot token ids for this output; avoid mutating prior outputs.
+            token_ids = list(self.detokenizer.output_token_ids)
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
