@@ -52,17 +52,18 @@ logger = init_logger(__name__)
 
 def make_copy_and_call(
     sym_tensor_indices: list[int],
-    input_buffers: list[torch.Tensor | None],
+    input_buffers: list[torch.Tensor],
     callable_fn: Callable[..., Any],
 ) -> Callable[..., Any]:
     """Create a wrapper that copies inputs to static buffers before calling.
 
     This is used for cudagraph input copying where we need to copy dynamic
     tensors to static buffers before invoking the compiled graph.
+    Assumes dim 0 is the only dynamic dimension for each symbolic tensor.
 
     Args:
         sym_tensor_indices: Indices of tensors with symbolic shapes
-        input_buffers: List of static buffers (can contain None for lazy init)
+        input_buffers: List of static buffers, one per sym_tensor_indices entry
         callable_fn: The compiled function to call
 
     Returns:
@@ -71,17 +72,17 @@ def make_copy_and_call(
 
     def copy_and_call(*args: Any) -> Any:
         list_args = list(args)
-        for i, index in enumerate(sym_tensor_indices):
-            runtime_tensor = list_args[index]
+        for buf_idx, arg_idx in enumerate(sym_tensor_indices):
+            runtime_tensor = list_args[arg_idx]
             runtime_shape = runtime_tensor.shape[0]
-
-            # lazy initialization of buffer on first call
-            if input_buffers[i] is None:
-                input_buffers[i] = runtime_tensor.clone()
-
-            static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index]
+            assert runtime_shape <= input_buffers[buf_idx].shape[0], (
+                f"Runtime shape {runtime_shape} exceeds static buffer size "
+                f"{input_buffers[buf_idx].shape[0]}. "
+                "Ensure input tensors do not exceed the pre-allocated buffer capacity."
+            )
+            static_tensor = input_buffers[buf_idx][:runtime_shape]
             static_tensor.copy_(runtime_tensor)
-            list_args[index] = static_tensor
+            list_args[arg_idx] = static_tensor
         return callable_fn(*list_args)
 
     return copy_and_call
