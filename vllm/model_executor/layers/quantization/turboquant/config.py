@@ -4,6 +4,8 @@
 import math
 from dataclasses import dataclass
 
+from vllm.utils.math_utils import next_power_of_2
+
 
 # Named TQ presets: each maps to frozen config parameters.
 # These are the 4 validated configs with quality benchmarks.
@@ -97,6 +99,16 @@ class TurboQuantConfig:
         return self.effective_key_quant_bits
 
     @property
+    def centroid_bits(self) -> int:
+        """Bits for centroid generation — always non-zero.
+
+        In FP8 key mode, key_mse_bits is 0 (no MSE), but centroids are still
+        needed for continuation-prefill dequant and decode kernel params.
+        Falls back to total_bits (mse_bits).
+        """
+        return self.key_mse_bits if not self.key_fp8 else self.mse_bits
+
+    @property
     def n_centroids(self) -> int:
         return 2 ** self.mse_bits
 
@@ -149,8 +161,7 @@ class TurboQuantConfig:
         layers.  Also satisfies the even-number requirement for
         effective_head_size = padded_slot_size // 2.
         """
-        raw = self.slot_size
-        return 1 << (raw - 1).bit_length()  # next power of 2
+        return next_power_of_2(self.slot_size)
 
     @staticmethod
     def get_boundary_skip_layers(num_layers: int, n: int) -> list[str]:

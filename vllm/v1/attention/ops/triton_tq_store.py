@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fused Triton kernels for TurboQuant KV store.
 
-Three kernel variants:
-1. _tq_semifused_store: Single-kernel normalize + bucketize + residual + pack.
-2. _tq_fused_store: Pack-only kernel (idx/norms pre-computed).
-3. CUDA fused store: Full pipeline in one CUDA kernel (compiled at runtime).
+Two paths:
+1. _tq_fused_store: Pack-only kernel (idx/norms pre-computed via external cuBLAS).
+2. FP8 key path: reuses _tq_fused_store with KEY_FP8=True.
 
 The launcher `triton_tq_store` selects the appropriate path.
 """
@@ -19,244 +18,7 @@ logger = init_logger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Kernel 1: SEMI-FUSED — normalize + bucketize + residual IN-KERNEL,
-#           then pack from the resulting register values.
-#           Single kernel, reads raw key/value, writes packed cache.
-# ═══════════════════════════════════════════════════════════════════════
-
-@triton.jit
-def _tq_semifused_store(
-    # Raw inputs
-    Key_ptr,           # [N, H, D] float16
-    Value_ptr,         # [N, H, D] float16
-    # Cache and indexing
-    KV_cache_ptr,      # [total_bytes] uint8
-    Slot_mapping_ptr,  # [N] int32
-    # TQ constants
-    Centroids_ptr,     # [n_centroids] float32
-    Midpoints_ptr,     # [n_centroids-1] float32
-    # Rotation matrix
-    PiT_ptr,           # [D, D] float32 (ignored if NO_ROTATION)
-    # Cache strides
-    stride_cache_block: tl.constexpr,
-    stride_cache_pos: tl.constexpr,
-    stride_cache_head: tl.constexpr,
-    # Key/value input strides
-    stride_kv_n: tl.constexpr,
-    stride_kv_h: tl.constexpr,
-    # Dimensions
-    D: tl.constexpr,
-    H: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    # TQ layout
-    MSE_BITS: tl.constexpr,
-    MSE_BYTES: tl.constexpr,
-    KPS: tl.constexpr,
-    # Value quantization
-    VQB: tl.constexpr,
-    VAL_DATA_BYTES: tl.constexpr,
-    # Packing block sizes
-    BLOCK_MSE: tl.constexpr,
-    BLOCK_VAL: tl.constexpr,
-    # Feature flags
-    NO_ROTATION: tl.constexpr,
-    # Rotation tile size
-    TILE_K: tl.constexpr,
-    # Number of centroids (2**MSE_BITS)
-    N_CENTROIDS: tl.constexpr = 4,
-    # Block size for 3-bit group packing (next_pow2(D//8))
-    BLOCK_GRP: tl.constexpr = 16,
-):
-    """Semi-fused TQ store: all steps in one kernel.
-
-    For no-rotation mode: truly single kernel (no external ops).
-    For rotation mode: includes tiled matrix multiply in-kernel.
-    One program per (token, head) pair.
-    """
-    pid = tl.program_id(0)
-    token_idx = pid // H
-    head_idx = pid % H
-
-    # Compute cache byte offset
-    slot = tl.load(Slot_mapping_ptr + token_idx)
-    if slot < 0:
-        return
-    blk = slot // BLOCK_SIZE
-    off = slot % BLOCK_SIZE
-    slot_base = (blk * stride_cache_block + off * stride_cache_pos
-                 + head_idx * stride_cache_head)
-
-    d_offs = tl.arange(0, BLOCK_D)
-    d_mask = d_offs < D
-
-    # ================================================================
-    # STEP 1: Load key and normalize
-    # ================================================================
-    key_base = token_idx * stride_kv_n + head_idx * stride_kv_h
-    key_vec = tl.load(Key_ptr + key_base + d_offs, mask=d_mask,
-                      other=0.0).to(tl.float32)
-    norm_sq = tl.sum(key_vec * key_vec, axis=0)
-    norm_val = tl.sqrt(norm_sq + 1e-16)
-    x_hat = key_vec / norm_val
-
-    # ================================================================
-    # STEP 2: Rotate (optional tiled matmul)
-    # ================================================================
-    if NO_ROTATION:
-        y = x_hat
-    else:
-        # NOTE: Tiled matmul with register vectors is not efficient in Triton.
-        # For rotation mode, keep the GEMM external. Fall through to external path.
-        y = x_hat  # placeholder — rotation path uses external GEMM
-
-    # ================================================================
-    # STEP 3: Bucketize (generic for any N_CENTROIDS)
-    # ================================================================
-    idx = tl.zeros([BLOCK_D], dtype=tl.int32)
-    for _i in range(1, N_CENTROIDS):
-        mp = tl.load(Midpoints_ptr + _i - 1)
-        idx = tl.where(y >= mp, _i, idx)
-
-    # Centroid lookup via gather
-    y_hat = tl.load(Centroids_ptr + idx)
-
-    # Residual and residual norm
-    r = y - y_hat
-    gamma_sq = tl.sum(r * r, axis=0)
-    gamma_val = tl.sqrt(gamma_sq + 1e-16)
-
-    # ================================================================
-    # STEP 4: Pack MSE indices (3-bit or 4-bit)
-    # ================================================================
-    idx_i32 = idx.to(tl.int32)
-
-    if MSE_BITS == 4:
-        mse_offs = tl.arange(0, BLOCK_MSE)
-        mse_mask = mse_offs < MSE_BYTES
-        idx_reshaped = tl.reshape(idx_i32, [BLOCK_MSE, 2])
-        shifts = tl.arange(0, 2) * 4
-        shifted = idx_reshaped << shifts[None, :]
-        packed_mse = tl.sum(shifted, axis=1).to(tl.uint8)
-        tl.store(KV_cache_ptr + slot_base + mse_offs, packed_mse, mask=mse_mask)
-
-    elif MSE_BITS == 3:
-        grp_offs = tl.arange(0, BLOCK_GRP)
-        grp_mask = grp_offs < (D // 8)
-        idx_grp = tl.reshape(idx_i32, [BLOCK_GRP, 8])
-        shifts_3bit = tl.arange(0, 8) * 3
-        packed_24 = tl.sum(idx_grp << shifts_3bit[None, :], axis=1)
-        b0 = (packed_24 & 0xFF).to(tl.uint8)
-        b1 = ((packed_24 >> 8) & 0xFF).to(tl.uint8)
-        b2 = ((packed_24 >> 16) & 0xFF).to(tl.uint8)
-        tl.store(KV_cache_ptr + slot_base + grp_offs * 3,     b0, mask=grp_mask)
-        tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 1, b1, mask=grp_mask)
-        tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 2, b2, mask=grp_mask)
-
-    # ================================================================
-    # STEP 5: Store norms (vec_norm and gamma as fp16, 2 bytes each)
-    # ================================================================
-    norm_offset = MSE_BYTES
-
-    vn_f16 = norm_val.to(tl.float16)
-    vn_u16 = vn_f16.to(tl.uint16, bitcast=True)
-    tl.store(KV_cache_ptr + slot_base + norm_offset,
-             (vn_u16 & 0xFF).to(tl.uint8))
-    tl.store(KV_cache_ptr + slot_base + norm_offset + 1,
-             ((vn_u16 >> 8) & 0xFF).to(tl.uint8))
-
-    gm_f16 = gamma_val.to(tl.float16)
-    gm_u16 = gm_f16.to(tl.uint16, bitcast=True)
-    tl.store(KV_cache_ptr + slot_base + norm_offset + 2,
-             (gm_u16 & 0xFF).to(tl.uint8))
-    tl.store(KV_cache_ptr + slot_base + norm_offset + 3,
-             ((gm_u16 >> 8) & 0xFF).to(tl.uint8))
-
-    # ================================================================
-    # STEP 6: Value quantize + pack
-    # ================================================================
-    val_cache_offset = KPS
-    val_base = token_idx * stride_kv_n + head_idx * stride_kv_h
-    val_vec = tl.load(Value_ptr + val_base + d_offs, mask=d_mask,
-                      other=0.0).to(tl.float32)
-
-    if VQB == 3:
-        val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
-        val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
-        v_scale = (val_max - val_min) / 7.0  # 2^3 - 1 = 7
-        v_scale = tl.where(v_scale > 1e-8, v_scale, 1e-8)
-
-        # Quantize all dims to 0-7
-        q_vals = tl.minimum(tl.maximum(
-            ((val_vec - val_min) / v_scale + 0.5).to(tl.int32), 0), 7)
-
-        # Pack 8 values into 3 bytes (same as MSE 3-bit packing)
-        grp_offs = tl.arange(0, BLOCK_GRP)
-        grp_mask = grp_offs < (D // 8)
-        q_grp = tl.reshape(q_vals, [BLOCK_GRP, 8])
-        shifts_3bit = tl.arange(0, 8) * 3
-        packed_24 = tl.sum(q_grp << shifts_3bit[None, :], axis=1)
-        b0 = (packed_24 & 0xFF).to(tl.uint8)
-        b1 = ((packed_24 >> 8) & 0xFF).to(tl.uint8)
-        b2 = ((packed_24 >> 16) & 0xFF).to(tl.uint8)
-        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3,
-                 b0, mask=grp_mask)
-        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3 + 1,
-                 b1, mask=grp_mask)
-        tl.store(KV_cache_ptr + slot_base + val_cache_offset + grp_offs * 3 + 2,
-                 b2, mask=grp_mask)
-
-        sc_offset = val_cache_offset + VAL_DATA_BYTES
-        sc_f16 = v_scale.to(tl.float16)
-        sc_u16 = sc_f16.to(tl.uint16, bitcast=True)
-        tl.store(KV_cache_ptr + slot_base + sc_offset,
-                 (sc_u16 & 0xFF).to(tl.uint8))
-        tl.store(KV_cache_ptr + slot_base + sc_offset + 1,
-                 ((sc_u16 >> 8) & 0xFF).to(tl.uint8))
-        zr_f16 = val_min.to(tl.float16)
-        zr_u16 = zr_f16.to(tl.uint16, bitcast=True)
-        tl.store(KV_cache_ptr + slot_base + sc_offset + 2,
-                 (zr_u16 & 0xFF).to(tl.uint8))
-        tl.store(KV_cache_ptr + slot_base + sc_offset + 3,
-                 ((zr_u16 >> 8) & 0xFF).to(tl.uint8))
-
-    else:  # VQB == 4
-        val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
-        val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
-        v_scale = (val_max - val_min) / 15.0
-        v_scale = tl.where(v_scale > 1e-8, v_scale, 1e-8)
-
-        val_offs = tl.arange(0, BLOCK_VAL)
-        val_mask = val_offs < VAL_DATA_BYTES
-        v0 = tl.load(Value_ptr + val_base + val_offs * 2,
-                     mask=val_mask & (val_offs * 2 < D), other=val_min)
-        v1 = tl.load(Value_ptr + val_base + val_offs * 2 + 1,
-                     mask=val_mask & (val_offs * 2 + 1 < D), other=val_min)
-        q0 = tl.minimum(tl.maximum(
-            ((v0 - val_min) / v_scale + 0.5).to(tl.int32), 0), 15)
-        q1 = tl.minimum(tl.maximum(
-            ((v1 - val_min) / v_scale + 0.5).to(tl.int32), 0), 15)
-        packed_val = (q0 | (q1 << 4)).to(tl.uint8)
-        tl.store(KV_cache_ptr + slot_base + val_cache_offset + val_offs,
-                 packed_val, mask=val_mask)
-
-        sc_offset = val_cache_offset + VAL_DATA_BYTES
-        sc_f16 = v_scale.to(tl.float16)
-        sc_u16 = sc_f16.to(tl.uint16, bitcast=True)
-        tl.store(KV_cache_ptr + slot_base + sc_offset,
-                 (sc_u16 & 0xFF).to(tl.uint8))
-        tl.store(KV_cache_ptr + slot_base + sc_offset + 1,
-                 ((sc_u16 >> 8) & 0xFF).to(tl.uint8))
-        zr_f16 = val_min.to(tl.float16)
-        zr_u16 = zr_f16.to(tl.uint16, bitcast=True)
-        tl.store(KV_cache_ptr + slot_base + sc_offset + 2,
-                 (zr_u16 & 0xFF).to(tl.uint8))
-        tl.store(KV_cache_ptr + slot_base + sc_offset + 3,
-                 ((zr_u16 >> 8) & 0xFF).to(tl.uint8))
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Kernel 2: Pack-only kernel (for rotation path — GEMM done externally)
+# Pack-only kernel (rotation GEMM done externally via cuBLAS)
 # ═══════════════════════════════════════════════════════════════════════
 
 @triton.jit
@@ -498,23 +260,10 @@ def triton_tq_store(
         )
         return
 
-    # ── SEMI-FUSED PATH: external GEMM + pack kernel ──
+    # ── MSE PATH: external GEMM + pack kernel ──
     block_grp = triton.next_power_of_2(D // 8) if D >= 8 else 1
-    if mse_bits == 4:
-        reshape_ok = (BLOCK_MSE * 2 == BLOCK_D)
-    elif mse_bits == 3:
-        reshape_ok = (block_grp * 8 == BLOCK_D)
-    else:
-        reshape_ok = False
-    can_semifuse = (D % 8 == 0 and BLOCK_D == D
-                    and BLOCK_MSE == mse_bytes
-                    and reshape_ok)
-    logger.debug("triton_tq_store: can_semifuse=%s "
-                 "D=%d BLOCK_D=%d MSE_BYTES=%d BLOCK_MSE=%d",
-                 can_semifuse, D, BLOCK_D,
-                 mse_bytes, BLOCK_MSE)
 
-    # Do rotation GEMM externally (cuBLAS is faster for batched matmul)
+    # Do rotation GEMM externally (cuBLAS is faster than in-kernel matmul)
     k_flat = key.float().reshape(NH, D)
     norms = k_flat.norm(dim=1, keepdim=True)
     x_hat = k_flat / (norms + 1e-8)

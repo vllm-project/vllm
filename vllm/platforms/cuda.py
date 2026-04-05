@@ -253,7 +253,7 @@ class CudaPlatformBase(Platform):
 
         # TurboQuant KV cache: route directly to TQ backend
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
-        if kv_cache_dtype is not None and kv_cache_dtype.startswith("tq"):
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("tq-"):
             return [(AttentionBackendEnum.TURBOQUANT, 0)], {}
 
         backend_priorities = _get_backend_priorities(

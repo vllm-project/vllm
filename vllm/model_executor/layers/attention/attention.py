@@ -381,7 +381,7 @@ class Attention(nn.Module, AttentionLayerBase):
         _init_kv_cache_quant(self, quant_config, prefix)
 
         # Initialize TurboQuant buffers (Pi, S, centroids) if tq cache dtype
-        if kv_cache_dtype.startswith("tq"):
+        if kv_cache_dtype.startswith("tq-"):
             self._init_turboquant_buffers(kv_cache_dtype, head_size, prefix)
 
         # for attn backends supporting query quantization
@@ -423,11 +423,9 @@ class Attention(nn.Module, AttentionLayerBase):
             "_tq_Pi",
             generate_rotation_matrix(head_size, seed=seed),
         )
-        # Use key_mse_bits (may differ from mse_bits when TQ_KEY_BITS is set)
-        key_bits = tq_config.key_mse_bits if not tq_config.key_fp8 else tq_config.mse_bits
         self.register_buffer(
             "_tq_centroids",
-            get_centroids(head_size, key_bits),
+            get_centroids(head_size, tq_config.centroid_bits),
         )
         self._tq_config = tq_config
 
@@ -588,7 +586,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             )
-        elif self.kv_cache_dtype.startswith("tq"):
+        elif self.kv_cache_dtype.startswith("tq-"):
             from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
             tq_config = TurboQuantConfig.from_cache_dtype(
                 self.kv_cache_dtype, self.head_size)

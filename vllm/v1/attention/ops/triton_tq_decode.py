@@ -438,19 +438,6 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
     return cfg
 
 
-_pi_t_cache: dict = {}
-
-
-def _get_pi_t(Pi):
-    """Cached Pi.T contiguous."""
-    key = Pi.data_ptr()
-    pit = _pi_t_cache.get(key)
-    if pit is None:
-        pit = Pi.T.contiguous()
-        _pi_t_cache[key] = pit
-    return pit
-
-
 def triton_tq_decode_attention(
     query: torch.Tensor,        # [B, Hq, D] — original query
     kv_cache: torch.Tensor,     # [num_blocks, block_size, Hk, padded_slot] uint8
@@ -467,6 +454,7 @@ def triton_tq_decode_attention(
     max_seq_len: int = 0,
     key_fp8: bool = False,
     norm_correction: bool = False,
+    PiT: torch.Tensor | None = None,  # [D, D] pre-computed Pi.T contiguous
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -488,7 +476,9 @@ def triton_tq_decode_attention(
         q_rot = query.float().contiguous()
     else:
         q_float = query.float()
-        q_rot = (q_float @ _get_pi_t(Pi)).contiguous()
+        if PiT is None:
+            PiT = Pi.T.contiguous()
+        q_rot = (q_float @ PiT).contiguous()
 
     # Occupancy-aware NUM_KV_SPLITS
     MIN_TOKENS_PER_SPLIT = 128
@@ -518,7 +508,6 @@ def triton_tq_decode_attention(
         dtype=torch.float32, device=device,
     )
 
-    sparse_v_threshold = float(os.environ.get("TQ_SPARSE_V_THRESHOLD", "1e-6"))
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
 
     # Triton stage 1: split-KV tiled attention scoring + value accumulation
