@@ -40,6 +40,7 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -164,6 +165,38 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+
+    @staticmethod
+    def _count_reasoning_tokens_for_usage(
+        token_ids: GenericSequence[int],
+        reasoning_parser: ReasoningParser | None,
+    ) -> int | None:
+        if reasoning_parser is None:
+            return None
+        return reasoning_parser.count_reasoning_tokens(token_ids)
+
+    def _make_usage_info(
+        self,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        num_cached_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+    ) -> UsageInfo:
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+        if reasoning_tokens is not None:
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=max(0, min(reasoning_tokens, completion_tokens))
+            )
+        if self.enable_prompt_tokens_details and num_cached_tokens:
+            usage.prompt_tokens_details = PromptTokenUsageInfo(
+                cached_tokens=num_cached_tokens
+            )
+        return usage
 
     def warmup(self) -> None:
         self.renderer.warmup(
@@ -513,6 +546,7 @@ class OpenAIServingChat(OpenAIServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+        raw_output_token_ids = [[] for _ in range(num_choices)]
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -627,10 +661,12 @@ class OpenAIServingChat(OpenAIServing):
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
-                            chunk.usage = UsageInfo(
+                            chunk.usage = self._make_usage_info(
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
-                                total_tokens=num_prompt_tokens,
+                                reasoning_tokens=self._count_reasoning_tokens_for_usage(
+                                    raw_output_token_ids[i], reasoning_parser
+                                ),
                             )
 
                         data = chunk.model_dump_json(exclude_unset=True)
@@ -663,10 +699,13 @@ class OpenAIServingChat(OpenAIServing):
                                     model=model_name,
                                 )
                                 if include_continuous_usage:
-                                    chunk.usage = UsageInfo(
+                                    chunk.usage = self._make_usage_info(
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
-                                        total_tokens=num_prompt_tokens,
+                                        reasoning_tokens=self._count_reasoning_tokens_for_usage(
+                                            raw_output_token_ids[i],
+                                            reasoning_parser,
+                                        ),
                                     )
 
                                 data = chunk.model_dump_json(exclude_unset=True)
@@ -1022,6 +1061,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
+                    raw_output_token_ids[i].extend(as_list(output.token_ids))
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -1194,10 +1234,12 @@ class OpenAIServingChat(OpenAIServing):
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         completion_tokens = previous_num_tokens[i]
-                        chunk.usage = UsageInfo(
+                        chunk.usage = self._make_usage_info(
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
-                            total_tokens=num_prompt_tokens + completion_tokens,
+                            reasoning_tokens=self._count_reasoning_tokens_for_usage(
+                                raw_output_token_ids[i], reasoning_parser
+                            ),
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
@@ -1207,15 +1249,21 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
-                final_usage = UsageInfo(
+                reasoning_tokens = None
+                if reasoning_parser is not None:
+                    reasoning_tokens = sum(
+                        self._count_reasoning_tokens_for_usage(
+                            token_ids, reasoning_parser
+                        )
+                        or 0
+                        for token_ids in raw_output_token_ids
+                    )
+                final_usage = self._make_usage_info(
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
-                    total_tokens=num_prompt_tokens + completion_tokens,
+                    num_cached_tokens=num_cached_tokens,
+                    reasoning_tokens=reasoning_tokens,
                 )
-                if self.enable_prompt_tokens_details and num_cached_tokens:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens
-                    )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1232,10 +1280,19 @@ class OpenAIServingChat(OpenAIServing):
 
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
-            request_metadata.final_usage_info = UsageInfo(
+            reasoning_tokens = None
+            if reasoning_parser is not None:
+                reasoning_tokens = sum(
+                    self._count_reasoning_tokens_for_usage(
+                        token_ids, reasoning_parser
+                    )
+                    or 0
+                    for token_ids in raw_output_token_ids
+                )
+            request_metadata.final_usage_info = self._make_usage_info(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
-                total_tokens=num_prompt_tokens + num_completion_tokens,
+                reasoning_tokens=reasoning_tokens,
             )
 
             # Log complete streaming response if output logging is enabled
@@ -1594,15 +1651,21 @@ class OpenAIServingChat(OpenAIServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs
         )
-        usage = UsageInfo(
+        reasoning_tokens = None
+        if reasoning_parser is not None:
+            reasoning_tokens = sum(
+                self._count_reasoning_tokens_for_usage(
+                    as_list(output.token_ids), reasoning_parser
+                )
+                or 0
+                for output in final_res.outputs
+            )
+        usage = self._make_usage_info(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
+            num_cached_tokens=final_res.num_cached_tokens,
+            reasoning_tokens=reasoning_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
-            )
 
         request_metadata.final_usage_info = usage
 

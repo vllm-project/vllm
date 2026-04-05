@@ -101,10 +101,18 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
 
 
+class CompletionTokenUsageInfo(OpenAIBaseModel):
+    reasoning_tokens: int | None = None
+    audio_tokens: int | None = None
+    accepted_prediction_tokens: int | None = None
+    rejected_prediction_tokens: int | None = None
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: int | None = 0
+    completion_tokens_details: CompletionTokenUsageInfo | None = None
     prompt_tokens_details: PromptTokenUsageInfo | None = None
 
 

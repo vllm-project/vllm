@@ -19,6 +19,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _count_minimax_reasoning_tokens(
+    token_ids: Sequence[int], end_token_id: int | None
+) -> int:
+    if end_token_id is None:
+        return 0
+
+    for idx, token_id in enumerate(token_ids):
+        if token_id == end_token_id:
+            return idx
+    return len(token_ids)
+
+
 class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for MiniMax M2 model.
@@ -77,6 +89,9 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
         # No end token yet, all content is reasoning
         return DeltaMessage(reasoning=delta_text)
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        return _count_minimax_reasoning_tokens(token_ids, self.end_token_id)
+
 
 class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     """
@@ -116,3 +131,6 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         return None, "<think>" + model_output
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        return _count_minimax_reasoning_tokens(token_ids, self.end_token_id)
