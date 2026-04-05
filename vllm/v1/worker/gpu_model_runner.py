@@ -1384,8 +1384,30 @@ class GPUModelRunner(
                     prev_req_index = prev_req_id_to_index.get(req_id)
                     if prev_req_index is None:
                         continue
-                    num_accepted = valid_sampled_token_count[prev_req_index] - 1
-                    correction = optimistic_num_accepted - num_accepted
+
+                    # The request might have been completely discarded on the GPU
+                    # due to being aborted. We must defend against out-of-bounds.
+                    if prev_req_index >= len(valid_sampled_token_count):
+                        continue
+
+                    # If valid_sampled_token_count is 0, the request generated 0
+                    # draft tokens and no actual tokens. We must completely revert
+                    # the optimistic drafts without underflowing token counts.
+                    raw_count = valid_sampled_token_count[prev_req_index]
+                    if raw_count == 0:
+                        correction = optimistic_num_accepted
+                    else:
+                        num_accepted = raw_count - 1
+                        correction = optimistic_num_accepted - num_accepted
+
+                    # Safeguard against TOCTOU race: if the request ID was aborted
+                    # and resubmitted, the CachedRequestState object could have
+                    # changed, so applying previous correction payload to the newly
+                    # recycled batch slot and mapping causes memory corruption.
+                    current_req_state = self.requests.get(req_id)
+                    if current_req_state is not req_state:
+                        continue
+
                     req_state.num_computed_tokens -= correction
                     cur_req_index = self.input_batch.req_id_to_index.get(req_id)
                     if cur_req_index is None:
