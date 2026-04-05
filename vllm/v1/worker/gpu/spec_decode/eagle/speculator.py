@@ -133,7 +133,7 @@ class EagleSpeculator:
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        _, self.attn_groups = init_attn_backend(
+        _, self.attn_groups, _ = init_attn_backend(
             kv_cache_config,
             self.vllm_config,
             self.device,
