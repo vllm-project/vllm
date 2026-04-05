@@ -298,8 +298,8 @@ class EplbState:
         """
         Shared scalar bool tensor for all layers.  Every
         :class:`EplbLayerState` holds a reference to the **same** object so
-        a single ``.fill_()`` updates all layers at once.  Allocated on the
-        first call to :meth:`_init_should_record_tensor`.
+        a single ``.fill_()`` updates all layers at once.  Allocated during
+        :meth:`initialize`.
         """
         self.is_async: bool = False
         """
@@ -486,12 +486,13 @@ class EplbState:
         self.policy = EPLB_POLICIES[policy_type]
         logger.debug("Selected EPLB policy: %s", policy_type)
 
+        self.should_record_tensor = torch.ones((), dtype=torch.bool, device=self.device)
         model.set_eplb_state(
             expert_load_pass,
             logical_to_physical_map,
             logical_replica_count,
+            self.should_record_tensor,
         )
-        self._init_should_record_tensor(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
         communicator = create_eplb_communicator(
@@ -693,27 +694,6 @@ class EplbState:
             self.should_record_tensor.fill_(
                 self._should_record_current_step(log_stats=log_stats)
             )
-
-    def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
-        """Allocate (once) and propagate the shared ``should_record_tensor``.
-
-        Must be called after :meth:`model.set_eplb_state` so that each
-        layer's ``eplb_state`` is already populated with the tensor views.
-        """
-        layer_states = [
-            layer.eplb_state
-            for layer in model.moe_layers
-            if hasattr(layer, "eplb_state")
-            and isinstance(layer.eplb_state, EplbLayerState)
-        ]
-
-        if self.should_record_tensor is None and layer_states:
-            self.should_record_tensor = torch.ones(
-                (), dtype=torch.bool, device=self.device
-            )
-
-        for ls in layer_states:
-            ls.should_record_tensor = self.should_record_tensor
 
     def rearrange(
         self,
@@ -1100,6 +1080,14 @@ class InitializedEplbLayerState:
     sliding window before the next rearrangement, so recording them wastes
     GPU work.
     """
+
+
+@dataclass(frozen=True)
+class UninitializedEplbLayerState:
+    pass
+
+
+EplbLayerState = InitializedEplbLayerState | UninitializedEplbLayerState
 
 
 def _node_count_with_rank_mapping(

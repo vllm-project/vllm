@@ -1478,6 +1478,7 @@ class FusedMoE(CustomOp):
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        should_record_tensor: torch.Tensor,
     ) -> None:
         """
         Register the EPLB state in this layer.
@@ -1490,6 +1491,7 @@ class FusedMoE(CustomOp):
                 expert_load_view[moe_layer_idx],
                 logical_to_physical_map[moe_layer_idx],
                 logical_replica_count[moe_layer_idx],
+                should_record_tensor,
             )
 
     def ensure_moe_quant_config_init(self):

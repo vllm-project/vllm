@@ -466,11 +466,13 @@ class PixtralForConditionalGeneration(
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        should_record_tensor: torch.Tensor,
     ) -> None:
         self.language_model.set_eplb_state(
             expert_load_view,
             logical_to_physical_map,
             logical_replica_count,
+            should_record_tensor,
         )
 
     def update_physical_experts_metadata(

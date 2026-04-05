@@ -160,7 +160,6 @@ def make_fused_moe_layer(
     )
 
     # Global weight scales
-    num_experts_local = fml.w13_weight_global_scale.data.shape[0]
     fml.w13_weight_global_scale.data = torch.rand(
         fml.w13_weight_global_scale.data.shape,
         device=device,
@@ -298,6 +297,7 @@ def _test_eplb_ct_nvfp4(env: dict[str, str], world_size: int, test_config: TestC
 
         logical_to_physical_map = torch.stack(logical_to_physical_map_list)
 
+        should_record = torch.ones((), dtype=torch.bool, device=device)
         for lidx, fml in enumerate(fused_moe_layers):
             logical_replica_count = torch.ones(
                 (test_config.num_layers, num_global_experts),
@@ -314,6 +314,7 @@ def _test_eplb_ct_nvfp4(env: dict[str, str], world_size: int, test_config: TestC
                 ),
                 logical_to_physical_map,
                 logical_replica_count,
+                should_record,
             )
 
         # ---- Recompute derived quant state after rearrangement ----
@@ -375,7 +376,7 @@ def test_eplb_ct_nvfp4(
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", backend)
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     num_local_experts = num_experts // world_size
