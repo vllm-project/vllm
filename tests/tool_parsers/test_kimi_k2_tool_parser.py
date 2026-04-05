@@ -502,10 +502,12 @@ def test_empty_tool_section(kimi_k2_tool_parser):
     assert kimi_k2_tool_parser.in_tool_section is False
 
 
-def test_malformed_tool_section_recovery(kimi_k2_tool_parser):
+def test_malformed_tool_section_no_forced_exit(kimi_k2_tool_parser):
     """
-    Test that the parser recovers from a malformed tool section
-    that never closes properly.
+    Test that the parser does NOT force-exit a tool section based on
+    character count. The parser should remain in the tool section until
+    a proper end marker is received, allowing arbitrarily large tool call
+    arguments (e.g., file content > 8K chars).
     """
     kimi_k2_tool_parser.reset_streaming_state()
 
@@ -523,11 +525,11 @@ def test_malformed_tool_section_recovery(kimi_k2_tool_parser):
     )
     assert kimi_k2_tool_parser.in_tool_section is True
 
-    # Simulate a lot of text without proper tool calls or section end
-    # This should trigger the error recovery mechanism
-    large_text = "x" * 10000  # Exceeds max_section_chars
+    # Simulate a lot of text without proper tool calls or section end.
+    # The parser should NOT force-exit; it stays in tool section.
+    large_text = "x" * 10000
 
-    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+    _result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
         previous_text="<|tool_calls_section_begin|>",
         current_text="<|tool_calls_section_begin|>" + large_text,
         delta_text=large_text,
@@ -537,11 +539,8 @@ def test_malformed_tool_section_recovery(kimi_k2_tool_parser):
         request=None,
     )
 
-    # Parser should have force-exited the tool section
-    assert kimi_k2_tool_parser.in_tool_section is False
-    # And returned the content as reasoning
-    assert result2 is not None
-    assert result2.content == large_text
+    # Parser should still be in tool section (no forced exit)
+    assert kimi_k2_tool_parser.in_tool_section is True
 
 
 def test_state_reset(kimi_k2_tool_parser):
@@ -551,8 +550,6 @@ def test_state_reset(kimi_k2_tool_parser):
     kimi_k2_tool_parser.token_buffer = "some buffer"
     kimi_k2_tool_parser.current_tool_id = 5
     kimi_k2_tool_parser.prev_tool_call_arr = [{"id": "test"}]
-    kimi_k2_tool_parser.section_char_count = 1000
-
     # Reset
     kimi_k2_tool_parser.reset_streaming_state()
 
@@ -561,7 +558,6 @@ def test_state_reset(kimi_k2_tool_parser):
     assert kimi_k2_tool_parser.token_buffer == ""
     assert kimi_k2_tool_parser.current_tool_id == -1
     assert kimi_k2_tool_parser.prev_tool_call_arr == []
-    assert kimi_k2_tool_parser.section_char_count == 0
     assert kimi_k2_tool_parser.current_tool_name_sent is False
     assert kimi_k2_tool_parser.streamed_args_for_tool == []
 
