@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, overload
 
+import vllm.envs as envs
 from vllm.beam_search import (
     BeamSearchInstance,
     BeamSearchOutput,
@@ -88,6 +89,7 @@ from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine import PauseMode
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
@@ -1760,6 +1762,16 @@ class LLM:
         priorities: Sequence[int] | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
+        pause_scheduler_for_batch_invariant = (
+            envs.VLLM_BATCH_INVARIANT
+            and not isinstance(self.llm_engine.engine_core, InprocClient)
+            and not self.llm_engine.is_sleeping()
+        )
+
+        if pause_scheduler_for_batch_invariant:
+            # keep the background engine from starting prefill before this
+            # offline batch has finished enqueuing all of its requests.
+            self.llm_engine.sleep(level=0, mode="keep")
 
         try:
             for i, prompt in enumerate(prompts):
@@ -1777,6 +1789,9 @@ class LLM:
             if added_request_ids:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
+        finally:
+            if pause_scheduler_for_batch_invariant:
+                self.llm_engine.wake_up(["scheduling"])
 
         return added_request_ids
 

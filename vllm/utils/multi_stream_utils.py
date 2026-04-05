@@ -6,6 +6,8 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
+
 
 def maybe_execute_in_parallel(
     fn0: Callable[[], Any],
@@ -34,6 +36,9 @@ def maybe_execute_in_parallel(
     Returns:
         Tuple of (fn0_result, fn1_result).
     """
+    if envs.VLLM_BATCH_INVARIANT:
+        aux_stream = None
+
     if aux_stream is not None:
         event0.record()
         result0 = fn0()
