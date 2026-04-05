@@ -3432,11 +3432,20 @@ class GPUModelRunner(
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + num_sampled_ids
-            assert end_idx <= self.max_model_len, (
-                "Sampled token IDs exceed the max model length. "
-                f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{self.max_model_len}"
-            )
+
+            # Instead of crashing the entire engine with an assertion,
+            # mark requests that exceed max_model_len as invalid.
+            # The scheduler will handle them as FINISHED_LENGTH_CAPPED.
+            if end_idx > self.max_model_len:
+                # Add this request to invalid indices so it's filtered out
+                if req_idx not in invalid_req_indices:
+                    invalid_req_indices.append(req_idx)
+                if self.use_async_scheduling:
+                    invalid_req_indices_set.add(req_idx)
+                else:
+                    # Clear sampled tokens for this request
+                    valid_sampled_token_ids[req_idx].clear()
+                continue
 
             self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
             self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
