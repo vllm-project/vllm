@@ -860,9 +860,19 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            # Create the profiler wrapper only on the first start call
+            profiler_type = self.profiler_config.profiler
+            # For torch profiler, recreate the wrapper when the previous
+            # profiling session has stopped. This keeps repeated start_profile
+            # calls idempotent and can help avoid start latency from reusing
+            # a stale backend profiler object across sessions.
+            if (
+                profiler_type == "torch"
+                and self.profiler is not None
+                and not self.profiler.active
+            ):
+                self.profiler = None
+
             if self.profiler is None:
-                profiler_type = self.profiler_config.profiler
                 if profiler_type == "torch":
                     self.profiler = TorchProfilerWrapper(
                         self.profiler_config,
@@ -873,6 +883,7 @@ class Worker(WorkerBase):
                     logger.debug(
                         "Starting torch profiler with trace name: %s", trace_name
                     )
+                # Create the cuda profiler wrapper only on the first start call
                 elif profiler_type == "cuda":
                     self.profiler = CudaProfilerWrapper(self.profiler_config)
                     logger.debug("Starting CUDA profiler")
@@ -882,8 +893,8 @@ class Worker(WorkerBase):
                         f"Invalid profiler value of {self.profiler_config.profiler}"
                     )
 
-            # If profiler already initialized, restart profiling but keep
-            # the original trace name from the first initialization.
+            # If profiler is already initialized for the current active session,
+            # start() is a no-op and keeps the existing trace name.
             self.profiler.start()
         else:
             if self.profiler is None:
