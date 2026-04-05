@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensors24,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4MxFp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
@@ -394,14 +395,29 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_group_size_32 = quant_args.group_size == 32
         is_float_type = quant_args.type == QuantizationType.FLOAT
         is_4_bits = quant_args.num_bits == 4
-
+        is_e8m0_scale = quant_args.scale_dtype == torch.uint8
         return (
             is_group_quant
             and is_float_type
             and is_4_bits
             and is_group_size_32
             and is_symmetric
+            and is_e8m0_scale
         )
+
+    @staticmethod
+    def _is_w4a4_mxfp4(
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        return CompressedTensorsConfig._is_mxfp4(
+            weight_quant
+        ) and CompressedTensorsConfig._is_mxfp4(input_quant)
+
+    @staticmethod
+    def _is_w4a16_mxfp4(
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        return CompressedTensorsConfig._is_mxfp4(weight_quant)
 
     @staticmethod
     def _is_static_tensor_w8a8(
@@ -603,7 +619,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._is_nvfp4_format(weight_quant) and input_quant is None:
             return CompressedTensorsW4A16Fp4()
 
-        if self._is_mxfp4(weight_quant):
+        if self._is_w4a4_mxfp4(weight_quant, input_quant):
+            return CompressedTensorsW4A4MxFp4()
+
+        if self._is_w4a16_mxfp4(weight_quant, input_quant):
             return CompressedTensorsW4A16Mxfp4()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
