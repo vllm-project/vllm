@@ -10,11 +10,16 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.quark.transform import (
+    OrthogonalTransform,
+    rotation_weight_loader,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
+    ModelWeightParameter,
     PackedvLLMParameter,
     PerTensorScaleParameter,
 )
@@ -42,6 +47,8 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         self,
         weight_quant_spec: dict[str, Any],
         input_quant_spec: dict[str, Any],
+        quant_config: dict[str, Any],
+        layer_names: list[str],
     ):
         self.out_dtype = None
 
@@ -78,6 +85,14 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
             logger.warning_once(
                 "[W4A8 MXFP4+FP8] Aiter Triton kernel not found. Using emulation mode."
             )
+
+        (
+            self.use_online_rotation,
+            self.rotation_config,
+            self.rotation_size,
+        ) = OrthogonalTransform.setup_transform(
+            quant_config=quant_config, layer_names=layer_names
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -142,6 +157,21 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
+        if self.use_online_rotation:
+            dtype = torch.float64 if self.rotation_config["trainable"] else torch.int8  # type: ignore[index]
+
+            input_rotation = ModelWeightParameter(
+                data=torch.empty(self.rotation_size, self.rotation_size, dtype=dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=rotation_weight_loader,
+            )
+            layer.register_parameter("input_rotation", input_rotation)
+
+            self.input_transform = OrthogonalTransform(
+                layer.input_rotation, self.rotation_config
+            )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Ensuring weights & scales are non-trainable
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
@@ -160,12 +190,18 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
                 requires_grad=False,
             )
 
+        if self.use_online_rotation:
+            self.input_transform.post_process_transform()
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.use_online_rotation:
+            x = self.input_transform(x)
+
         if self.use_aiter_kernel:
             return self._apply_aiter_kernel(layer, x, bias)
         else:
