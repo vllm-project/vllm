@@ -352,7 +352,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
 
   # marlin arches for fp16 output
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+  # Include 9.0 so H100/H200 get native SASS (see MARLIN_OTHER_ARCHS comment)
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   # marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
   # marlin arches for bf16 output (we need 9.0 for bf16 atomicAdd PTX)
@@ -363,7 +364,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
   cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
   # marlin arches for other files
-  cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
+  # Include 9.0 so that H100/H200 (sm_90) get native SASS instead of relying
+  # on PTX JIT, which fails when the wheel's CUDA toolkit is newer than the
+  # driver (e.g. wheel built with CTK 12.9 on a CUDA 12.8 driver).
+  cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
 
   if (MARLIN_OTHER_ARCHS)
 
@@ -1057,7 +1061,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # moe marlin arches
   # note that we always set `use_atomic_add=False` for moe marlin now,
   # so we don't need 9.0 for bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+  # Include 9.0 so H100/H200 get native SASS (see MARLIN_MOE_OTHER_ARCHS comment)
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   # moe marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
   # moe marlin arches for fp8 input
@@ -1066,7 +1071,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
   cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
   # moe marlin arches for other files
-  cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
+  # Include 9.0 so that H100/H200 (sm_90) get native SASS instead of relying
+  # on PTX JIT, which fails when the wheel's CUDA toolkit is newer than the
+  # driver (e.g. wheel built with CTK 12.9 on a CUDA 12.8 driver).
+  cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_OTHER_ARCHS)
 
     #
