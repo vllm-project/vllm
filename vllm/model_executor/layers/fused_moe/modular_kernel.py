@@ -10,6 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -1393,6 +1394,15 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
         )
+
+        # Aiter don't use temp buffer, so can skip copy if output is contiguous
+        if (
+            rocm_aiter_ops.is_fused_moe_enabled()
+            and not self.inplace
+            and fused_out.shape == output.shape
+            and fused_out.is_contiguous()
+        ):
+            output = fused_out
 
         return self._finalize(
             output,
