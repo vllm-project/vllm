@@ -117,7 +117,7 @@ def backend_to_kernel_cls(
         return [TrtLlmFp8ExpertsMonolithic, TrtLlmFp8ExpertsModular]
 
     elif backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
