@@ -204,6 +204,35 @@ class DeviceCommunicatorBase:
         )
         return output_tensor
 
+    def all_gather_into(
+        self,
+        output_tensor: torch.Tensor,
+        input_: torch.Tensor,
+        dim: int = -1,
+    ) -> torch.Tensor:
+        if dim < 0:
+            dim += input_.dim()
+        if self.world_size == 1:
+            output_tensor.copy_(input_)
+            return output_tensor
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        )
+        if dim != 0:
+            output_tensor.copy_(self.all_gather(input_, dim))
+            return output_tensor
+
+        expected_shape = (
+            input_.shape[0] * self.world_size,
+            *input_.shape[1:],
+        )
+        assert tuple(output_tensor.shape) == expected_shape, (
+            "Invalid output shape for all_gather_into. "
+            f"Expected {expected_shape}, got {tuple(output_tensor.shape)}."
+        )
+        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        return output_tensor
+
     def all_gatherv(
         self,
         input_: torch.Tensor | list[torch.Tensor],
@@ -244,6 +273,42 @@ class DeviceCommunicatorBase:
 
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
+
+    def reduce_scatter_into(
+        self,
+        output_tensor: torch.Tensor,
+        input_: torch.Tensor,
+        dim: int = -1,
+    ) -> torch.Tensor:
+        world_size = self.world_size
+        if world_size == 1:
+            output_tensor.copy_(input_)
+            return output_tensor
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        )
+        if dim < 0:
+            dim += input_.dim()
+        if dim != 0:
+            output_tensor.copy_(self.reduce_scatter(input_, dim))
+            return output_tensor
+
+        assert input_.shape[0] % world_size == 0, (
+            "reduce_scatter_into expects dim 0 to be divisible by world size: "
+            f"shape={tuple(input_.shape)}, world_size={world_size}"
+        )
+        expected_shape = (
+            input_.shape[0] // world_size,
+            *input_.shape[1:],
+        )
+        assert tuple(output_tensor.shape) == expected_shape, (
+            "Invalid output shape for reduce_scatter_into. "
+            f"Expected {expected_shape}, got {tuple(output_tensor.shape)}."
+        )
+        torch.distributed.reduce_scatter_tensor(
+            output_tensor, input_, group=self.device_group
+        )
+        return output_tensor
 
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None

@@ -4,12 +4,11 @@
 
 import pytest
 import torch
+from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
-from tests.utils import (
-    multi_gpu_test,
-)
+from tests.utils import multi_gpu_test
 from vllm.compilation.passes.fusion.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
@@ -20,10 +19,12 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import (
+    get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -32,13 +33,6 @@ from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
 FP8_DTYPE = current_platform.fp8_dtype()
-
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
 
 
 class TestMMRSModel(torch.nn.Module):
@@ -224,6 +218,87 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
 
+FLASHINFER_RS_CASE = "flashinfer_rs"
+FLASHINFER_AG_CASE = "flashinfer_ag"
+
+
+def _flashinfer_bmm_reshape(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    bmm_result = torch.ops.vllm.bmm_fp8.default(
+        input.unsqueeze(0),
+        weight.unsqueeze(0),
+        scale_a,
+        scale_b,
+        dtype,
+        "auto",
+    )
+    return torch.ops.aten.reshape.default(
+        bmm_result,
+        [input.shape[0], weight.shape[1]],
+    )
+
+
+def _build_flashinfer_rs_case(
+    dtype: torch.dtype,
+    tp_world_size: int,
+    tp_group_name: str,
+):
+    def fn(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+    ):
+        fp8_input = input.to(FP8_DTYPE)
+        mm_result = _flashinfer_bmm_reshape(fp8_input, weight, scale_a, scale_b, dtype)
+        return torch.ops.vllm.reduce_scatter.default(
+            mm_result,
+            dim=0,
+            world_size=tp_world_size,
+            group_name=tp_group_name,
+        )
+
+    ops_before = [torch.ops.vllm.reduce_scatter.default]
+    ops_after = [torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default]
+    return fn, ops_before, ops_after
+
+
+def _build_flashinfer_ag_case(
+    dtype: torch.dtype,
+    hidden_size: int,
+    tp_world_size: int,
+    tp_group_name: str,
+):
+    def fn(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+    ):
+        fp8_input = input.to(FP8_DTYPE)
+        all_gather = torch.ops.vllm.all_gather.default(
+            fp8_input,
+            dim=0,
+            world_size=tp_world_size,
+            group_name=tp_group_name,
+        )
+        output = _flashinfer_bmm_reshape(all_gather, weight, scale_a, scale_b, dtype)
+        q_size = hidden_size // 2
+        kv_size = hidden_size // 4
+        return torch.ops.aten.split_with_sizes.default(
+            output, [q_size, kv_size, kv_size], -1
+        )
+
+    ops_before = [torch.ops.vllm.all_gather.default]
+    ops_after = [torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default]
+    return fn, ops_before, ops_after
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model",
@@ -243,7 +318,7 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
 @pytest.mark.parametrize("dynamic", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_async_tp_pass_replace(
-    test_model: str,
+    test_model: type[torch.nn.Module],
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -290,7 +365,7 @@ def test_async_tp_pass_replace(
 def async_tp_pass_on_test_model(
     local_rank: int,
     world_size: int,
-    test_model_cls: torch.nn.Module,
+    test_model_cls: type[torch.nn.Module],
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -369,3 +444,115 @@ def async_tp_pass_on_test_model(
         # In post-nodes, fused_matmul_reduce_scatter or \
         # fused_all_gather_matmul should exist
         backend.check_after_ops(model.ops_in_model_after())
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "test_case",
+    [FLASHINFER_RS_CASE, FLASHINFER_AG_CASE],
+)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+@pytest.mark.parametrize("hidden_size", [16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+def test_async_tp_pass_replace_flashinfer(
+    test_case: str,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+):
+    if not hasattr(torch.ops.vllm, "bmm_fp8"):
+        pytest.skip("FlashInfer bmm_fp8 not available")
+
+    num_processes = 2
+
+    torch.multiprocessing.spawn(
+        flashinfer_async_tp_pass_on_test_model,
+        args=(num_processes, test_case, batch_size, seq_len, hidden_size, dtype),
+        nprocs=num_processes,
+    )
+
+
+def flashinfer_async_tp_pass_on_test_model(
+    local_rank: int,
+    world_size: int,
+    test_case: str,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+):
+    set_random_seed(0)
+
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "12346",
+        }
+    )
+
+    init_distributed_environment()
+
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig(
+        pass_config=PassConfig(
+            fuse_gemm_comms=True,
+        ),
+    )
+    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.model_config = ModelConfig(
+        model="RedHatAI/Llama-3.2-1B-Instruct-FP8",
+        trust_remote_code=True,
+        dtype=dtype,
+        seed=42,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+        async_tp_pass = AsyncTPPass(vllm_config)
+        backend = TestBackend(async_tp_pass)
+        hidden_states = torch.randn(
+            (batch_size * seq_len, hidden_size), dtype=dtype, requires_grad=False
+        )
+        weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)
+        scale_a = torch.tensor(1.0, dtype=torch.float32)
+        scale_b = torch.tensor(1.0, dtype=torch.float32)
+        tp_world_size = get_tensor_model_parallel_world_size()
+        tp_group_name = get_tp_group().unique_name
+
+        if test_case == FLASHINFER_RS_CASE:
+            fn, ops_before, ops_after = _build_flashinfer_rs_case(
+                dtype,
+                tp_world_size,
+                tp_group_name,
+            )
+        else:
+            fn, ops_before, ops_after = _build_flashinfer_ag_case(
+                dtype,
+                hidden_size,
+                tp_world_size,
+                tp_group_name,
+            )
+
+        graph = make_fx(fn, tracing_mode="fake")(
+            hidden_states,
+            weight,
+            scale_a,
+            scale_b,
+        )
+        backend.post_pass(graph.graph)
+
+        assert async_tp_pass.matched_count == 1
+        backend.check_before_ops(ops_before, fully_replaced=False)
+        backend.check_after_ops(ops_after)

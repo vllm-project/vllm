@@ -202,7 +202,6 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
-        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
@@ -290,10 +289,10 @@ def supports_trtllm_attention() -> bool:
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # TRTLLM attention is currently only validated on SM100 (CC 10.0).
-    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
-    # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
-    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    return (
+        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+    )
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -526,6 +525,38 @@ if has_flashinfer():
         return torch.empty(
             A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
         )
+
+    def _bmm_fp8_out(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        dtype: torch.dtype,
+        backend: str,
+        out: torch.Tensor,
+    ) -> None:
+        from flashinfer import bmm_fp8 as bmm_fp8_
+
+        bmm_fp8_(A, B, A_scale, B_scale, dtype, out, backend)
+        return None
+
+    def _bmm_fp8_out_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        dtype: torch.dtype,
+        backend: str,
+        out: torch.Tensor,
+    ) -> None:
+        return None
+
+    direct_register_custom_op(
+        op_name="bmm_fp8_out",
+        op_func=_bmm_fp8_out,
+        mutates_args=["out"],
+        fake_impl=_bmm_fp8_out_fake,
+    )
 
     @torch.library.custom_op(
         "vllm::flashinfer_nvfp4_quantize",

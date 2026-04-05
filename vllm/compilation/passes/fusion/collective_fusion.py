@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import suppress
+
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
@@ -10,6 +12,7 @@ from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group
+from vllm.distributed.flashinfer_async_tp_ops import register_flashinfer_async_tp_ops
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
@@ -18,6 +21,9 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .flashinfer_collective_fusion import (
+    rewrite_flashinfer_bmm_fp8_collective_fusion,
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -377,7 +383,8 @@ class AsyncTPPass(VllmPatternMatcherPass):
         super().__init__(config)
 
         # Enable symmetric memory for the TP process group
-        enable_symm_mem_for_group(get_tp_group().device_group.group_name)
+        tp_device_group_name = get_tp_group().device_group.group_name
+        enable_symm_mem_for_group(tp_device_group_name)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="async_tp_pass"
         )
@@ -402,6 +409,10 @@ class AsyncTPPass(VllmPatternMatcherPass):
             AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
                 self.patterns
             )
+            with suppress(ImportError):
+                import vllm.utils.flashinfer  # noqa: F401
+            if hasattr(torch.ops.vllm, "bmm_fp8"):
+                register_flashinfer_async_tp_ops()
 
         self.dump_patterns(config, self.patterns)
 
@@ -420,4 +431,6 @@ class AsyncTPPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
+        if hasattr(torch.ops.vllm, "bmm_fp8"):
+            self.matched_count += rewrite_flashinfer_bmm_fp8_collective_fusion(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
