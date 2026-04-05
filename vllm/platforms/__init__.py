@@ -163,26 +163,37 @@ def _is_amd_zen_cpu() -> bool:
 def cpu_platform_plugin() -> str | None:
     is_cpu = False
     logger.debug("Checking if CPU platform is available.")
-    try:
-        is_cpu = vllm_version_matches_substr("cpu")
-        if is_cpu:
-            logger.debug(
-                "Confirmed CPU platform is available because vLLM is built with CPU."
-            )
-        if not is_cpu:
-            import sys
-
-            is_cpu = sys.platform.startswith("darwin")
-            if is_cpu:
-                logger.debug(
-                    "Confirmed CPU platform is available because the machine is MacOS."
-                )
-
-    except Exception as e:
-        logger.debug("CPU platform is not available because: %s", str(e))
+    # If the target device is explicitly set to CPU, honor it even when
+    # package metadata is unavailable (e.g. source checkout without install).
+    if envs.VLLM_TARGET_DEVICE == "cpu":
+        logger.debug(
+            "Confirmed CPU platform is available because VLLM_TARGET_DEVICE=cpu."
+        )
+        is_cpu = True
 
     if not is_cpu:
-        return None
+        try:
+            is_cpu = vllm_version_matches_substr("cpu")
+            if is_cpu:
+                logger.debug(
+                    "Confirmed CPU platform is available "
+                    "because vLLM is built with CPU."
+                )
+        except Exception as e:
+            logger.debug("CPU platform is not available because: %s", str(e))
+
+    # Fallback: on macOS, always use CPU (covers both the normal path where
+    # the version string didn't contain "cpu" and the exception path where
+    # package metadata is missing in source/editable checkouts).
+    if not is_cpu:
+        import sys
+
+        if sys.platform.startswith("darwin"):
+            logger.debug(
+                "Confirmed CPU platform is available because the machine is MacOS."
+            )
+        else:
+            return None
 
     if _is_amd_zen_cpu():
         try:
@@ -211,6 +222,13 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
+    # Explicit user override should take precedence over auto-detection.
+    # Route through cpu_platform_plugin() so that ZenCpuPlatform is
+    # selected when appropriate instead of hardcoding CpuPlatform.
+    if envs.VLLM_TARGET_DEVICE == "cpu":
+        logger.debug("Platform is forced to CPU because VLLM_TARGET_DEVICE=cpu.")
+        return cpu_platform_plugin() or "vllm.platforms.cpu.CpuPlatform"
+
     platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []
