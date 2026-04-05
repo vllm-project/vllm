@@ -84,10 +84,13 @@ def mock_parallel_groups():
         yield mock_group
 
 
-def _setup_kv_transfer_request(request, remote_host="127.0.0.1", fake_port=4789):
+def _setup_kv_transfer_request(
+    request, remote_host="127.0.0.1", fake_port=4789, fake_transfer_id="0"
+):
     """Setup KV transfer parameters for a request."""
     request.kv_transfer_params.update(
         {
+            "transfer_id": fake_transfer_id,
             "remote_notify_port": fake_port,
             "remote_block_ids": None,
             "remote_host": remote_host,
@@ -206,7 +209,6 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=True,
     )

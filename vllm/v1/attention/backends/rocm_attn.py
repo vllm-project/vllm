@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -166,6 +167,7 @@ class RocmAttentionBackend(AttentionBackend):
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -174,19 +176,15 @@ class RocmAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # ROCM paged attention kernel only supports block sizes 16 and 32
+        # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
-
-        # However, The limitations in [16, 32] are reasonable for a native C++ kernel,
-        # but vLLM should allow support for non-standard sizes via the Triton path,
-        # as addressed in this PR: https://github.com/vllm-project/vllm/pull/31380,
-        # where the Triton kernel under rocm_atten does not support inference
-        # for a non-standard qwen3-next model with a block_size of 544.
-        # We have fixed the Triton kernel so that the standard model uses the original
-        # bit-addressing logic, while the non-standard model
-        # uses our optimized kernel logic.
-        return [16, 32, 544]
+        # However, vLLM allows support for any multiple of 16 via the Triton path.
+        # As addressed in PR: https://github.com/vllm-project/vllm/pull/31380,
+        # non-standard models (like qwen3-next with block_size 544, or qwen3_5
+        # with 784 and 1056) are dynamically routed to our optimized Triton kernel
+        # in `do_kv_cache_update`.
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -198,7 +196,10 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        return True
+        # ROCM custom attention kernel does not support sinks.
+        # Callink this backend with sinks will cause it to fall back to the Triton
+        # kernel, which is less efficient than the proper triton backends.
+        return False
 
     forward_includes_kv_cache_update: bool = False
 
@@ -212,12 +213,17 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """RocmAttention supports all attention types."""
+        """ENCODER_DECODER is not supported because
+        chunked_prefill_paged_decode's prefill kernel (context_attention_fwd)
+        assumes self-attention semantics: it treats passed K/V as new tokens
+        to mix with cached K/V. For cross-attention layers the encoder K/V
+        are already fully cached, so mixing them again produces incorrect
+        results when max_query_len > 1 (e.g. beam search).
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER_DECODER,
         )
 
     @staticmethod
@@ -310,7 +316,7 @@ class RocmAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
@@ -401,7 +407,7 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             assert layer._q_scale_float == 1.0, (
@@ -457,11 +463,9 @@ class RocmAttentionImpl(AttentionImpl):
         # Get the actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
-        # Determine if it is a power of 2
-        is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
 
-        if is_pow2:
-            # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
+        if block_size in (16, 32):
+            # Normal 16, 32, use vLLM native HIP C++ logic
             PagedAttention.write_to_paged_cache(
                 key,
                 value,
@@ -473,7 +477,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
         else:
-            # Case B: Non-standard blocks (e.g., 544 in Qwen3),
+            # Case B: Non-standard blocks (e.g., 64, 128, 544 in Qwen3Next or Qwen3.5 ),
             # force using our modified Triton logic
             triton_reshape_and_cache_flash(
                 key,
@@ -510,7 +514,7 @@ class RocmAttentionImpl(AttentionImpl):
         )
         flash_layout = False
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

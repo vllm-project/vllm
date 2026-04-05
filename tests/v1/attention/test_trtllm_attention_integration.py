@@ -43,18 +43,19 @@ class MockAttentionLayer:
     """Minimal mock of an attention layer for testing."""
 
     def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._q_scale = torch.tensor(2.0, device=device)
+        self._k_scale = torch.tensor(3.0, device=device)
+        self._v_scale = torch.tensor(4.0, device=device)
+        self._q_scale_float = 2.0
+        self._k_scale_float = 3.0
+        self._v_scale_float = 4.0
         self._o_scale_float = None
 
 
 MODEL = "Qwen/Qwen2.5-0.5B"
 BLOCK_SIZE = 16
 NUM_GPU_BLOCKS = 8192
+DEVICE_TYPE = current_platform.device_type
 
 BATCH_SPECS = {
     "decode_only": BatchSpec(
@@ -172,7 +173,7 @@ def _run_trtllm_integration(batch_spec):
     """Run TRTLLM attention through the full FlashInfer pipeline
     and compare against an SDPA reference."""
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     vllm_config = create_vllm_config(
         model_name=MODEL,

@@ -59,6 +59,7 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
+MMTensorIPC = Literal["direct_rpc", "torch_shm"]
 MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
 """
 A dictionary containing an entry for each modality type of dummy data.
@@ -145,14 +146,14 @@ class MultiModalConfig:
     parallelism (TP).
 
     - `"weights"`: Within the same vLLM engine, split the weights of
-        each layer across TP ranks. (default TP behavior)\n
+      each layer across TP ranks. (default TP behavior)
     - `"data"`: Within the same vLLM engine, split the batched input data
-        across TP ranks to process the data in parallel, while hosting
-        the full weights on each TP rank.
-        This batch-level DP is not to be confused with API request-level
-        DP (which is controlled by `--data-parallel-size`).
-        This is only supported on a per-model basis and falls back to
-        `"weights"` if the encoder does not support DP."""
+      across TP ranks to process the data in parallel, while hosting
+      the full weights on each TP rank.
+      This batch-level DP is not to be confused with API request-level
+      DP (which is controlled by `--data-parallel-size`).
+      This is only supported on a per-model basis and falls back to
+      `"weights"` if the encoder does not support DP."""
     mm_encoder_attn_backend: AttentionBackendEnum | None = None
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
@@ -172,6 +173,11 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    mm_tensor_ipc: MMTensorIPC = "direct_rpc"
+    """IPC (inter-process communication) method for multimodal tensors.
+    - "direct_rpc": Use msgspec serialization via RPC
+    - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
+    Defaults to "direct_rpc". """
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod

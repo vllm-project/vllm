@@ -348,13 +348,46 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Can remove this after the following issue gets fixed
         # https://github.com/pytorch/pytorch/issues/174502
         if envs.VLLM_ENABLE_PREGRAD_PASSES:
-            ctx: Any = contextlib.nullcontext()
+            pregrad_ctx: Any = contextlib.nullcontext()
         else:
-            ctx = patch(
+            pregrad_ctx = patch(
                 "torch._inductor.compile_fx._recursive_pre_grad_passes",
                 lambda gm, _: gm,
             )
-        with ctx, _patch_constrain_to_fx_strides():
+
+        # When inputs are FakeTensors (from create_concrete_args),
+        # standalone_compile("from_example_inputs") would normally create
+        # a fresh FakeTensorMode, causing a mode mismatch assertion.
+        # Patch FakeTensorMode in standalone_compile so it reuses the
+        # mode already attached to our FakeTensors. This gives us both
+        # ignore_shape_env=True (from "from_example_inputs") and mode
+        # consistency (from reusing our mode).
+        # Can remove this after the following issue gets fixed:
+        # https://github.com/pytorch/pytorch/issues/176562
+        from torch._subclasses.fake_tensor import FakeTensor
+
+        input_fake_mode = None
+        for x in example_inputs:
+            if isinstance(x, FakeTensor):
+                input_fake_mode = x.fake_mode
+                break
+
+        if input_fake_mode is not None:
+            # Use patch.object on the actual module from sys.modules
+            # because in Python <=3.10 the string-based patch() resolves
+            # torch._inductor.standalone_compile to the wrapper function
+            # (defined in __init__.py) instead of the module.
+            import sys
+
+            fake_mode_ctx: Any = patch.object(
+                sys.modules["torch._inductor.standalone_compile"],
+                "FakeTensorMode",
+                lambda *a, **kw: input_fake_mode,
+            )
+        else:
+            fake_mode_ctx = contextlib.nullcontext()
+
+        with pregrad_ctx, fake_mode_ctx, _patch_constrain_to_fx_strides():
             compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if use_aot:
@@ -598,6 +631,23 @@ class InductorAdaptor(CompilerInterface):
                 torch._functorch.config.patch(enable_remote_autograd_cache=False)
             )
             stack.enter_context(_patch_constrain_to_fx_strides())
+
+            # Clear the tracing context before calling compile_fx.
+            # vLLM calls compile_fx from within a PiecewiseCompileInterpreter
+            # that runs under Dynamo's tracing context. The tracing context
+            # has a FakeTensorMode from Dynamo, but the example inputs for
+            # this subgraph have fake tensors from a different FakeTensorMode.
+            # compile_fx's _compile_fx_main calls detect_fake_mode() which
+            # asserts all FakeTensorModes match, causing a crash.
+            # Clearing the tracing context lets compile_fx create its own.
+            saved_tracing_context = torch._guards.TracingContext.try_get()
+            if saved_tracing_context is not None:
+                torch._guards._TLS.tracing_context = None
+
+                def _restore_tracing_context():
+                    torch._guards._TLS.tracing_context = saved_tracing_context
+
+                stack.callback(_restore_tracing_context)
 
             compiled_graph = compile_fx(
                 graph,

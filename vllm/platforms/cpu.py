@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
-import json
 import os
 import platform
 import subprocess
@@ -11,12 +10,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import psutil
-import regex as re
 import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import is_quantized_kv_cache
+from vllm.utils.ompmultiprocessing import OMPProcessManager
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -76,6 +75,10 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
     device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
+    omp_process_manager = None
+    smt = 1  # SMT level for OMP - 4 threads on PowerPC, 1 on others
+    global_cpu_mask = None
+    simulate_numa = int(os.environ.get("_SIM_MULTI_NUMA", 0))
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -93,30 +96,7 @@ class CpuPlatform(Platform):
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
-            # Workaround for Issue #25655: RISC-V scheduler bug with float16
-            #
-            # Background:
-            # - RISC-V currently uses scalar code path
-            # - There is a latent bug in the vLLM scheduler that provides
-            # invalid
-            #   physical_block_idx values under certain conditions
-            # - This bug causes segmentation faults when using float16
-            # dtype on RISC-V
-            # - Testing shows that forcing float32 successfully bypasses
-            # this issue
-            #
-            # Technical details:
-            # - The bug manifests as out-of-bounds physical_block_idx in
-            # block_tables
-            # - Only occurs on RISC-V hardware
-            # tested on Sophgo SG2044
-            # - Does not reproduce on x86 or other architectures
-            # - Root cause is in Python-level scheduling logic,
-            # not C++ kernels
-            #
-            # This is a temporary workaround until the scheduler bug is fixed.
-            # See: https://github.com/vllm-project/vllm/issues/25655
-            return [torch.float32]
+            return [torch.bfloat16, torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
@@ -185,7 +165,7 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        if cache_config.block_size is None:
+        if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
         if cache_config.block_size % 32 != 0:
@@ -206,7 +186,7 @@ class CpuPlatform(Platform):
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(cache_config.cache_dtype):
             logger.warning(
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )
@@ -214,26 +194,10 @@ class CpuPlatform(Platform):
 
         cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
 
-        # reserve at least one core for nixl_connector under p/d case
-        if vllm_config.kv_transfer_config and (
-            envs.VLLM_CPU_NUM_OF_RESERVED_CPU == 0
-            or envs.VLLM_CPU_NUM_OF_RESERVED_CPU is None
-        ):
-            os.environ["VLLM_CPU_NUM_OF_RESERVED_CPU"] = "1"
-
         parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.world_size > 1
-            and parallel_config.distributed_executor_backend is not None
-            and parallel_config.distributed_executor_backend != "mp"
-        ):
-            logger.warning(
-                (
-                    "%s is not supported on CPU, fallback to mp "
-                    "distributed executor backend."
-                ),
-                parallel_config.distributed_executor_backend,
-            )
+        # OMP requires the MP executor to function correctly, UniProc is not
+        # supported as it is not possible to set the OMP environment correctly
+        if parallel_config.distributed_executor_backend == "uni":
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
@@ -269,11 +233,14 @@ class CpuPlatform(Platform):
                     "size_asserts": False,
                     "nan_asserts": False,
                     "epilogue_fusion": True,
+                    "cpp.dynamic_threads": True,
                 }
             )
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
+
+        vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
         assert vllm_config.device_config.device_type == "cpu"
 
@@ -287,23 +254,19 @@ class CpuPlatform(Platform):
         # variable "NUMEXPR_MAX_THREADS" (64)'.
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
-        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
-            # Set default threads num for OpenMP parallel
-            os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
-        else:
-            # In this case, setting the OpenMP configuration via
-            # OMP_NUM_THREADS is up to the user.
-            logger.info("Disabling binding processes to CPU cores...")
-
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-        # Intel OpenMP setting
+        # Avoid inductor generates num_thread() and breaks the thread binding
+        os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
+
         ld_preload_str = os.getenv("LD_PRELOAD", "")
-        if "libiomp5.so" in ld_preload_str:
+
+        # Intel and CLANG OpenMP setting
+        if "libiomp5.so" in ld_preload_str or "libomp5" in ld_preload_str:
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
             os.environ["KMP_BLOCKTIME"] = "1"
@@ -314,36 +277,30 @@ class CpuPlatform(Platform):
             os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
 
+        cpu_architecture = Platform.get_cpu_architecture()
+
+        # LD_PRELOAD libtcmalloc, bundled under vllm/libs to reduce
+        # memory allocation overhead
         if (
             platform.system() == "Linux"
-            and Platform.get_cpu_architecture()
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
-            and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
+            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.X86)
+            and "libtcmalloc" not in ld_preload_str
         ):
-            # We need to LD_PRELOAD PyTorch's libgomp, otherwise only
-            # one core will be properly utilized when we thread-bind
-            # See: https://github.com/vllm-project/vllm/issues/27369
-            # TODO: Remove once:
-            # https://github.com/pytorch/pytorch/issues/166087 is fixed
-
-            # We need to find the location of PyTorch's libgomp
-            torch_pkg = os.path.dirname(torch.__file__)
-            site_root = os.path.dirname(torch_pkg)
-            # Search both torch.libs and torch/lib - See: https://github.com/vllm-project/vllm/issues/30470
-            torch_libs_paths = [
-                os.path.join(site_root, "torch.libs"),
-                os.path.join(torch_pkg, "lib"),
-            ]
-            pytorch_libgomp_so_candidates = []
-            for torch_libs in torch_libs_paths:
-                pytorch_libgomp_so_candidates.extend(
-                    glob.glob(os.path.join(torch_libs, "libgomp*.so*"))
+            vllm_pkg = os.path.dirname(os.path.dirname(__file__))
+            tcmalloc_so = None
+            for pattern in ("libtcmalloc_minimal*.so*", "libtcmalloc.so*"):
+                tcmalloc_so_candidates = glob.glob(
+                    os.path.join(vllm_pkg, "libs", pattern)
                 )
-            if pytorch_libgomp_so_candidates:
-                pytorch_libgomp_so = pytorch_libgomp_so_candidates[0]
+                if tcmalloc_so_candidates:
+                    tcmalloc_so = tcmalloc_so_candidates[0]
+                    break
+
+            if tcmalloc_so is not None:
                 if ld_preload_str:
-                    ld_preload_str += ":"
-                ld_preload_str += pytorch_libgomp_so
+                    ld_preload_str = f"{tcmalloc_so}:{ld_preload_str}"
+                else:
+                    ld_preload_str = tcmalloc_so
                 os.environ["LD_PRELOAD"] = ld_preload_str
 
         os.environ["LOCAL_WORLD_SIZE"] = str(
@@ -360,48 +317,91 @@ class CpuPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
+        # CI specific "quick" NUMA simulation - split all available CPUs
+        # into a fake NUMA topology
+        if os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", None) is not None:
+            os.environ["_SIM_MULTI_NUMA"] = str(
+                vllm_config.parallel_config.world_size
+                * vllm_config.parallel_config._api_process_count
+            )
 
     @classmethod
-    def get_allowed_cpu_core_node_list(cls) -> tuple[list[int], list[LogicalCPUInfo]]:
-        assert platform.system() == "Linux"
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: CPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
-        # Init LogicalCPUInfo from lscpu
-        lscpu_output = subprocess.check_output(
-            "lscpu -J -e=CPU,CORE,NODE", shell=True, text=True
+    @classmethod
+    def get_omp_manager(cls) -> OMPProcessManager:
+        # initialise the OMP resource management if need be and return the manager
+        if cls.omp_process_manager is None:
+            if cls.get_cpu_architecture() == CpuArchEnum.POWERPC:
+                cls.smt = 4
+            cls.omp_process_manager = OMPProcessManager(
+                affinity=cls.get_global_cpu_mask(), smt=cls.smt
+            )
+            # we need to fix up the topology returned by the OMP Manager for
+            # simulated NUMA environments in CI
+            if cls.simulate_numa > 0:
+                logger.info(
+                    "Adjusting numa topology to resemble at least %d nodes",
+                    int(cls.simulate_numa),
+                )
+                om = cls.omp_process_manager
+                while len(om.omp_places) < cls.simulate_numa:
+                    new_omp_places = []
+                    touched = False
+                    for omp_place in om.omp_places:
+                        if len(omp_place["mask"]) > 1:
+                            touched = True
+                            cpu_list = sorted(list(omp_place["mask"]))
+                            new_omp_places.append(
+                                {
+                                    "mask": set(cpu_list[0 : int(len(cpu_list) / 2)]),
+                                    "available": True,
+                                }
+                            )
+                            new_omp_places.append(
+                                {
+                                    "mask": set(cpu_list[int(len(cpu_list) / 2) :]),
+                                    "available": True,
+                                }
+                            )
+                    if touched:
+                        om.omp_places = new_omp_places
+                    else:
+                        raise ValueError(
+                            "Cannot split the existing NUMA topology to match "
+                            "simulation requirements"
+                        )
+
+        return cls.omp_process_manager
+
+    @classmethod
+    def get_global_cpu_mask(cls) -> set[int]:
+        # get global cpu mask
+        if cls.global_cpu_mask is None:
+            if hasattr(os, "sched_getaffinity"):
+                cls.global_cpu_mask = os.sched_getaffinity(0)
+            else:
+                # macOS does not support sched_getaffinity
+                cpu_count = os.cpu_count() or 1
+                cls.global_cpu_mask = set(range(cpu_count))
+        return cls.global_cpu_mask
+
+    @classmethod
+    def reserve_cpus(cls, reserve: set[int]) -> bool:
+        # remove CPUs from global mask, for now there is no "release" mechanism
+        if cls.omp_process_manager is not None:
+            for place in cls.omp_process_manager.omp_places:
+                if not place["available"]:
+                    return False
+        cls.global_cpu_mask = cls.get_global_cpu_mask() - reserve
+        # reinitialize OMP resource management
+        cls.omp_process_manager = OMPProcessManager(
+            affinity=cls.global_cpu_mask, smt=cls.smt
         )
-        lscpu_output = re.sub(r'"node":\s*-\s*(,|\n)', r'"node": 0\1', lscpu_output)
-        logical_cpu_list: list[LogicalCPUInfo] = json.loads(
-            lscpu_output, object_hook=LogicalCPUInfo.json_decoder
-        )["cpus"]
-
-        # Filter CPUs with invalid attributes
-        logical_cpu_list = [
-            x
-            for x in logical_cpu_list
-            if -1 not in (x.id, x.physical_core, x.numa_node)
-        ]
-
-        # Filter allowed CPUs
-        if hasattr(os, "sched_getaffinity"):
-            allowed_cpu_id_list = os.sched_getaffinity(0)
-        else:
-            raise NotImplementedError("Unsupported OS")
-        logical_cpu_list = [x for x in logical_cpu_list if x.id in allowed_cpu_id_list]
-
-        # Get allowed NUMA nodes
-        allowed_numa_nodes = set()
-        for x in logical_cpu_list:
-            allowed_numa_nodes.add(x.numa_node)  # type: ignore
-        allowed_numa_nodes_list = sorted(allowed_numa_nodes)
-
-        env_key = CpuPlatform.device_control_env_var
-        if env_key in os.environ and os.environ[env_key] != "":
-            visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
-            allowed_numa_nodes_list = [
-                x for x in sorted(list(set(visible_nodes))) if x in allowed_numa_nodes
-            ]
-
-        return allowed_numa_nodes_list, logical_cpu_list
+        return True
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
@@ -487,21 +487,32 @@ class CpuPlatform(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
-            if torch._C._cpu._is_avx512_supported():
-                try:
-                    import vllm._C  # noqa: F401
-                except ImportError as e:
-                    logger.warning("Failed to import from vllm._C: %r", e)
+            # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
+            # This will cause a exception "dynamic module does define
+            # module export function". But the library is imported
+            # successfully. So ignore the exception for now, until we find
+            # a solution.
+            ignored_msg = "dynamic module does not define module export function"
+            if torch.cpu._is_avx512_supported():
+                if torch.cpu._is_avx512_bf16_supported():
+                    try:
+                        import vllm._C  # noqa: F401
+                    except ImportError as e:
+                        logger.warning("Failed to import from vllm._C: %r", e)
+                else:
+                    try:
+                        import vllm._C_AVX512  # noqa: F401
+                    except ImportError as e:
+                        if ignored_msg not in e.msg:
+                            logger.warning(
+                                "Failed to import from vllm._C_AVX512: %r", e
+                            )
             else:
-                # Note: The lib name is _C_AVX2, but the module name is _C.
-                # This will cause a exception "dynamic module does define
-                # module export function". But the library is imported
-                # successfully. So ignore the exception for now, until we find
-                # a solution.
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
-                    logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                    if ignored_msg not in e.msg:
+                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
