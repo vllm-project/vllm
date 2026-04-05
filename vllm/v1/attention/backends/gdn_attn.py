@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import logging
 from dataclasses import dataclass
 
 import torch
@@ -20,6 +21,33 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+
+# Module-level logger to avoid repeated initialization in hot paths
+logger = logging.getLogger(__name__)
+
+
+def _warn_about_spec_token_limitation(
+    num_spec: int, max_allowed: int | None = None
+) -> None:
+    """Helper function to warn about FlashInfer GDN kernel limitations."""
+    if max_allowed is not None and max_allowed < num_spec + 1:
+        logger.warning(
+            "FlashInfer GDN kernel does not fully support "
+            "%d speculative tokens (>4). Using %d tokens "
+            "instead to prevent CUDA errors. Consider reducing "
+            "num_speculative_tokens to 4 or fewer.",
+            num_spec,
+            max_allowed - 1,
+        )
+    elif num_spec > 4:
+        logger.warning(
+            "GDN attention backend with FlashInfer kernel has known "
+            "issues with >4 speculative tokens. You specified %d "
+            "tokens, which may cause CUDA illegal memory access "
+            "errors under load. Consider setting "
+            "num_speculative_tokens to 4 or fewer for stability.",
+            num_spec,
+        )
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -94,6 +122,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
             self.num_spec: int = self.speculative_config.num_speculative_tokens
+
+            # Warn about FlashInfer GDN kernel limitation with >4 speculative tokens
+            _warn_about_spec_token_limitation(self.num_spec)
         else:
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
@@ -224,6 +255,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_prefill_tokens = (
                 non_spec_query_lens_cpu.sum().item() - num_decode_tokens
             )
+
+        # Calculate bounds checking once for both branches to avoid duplication
+        # Prevents CUDA illegal memory access when using >4 speculative tokens
+        max_allowed_spec_tokens = (
+            min(self.num_spec + 1, block_table_tensor.size(1))
+            if spec_sequence_masks is not None
+            else None
+        )
+        if (
+            max_allowed_spec_tokens is not None
+            and max_allowed_spec_tokens < self.num_spec + 1
+        ):
+            _warn_about_spec_token_limitation(self.num_spec, max_allowed_spec_tokens)
+
+        if spec_sequence_masks is None:
             num_spec_decode_tokens = (
                 query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens
             )
@@ -253,7 +299,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
                 # Filter by spec_sequence_masks to exclude padded sequences
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_sequence_masks, :max_allowed_spec_tokens
                 ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
@@ -263,6 +309,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
+                # Type assertions for mypy - these are not None in this branch
+                assert spec_sequence_masks is not None
+                assert spec_sequence_masks_cpu is not None
+
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks, query_lens
                 )
@@ -272,7 +322,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_token_indx = index[num_non_spec_tokens:]
 
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_sequence_masks, :max_allowed_spec_tokens
                 ]
                 non_spec_state_indices_tensor = block_table_tensor[
                     ~spec_sequence_masks, 0
