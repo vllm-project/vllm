@@ -50,6 +50,16 @@ from .passes.pass_manager import PostGradPassManager
 logger = init_logger(__name__)
 
 
+class CompilationDone(Exception):
+    """Raised in compile-only mode after compilation is complete.
+
+    This signals that the vLLM-compile cache has been populated and
+    there is no need to actually execute the compiled code.
+    """
+
+    pass
+
+
 def make_copy_and_call(
     sym_tensor_indices: list[int],
     input_buffers: list[torch.Tensor | None],
@@ -990,7 +1000,14 @@ class VllmBackend:
         # Compute config/compiler/code hashes once and reuse
         config_hash = vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        # Filter out PyTorch internal files — they are already covered
+        # by the torch version in env_factors.
+        torch_root = os.path.dirname(torch.__file__) + os.sep
+        forward_code_files = [
+            f
+            for f in sorted(self.compilation_config.traced_files)
+            if not f.startswith(torch_root)
+        ]
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",

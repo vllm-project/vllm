@@ -247,3 +247,92 @@ def test_model_startup(monkeypatch, vllm_runner, fresh_vllm_cache, spec):
 
     # Warm start — compiled artifacts loaded from disk cache.
     _check_model_run(vllm_runner, spec, is_cold_start=False)
+
+
+# ---------------------------------------------------------------------------
+# compile_model (compile-only) cold start tests
+# ---------------------------------------------------------------------------
+
+COMPILE_ONLY_SPECS = [
+    pytest.param(
+        ModelStartupSpec(
+            model="microsoft/Phi-tiny-MoE-instruct",
+            hf_overrides={},
+            cold_artifacts_saved=3,
+            warm_artifacts_saved=0,
+            warm_artifacts_loaded=3,
+        ),
+        id="phi_tiny_moe",
+    ),
+    pytest.param(
+        ModelStartupSpec(
+            model="openai/gpt-oss-120b",
+            hf_overrides={
+                "num_hidden_layers": 8,
+                "hidden_size": 256,
+                "intermediate_size": 512,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 1,
+                "num_local_experts": 8,
+            },
+            cold_artifacts_saved=3,
+            warm_artifacts_saved=0,
+            warm_artifacts_loaded=3,
+        ),
+        id="gpt_oss_120b",
+    ),
+    pytest.param(
+        ModelStartupSpec(
+            model="zai-org/GLM-4.5",
+            hf_overrides=_SMALL_MOE_OVERRIDES,
+            cold_artifacts_saved=4,
+            warm_artifacts_saved=0,
+            warm_artifacts_loaded=4,
+        ),
+        id="glm_4.5",
+    ),
+]
+
+
+def _compile_only_cold_start(spec: ModelStartupSpec):
+    """Cold start using compile_model (fake weights, no GPU memory)."""
+    from vllm.compile_only import compile_model
+
+    old = compilation_counter.clone()
+    compile_model(
+        spec.model,
+        trust_remote_code=True,
+        max_model_len=256,
+        max_num_batched_tokens=1024,
+        block_size=64,
+        hf_overrides=spec.hf_overrides,
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            pass_config=PassConfig(fuse_allreduce_rms=False),
+        ),
+    )
+
+    saved = (
+        compilation_counter.num_compiled_artifacts_saved
+        - old.num_compiled_artifacts_saved
+    )
+    print(f"\n=== COMPILE-ONLY COLD START for {spec.model} ===")
+    print(f"  num_compiled_artifacts_saved={saved}")
+    assert saved == spec.cold_artifacts_saved, f"cold_artifacts_saved: got {saved}"
+
+
+@pytest.mark.parametrize("spec", COMPILE_ONLY_SPECS)
+@fork_new_process_for_each_test
+def test_compile_only_startup(monkeypatch, vllm_runner, fresh_vllm_cache, spec):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # Cold start: compile-only in a forked child (fork before CUDA init).
+    ctx = mp.get_context("fork")
+    p = ctx.Process(target=_compile_only_cold_start, args=(spec,))
+    p.start()
+    p.join()
+    assert p.exitcode == 0, "Compile-only cold start failed"
+
+    # Warm start — compiled artifacts loaded from disk cache.
+    _check_model_run(vllm_runner, spec, is_cold_start=False)

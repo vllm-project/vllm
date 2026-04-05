@@ -665,6 +665,12 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
+    compile_only: bool = False
+    """If True, run in compile-only mode: only torch.compile
+    compilation, skip CUDA graph capture, kernel warmup, and sampler
+    warmup. Used to pre-populate vLLM's torch.compile cache without
+    allocating KV caches or setting up the full engine."""
+
     fast_moe_cold_start: bool | None = None
     """Optimization for fast MOE cold start.
 
@@ -749,6 +755,8 @@ class CompilationConfig:
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
+            # compile_only doesn't affect the compiled graph
+            "compile_only",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
