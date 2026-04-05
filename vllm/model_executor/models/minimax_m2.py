@@ -31,7 +31,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -59,7 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -96,6 +96,9 @@ class MiniMaxM2MoE(nn.Module):
         else:
             self.e_score_correction_bias = None
 
+        vllm_config = get_current_vllm_config()
+        self.enable_eplb = vllm_config.parallel_config.enable_eplb
+
         self.experts = FusedMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -108,6 +111,7 @@ class MiniMaxM2MoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             router_logits_dtype=torch.float32,
+            enable_eplb=self.enable_eplb,
         )
 
         self.gate = ReplicatedLinear(
@@ -496,7 +500,7 @@ class MiniMaxM2Model(nn.Module):
         return loaded_params
 
 
-class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -529,6 +533,43 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self):
+        self.expert_weights: list[list[torch.Tensor]] = []
+        self.moe_layers: list[nn.Module] = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if hasattr(layer, "block_sparse_moe") and isinstance(
+                layer.block_sparse_moe, MiniMaxM2MoE
+            ):
+                example_moe = layer.block_sparse_moe.experts
+                self.moe_layers.append(layer.block_sparse_moe.experts)
+
+        self.num_moe_layers = len(self.moe_layers)
+        self.extract_moe_parameters(example_moe)
+
+    def extract_moe_parameters(self, example_moe: FusedMoE | None):
+        if example_moe is None:
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_redundant_experts = 0
+            self.num_expert_groups = 0
+            self.num_shared_experts = 0
+        else:
+            self.num_logical_experts = example_moe.logical_num_experts
+            self.num_physical_experts = example_moe.global_num_experts
+            self.num_local_physical_experts = example_moe.local_num_experts
+            self.num_routed_experts = example_moe.logical_num_experts
+            self.num_redundant_experts = (
+                example_moe.global_num_experts - example_moe.logical_num_experts
+            )
+            self.num_expert_groups = 1
+            self.num_shared_experts = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -559,6 +600,46 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.model.layers):
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if hasattr(layer, "block_sparse_moe") and isinstance(
+                layer.block_sparse_moe, MiniMaxM2MoE
+            ):
+                moe_layer = layer.block_sparse_moe.experts
+                self.expert_weights.append(moe_layer.get_expert_weights())
+                moe_layer.set_eplb_state(
+                    moe_layer_idx=layer_idx,
+                    expert_load_view=expert_load_view,
+                    logical_to_physical_map=logical_to_physical_map,
+                    logical_replica_count=logical_replica_count,
+                )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if hasattr(layer, "block_sparse_moe") and isinstance(
+                layer.block_sparse_moe, MiniMaxM2MoE
+            ):
+                moe_layer = layer.block_sparse_moe.experts
+                moe_layer.global_num_experts = num_physical_experts
+                moe_layer.local_num_experts = num_local_physical_experts
+                moe_layer.update_expert_map()
 
 
 def get_spec_layer_idx_from_weight_name(
