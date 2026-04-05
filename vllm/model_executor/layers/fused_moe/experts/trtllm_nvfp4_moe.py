@@ -311,7 +311,10 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
-        # Prepare router logits for kernel format.
+        # Prepare routing bias into kernel format.
+        routing_bias = e_score_correction_bias
+        if routing_bias is not None:
+            routing_bias = routing_bias.to(torch.bfloat16)
         router_logits = (
             router_logits.to(torch.float32)
             if self.routing_method_type == RoutingMethodType.DeepSeekV3
@@ -326,7 +329,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         # Invoke kernel.
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
-            routing_bias=e_score_correction_bias,
+            routing_bias=routing_bias,
             hidden_states=hidden_states,
             hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
