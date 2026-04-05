@@ -1130,7 +1130,11 @@ def _load_chat_template(
 
     try:
         with open(chat_template) as f:
-            return f.read()
+            if chat_template.endswith(".json"):
+                chat_template_jinja = json.load(f)
+                return chat_template_jinja.get("chat_template",None)
+            else:
+                return f.read()
     except OSError as e:
         if isinstance(chat_template, Path):
             raise
