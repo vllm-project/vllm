@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -474,7 +475,53 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        return None
+        from vllm.model_executor.layers.fused_moe.config import (
+            FUSED_MOE_UNQUANTIZED_CONFIG,
+        )
+
+        return FUSED_MOE_UNQUANTIZED_CONFIG
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize,
+        layer: torch.nn.Module,
+    ):
+        if not self.moe.is_lora_enabled:
+            raise NotImplementedError(
+                "BitsAndBytes uses its own apply() method when LoRA is not enabled. "
+                "Modular kernels are only used for LoRA support."
+            )
+        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedTritonExperts,
+        )
+        from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+
+        assert self.moe_quant_config is not None, (
+            "moe_quant_config must be initialized before select_gemm_impl"
+        )
+
+        if self.quant_config.load_in_8bit:
+            w13, w2 = self._apply_8bit_dequant(layer)
+        else:
+            w13, w2 = self._apply_4bit_dequant(layer)
+
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
+            return BatchedTritonExperts(
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                quant_config=self.moe_quant_config,
+            )
+        else:
+            return TritonExperts(self.moe_quant_config)
 
     def apply(
         self,
@@ -490,7 +537,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         if self.quant_config.load_in_8bit:
             w13, w2 = self._apply_8bit_dequant(layer)
         else:
-            w13, w2 = self._apply_4bit_dequnt(layer)
+            w13, w2 = self._apply_4bit_dequant(layer)
         return fused_experts(
             hidden_states=x,
             w1=w13,
@@ -543,6 +590,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
                 ),
                 "pack_factor": quant_ratio,
                 "use_bitsandbytes_4bit": True,
+                "dequant_dtype": params_dtype,
             },
         )
         # down_proj (row parallel)
@@ -569,6 +617,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
                 ),
                 "pack_factor": quant_ratio,
                 "use_bitsandbytes_4bit": True,
+                "dequant_dtype": params_dtype,
             },
         )
         layer.register_parameter("w2_weight", w2_qweight)
@@ -585,7 +634,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
     ):
         raise NotImplementedError
 
-    def _apply_4bit_dequnt(
+    def _apply_4bit_dequant(
         self, layer: torch.nn.Module
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from bitsandbytes.functional import dequantize_4bit
@@ -600,6 +649,14 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         )
         w13 = w13.reshape(layer.w13_weight.experts_shape)
         w2 = w2.reshape(layer.w2_weight.experts_shape)
+
+        if (
+            hasattr(layer.w13_weight, "dequant_dtype")
+            and layer.w13_weight.dequant_dtype is not None
+        ):
+            w13 = w13.to(layer.w13_weight.dequant_dtype)
+            w2 = w2.to(layer.w13_weight.dequant_dtype)
+
         return w13, w2
 
     def _apply_8bit_dequant(
