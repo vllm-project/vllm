@@ -510,6 +510,8 @@ class EngineArgs:
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
+    mm_encoder_attn_dtype: str | None = MultiModalConfig.mm_encoder_attn_dtype
+    mm_encoder_fp8_scale_path: str | None = MultiModalConfig.mm_encoder_fp8_scale_path
     io_processor_plugin: str | None = None
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
@@ -1127,6 +1129,14 @@ class EngineArgs:
             **multimodal_kwargs["mm_encoder_attn_backend"],
         )
         multimodal_group.add_argument(
+            "--mm-encoder-attn-dtype",
+            **multimodal_kwargs["mm_encoder_attn_dtype"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-fp8-scale-path",
+            **multimodal_kwargs["mm_encoder_fp8_scale_path"],
+        )
+        multimodal_group.add_argument(
             "--interleave-mm-strings", **multimodal_kwargs["interleave_mm_strings"]
         )
         multimodal_group.add_argument(
@@ -1464,6 +1474,8 @@ class EngineArgs:
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
+            mm_encoder_attn_dtype=self.mm_encoder_attn_dtype,
+            mm_encoder_fp8_scale_path=self.mm_encoder_fp8_scale_path,
             pooler_config=self.pooler_config,
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
