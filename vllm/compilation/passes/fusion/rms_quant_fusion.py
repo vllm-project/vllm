@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -111,6 +112,22 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
         kFp8Dynamic64Sym, True
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
+
+STATIC_FP4_QUANT_OP: OpOverload | None = None
+if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
+    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
+
+FLASHINFER_RMSNORM_FP4QUANT_OP: OpOverload | None = None
+FLASHINFER_ADD_RMSNORM_FP4QUANT_OP: OpOverload | None = None
+if has_flashinfer() and hasattr(torch.ops, "vllm"):
+    if hasattr(torch.ops.vllm, "flashinfer_rmsnorm_fp4quant"):
+        FLASHINFER_RMSNORM_FP4QUANT_OP = (
+            torch.ops.vllm.flashinfer_rmsnorm_fp4quant.default
+        )
+    if hasattr(torch.ops.vllm, "flashinfer_add_rmsnorm_fp4quant"):
+        FLASHINFER_ADD_RMSNORM_FP4QUANT_OP = (
+            torch.ops.vllm.flashinfer_add_rmsnorm_fp4quant.default
+        )
 
 
 class RMSNormQuantPattern:
@@ -562,6 +579,139 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         )
 
 
+class RMSNormNvfp4QuantPattern:
+    """Fuses RMSNorm + scaled_fp4_quant into flashinfer_rmsnorm_fp4quant."""
+
+    def __init__(self, epsilon: float) -> None:
+        self.epsilon = epsilon
+        config = get_current_vllm_config()
+        self.model_dtype = config.model_config.dtype if config.model_config else None
+        self.device = config.device_config.device if config.device_config else None
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        input = torch.empty(5, 16, dtype=self.model_dtype, device=self.device)
+        weight = torch.empty(16, dtype=self.model_dtype, device=self.device)
+        quant_result = torch.empty(5, 8, dtype=FP4_DTYPE, device=self.device)
+        output_scale = torch.empty(128, 1, dtype=torch.int32, device=self.device)
+        input_scale = torch.empty(1, 1, dtype=torch.float32, device=self.device)
+        return [quant_result, output_scale, input, weight, input_scale]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        assert STATIC_FP4_QUANT_OP is not None
+        assert FLASHINFER_RMSNORM_FP4QUANT_OP is not None
+
+        def pattern(
+            quant_result: torch.Tensor,
+            output_scale: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            input_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            rms_out = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
+            at = auto_functionalized(
+                STATIC_FP4_QUANT_OP,
+                input=rms_out,
+                input_scale=input_scale,
+                is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
+            )
+            return at[1], at[2]
+
+        def replacement(
+            quant_result: torch.Tensor,
+            output_scale: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            input_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            input = input.to(dtype=self.model_dtype)
+            at = auto_functionalized(
+                FLASHINFER_RMSNORM_FP4QUANT_OP,
+                output=quant_result,
+                output_scale=output_scale,
+                input=input,
+                weight=weight,
+                global_scale=input_scale,
+                epsilon=self.epsilon,
+            )
+            return at[1], at[2]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class FusedAddRMSNormNvfp4QuantPattern:
+    """Fuses FusedAddRMSNorm + scaled_fp4_quant into
+    flashinfer_add_rmsnorm_fp4quant."""
+
+    def __init__(self, epsilon: float) -> None:
+        self.epsilon = epsilon
+        config = get_current_vllm_config()
+        self.model_dtype = config.model_config.dtype if config.model_config else None
+        self.device = config.device_config.device if config.device_config else None
+        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        input = torch.empty(5, 16, dtype=self.model_dtype, device=self.device)
+        weight = torch.empty(16, dtype=self.model_dtype, device=self.device)
+        residual = torch.empty(5, 16, dtype=self.model_dtype, device=self.device)
+        quant_result = torch.empty(5, 8, dtype=FP4_DTYPE, device=self.device)
+        output_scale = torch.empty(128, 1, dtype=torch.int32, device=self.device)
+        input_scale = torch.empty(1, 1, dtype=torch.float32, device=self.device)
+        return [quant_result, output_scale, input, weight, residual, input_scale]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        assert STATIC_FP4_QUANT_OP is not None
+        assert FLASHINFER_ADD_RMSNORM_FP4QUANT_OP is not None
+
+        def pattern(
+            quant_result: torch.Tensor,
+            output_scale: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            input_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            rms_out, residual = self.rmsnorm_matcher(input, weight, residual)
+            at = auto_functionalized(
+                STATIC_FP4_QUANT_OP,
+                input=rms_out,
+                input_scale=input_scale,
+                is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
+            )
+            return at[1], at[2], residual
+
+        def replacement(
+            quant_result: torch.Tensor,
+            output_scale: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            input_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            input = input.to(dtype=self.model_dtype)
+            at = auto_functionalized(
+                FLASHINFER_ADD_RMSNORM_FP4QUANT_OP,
+                output=quant_result,
+                output_scale=output_scale,
+                residual=residual,
+                input=input,
+                weight=weight,
+                global_scale=input_scale,
+                epsilon=self.epsilon,
+            )
+            # at[1]=output, at[2]=output_scale, at[3]=residual
+            return at[1], at[2], at[3]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
@@ -621,6 +771,18 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                                     is_tma_aligned=is_tma_aligned,
                                 ).register(self.patterns)
 
+            if (
+                STATIC_FP4_QUANT_OP is not None
+                and FLASHINFER_ADD_RMSNORM_FP4QUANT_OP is not None
+            ):
+                FusedAddRMSNormNvfp4QuantPattern(epsilon).register(self.patterns)
+
+            if (
+                STATIC_FP4_QUANT_OP is not None
+                and FLASHINFER_RMSNORM_FP4QUANT_OP is not None
+            ):
+                RMSNormNvfp4QuantPattern(epsilon).register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -638,4 +800,6 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
             FusedAddRMSNormGroupQuantPattern,
+            RMSNormNvfp4QuantPattern,
+            FusedAddRMSNormNvfp4QuantPattern,
         )

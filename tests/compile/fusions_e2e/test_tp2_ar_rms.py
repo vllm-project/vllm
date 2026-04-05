@@ -147,6 +147,7 @@ def test_tp2_ar_rms_fp4_fusions(
         use_inductor_graph_partition=inductor_graph_partition,
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
+            fuse_norm_quant=True,
             fuse_act_quant=True,
             fuse_attn_quant=True,
             fuse_allreduce_rms=True,
@@ -154,6 +155,7 @@ def test_tp2_ar_rms_fp4_fusions(
     )
 
     matches_check = [
+        "rms_quant_fusion",
         "act_quant_fusion",
         "attn_quant_fusion",
         "ar_rms_fusion",

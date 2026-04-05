@@ -560,6 +560,89 @@ if has_flashinfer():
             rounded_m, rounded_n, dtype=torch.uint8, device=a.device
         )
 
+    def _flashinfer_rmsnorm_fp4quant(
+        output: torch.Tensor,
+        output_scale: torch.Tensor,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        global_scale: torch.Tensor,
+        epsilon: float,
+    ) -> None:
+        from flashinfer.cute_dsl import rmsnorm_fp4quant as rmsnorm_fp4quant_
+
+        rmsnorm_fp4quant_(
+            input=input,
+            weight=weight,
+            y_fp4=output.view(torch.float4_e2m1fn_x2),
+            block_scale=output_scale.view(torch.uint8)
+            .view(torch.float8_e4m3fn)
+            .view(-1),
+            global_scale=global_scale.view(-1),
+            eps=epsilon,
+            is_sf_swizzled_layout=True,
+        )
+
+    def _flashinfer_rmsnorm_fp4quant_fake(
+        output: torch.Tensor,
+        output_scale: torch.Tensor,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        global_scale: torch.Tensor,
+        epsilon: float,
+    ) -> None:
+        return
+
+    direct_register_custom_op(
+        op_name="flashinfer_rmsnorm_fp4quant",
+        op_func=_flashinfer_rmsnorm_fp4quant,
+        mutates_args=["output", "output_scale"],
+        fake_impl=_flashinfer_rmsnorm_fp4quant_fake,
+    )
+
+    def _flashinfer_add_rmsnorm_fp4quant(
+        output: torch.Tensor,
+        output_scale: torch.Tensor,
+        residual: torch.Tensor,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        global_scale: torch.Tensor,
+        epsilon: float,
+    ) -> None:
+        from flashinfer.cute_dsl import (
+            add_rmsnorm_fp4quant as add_rmsnorm_fp4quant_,
+        )
+
+        add_rmsnorm_fp4quant_(
+            input=input,
+            residual=residual,
+            weight=weight,
+            y_fp4=output.view(torch.float4_e2m1fn_x2),
+            block_scale=output_scale.view(torch.uint8)
+            .view(torch.float8_e4m3fn)
+            .view(-1),
+            global_scale=global_scale.view(-1),
+            eps=epsilon,
+            is_sf_swizzled_layout=True,
+        )
+
+    def _flashinfer_add_rmsnorm_fp4quant_fake(
+        output: torch.Tensor,
+        output_scale: torch.Tensor,
+        residual: torch.Tensor,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        global_scale: torch.Tensor,
+        epsilon: float,
+    ) -> None:
+        return
+
+    direct_register_custom_op(
+        op_name="flashinfer_add_rmsnorm_fp4quant",
+        op_func=_flashinfer_add_rmsnorm_fp4quant,
+        mutates_args=["output", "output_scale", "residual"],
+        fake_impl=_flashinfer_add_rmsnorm_fp4quant_fake,
+    )
+
     @torch.library.custom_op(
         "vllm::mm_mxfp8",
         mutates_args=[],

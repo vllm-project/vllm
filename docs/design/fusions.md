@@ -37,18 +37,18 @@ The table below lists the quantization schemes supported by each fusion on each 
 **—** means the fusion is not available on that platform. The latest and in-progress work is available in the tracking issue:
 [#36066](https://github.com/vllm-project/vllm/issues/36066)
 
-| Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
-| ---------------------------- | ---------------------------------------- | ---------------------------------------- | ---------------------------------------- | ------------- | ---------------------------------------- |
-| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
-| `fuse_attn_quant` (MLA)\*    | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static(untested)\*                   |
-| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
-| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
-| `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
-| `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| Fusion                       | SM100 (Blackwell)                                | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
+| ---------------------------- | ------------------------------------------------ | ---------------------------------------- | ---------------------------------------- | ------------- | ---------------------------------------- |
+| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4                     | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
+| `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                            | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
+| `fuse_attn_quant` (MLA)\*    | FP8 static\*, NVFP4\*                            | FP8 static\*                             | FP8 static\*                             | —             | FP8 static(untested)\*                   |
+| `fuse_rope_kvcache`          | —                                                | —                                        | —                                        | —             | FP16/BF16                                |
+| `enable_qk_norm_rope_fusion` | FP16/BF16                                        | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `enable_sp`                  | FP16/BF16, FP8 static†                           | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `fuse_gemm_comms`            | FP16/BF16, FP8 static†                           | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group, NVFP4‡ | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
+| `fuse_act_quant`             | FP8 static, NVFP4                                | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
+| `fuse_act_padding`           | —                                                | —                                        | —                                        | —             | FP16/BF16                                |
 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
@@ -57,6 +57,10 @@ for per-backend details.
 † `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
 other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
 SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
+
+‡ NVFP4 support for `fuse_norm_quant` uses FlashInfer kernels and is currently
+**disabled by default** at all optimization levels while performance is being
+tuned. To enable it manually, set `PassConfig(fuse_norm_quant=True)`.
 
 ## Enabling / Disabling Fusions
 
@@ -284,6 +288,11 @@ Supported hardware: CUDA (sm80+) only, tested only on sm90 and sm100.
     On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
     Hence, this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
 
+!!! info
+    NVFP4 support is available but **disabled by default** at all optimization levels while
+    kernel performance is being tuned. To experiment with the FlashInfer NVFP4 fused kernels,
+    set `PassConfig(fuse_norm_quant=True)` explicitly. Requires SM100+ (Blackwell) and FlashInfer.
+
 **What it fuses.** Combines the custom `rms_norm` / `fused_add_rms_norm`
 operations with subsequent quantization into a single fused kernel,
 eliminating an intermediate read/write of the full-precision activation tensor.
@@ -292,6 +301,12 @@ Two variants are fused:
 - *Plain RMSNorm + quant*: `rms_norm(x) → quant_fp8(y)`
 - *Fused-add RMSNorm + quant*: `fused_add_rms_norm(x, residual) → quant_fp8(y)` — also updates the residual in-place.
 
+For NVFP4-quantized models on SM100+ with FlashInfer, two additional patterns
+are matched:
+
+- *Plain RMSNorm + NVFP4 quant*: `rms_norm(x) → scaled_fp4_quant(y)` — replaced by `flashinfer_rmsnorm_fp4quant`
+- *Fused-add RMSNorm + NVFP4 quant*: `fused_add_rms_norm(x, residual) → scaled_fp4_quant(y)` — replaced by `flashinfer_add_rmsnorm_fp4quant`, also updates the residual in-place.
+
 Note that AITER fusions are currently in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
 
 Supported quantization scheme/hardware combinations:
@@ -299,12 +314,14 @@ Supported quantization scheme/hardware combinations:
 - FP8 static per-tensor: CUDA & HIP kernel
 - FP8 dynamic per-token: CUDA & HIP kernel, AITER
 - FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER
+- NVFP4 dynamic: CUDA sm100+ with FlashInfer (disabled by default)
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rms_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rms_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
 - CUDA/HIP kernels: [`csrc/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_quant_kernels.cu)
+- FlashInfer NVFP4 kernels: [`vllm/utils/flashinfer.py`](https://github.com/vllm-project/vllm/blob/main/vllm/utils/flashinfer.py) (`flashinfer_rmsnorm_fp4quant`, `flashinfer_add_rmsnorm_fp4quant`)
 
 ### SiLU+Mul + Quantization (`fuse_act_quant`)
 
