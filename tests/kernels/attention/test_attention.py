@@ -405,6 +405,192 @@ def test_paged_attention(
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
+# Multi-pass reduction is triggered when npar_loops exceeds the
+# per-architecture limit (8 for GFX9, 16 for GFX12), i.e.
+# max_num_partitions > 512 → max_seq_len > 131072 tokens.
+MULTIPASS_SEQ_LEN = 131072 + 16384
+MULTIPASS_NUM_BLOCKS = (
+    (MULTIPASS_SEQ_LEN + 16 - 1) // 16 + 64
+)
+
+
+def _run_multipass_attention(
+    kv_cache_factory,
+    head_size: int,
+    num_heads: tuple[int, int],
+    dtype: torch.dtype,
+    device: str,
+    seq_len: int,
+    max_seq_len: int,
+) -> None:
+    """Run multi-pass paged attention and compare to reference."""
+    num_query_heads, num_kv_heads = num_heads
+    num_seqs = 1
+    block_size = 16
+
+    set_random_seed(0)
+    torch.set_default_device(device)
+    scale = float(1.0 / (head_size**0.5))
+
+    query = torch.empty(
+        num_seqs, num_query_heads, head_size, dtype=dtype,
+    )
+    query.uniform_(-scale, scale)
+
+    seq_lens = torch.tensor([seq_len], dtype=torch.int)
+
+    max_num_blocks_per_seq = (
+        (max_seq_len + block_size - 1) // block_size
+    )
+    num_blocks = max_num_blocks_per_seq + 64
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq),
+        dtype=torch.int,
+    )
+
+    key_caches, value_caches = kv_cache_factory(
+        num_blocks,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        "auto",
+        dtype,
+        0,
+        device,
+    )
+    key_cache, value_cache = key_caches[0], value_caches[0]
+    k_scale = v_scale = torch.tensor(
+        1.0, dtype=torch.float32, device=device,
+    )
+
+    partition_size = 256
+    num_partitions = (
+        (max_seq_len + partition_size - 1) // partition_size
+    )
+    max_passes = (num_partitions + 511) // 512
+    float4_bytes = 16
+    elem_bytes = query.element_size()
+    extra_per_pass = (
+        1 + (float4_bytes + elem_bytes - 1) // elem_bytes
+    )
+    partition_dim = (
+        num_partitions + max_passes * extra_per_pass
+    )
+
+    output = torch.empty_like(query)
+    tmp_output = torch.empty(
+        size=(
+            num_seqs, num_query_heads,
+            partition_dim, head_size,
+        ),
+        dtype=dtype,
+    )
+    exp_sums = torch.empty(
+        size=(num_seqs, num_query_heads, num_partitions),
+        dtype=torch.float32,
+    )
+    max_logits = torch.empty_like(exp_sums)
+
+    ops.paged_attention_rocm(
+        output,
+        exp_sums,
+        max_logits,
+        tmp_output,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        seq_lens,
+        None,
+        block_size,
+        max_seq_len,
+        None,  # alibi_slopes
+        "auto",
+        k_scale,
+        v_scale,
+    )
+
+    ref_output = torch.empty_like(query)
+    ref_single_query_cached_kv_attention(
+        ref_output,
+        query,
+        num_query_heads // num_kv_heads,
+        key_cache,
+        value_cache,
+        block_tables,
+        seq_lens,
+        scale,
+        None,  # alibi_slopes
+    )
+
+    atol = get_default_atol(output)
+    rtol = get_default_rtol(output)
+    torch.testing.assert_close(
+        output, ref_output, atol=atol, rtol=rtol,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="ROCm multi-pass reduction only")
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("num_heads", [(32, 8)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_paged_attention_multipass_rocm(
+    kv_cache_factory,
+    head_size: int,
+    num_heads: tuple[int, int],
+    dtype: torch.dtype,
+    device: str,
+) -> None:
+    """Test multi-pass reduction with seq_len > 128K."""
+    if current_platform.is_navi() and head_size != 128:
+        pytest.skip("Navi only supports head_size=128")
+
+    gqa_ratio = num_heads[0] // num_heads[1]
+    if current_platform.is_navi() and not (3 <= gqa_ratio <= 16):
+        pytest.skip("Navi requires 3 <= gqa_ratio <= 16")
+
+    _run_multipass_attention(
+        kv_cache_factory, head_size, num_heads, dtype, device,
+        seq_len=MULTIPASS_SEQ_LEN,
+        max_seq_len=MULTIPASS_SEQ_LEN,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="ROCm multi-pass reduction only")
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("num_heads", [(32, 8)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_paged_attention_multipass_short_seq_rocm(
+    kv_cache_factory,
+    head_size: int,
+    num_heads: tuple[int, int],
+    dtype: torch.dtype,
+    device: str,
+) -> None:
+    """Test multi-pass with short seq through buffers sized for long.
+
+    Simulates CUDA graph replay: graph captured with max_seq_len=262144
+    but replayed with seq_len=100. The early-exit path must write neutral
+    float4 sentinels for unused passes.
+    """
+    gqa_ratio = num_heads[0] // num_heads[1]
+    if current_platform.is_navi() and not (3 <= gqa_ratio <= 16):
+        pytest.skip("Navi requires 3 <= gqa_ratio <= 16")
+
+    _run_multipass_attention(
+        kv_cache_factory, head_size, num_heads, dtype, device,
+        seq_len=100,
+        max_seq_len=MULTIPASS_SEQ_LEN + 131072,
+    )
+
+
 def ref_multi_query_kv_attention(
     cu_seq_lens: list[int],
     query: torch.Tensor,
