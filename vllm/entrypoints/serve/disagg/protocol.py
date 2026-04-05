@@ -74,7 +74,7 @@ class GenerateRequest(BaseModel):
     features: MultiModalFeatures | None = None
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
-    sampling_params: SamplingParams
+    sampling_params: SamplingParams = Field(default_factory=SamplingParams)
     """The sampling parameters for the model."""
 
     model: str | None = None
@@ -106,6 +106,14 @@ class GenerateRequest(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+    def to_sampling_params(self) -> SamplingParams:
+        params = self.sampling_params
+        if self.kv_transfer_params:
+            if params.extra_args is None:
+                params.extra_args = {}
+            params.extra_args["kv_transfer_params"] = self.kv_transfer_params
+        return params
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
