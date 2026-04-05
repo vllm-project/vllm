@@ -145,6 +145,13 @@ class BaseFrontendArgs:
     """If set to True, log model outputs (generations).
     Requires `--enable-log-requests`. As with `--enable-log-requests`,
     information is only logged at INFO level at maximum."""
+    enable_log_request_prompts: bool = False
+    """If set to True, include truncated prompt inputs (text, token ids, or
+    embedding tensor shape) in INFO-level request logs when
+    `--enable-log-requests` is set. **Off by default:** logging client
+    payloads can expose sensitive data in log sinks. Requires
+    `--enable-log-requests`. Use `VLLM_LOGGING_LEVEL=DEBUG` for full prompt
+    details without this flag."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.
@@ -374,6 +381,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if (
+        getattr(args, "enable_log_request_prompts", False)
+        and not args.enable_log_requests
+    ):
+        raise TypeError(
+            "Error: --enable-log-request-prompts requires --enable-log-requests"
+        )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

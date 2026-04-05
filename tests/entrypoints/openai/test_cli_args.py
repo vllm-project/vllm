@@ -206,6 +206,19 @@ def test_chat_template_validation_for_sad_paths(serve_parser):
         validate_parsed_serve_args(args)
 
 
+def test_enable_log_request_prompts_requires_enable_log_requests(serve_parser):
+    args = serve_parser.parse_args(args=["--enable-log-request-prompts"])
+    with pytest.raises(TypeError, match="--enable-log-request-prompts"):
+        validate_parsed_serve_args(args)
+
+
+def test_enable_log_request_prompts_passes_with_log_requests(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--enable-log-requests", "--enable-log-request-prompts"]
+    )
+    validate_parsed_serve_args(args)
+
+
 @pytest.mark.parametrize(
     "cli_args, expected_middleware",
     [
