@@ -45,6 +45,16 @@ class IncrementalDetokenizer:
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         return ""
 
+    def get_next_output_token_ids(
+        self, finished: bool, delta: bool, token_ids: list[int]
+    ) -> list[int]:
+        """Return token_ids consistent with the text from
+        get_next_output_text. The default implementation just returns the
+        input token_ids unchanged (no stop-string buffering)."""
+        if not delta:
+            return self.output_token_ids
+        return token_ids
+
     @classmethod
     def from_new_request(
         cls,
@@ -89,6 +99,11 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
 
+        # Track cumulative text length after each output token so that
+        # token_ids can be held back in sync with stop-string text buffering.
+        self._cumulative_text_len: list[int] = []
+        self._last_output_token_offset: int = 0
+
         # Generation data
         self.output_text = ""
 
@@ -117,6 +132,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
+            self._cumulative_text_len.append(len(self.output_text))
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
@@ -124,6 +140,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
             self.token_ids.append(skipped_stop_token_id)
+            # The skipped token produces no text, so cumulative length
+            # stays the same as the previous token.
+            prev = self._cumulative_text_len[-1] if self._cumulative_text_len else 0
+            self._cumulative_text_len.append(prev)
 
         # 2) Evaluate stop strings.
         stop_string = None
@@ -145,6 +165,19 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
     def decode_next(self, next_token_id: int) -> str:
         raise NotImplementedError
 
+    def _token_index_for_text_offset(self, text_offset: int) -> int:
+        """Return the number of output tokens whose cumulative decoded text
+        is fully contained within ``text_offset`` characters.
+
+        Uses a simple linear scan from the last known position since the
+        offset typically advances by a small number of tokens each call.
+        """
+        idx = self._last_output_token_offset
+        n = len(self._cumulative_text_len)
+        while idx < n and self._cumulative_text_len[idx] <= text_offset:
+            idx += 1
+        return idx
+
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
         this method is returned"""
@@ -162,6 +195,43 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self._last_output_text_offset = length
             return self.output_text[last_offset:length]
         return ""
+
+    def get_next_output_token_ids(
+        self, finished: bool, delta: bool, token_ids: list[int]
+    ) -> list[int]:
+        """Return token_ids that correspond to the text returned by
+        ``get_next_output_text`` for the same ``finished`` and ``delta``
+        arguments.
+
+        When stop-string buffering is active, some trailing tokens may be
+        held back because their decoded text has not yet been released.
+        This ensures ``delta_token_ids`` stays in sync with ``delta_text``.
+        """
+        if not self.stop_buffer_length:
+            if not delta:
+                return self.output_token_ids
+            # For delta mode, the input token_ids are correct.
+            return token_ids
+
+        if not delta:
+            # Non-delta: return all output token_ids up to the text boundary.
+            buffer_length = 0 if finished else self.stop_buffer_length
+            if not buffer_length:
+                return self.output_token_ids
+            text_len = len(self.output_text) - buffer_length
+            count = self._token_index_for_text_offset(text_len)
+            return self.output_token_ids[:count]
+
+        # Delta mode: return only tokens whose text was released since
+        # the last call to get_next_output_text (which updates
+        # _last_output_text_offset).
+        text_offset = self._last_output_text_offset
+        new_token_end = self._token_index_for_text_offset(text_offset)
+        old_token_end = self._last_output_token_offset
+        self._last_output_token_offset = new_token_end
+        if new_token_end > old_token_end:
+            return self.output_token_ids[old_token_end:new_token_end]
+        return []
 
 
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):

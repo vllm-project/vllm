@@ -385,10 +385,14 @@ class RequestState:
         finished = finish_reason is not None
         delta = self.output_kind == RequestOutputKind.DELTA
 
-        # Prepare text and token_ids, based on delta mode
+        # Prepare text and token_ids, based on delta mode.
+        # get_next_output_text must be called before
+        # get_next_output_token_ids so that the text offset is updated
+        # first and the token_ids can be aligned to the released text.
         text = self.detokenizer.get_next_output_text(finished, delta)
-        if not delta:
-            token_ids = self.detokenizer.output_token_ids
+        token_ids = self.detokenizer.get_next_output_token_ids(
+            finished, delta, token_ids
+        )
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
