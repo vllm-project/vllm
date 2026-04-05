@@ -5,10 +5,13 @@ set -ex
 #   --workspace <dir>    workspace directory (default: ./ep_kernels_workspace)
 #   --mode <mode>        "install" (default) or "wheel"
 #   --deepep-ref <commit> DeepEP commit hash
+#   --deepep-branch <branch> DeepEP branch (default: none, uses --deepep-ref commit)
+#                            Use "hybrid-ep" for HybridEP NVLink-only support
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
+DEEPEP_BRANCH=${DEEPEP_BRANCH:-""}
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
@@ -39,6 +42,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             DEEPEP_COMMIT_HASH="$2"
+            shift 2
+            ;;
+        --deepep-branch)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --deepep-branch requires an argument." >&2
+                exit 1
+            fi
+            DEEPEP_BRANCH="$2"
             shift 2
             ;;
         --nvshmem-ver)
@@ -179,7 +190,12 @@ do_build() {
     popd
 }
 
-# build DeepEP
+# build DeepEP (use --deepep-branch for hybrid-ep support)
+if [[ -n "$DEEPEP_BRANCH" ]]; then
+    echo "Using DeepEP branch: $DEEPEP_BRANCH (ignoring --deepep-ref)"
+    rm -rf "$WORKSPACE/DeepEP"
+    DEEPEP_COMMIT_HASH="$DEEPEP_BRANCH"
+fi
 do_build \
     "https://github.com/deepseek-ai/DeepEP" \
     "DeepEP" \

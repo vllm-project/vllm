@@ -139,6 +139,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = DeepEPLLAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "hybrid_ep":
+                from .all2all import HybridEPAll2AllManager
+
+                self.all2all_manager = HybridEPAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "mori":
                 from .all2all import MoriAll2AllManager
 

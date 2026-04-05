@@ -398,6 +398,7 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_deepep_ht_kernels
+            or moe_parallel_config.use_hybrid_ep_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 

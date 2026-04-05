@@ -962,6 +962,10 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_hybrid_ep_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "hybrid_ep"
+
+    @property
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
@@ -1260,6 +1264,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ht_kernels(self):
         return self.moe_parallel_config.use_deepep_ht_kernels
+
+    @property
+    def use_hybrid_ep_kernels(self):
+        return self.moe_parallel_config.use_hybrid_ep_kernels
 
     @property
     def use_deepep_ll_kernels(self):

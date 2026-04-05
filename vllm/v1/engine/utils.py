@@ -475,6 +475,7 @@ class CoreEngineActorManager:
         if pack_strategy == "fill" and (
             all2all_backend == "deepep_high_throughput"
             or all2all_backend == "deepep_low_latency"
+            or all2all_backend == "hybrid_ep"
         ):
             raise ValueError(
                 "DeepEP kernels require EP ranks [0,7] (same for [8,15], ...) "

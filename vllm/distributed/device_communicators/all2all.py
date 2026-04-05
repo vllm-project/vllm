@@ -367,6 +367,43 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         deep_ep.Buffer.set_num_sms(num_sms)
 
 
+class HybridEPAll2AllManager(DeepEPAll2AllManagerBase):
+    """
+    All2All communication using HybridEP (DeepEP hybrid-ep branch).
+    Uses HybridEPBuffer with fused dispatch_with_permute / combine_with_unpermute
+    kernels. Optimized for NVLink-connected topologies.
+    """
+
+    def get_handle(self, kwargs):
+        from deep_ep import HybridEPBuffer  # type: ignore[import-not-found]
+
+        hidden_dim = kwargs.get("hidden_dim", 7168)
+        max_num_tokens = kwargs.get("max_num_tokens", 256)
+        num_local_experts = kwargs.get("num_local_experts", 8)
+
+        buffer_kwargs = dict(
+            group=self.cpu_group,
+            hidden_dim=hidden_dim,
+            max_num_of_tokens_per_rank=max_num_tokens,
+            num_local_experts=num_local_experts,
+            use_fp8=False,
+            num_sms_dispatch_api=self.num_sms,
+            num_sms_combine_api=self.num_sms,
+            load_cached_kernels=True,
+            use_shared_buffer=True,
+            enable_custom_allgather=True,
+        )
+        logger.debug("HybridEP all2all args %s", buffer_kwargs)
+        handle: HybridEPBuffer = self.handle_cache.get_or_create(
+            buffer_kwargs, HybridEPBuffer
+        )
+        return handle
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            self.handle_cache._cache.clear()
+
+
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     """
     All2All communication based on DeepEP Low-Latency kernels.
