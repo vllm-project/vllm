@@ -33,20 +33,14 @@ class MooncakeStoreScheduler:
 
     def __init__(self, vllm_config: VllmConfig):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "load_async", False
-            )
+        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "load_async", False
         )
         self.client = LookupKeyClient(vllm_config)
 
         self.load_specs: dict[str, LoadSpec] = {}
-        self.pcp_size = (
-            vllm_config.parallel_config.prefill_context_parallel_size
-        )
-        self.dcp_size = (
-            vllm_config.parallel_config.decode_context_parallel_size
-        )
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.original_block_size = vllm_config.cache_config.block_size
         self._block_size = vllm_config.cache_config.block_size
         if self.pcp_size > 1:
@@ -72,9 +66,7 @@ class MooncakeStoreScheduler:
         """Check for external KV cache hit."""
         if self._discard_partial_chunks:
             token_len = (
-                len(request.prompt_token_ids)
-                // self._block_size
-                * self._block_size
+                len(request.prompt_token_ids) // self._block_size * self._block_size
             )
         else:
             token_len = len(request.prompt_token_ids)
@@ -82,9 +74,7 @@ class MooncakeStoreScheduler:
         if token_len < self._block_size:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(
-            token_len, request.block_hashes
-        )
+        num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -95,8 +85,7 @@ class MooncakeStoreScheduler:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
         logger.debug(
-            "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, "
-            "need to load: %d",
+            "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
             num_external_hit_tokens,
@@ -165,9 +154,7 @@ class MooncakeStoreScheduler:
             self._preempted_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
-            self._preempted_req_ids.update(
-                scheduler_output.preempted_req_ids
-            )
+            self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
 
@@ -196,18 +183,12 @@ class MooncakeStoreScheduler:
                 token_len=num_tokens_to_compute,
                 allocated_block_ids=unfolded_block_ids,
                 num_saved_tokens=0,
-                token_ids=request.prompt_token_ids[
-                    :num_tokens_to_compute
-                ].copy(),
+                token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
             )
             self._request_trackers[request.req_id] = request_tracker
 
             last_chunk_tokens_num = (
-                (
-                    len(request.prompt_token_ids)
-                    // self._block_size
-                    * self._block_size
-                )
+                (len(request.prompt_token_ids) // self._block_size * self._block_size)
                 if self._discard_partial_chunks
                 else len(request.prompt_token_ids)
             )
@@ -218,9 +199,7 @@ class MooncakeStoreScheduler:
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 block_hashes=request_real.block_hashes,
-                is_last_chunk=(
-                    request_tracker.token_len >= last_chunk_tokens_num
-                ),
+                is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
                 discard_partial_chunks=self._discard_partial_chunks,
                 original_block_size=self.original_block_size,
             )
@@ -277,8 +256,7 @@ class MooncakeStoreScheduler:
                         skip_save=force_skip_save,
                         block_hashes=request_real.block_hashes,
                         is_last_chunk=(
-                            request_tracker.token_len
-                            >= last_chunk_tokens_num
+                            request_tracker.token_len >= last_chunk_tokens_num
                         ),
                         discard_partial_chunks=self._discard_partial_chunks,
                         original_block_size=self.original_block_size,
@@ -286,22 +264,18 @@ class MooncakeStoreScheduler:
                 else:
                     # Decode/chunked request
                     request_tracker = self._request_trackers[req_id]
-                    num_new_tokens = (
-                        scheduler_output.num_scheduled_tokens[req_id]
-                    )
+                    num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
                     req_tuple = self._unfinished_requests.get(req_id)
                     if req_tuple:
                         request = req_tuple[0]
                         num_current_tokens = request_tracker.token_len
                         new_token_ids = request.all_token_ids[
-                            num_current_tokens : num_current_tokens
-                            + num_new_tokens
+                            num_current_tokens : num_current_tokens + num_new_tokens
                         ]
                         request_tracker.token_len += len(new_token_ids)
                     else:
                         raise ValueError(
-                            f"Request {req_id} is not in "
-                            "_unfinished_requests"
+                            f"Request {req_id} is not in _unfinished_requests"
                         )
                     num_computed_token = cached_reqs.num_computed_tokens[i]
                     if num_computed_token >= len(request.prompt_token_ids):
@@ -324,8 +298,7 @@ class MooncakeStoreScheduler:
                         skip_save=force_skip_save,
                         block_hashes=request.block_hashes,
                         is_last_chunk=(
-                            request_tracker.token_len
-                            >= last_chunk_tokens_num
+                            request_tracker.token_len >= last_chunk_tokens_num
                         ),
                         discard_partial_chunks=self._discard_partial_chunks,
                         original_block_size=self.original_block_size,
@@ -335,26 +308,18 @@ class MooncakeStoreScheduler:
                     meta.add_request(req_meta)
 
         # Handle requests with pending load specs not yet scheduled
-        request_ids = [
-            req.req_id for req in scheduler_output.scheduled_new_reqs
-        ]
+        request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
         for request_id, (
             request,
             block_ids,
         ) in self._unfinished_requests.items():
-            if (
-                request_id not in request_ids
-                and request_id not in cached_reqs.req_ids
-            ):
+            if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 load_spec = self.load_specs.pop(request_id, None)
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (
-                    num_tokens_to_compute % self._block_size != 0
-                ) and (
-                    num_tokens_to_compute
-                    == len(request.prompt_token_ids) - 1
+                if (num_tokens_to_compute % self._block_size != 0) and (
+                    num_tokens_to_compute == len(request.prompt_token_ids) - 1
                 ):
                     num_tokens_to_compute = num_tokens_to_compute + 1
                 request_tracker = RequestTracker(
@@ -412,9 +377,7 @@ class LookupKeyClient:
             bind=False,
         )
 
-    def lookup(
-        self, token_len: int, block_hashes: list[BlockHash]
-    ) -> int:
+    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
@@ -433,9 +396,7 @@ def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     base_url = envs.VLLM_RPC_BASE_PATH
     rpc_port = 0
-    extra_config = (
-        vllm_config.kv_transfer_config.kv_connector_extra_config
-    )
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     if "lookup_rpc_port" in extra_config:
         rpc_port = extra_config["lookup_rpc_port"]
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)

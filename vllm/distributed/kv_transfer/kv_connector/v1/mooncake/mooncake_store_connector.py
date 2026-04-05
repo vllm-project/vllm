@@ -24,16 +24,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_data import (
-    MooncakeStoreConnectorMetadata,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_scheduler import (
-    MooncakeStoreScheduler,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_worker import (
-    LookupKeyServer,
-    MooncakeStoreWorker,
-)
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -42,6 +32,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
+
+from .mooncake_store_data import MooncakeStoreConnectorMetadata
+from .mooncake_store_scheduler import MooncakeStoreScheduler
+from .mooncake_store_worker import LookupKeyServer, MooncakeStoreWorker
 
 logger = init_logger(__name__)
 
@@ -76,10 +70,7 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         self._aggregator.reset_workers()
 
     def __repr__(self) -> str:
-        return (
-            f"<MooncakeStoreKVEvents "
-            f"events={self.get_all_events()}>"
-        )
+        return f"<MooncakeStoreKVEvents events={self.get_all_events()}>"
 
 
 class MooncakeStoreConnector(KVConnectorBase_V1):
@@ -107,9 +98,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config)
             if vllm_config.parallel_config.rank == 0:
-                self.lookup_server = LookupKeyServer(
-                    self.connector_worker, vllm_config
-                )
+                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     # ============================================================
     # Scheduler-side methods
@@ -141,9 +130,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.build_connector_meta(
-            scheduler_output
-        )
+        return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
         self,
@@ -151,13 +138,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(
-            request, block_ids
-        )
+        return self.connector_scheduler.request_finished(request, block_ids)
 
-    def update_connector_output(
-        self, connector_output: KVConnectorOutput
-    ):
+    def update_connector_output(self, connector_output: KVConnectorOutput):
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(
             kv_cache_events, MooncakeStoreKVEvents
@@ -167,9 +150,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         if self._kv_cache_events is None:
             self._kv_cache_events = kv_cache_events
         else:
-            self._kv_cache_events.add_events(
-                kv_cache_events.get_all_events()
-            )
+            self._kv_cache_events.add_events(kv_cache_events.get_all_events())
             self._kv_cache_events.increment_workers(
                 kv_cache_events.get_number_of_workers()
             )
@@ -185,15 +166,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
     # Worker-side methods
     # ============================================================
 
-    def register_kv_caches(
-        self, kv_caches: dict[str, torch.Tensor]
-    ):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def start_load_kv(
-        self, forward_context: ForwardContext, **kwargs: Any
-    ) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
@@ -227,9 +204,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
-        return self.connector_worker.get_finished(
-            finished_req_ids, metadata
-        )
+        return self.connector_worker.get_finished(finished_req_ids, metadata)
 
     def get_kv_connector_kv_cache_events(
         self,

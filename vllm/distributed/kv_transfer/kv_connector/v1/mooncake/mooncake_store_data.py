@@ -62,9 +62,7 @@ class PoolKey:
 class ChunkedTokenDatabase:
     """Maps token positions to store keys and GPU memory addresses."""
 
-    def __init__(
-        self, metadata: KeyMetadata, block_size: int
-    ):
+    def __init__(self, metadata: KeyMetadata, block_size: int):
         self.metadata = metadata
         self.block_size = block_size
         self.kv_caches_base_addr: list[int] = []
@@ -93,11 +91,7 @@ class ChunkedTokenDatabase:
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
             addr = base_addr + block_id * self.block_len[index % length]
-            size = int(
-                self.block_len[index % length]
-                / self.block_size
-                * (end - start)
-            )
+            size = int(self.block_len[index % length] / self.block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
@@ -164,9 +158,7 @@ class RequestTracker:
         elif isinstance(new_block_ids, list):
             pass
         else:
-            raise ValueError(
-                f"Unsupported new_block_ids type {type(new_block_ids)}"
-            )
+            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
 

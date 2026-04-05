@@ -10,12 +10,12 @@ import json
 import math
 import os
 import queue
-import re
 import threading
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
+import regex as re
 import torch
 import zmq
 
@@ -27,19 +27,18 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_data import (
+from vllm.logger import init_logger
+from vllm.utils.network_utils import get_ip, make_zmq_socket
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.serial_utils import MsgpackDecoder
+
+from .mooncake_store_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     MooncakeStoreConnectorMetadata,
     ReqMeta,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_scheduler import (
-    get_zmq_rpc_path_lookup,
-)
-from vllm.logger import init_logger
-from vllm.utils.network_utils import get_ip, make_zmq_socket
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
-from vllm.v1.serial_utils import MsgpackDecoder
+from .mooncake_store_scheduler import get_zmq_rpc_path_lookup
 
 logger = init_logger(__name__)
 
@@ -65,9 +64,7 @@ class MooncakeStoreConfig:
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server", ""),
             global_segment_size=_parse_size(
-                config.get(
-                    "global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE
-                )
+                config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
             ),
             local_buffer_size=_parse_size(
                 config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
@@ -82,8 +79,7 @@ class MooncakeStoreConfig:
         config_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if not config_path:
             raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' "
-                "is not set."
+                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
         return MooncakeStoreConfig.from_file(config_path)
 
@@ -96,9 +92,7 @@ def _parse_size(value: Any) -> int:
         try:
             return int(value)
         except (TypeError, ValueError) as e:
-            raise TypeError(
-                f"Unsupported type for size: {type(value)}"
-            ) from e
+            raise TypeError(f"Unsupported type for size: {type(value)}") from e
 
     cleaned = value.strip().lower()
     if not cleaned:
@@ -120,10 +114,8 @@ def _parse_size(value: Any) -> int:
 
     try:
         numeric_value = float(number_str)
-    except ValueError:
-        raise ValueError(
-            f"Invalid numeric value '{number_str}' in: '{value}'"
-        )
+    except ValueError as exc:
+        raise ValueError(f"Invalid numeric value '{number_str}' in: '{value}'") from exc
     return int(numeric_value * multiplier)
 
 
@@ -252,9 +244,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys = []
         block_hashes: list[BlockHash] = []
         for index, (start, end, key) in enumerate(
-            self.token_database.process_tokens(
-                token_len, req_meta.block_hashes
-            )
+            self.token_database.process_tokens(token_len, req_meta.block_hashes)
         ):
             starts.append(start)
             ends.append(end)
@@ -265,9 +255,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         starts = starts[self.tp_rank % self.put_step :: self.put_step]
         ends = ends[self.tp_rank % self.put_step :: self.put_step]
         keys = keys[self.tp_rank % self.put_step :: self.put_step]
-        block_hashes = block_hashes[
-            self.tp_rank % self.put_step :: self.put_step
-        ]
+        block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
 
         if not keys:
             self.dec_stored_request(req_id)
@@ -275,9 +263,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         # Check which blocks already exist (dedup)
         exists_states = self.store.batch_is_exist(keys)
-        missing_indices = [
-            i for i, exists in enumerate(exists_states) if exists != 1
-        ]
+        missing_indices = [i for i, exists in enumerate(exists_states) if exists != 1]
 
         if not missing_indices:
             self.dec_stored_request(req_id)
@@ -301,9 +287,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         sizes = []
         stored_events: list[BlockStored] = []
         prev_key = None
-        new_block_hashes = [
-            maybe_convert_block_hash(bh) for bh in block_hashes
-        ]
+        new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
 
         for index, start in enumerate(starts):
             addr, size, _ = self.token_database.prepare_value(
@@ -334,14 +318,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             current_event.synchronize()
 
         try:
-            res = self.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes
-            )
+            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
-                    logger.error(
-                        "Failed to put key %s, res: %s", keys, res
-                    )
+                    logger.error("Failed to put key %s, res: %s", keys, res)
         except Exception as e:
             logger.error("Failed to put key %s, error: %s", keys, e)
 
@@ -420,9 +400,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         res,
                     )
         except Exception as e:
-            logger.error(
-                "Failed to get key %s, error: %s", key_list_c, e
-            )
+            logger.error("Failed to get key %s, error: %s", key_list_c, e)
 
         self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -453,24 +431,16 @@ class MooncakeStoreWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
-        self.pp_rank = (
-            (parallel_config.rank // self.tp_size) % self.pp_size
-        )
+        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
 
         self.pcp_size = get_pcp_group().world_size
-        self.pcp_rank = (
-            get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        )
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_dcp_group().world_size
-        self.dcp_rank = (
-            get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
-        )
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "load_async", False
-            )
+        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "load_async", False
         )
         self.original_block_size = vllm_config.cache_config.block_size
         self.block_size = vllm_config.cache_config.block_size
@@ -508,9 +478,7 @@ class MooncakeStoreWorker:
             pp_rank=self.pp_rank,
         )
 
-        self.token_database = ChunkedTokenDatabase(
-            self.metadata, self.block_size
-        )
+        self.token_database = ChunkedTokenDatabase(self.metadata, self.block_size)
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_env()
@@ -540,9 +508,7 @@ class MooncakeStoreWorker:
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
 
-    def register_kv_caches(
-        self, kv_caches: dict[str, torch.Tensor]
-    ):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV cache tensors and start transfer threads."""
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache = first_kv_cache_tuple[0]
@@ -556,14 +522,11 @@ class MooncakeStoreWorker:
             for i in range(len(first_kv_cache_tuple)):
                 block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
                 self.block_len.append(
-                    first_kv_cache_tuple[i].element_size()
-                    * math.prod(block_shape)
+                    first_kv_cache_tuple[i].element_size() * math.prod(block_shape)
                 )
         else:
             block_shape = first_kv_cache.shape[-block_rank:]
-            self.block_len = [
-                first_kv_cache.element_size() * math.prod(block_shape)
-            ]
+            self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, shape %s",
@@ -586,9 +549,7 @@ class MooncakeStoreWorker:
         # Register buffers
         self.store.register_buffer(ptrs, lengths)
 
-        self.token_database.set_kv_caches_base_addr(
-            self.kv_caches_base_addr
-        )
+        self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
 
         # Start transfer threads
@@ -619,7 +580,8 @@ class MooncakeStoreWorker:
             ready_event.wait()
 
     def start_load_kv(
-        self, metadata: MooncakeStoreConnectorMetadata,
+        self,
+        metadata: MooncakeStoreConnectorMetadata,
     ):
         """Start loading KV cache from the store."""
         for request in metadata.requests:
@@ -628,15 +590,13 @@ class MooncakeStoreWorker:
                 continue
 
             token_len = request.token_len_chunk
-            if (
-                load_spec.kvpool_cached_tokens % self.block_size != 0
-            ) and (
+            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):
                 token_len = load_spec.kvpool_cached_tokens + 1
             else:
                 token_len = load_spec.kvpool_cached_tokens
-            request.load_spec.token_len = token_len
+            load_spec.token_len = token_len
 
             if self.load_async:
                 assert self.kv_recv_thread is not None
@@ -647,14 +607,10 @@ class MooncakeStoreWorker:
                 size_list = []
                 key_list = []
                 mask_num = (
-                    load_spec.vllm_cached_tokens
-                    // self.block_size
-                    * self.block_size
+                    load_spec.vllm_cached_tokens // self.block_size * self.block_size
                 )
-                for start, end, key in (
-                    self.token_database.process_tokens(
-                        token_len, request.block_hashes, mask_num
-                    )
+                for start, end, key in self.token_database.process_tokens(
+                    token_len, request.block_hashes, mask_num
                 ):
                     addr, size, _ = self.token_database.prepare_value(
                         start, end, request.block_ids
@@ -684,7 +640,8 @@ class MooncakeStoreWorker:
                     logger.error("Failed to get: %s", e)
 
     def wait_for_save(
-        self, metadata: MooncakeStoreConnectorMetadata,
+        self,
+        metadata: MooncakeStoreConnectorMetadata,
     ):
         """Record CUDA event and queue save requests."""
         current_event = None
@@ -710,9 +667,7 @@ class MooncakeStoreWorker:
     ) -> tuple[set[str], set[str]]:
         """Get completed send/recv request IDs."""
         done_sending = (
-            self._get_and_clear_finished_sending(
-                finished_req_ids, meta
-            )
+            self._get_and_clear_finished_sending(finished_req_ids, meta)
             if self.kv_role in ["kv_producer", "kv_both"]
             else set()
         )
@@ -749,19 +704,13 @@ class MooncakeStoreWorker:
             ):
                 self.finished_store_req.remove(req_id)
                 finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(
-                    req_id
-                )
+                self.kv_send_thread.delete_finished_stored_request(req_id)
 
         for req_id in finished_req_ids:
-            req_remain_jobs = (
-                self.kv_send_thread.stored_requests.get(req_id)
-            )
+            req_remain_jobs = self.kv_send_thread.stored_requests.get(req_id)
             if req_remain_jobs == 0:
                 finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(
-                    req_id
-                )
+                self.kv_send_thread.delete_finished_stored_request(req_id)
             elif req_remain_jobs is not None:
                 self.finished_store_req.add(req_id)
 
@@ -790,18 +739,14 @@ class MooncakeStoreWorker:
             multi_tp_keys = keys[:]
             for i in range(1, min(self.tp_size, self.num_kv_head)):
                 for item in keys:
-                    new_str = item.replace(
-                        "@tp_rank:0", f"@tp_rank:{i}", 1
-                    )
+                    new_str = item.replace("@tp_rank:0", f"@tp_rank:{i}", 1)
                     multi_tp_keys.append(new_str)
 
             # Expand keys for all PP ranks
             pp_base_keys = multi_tp_keys.copy()
             for i in range(1, self.pp_size):
                 for item in pp_base_keys:
-                    new_str = item.replace(
-                        "@pp_rank:0", f"@pp_rank:{i}", 1
-                    )
+                    new_str = item.replace("@pp_rank:0", f"@pp_rank:{i}", 1)
                     multi_tp_keys.append(new_str)
 
             res = self.store.batch_is_exist(multi_tp_keys)
@@ -809,9 +754,7 @@ class MooncakeStoreWorker:
             num_block = len(keys)
             multi_tp_values = [
                 res[i * num_block : (i + 1) * num_block]
-                for i in range(
-                    min(self.tp_size, self.num_kv_head) * self.pp_size
-                )
+                for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
             ]
             index = self._find_min_first_non_one_index(multi_tp_values)
             if index != -1:
@@ -826,12 +769,7 @@ class MooncakeStoreWorker:
         arr: list[list[int]],
     ) -> int:
         try:
-            return min(
-                idx
-                for row in arr
-                for idx, val in enumerate(row)
-                if val != 1
-            )
+            return min(idx for row in arr for idx, val in enumerate(row) if val != 1)
         except ValueError:
             return -1
 
@@ -870,20 +808,14 @@ class LookupKeyServer:
         def process_request():
             while self.running:
                 all_frames = self.socket.recv_multipart(copy=False)
-                token_len = int.from_bytes(
-                    all_frames[0], byteorder="big"
-                )
+                token_len = int.from_bytes(all_frames[0], byteorder="big")
                 hash_frames = all_frames[1:]
                 hashes_str = self.decoder.decode(hash_frames)
-                result = self.store_worker.lookup(
-                    token_len, hashes_str
-                )
+                result = self.store_worker.lookup(token_len, hashes_str)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 
-        self.thread = threading.Thread(
-            target=process_request, daemon=True
-        )
+        self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
     def close(self):
