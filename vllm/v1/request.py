@@ -20,6 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -145,9 +146,6 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -159,8 +157,7 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # The number of tokens that have been computed remotely.
-        self.num_external_computed_tokens = 0
+        self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
@@ -277,6 +274,18 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    def take_prefill_stats(self) -> PrefillStats | None:
+        """Return latest prefill stats and disable prefill future stats.
+
+        When we notify the frontend of prefill completion, we want the stats for
+        the latest prefill, but we do not want to record subsequent prefill stats
+        if we are later preempted."""
+        if self.prefill_stats is None:
+            return None
+        prefill_stats = self.prefill_stats
+        self.prefill_stats = None
+        return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
         """

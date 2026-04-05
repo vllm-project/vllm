@@ -164,6 +164,27 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
             "to recompute invalid portions."
         )
 
+    # 6b. Validate prefill_stats (directly on request since no output generated)
+    assert request.prefill_stats is not None, "prefill_stats should exist on request"
+    prefill_stats = request.prefill_stats
+    assert prefill_stats.num_prompt_tokens == num_prompt_tokens
+    assert prefill_stats.num_local_cached_tokens == 0  # No local cache
+
+    # Calculate expected external cached (after invalid block adjustment)
+    num_failed_tokens = (
+        num_external_computed_blocks - invalid_block_idx
+    ) * recompute_scheduler.block_size
+    expected_external_cached = num_external_computed_tokens - num_failed_tokens
+    assert prefill_stats.num_external_cached_tokens == expected_external_cached, (
+        f"prefill_stats should reflect {num_failed_tokens} failed external "
+        f"tokens, expected {expected_external_cached}, "
+        f"got {prefill_stats.num_external_cached_tokens}"
+    )
+    assert prefill_stats.num_cached_tokens == expected_external_cached
+    assert prefill_stats.num_computed_tokens == (
+        num_prompt_tokens - expected_external_cached
+    )
+
     # 7. verify request can be rescheduled in next step
     scheduler_output_2 = recompute_scheduler.schedule()
 
@@ -292,6 +313,25 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     assert conn_stats.queries == num_prompt_tokens
     assert conn_stats.hits == num_external_computed_tokens
 
+    # Validate prefill_stats (from request - output has None for error cases)
+    assert request.prefill_stats is not None, "prefill_stats should exist on request"
+    prefill_stats = request.prefill_stats
+    assert prefill_stats.num_prompt_tokens == num_prompt_tokens
+    assert prefill_stats.num_local_cached_tokens == 0  # No local cache
+
+    # Calculate expected external cached (after invalid block adjustment)
+    # All tokens in and after the invalid block are lost
+    expected_external_cached = invalid_block_idx * fail_scheduler.block_size
+    assert prefill_stats.num_external_cached_tokens == expected_external_cached, (
+        f"prefill_stats should reflect truncation at invalid block "
+        f"{invalid_block_idx}, expected {expected_external_cached}, "
+        f"got {prefill_stats.num_external_cached_tokens}"
+    )
+    assert prefill_stats.num_cached_tokens == expected_external_cached
+    assert prefill_stats.num_computed_tokens == (
+        num_prompt_tokens - expected_external_cached
+    )
+
 
 def test_async_recompute_blocks_not_cached_when_invalid(
     recompute_scheduler: Scheduler,
@@ -411,6 +451,25 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     assert conn_stats.requests == 1
     assert conn_stats.queries == num_prompt_tokens
     assert conn_stats.hits == num_external_computed_tokens
+
+    # Validate prefill_stats (directly on request since no output generated)
+    assert request.prefill_stats is not None, "prefill_stats should exist on request"
+    prefill_stats = request.prefill_stats
+    assert prefill_stats.num_prompt_tokens == num_prompt_tokens
+    assert prefill_stats.num_local_cached_tokens == 0  # No local cache
+
+    # Calculate expected external cached (after invalid block adjustment)
+    # All tokens in and after the invalid block are lost
+    expected_external_cached = invalid_block_idx * recompute_scheduler.block_size
+    assert prefill_stats.num_external_cached_tokens == expected_external_cached, (
+        f"prefill_stats should reflect truncation at invalid block "
+        f"{invalid_block_idx}, expected {expected_external_cached}, "
+        f"got {prefill_stats.num_external_cached_tokens}"
+    )
+    assert prefill_stats.num_cached_tokens == expected_external_cached
+    assert prefill_stats.num_computed_tokens == (
+        num_prompt_tokens - expected_external_cached
+    )
 
     # now simulate async transfer completing
     model_runner_output_2 = create_model_runner_output(
