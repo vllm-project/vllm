@@ -19,11 +19,26 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA-alike platforms.",
+        allow_module_level=True,
+    )
+if current_platform.is_cuda():
+    from vllm.vllm_flash_attn.flash_attn_interface import FA2_AVAILABLE, FA3_AVAILABLE
+
+    if not (FA2_AVAILABLE or FA3_AVAILABLE):
+        pytest.skip(
+            reason="CUDA flash attention extensions are unavailable.",
+            allow_module_level=True,
+        )
+
 from tests.utils import multi_gpu_test
 from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
-from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -45,26 +60,27 @@ from vllm.v1.pool.late_interaction import (
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
-if not current_platform.is_cuda_alike():
-    pytest.skip(
-        reason="V1 currently only supported on CUDA-alike platforms.",
-        allow_module_level=True,
-    )
-
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quantization kernels"
-PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 TEST_MODULE = "tests.v1.engine.test_engine_core_client"
+_PROMPT_TOKENS: list[int] | None = None
 
 _REQUEST_COUNTER = 0
+
+
+def get_prompt_tokens() -> list[int]:
+    global _PROMPT_TOKENS
+    if _PROMPT_TOKENS is None:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        _PROMPT_TOKENS = tokenizer(PROMPT).input_ids
+    return _PROMPT_TOKENS
 
 
 def make_request(
     params: SamplingParams, prompt_tokens_ids: list[int] | None = None
 ) -> EngineCoreRequest:
     if not prompt_tokens_ids:
-        prompt_tokens_ids = PROMPT_TOKENS
+        prompt_tokens_ids = get_prompt_tokens()
 
     global _REQUEST_COUNTER
     _REQUEST_COUNTER += 1
@@ -1120,9 +1136,15 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
         t = time.time()
         engine_args = EngineArgs(model=MODEL_NAME)
-        vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT
-        )
+        try:
+            vllm_config = engine_args.create_engine_config(
+                usage_context=UsageContext.UNKNOWN_CONTEXT
+            )
+        except OSError as exc:
+            error_message = str(exc).lower()
+            if "gated repo" in error_message:
+                pytest.skip(f"{MODEL_NAME} is unavailable in this environment.")
+            raise
         executor_class = Executor.get_class(vllm_config)
         print(f"VllmConfig creation took {time.time() - t:.2f} seconds.")
 
@@ -1146,7 +1168,12 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
             log_stats=True,
         )
 
-    assert "Engine core initialization failed" in str(e_info.value)
+    error_message = str(e_info.value)
+    assert "Engine core initialization failed" in error_message
+    assert "Failed core proc(s):" in error_message
+    assert "{}" not in error_message
+    assert "pid=" in error_message
+    assert "signal=" in error_message or "exitcode=" in error_message
 
 
 @create_new_process_for_each_test()
