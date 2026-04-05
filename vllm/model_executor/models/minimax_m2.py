@@ -34,6 +34,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -221,9 +222,21 @@ class MiniMaxM2Attention(nn.Module):
         self.q_norm = MiniMaxText01RMSNormTP(
             self.head_dim * self.total_num_heads, eps=rms_norm_eps
         )
-        self.k_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
-        )
+        if self.total_num_kv_heads >= tp_size:
+            self.k_norm = MiniMaxText01RMSNormTP(
+                self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
+            )
+        else:
+            # KV heads are replicated across TP ranks; shard k_norm weight by
+            # total_num_kv_heads rather than tp_size to avoid incorrect sharding.
+            num_kv_head_replicas = tp_size // self.total_num_kv_heads
+            self.k_norm = MiniMaxText01RMSNormTP(
+                self.head_dim * self.total_num_kv_heads,
+                eps=rms_norm_eps,
+                weight_shard_world_size=self.total_num_kv_heads,
+                weight_shard_rank=get_tensor_model_parallel_rank()
+                // num_kv_head_replicas,
+            )
 
     def forward(
         self,
