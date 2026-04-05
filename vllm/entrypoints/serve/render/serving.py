@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Sequence
+from copy import copy
 from http import HTTPStatus
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
@@ -21,10 +26,24 @@ from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_system_message,
+    get_user_message,
+    has_custom_tools,
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.harmony import (
+    construct_harmony_previous_input_messages,
+    response_input_to_harmony,
+)
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
+from vllm.entrypoints.openai.responses.utils import (
+    construct_input_messages,
+    construct_tool_dicts,
+    extract_tool_types,
+)
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -56,7 +75,34 @@ from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.mcp.tool_server import ToolServer
+
 logger = init_logger(__name__)
+
+
+def _extract_allowed_tools_from_mcp_requests(
+    tools: list[Tool],
+) -> dict[str, list[str] | None]:
+    """Extract allowed_tools mapping from MCP tool requests."""
+    allowed_tools_map: dict[str, list[str] | None] = {}
+    for tool in tools:
+        if not isinstance(tool, Mcp):
+            continue
+
+        allowed_tools_val = None
+        if tool.allowed_tools is not None:
+            if isinstance(tool.allowed_tools, list):
+                allowed_tools_val = tool.allowed_tools
+            elif hasattr(tool.allowed_tools, "tool_names"):
+                allowed_tools_val = tool.allowed_tools.tool_names
+
+        # Normalize "*" to None (both mean "allow all tools")
+        if allowed_tools_val is not None and "*" in allowed_tools_val:
+            allowed_tools_val = None
+
+        allowed_tools_map[tool.server_label] = allowed_tools_val
+    return allowed_tools_map
 
 
 class OpenAIServingRender:
@@ -109,6 +155,11 @@ class OpenAIServingRender:
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+        # Responses API support.
+        # These are set after init by generate/api_router.py when an engine
+        # is available.  GPU-less render servers use the defaults (None / {}).
+        self.tool_server: ToolServer | None = None
 
     async def render_chat_request(
         self,
@@ -338,6 +389,290 @@ class OpenAIServingRender:
         )
 
         return engine_inputs
+
+    async def render_responses_request(
+        self,
+        request: ResponsesRequest,
+    ) -> GenerateRequest | ErrorResponse:
+        """Validate the model and preprocess a responses request.
+
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingResponses.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            logger.error("Error with model %s", error_check_ret)
+            return error_check_ret
+
+        # GPU-less render server has no store; only new conversations.
+        result = await self.render_responses(
+            request, prev_response=None, prev_messages=None
+        )
+        if isinstance(result, ErrorResponse):
+            return result
+
+        _, engine_inputs = result
+
+        if len(engine_inputs) != 1:
+            return self.create_error_response(
+                f"Expected exactly 1 engine prompt, got {len(engine_inputs)}"
+            )
+
+        engine_input = engine_inputs[0]
+
+        prompt_components = extract_prompt_components(self.model_config, engine_input)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+        token_ids = list(token_ids)
+
+        input_length = extract_prompt_len(self.model_config, engine_input)
+        max_tokens = get_max_tokens(
+            self.model_config.max_model_len,
+            request.max_output_tokens,
+            input_length,
+            self.default_sampling_params,
+            self.override_max_tokens,
+        )
+        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+
+        request_id = f"resp-{random_uuid()}"
+
+        return GenerateRequest(
+            request_id=request_id,
+            token_ids=token_ids,
+            features=self._extract_mm_features(engine_input),
+            sampling_params=params,
+            model=request.model,
+            stream=bool(request.stream),
+            stream_options=None,
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+        )
+
+    async def render_responses(
+        self,
+        request: ResponsesRequest,
+        prev_response: ResponsesResponse | None,
+        prev_messages: list[ChatCompletionMessageParam] | None,
+    ) -> tuple[list[ChatCompletionMessageParam], list[EngineInput]] | ErrorResponse:
+        """Core preprocessing logic for responses requests (no model/engine
+        check).
+
+        State lookups (response_store, msg_store) are performed by the
+        caller (OpenAIServingResponses) and passed in as parameters.
+        """
+        if self.use_harmony:
+            return self._make_responses_request_with_harmony(
+                request, prev_response, prev_messages
+            )
+
+        # Non-harmony path.
+        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        messages = construct_input_messages(
+            request_instructions=request.instructions,
+            request_input=request.input,
+            prev_msg=prev_messages,
+            prev_response_output=prev_response.output if prev_response else None,
+        )
+
+        _, engine_inputs = await self.preprocess_chat(
+            request,
+            messages,
+            default_template=self.chat_template,
+            default_template_content_format=self.chat_template_content_format,
+            default_template_kwargs=None,
+            tool_dicts=tool_dicts,
+            tool_parser=self.tool_parser,
+        )
+        return messages, engine_inputs
+
+    # ------------------------------------------------------------------
+    # Responses API: Harmony helpers (moved from OpenAIServingResponses)
+    # ------------------------------------------------------------------
+
+    def _make_responses_request_with_harmony(
+        self,
+        request: ResponsesRequest,
+        prev_response: ResponsesResponse | None,
+        prev_messages: list[ChatCompletionMessageParam] | None,
+    ) -> tuple[list[OpenAIMessage], list[EngineInput]]:
+        if request.tool_choice != "auto":
+            raise NotImplementedError(
+                "Only 'auto' tool_choice is supported in response API with Harmony"
+            )
+
+        arrival_time = time.time()
+        messages = self._construct_responses_input_with_harmony(
+            request, prev_response, prev_messages
+        )
+        prompt_token_ids = render_for_completion(messages)
+        engine_input = tokens_input(prompt_token_ids)
+        engine_input["arrival_time"] = arrival_time
+
+        # Add cache_salt if provided in the request.
+        if request.cache_salt is not None:
+            engine_input["cache_salt"] = request.cache_salt
+
+        return messages, [engine_input]
+
+    def _construct_responses_input_with_harmony(
+        self,
+        request: ResponsesRequest,
+        prev_response: ResponsesResponse | None,
+        prev_messages: list[ChatCompletionMessageParam] | None,
+    ) -> list[OpenAIMessage]:
+        messages: list[OpenAIMessage] = []
+        if prev_response is None:
+            # New conversation.
+            tool_types = extract_tool_types(request.tools)
+            with_custom_tools = has_custom_tools(tool_types)
+
+            sys_msg = self._construct_responses_harmony_system_message(
+                request, with_custom_tools, tool_types
+            )
+            messages.append(sys_msg)
+            if with_custom_tools:
+                dev_msg = get_developer_message(
+                    instructions=request.instructions, tools=request.tools
+                )
+                messages.append(dev_msg)
+            messages += construct_harmony_previous_input_messages(request)
+
+        else:
+            # Continue the previous conversation.
+            # FIXME(woosuk): Currently, request params like reasoning and
+            # instructions are ignored.
+            assert prev_messages is not None
+            prev_msgs = prev_messages
+
+            # FIXME(woosuk): The slice-delete-reappend cycle below is
+            # currently a no-op --- it removes messages then puts them all
+            # back unfiltered.  It may be intentionally deferred (see FIXME
+            # above) or redundant if the Harmony encoder already strips
+            # analysis messages at render time.  If analysis messages need
+            # to be dropped here, add a channel != "analysis" filter when
+            # re-appending, similar to auto_drop_analysis_messages in
+            # harmony_utils.py.
+            if len(prev_msgs) > 0:
+                last_msg = prev_msgs[-1]
+                assert isinstance(last_msg, OpenAIMessage)
+                if last_msg.channel == "final":
+                    prev_final_msg_idx = -1
+                    for i in range(len(prev_msgs) - 2, -1, -1):
+                        prev_msg_i = prev_msgs[i]
+                        assert isinstance(prev_msg_i, OpenAIMessage)
+                        if prev_msg_i.channel == "final":
+                            prev_final_msg_idx = i
+                            break
+                    recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1 :]
+                    del prev_msgs[prev_final_msg_idx + 1 :]
+                    for msg in recent_turn_msgs:
+                        assert isinstance(msg, OpenAIMessage)
+                        prev_msgs.append(msg)
+            messages.extend(prev_msgs)
+        # Append the new input.
+        # Responses API supports simple text inputs without chat format.
+        if isinstance(request.input, str):
+            # Skip empty string input when previous_input_messages supplies
+            # the full conversation history --- an empty trailing user message
+            # confuses the model into thinking nothing was sent.
+            if request.input or not request.previous_input_messages:
+                messages.append(get_user_message(request.input))
+        else:
+            prev_outputs: list[ResponseOutputItem] = (
+                copy(prev_response.output) if prev_response is not None else []
+            )
+            for response_msg in request.input:
+                new_msg = response_input_to_harmony(response_msg, prev_outputs)
+                if new_msg is not None and new_msg.author.role != "system":
+                    messages.append(new_msg)
+
+                # User passes in a tool call request and its output.  We need
+                # to add the tool call request to prev_outputs so that
+                # response_input_to_harmony can find the tool call request
+                # when parsing the tool call output.
+                if isinstance(response_msg, ResponseFunctionToolCall):
+                    prev_outputs.append(response_msg)
+        return messages
+
+    def _construct_responses_harmony_system_message(
+        self,
+        request: ResponsesRequest,
+        with_custom_tools: bool,
+        tool_types: set[str],
+    ) -> OpenAIMessage:
+        model_identity = self._extract_responses_system_message(request)
+
+        reasoning_effort = request.reasoning.effort if request.reasoning else None
+
+        # Extract allowed_tools from MCP tool requests.
+        allowed_tools_map = _extract_allowed_tools_from_mcp_requests(request.tools)
+
+        # Get filtered tool descriptions first.
+        browser_description = (
+            self.tool_server.get_tool_description(
+                "browser", allowed_tools_map.get("web_search_preview")
+            )
+            if "web_search_preview" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("browser")
+            else None
+        )
+        python_description = (
+            self.tool_server.get_tool_description(
+                "python", allowed_tools_map.get("code_interpreter")
+            )
+            if "code_interpreter" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("python")
+            else None
+        )
+        container_description = (
+            self.tool_server.get_tool_description(
+                "container", allowed_tools_map.get("container")
+            )
+            if "container" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("container")
+            else None
+        )
+
+        sys_msg = get_system_message(
+            model_identity=model_identity,
+            reasoning_effort=reasoning_effort,
+            browser_description=browser_description,
+            python_description=python_description,
+            container_description=container_description,
+            instructions=request.instructions,
+            with_custom_tools=with_custom_tools,
+        )
+        return sys_msg
+
+    @staticmethod
+    def _extract_responses_system_message(
+        request: ResponsesRequest,
+    ) -> str | None:
+        system_msg = None
+        if not isinstance(request.input, str):
+            for response_msg in request.input:
+                if (
+                    isinstance(response_msg, dict)
+                    and response_msg.get("role") == "system"
+                ):
+                    content = response_msg.get("content")
+                    if isinstance(content, str):
+                        system_msg = content
+                    elif isinstance(content, list):
+                        for param in content:
+                            if (
+                                isinstance(param, dict)
+                                and param.get("type") == "input_text"
+                            ):
+                                system_msg = param.get("text")
+                                break
+                    break
+        return system_msg
 
     @staticmethod
     def _extract_mm_features(

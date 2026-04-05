@@ -31,11 +31,13 @@ from vllm.entrypoints.openai.responses.context import ConversationContext, Simpl
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
-    _extract_allowed_tools_from_mcp_requests,
-    extract_tool_types,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
+)
+from vllm.entrypoints.openai.responses.utils import extract_tool_types
+from vllm.entrypoints.serve.render.serving import (
+    _extract_allowed_tools_from_mcp_requests,
 )
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
