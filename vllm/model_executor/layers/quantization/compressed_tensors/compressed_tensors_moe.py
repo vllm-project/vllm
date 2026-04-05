@@ -2509,7 +2509,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
         assert self.moe_quant_config is not None
 
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             cutlass_moe_w4a8_fp8,
         )
 
