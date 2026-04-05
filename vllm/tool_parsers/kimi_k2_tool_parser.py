@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # code modified from deepseekv3_tool_parser.py
 
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -18,6 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
 )
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -104,6 +106,67 @@ class KimiK2ToolParser(ToolParser):
                 "Kimi-K2 Tool parser could not locate tool call start/end "
                 "tokens in the tokenizer!"
             )
+
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
+
+        if request.structured_outputs is not None:
+            return request
+
+        if request.tools and request.tool_choice in ("auto", None):
+            tag_json = self._build_structural_tag(request.tools)
+            if tag_json is not None:
+                request.structured_outputs = StructuredOutputsParams(
+                    structural_tag=tag_json
+                )
+
+        if request.tools and request.tool_choice != "none":
+            request.skip_special_tokens = False
+
+        return request
+
+    def _build_structural_tag(self, tools) -> str | None:
+        """Build a structural_tag JSON from tools for guided decoding."""
+        tags = []
+        for tool in tools:
+            name = tool.function.name
+            params = tool.function.parameters or {
+                "type": "object",
+                "properties": {},
+            }
+            tags.append(
+                {
+                    "type": "tag",
+                    "begin": f"<|tool_call_begin|>functions.{name}",
+                    "content": {
+                        "type": "sequence",
+                        "elements": [
+                            {"type": "regex", "pattern": r":\d+"},
+                            {
+                                "type": "const_string",
+                                "value": "<|tool_call_argument_begin|>",
+                            },
+                            {"type": "json_schema", "json_schema": params},
+                        ],
+                    },
+                    "end": "<|tool_call_end|>",
+                }
+            )
+
+        if not tags:
+            return None
+
+        structural_tag = {
+            "type": "structural_tag",
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<|tool_call_begin|>"],
+                "tags": tags,
+                "at_least_one": False,
+                "stop_after_first": False,
+            },
+        }
+        return json.dumps(structural_tag)
 
     def _check_and_strip_markers(self, text: str) -> tuple[str, bool, bool]:
         """
