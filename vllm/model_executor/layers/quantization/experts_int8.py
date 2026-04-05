@@ -134,10 +134,7 @@ class ExpertsInt8MoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w2_scale", w2_scale)
 
     def _setup_kernel(self, layer: FusedMoE) -> None:
-        self.moe_quant_config = make_int8_moe_quant_config(
-            w1_scale=layer.w13_scale,
-            w2_scale=layer.w2_scale,
-        )
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
         assert self.experts_cls is not None
         self.moe_kernel = make_int8_moe_kernel(
