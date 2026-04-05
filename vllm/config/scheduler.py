@@ -153,6 +153,18 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    request_timeout_s: float = Field(default=0.0, ge=0.0)
+    """Maximum wall-clock time (seconds) allowed for a single request from
+    the moment it is enqueued until it finishes.  If the request has not
+    completed within this budget it is aborted and the caller receives an
+    ``EngineRequestTimeoutError``.  0 (default) disables the limit."""
+
+    request_stall_timeout_s: float = Field(default=0.0, ge=0.0)
+    """Maximum time (seconds) allowed between two successive output tokens
+    for a request.  If no new token arrives within this window the request
+    is aborted with ``EngineRequestTimeoutError``.  0 (default) disables
+    the limit."""
+
     @staticmethod
     def default_factory(**kwargs):
         """

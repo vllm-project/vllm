@@ -6,6 +6,18 @@ class EngineGenerateError(Exception):
     pass
 
 
+class EngineRequestTimeoutError(EngineGenerateError):
+    """Raised when a request exceeds the ``request_timeout_s`` or
+    ``request_stall_timeout_s`` limits set in ``SchedulerConfig``.
+    The request has been aborted.
+
+    Subclasses EngineGenerateError so existing handlers for recoverable
+    generate failures still match, while callers that need to distinguish
+    a timeout can catch this more-specific type."""
+
+    pass
+
+
 class EngineDeadError(Exception):
     """Raised when the EngineCore dies. Unrecoverable."""
 
