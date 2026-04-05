@@ -603,6 +603,10 @@ def maybe_override_with_speculators(
     # Set the draft model to the speculators model
     speculative_config["model"] = model
 
+    # Allow user --speculative-config to override auto-detected values
+    if vllm_speculative_config is not None:
+        speculative_config.update(vllm_speculative_config)
+
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
