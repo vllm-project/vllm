@@ -345,4 +345,6 @@ class LongCatFlashMTP(nn.Module):
     ) -> int | None:
         if "model.mtp" in weight_name:
             return config.num_hidden_layers * 2
+        if weight_name == "lm_head.weight":
+            return config.num_hidden_layers * 2
         return None
