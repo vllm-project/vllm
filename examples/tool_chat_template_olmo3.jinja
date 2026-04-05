@@ -1,0 +1,96 @@
+{{- bos_token }}
+{%- if custom_tools is defined %}
+    {%- set tools = custom_tools %}
+{%- endif %}
+{%- if not tools is defined %}
+    {%- set tools = none %}
+{%- endif %}
+
+{#- Extract the system message if present #}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content']|trim %}
+    {%- set messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "You are a helpful function-calling AI assistant." %}
+{%- endif %}
+
+{#- System message with tools #}
+{{- "<|im_start|>system\n" }}
+{{- system_message }}
+{%- if tools is not none and tools | length > 0 %}
+{{- "\n\nYou have access to the following functions. To call functions, respond with a pythonic function call wrapped in <function_calls></function_calls> XML tags." }}
+{{- "\n\nFor example, to call a function named 'get_weather' with parameters city='New York' and units='celsius', respond with:" }}
+{{- "\n<function_calls>\nget_weather(city='New York', units='celsius')\n</function_calls>" }}
+{{- "\n\nYou can call multiple functions by putting each call on a new line within the tags:" }}
+{{- "\n<function_calls>\nfunction1(param1='value1')\nfunction2(param2='value2')\n</function_calls>" }}
+{{- "\n\nHere are the available functions:\n<functions>\n" }}
+    {%- for tool in tools %}
+        {%- if tool.function is defined %}
+            {%- set tool = tool.function %}
+        {%- endif %}
+        {{- tool | tojson }}
+        {%- if not loop.last %}
+            {{- "\n" }}
+        {%- endif %}
+    {%- endfor %}
+{{- "\n</functions>" }}
+{%- else %}
+{{- "\nYou do not currently have access to any functions." }}
+{%- endif %}
+{{- "<|im_end|>\n" }}
+
+{#- Process conversation messages #}
+{%- for message in messages %}
+    {%- if message.role == "user" %}
+        {{- "<|im_start|>user\n" + message.content|trim + "<|im_end|>\n" }}
+    {%- elif message.role == "assistant" %}
+        {%- if message.tool_calls is defined and message.tool_calls | length > 0 %}
+            {{- "<|im_start|>assistant\n<function_calls>\n" }}
+            {%- for tool_call in message.tool_calls %}
+                {%- if tool_call.function is defined %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- tool_call.name + "(" }}
+                {%- if tool_call.arguments is string %}
+                    {%- set args = tool_call.arguments | from_json %}
+                {%- else %}
+                    {%- set args = tool_call.arguments %}
+                {%- endif %}
+                {%- for key, value in args.items() %}
+                    {{- key + "=" }}
+                    {%- if value is string %}
+                        {{- "'" + value + "'" }}
+                    {%- elif value is none %}
+                        {{- "null" }}
+                    {%- elif value is sameas true %}
+                        {{- "true" }}
+                    {%- elif value is sameas false %}
+                        {{- "false" }}
+                    {%- else %}
+                        {{- value | tojson }}
+                    {%- endif %}
+                    {%- if not loop.last %}
+                        {{- ", " }}
+                    {%- endif %}
+                {%- endfor %}
+                {{- ")" }}
+                {%- if not loop.last %}
+                    {{- "\n" }}
+                {%- endif %}
+            {%- endfor %}
+            {{- "\n</function_calls><|im_end|>\n" }}
+        {%- else %}
+            {{- "<|im_start|>assistant\n" + message.content|trim + "<|im_end|>\n" }}
+        {%- endif %}
+    {%- elif message.role == "tool" %}
+        {{- "<|im_start|>tool\n" }}
+        {%- if message.name is defined %}
+            {{- "Function " + message.name + " returned:\n" }}
+        {%- endif %}
+        {{- message.content|trim + "<|im_end|>\n" }}
+    {%- endif %}
+{%- endfor %}
+
+{%- if add_generation_prompt %}
+    {{- "<|im_start|>assistant\n" }}
+{%- endif %}
