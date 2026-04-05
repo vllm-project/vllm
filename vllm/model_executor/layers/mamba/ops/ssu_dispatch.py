@@ -12,15 +12,18 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 logger = init_logger(__name__)
 
 
 class MambaSSUBackend(ABC):
     """Abstract base class for Mamba SSU backends."""
+
+    def __init__(self, mamba_config: MambaConfig):
+        self._mamba_config = mamba_config
 
     @property
     @abstractmethod
@@ -41,7 +44,7 @@ class MambaSSUBackend(ABC):
         dt_softplus: bool = False,
         state_batch_indices: torch.Tensor | None = None,
         dst_state_batch_indices: torch.Tensor | None = None,
-        pad_slot_id: int = PAD_SLOT_ID,
+        null_block_id: int = NULL_BLOCK_ID,
         out: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
@@ -52,7 +55,8 @@ class MambaSSUBackend(ABC):
 class TritonSSUBackend(MambaSSUBackend):
     """Triton-based SSU backend (vLLM's default)."""
 
-    def __init__(self):
+    def __init__(self, mamba_config: MambaConfig):
+        super().__init__(mamba_config)
         from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
             selective_state_update as _triton_selective_state_update,
         )
@@ -77,7 +81,7 @@ class TritonSSUBackend(MambaSSUBackend):
         dt_softplus: bool = False,
         state_batch_indices: torch.Tensor | None = None,
         dst_state_batch_indices: torch.Tensor | None = None,
-        pad_slot_id: int = PAD_SLOT_ID,
+        null_block_id: int = NULL_BLOCK_ID,
         out: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
@@ -96,18 +100,21 @@ class TritonSSUBackend(MambaSSUBackend):
             dt_softplus=dt_softplus,
             state_batch_indices=state_batch_indices,
             dst_state_batch_indices=dst_state_batch_indices,
-            pad_slot_id=pad_slot_id,
+            null_block_id=null_block_id,
             out=out,
             num_accepted_tokens=num_accepted_tokens,
             cu_seqlens=cu_seqlens,
             is_blackwell=is_blackwell,
+            enable_stochastic_rounding=self._mamba_config.enable_stochastic_rounding,
+            cache_philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds,
         )
 
 
 class FlashInferSSUBackend(MambaSSUBackend):
     """FlashInfer-based SSU backend."""
 
-    def __init__(self):
+    def __init__(self, mamba_config: MambaConfig):
+        super().__init__(mamba_config)
         try:
             from flashinfer.mamba import selective_state_update as _fi_ssu
         except ImportError as e:
@@ -136,13 +143,18 @@ class FlashInferSSUBackend(MambaSSUBackend):
         dt_softplus: bool = False,
         state_batch_indices: torch.Tensor | None = None,
         dst_state_batch_indices: torch.Tensor | None = None,
-        pad_slot_id: int = PAD_SLOT_ID,
+        null_block_id: int = NULL_BLOCK_ID,
         out: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
     ) -> None:
-        # is_blackwell is Triton-only (block size tuning), ignored here
+        rand_seed = (
+            torch.randint(0, 2**32, (1,), device=state.device)
+            if self._mamba_config.enable_stochastic_rounding
+            else None
+        )
+
         self._kernel(
             state,
             x,
@@ -161,8 +173,10 @@ class FlashInferSSUBackend(MambaSSUBackend):
             cache_steps=state_batch_indices.size(-1)
             if cu_seqlens is not None and state_batch_indices is not None
             else 0,
-            pad_slot_id=pad_slot_id,
+            pad_slot_id=null_block_id,
             out=out,
+            rand_seed=rand_seed,
+            philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds,
         )
 
 
@@ -174,14 +188,15 @@ _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {
 _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
-def initialize_mamba_ssu_backend(backend: MambaBackendEnum | None = None) -> None:
+def initialize_mamba_ssu_backend(mamba_config: MambaConfig) -> None:
     """Initialize the global Mamba SSU backend.
 
     Args:
-        backend: Which backend to use. Defaults to TRITON if None.
+        mamba_config: Mamba configuration.
     """
     global _mamba_ssu_backend
 
+    backend = mamba_config.backend
     if backend is None:
         backend = MambaBackendEnum.TRITON
 
@@ -191,7 +206,7 @@ def initialize_mamba_ssu_backend(backend: MambaBackendEnum | None = None) -> Non
             f"Valid options: {list(_BACKEND_REGISTRY.keys())}"
         )
 
-    _mamba_ssu_backend = _BACKEND_REGISTRY[backend]()
+    _mamba_ssu_backend = _BACKEND_REGISTRY[backend](mamba_config)
     logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
 
 
@@ -218,7 +233,7 @@ def selective_state_update(
     dt_softplus: bool = False,
     state_batch_indices: torch.Tensor | None = None,
     dst_state_batch_indices: torch.Tensor | None = None,
-    pad_slot_id: int = PAD_SLOT_ID,
+    null_block_id: int = NULL_BLOCK_ID,
     out: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
@@ -241,7 +256,7 @@ def selective_state_update(
         dt_softplus=dt_softplus,
         state_batch_indices=state_batch_indices,
         dst_state_batch_indices=dst_state_batch_indices,
-        pad_slot_id=pad_slot_id,
+        null_block_id=null_block_id,
         out=out,
         num_accepted_tokens=num_accepted_tokens,
         cu_seqlens=cu_seqlens,

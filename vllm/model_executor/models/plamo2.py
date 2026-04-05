@@ -445,8 +445,6 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
-                enable_stochastic_rounding=self.cache_config.enable_mamba_cache_stochastic_rounding,
-                cache_philox_rounds=self.cache_config.mamba_cache_philox_rounds,
             )
 
         # 4. Final linear projection

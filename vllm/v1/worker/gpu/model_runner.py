@@ -368,7 +368,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_backends, self.attn_groups = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
-        initialize_mamba_ssu_backend(self.vllm_config.mamba_config.backend)
+        initialize_mamba_ssu_backend(self.vllm_config.mamba_config)
         check_attention_cp_compatibility(self.vllm_config)
         if self.speculator is not None:
             # HACK(woosuk)
