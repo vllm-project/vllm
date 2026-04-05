@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import os
 import sys
-from glob import glob
 from collections.abc import Sequence
 from functools import lru_cache
+from glob import glob
 from typing import Any
 
 import numpy as np
@@ -68,17 +68,22 @@ def _import_local_whisper_vq_encoder() -> tuple[Any, Any] | None:
     if source_root not in sys.path:
         sys.path.insert(0, source_root)
 
-    from kimia_infer.models.tokenizer.glm4.speech_tokenizer.configuration_whisper import (
-        WhisperVQConfig,
+    from kimia_infer.models.tokenizer.glm4.speech_tokenizer import (
+        configuration_whisper as whisper_config,
     )
-    from kimia_infer.models.tokenizer.glm4.speech_tokenizer.modeling_whisper import (
-        WhisperVQEncoder,
+    from kimia_infer.models.tokenizer.glm4.speech_tokenizer import (
+        modeling_whisper as whisper_modeling,
     )
+
+    WhisperVQConfig = whisper_config.WhisperVQConfig
+    WhisperVQEncoder = whisper_modeling.WhisperVQEncoder
 
     return WhisperVQConfig, WhisperVQEncoder
 
 
-def _load_local_quantize_encoder(model_path: str, device: torch.device | str) -> Any | None:
+def _load_local_quantize_encoder(
+    model_path: str, device: torch.device | str
+) -> Any | None:
     imported = _import_local_whisper_vq_encoder()
     if imported is None:
         return None
@@ -90,7 +95,7 @@ def _load_local_quantize_encoder(model_path: str, device: torch.device | str) ->
     state_dict = {}
     for path in glob(os.path.join(model_path, "model*.safetensors")):
         with safetensors.safe_open(path, framework="pt", device="cpu") as weights_file:
-            for key in weights_file.keys():
+            for key in tuple(weights_file.keys()):
                 state_dict[key] = weights_file.get_tensor(key)
 
     model.load_state_dict(state_dict, strict=True)
@@ -111,8 +116,8 @@ class KimiAudioSpeechTokenizer:
         self.model_name_or_path = model_name_or_path
         self.token_offset = token_offset
         env_device = os.environ.get(KIMIA_SPEECH_TOKENIZER_DEVICE_ENV)
-        self.device = device or env_device or (
-            "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = (
+            device or env_device or ("cuda" if torch.cuda.is_available() else "cpu")
         )
         self._model = model
         self._feature_extractor = feature_extractor
@@ -126,11 +131,15 @@ class KimiAudioSpeechTokenizer:
                 self.device,
             )
             if self._model is None:
-                self._model = AutoModel.from_pretrained(
-                    resolved_model_path,
-                    trust_remote_code=True,
-                    local_files_only=resolved_model_path != self.model_name_or_path,
-                ).eval().to(self.device)
+                self._model = (
+                    AutoModel.from_pretrained(
+                        resolved_model_path,
+                        trust_remote_code=True,
+                        local_files_only=resolved_model_path != self.model_name_or_path,
+                    )
+                    .eval()
+                    .to(self.device)
+                )
         if self._feature_extractor is None:
             self._feature_extractor = WhisperFeatureExtractor.from_pretrained(
                 resolved_model_path,
@@ -175,19 +184,23 @@ class KimiAudioSpeechTokenizer:
             if audio_tensor.dim() == 1:
                 audio_tensor = audio_tensor.unsqueeze(0)
             audio_tensor = audio_tensor.to(dtype=torch.float32, device=self.device)
-            audio_tensor = self._resample_if_needed(audio_tensor, sampling_rate, target_sr)
+            audio_tensor = self._resample_if_needed(
+                audio_tensor, sampling_rate, target_sr
+            )
             mono_audio = audio_tensor[0].detach().cpu().numpy()
             if mono_audio.size == 0:
                 continue
 
             time_step = 0
             while time_step * target_sr < mono_audio.shape[0]:
-                segment = mono_audio[time_step * target_sr : (time_step + 30) * target_sr]
+                segment = mono_audio[
+                    time_step * target_sr : (time_step + 30) * target_sr
+                ]
                 segments.append(segment)
                 segment_to_audio_idx.append(audio_idx)
                 time_step += 30
 
-        all_speech_tokens = [[] for _ in range(len(audios))]
+        all_speech_tokens: list[list[int]] = [[] for _ in range(len(audios))]
         if not segments:
             return all_speech_tokens
 
@@ -218,8 +231,10 @@ class KimiAudioSpeechTokenizer:
                     attention_mask=attention_mask,
                 )
                 speech_tokens = outputs.quantized_token_ids
-                attention_mask = attention_mask[:, :: model.conv1.stride[0] * model.conv2.stride[0]]
-                attention_mask = attention_mask[:, :: pooling_kernel_size]
+                attention_mask = attention_mask[
+                    :, :: model.conv1.stride[0] * model.conv2.stride[0]
+                ]
+                attention_mask = attention_mask[:, ::pooling_kernel_size]
 
                 for i in range(len(speech_tokens)):
                     audio_idx = segment_to_audio_idx[start + i]

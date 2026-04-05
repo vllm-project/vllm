@@ -3220,8 +3220,7 @@ class GPUModelRunner(
                 **self._init_model_kwargs(),
                 **self._extract_mm_kwargs(scheduler_output),
             }
-            if getattr(self.model,
-                       "builds_multimodal_inputs_embeds_in_forward", False):
+            if getattr(self.model, "builds_multimodal_inputs_embeds_in_forward", False):
                 # Some models need raw multimodal kwargs plus encoder outputs to
                 # build aligned inputs_embeds inside `forward`, instead of using
                 # the generic text-token-based merge path.
@@ -3240,10 +3239,10 @@ class GPUModelRunner(
 
                 # TODO(woosuk): Avoid the copy. Optimize.
                 self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
-                    inputs_embeds_scheduled)
+                    inputs_embeds_scheduled
+                )
 
-                input_ids, inputs_embeds = self._prepare_mm_inputs(
-                    num_input_tokens)
+                input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.

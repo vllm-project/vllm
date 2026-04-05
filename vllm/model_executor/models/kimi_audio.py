@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
+
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 
@@ -246,9 +247,9 @@ class KimiAudioWhisperEncoder(nn.Module):
                 target_length = min(target_length, max(0, normalized_lengths[idx]))
             embeds = embeds[:, :target_length, :]
 
-            embeds = (
-                embeds + self.embed_positions.weight[: embeds.size(-2), :]
-            ).to(embeds.dtype)
+            embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
+                embeds.dtype
+            )
 
             hidden_states.append(embeds)
             input_is_batched = embeds.ndim > 2
@@ -552,7 +553,9 @@ class KimiAudioMimoModel(nn.Module):
             self.layers = nn.ModuleList()
             self.norm = PPMissingLayer()
 
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
@@ -616,6 +619,7 @@ class KimiAudioForConditionalGeneration(
     SupportsTranscription,
 ):
     """Kimi-Audio model for ASR transcription."""
+
     supports_multimodal_raw_input_only: ClassVar[bool] = True
     builds_multimodal_inputs_embeds_in_forward: ClassVar[bool] = True
 
@@ -772,7 +776,10 @@ class KimiAudioForConditionalGeneration(
     def _iter_single_audio_features(
         self,
         input_features: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
-        feature_attention_mask: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None = None,
+        feature_attention_mask: torch.Tensor
+        | list[torch.Tensor]
+        | tuple[torch.Tensor, ...]
+        | None = None,
     ) -> list[torch.Tensor]:
         if isinstance(feature_attention_mask, torch.Tensor):
             if feature_attention_mask.dim() == 1:
@@ -795,7 +802,9 @@ class KimiAudioForConditionalGeneration(
                 return [
                     self._trim_single_audio_features(
                         input_features,
-                        None if feature_attention_masks is None else feature_attention_masks[0],
+                        None
+                        if feature_attention_masks is None
+                        else feature_attention_masks[0],
                     ).unsqueeze(0)
                 ]
             if input_features.dim() == 3:
@@ -807,7 +816,9 @@ class KimiAudioForConditionalGeneration(
                         else feature_attention_masks[idx]
                     )
                     normalized_features.append(
-                        self._trim_single_audio_features(feature, feature_mask).unsqueeze(0)
+                        self._trim_single_audio_features(
+                            feature, feature_mask
+                        ).unsqueeze(0)
                     )
                 return normalized_features
             msg = (
@@ -826,12 +837,15 @@ class KimiAudioForConditionalGeneration(
                 raise TypeError(msg)
             feature_mask = (
                 None
-                if feature_attention_masks is None or idx >= len(feature_attention_masks)
+                if feature_attention_masks is None
+                or idx >= len(feature_attention_masks)
                 else feature_attention_masks[idx]
             )
             if features.dim() == 2:
                 normalized_features.append(
-                    self._trim_single_audio_features(features, feature_mask).unsqueeze(0)
+                    self._trim_single_audio_features(features, feature_mask).unsqueeze(
+                        0
+                    )
                 )
             elif features.dim() == 3:
                 for inner_idx, feature in enumerate(features.unbind(dim=0)):
@@ -843,7 +857,9 @@ class KimiAudioForConditionalGeneration(
                     ):
                         inner_mask = feature_mask[inner_idx]
                     normalized_features.append(
-                        self._trim_single_audio_features(feature, inner_mask).unsqueeze(0)
+                        self._trim_single_audio_features(feature, inner_mask).unsqueeze(
+                            0
+                        )
                     )
             else:
                 msg = (
@@ -878,9 +894,11 @@ class KimiAudioForConditionalGeneration(
         if isinstance(audio_sample_lengths, torch.Tensor):
             sample_lengths = [int(length) for length in audio_sample_lengths.tolist()]
         else:
-            sample_lengths = [] if audio_sample_lengths is None else [
-                int(length) for length in audio_sample_lengths
-            ]
+            sample_lengths = (
+                []
+                if audio_sample_lengths is None
+                else [int(length) for length in audio_sample_lengths]
+            )
         projected_embeds: list[torch.Tensor] = []
         normalized_features = self._iter_single_audio_features(
             input_features,
@@ -982,7 +1000,8 @@ class KimiAudioForConditionalGeneration(
                         2.0,
                         dtype=audio_inputs_embeds.dtype,
                         device=audio_inputs_embeds.device,
-                    ))
+                    )
+                )
                 encoder_input_addwith_discrete_token = (
                     audio_inputs_embeds + whisper_embeds
                 ) * sqrt_two
@@ -996,7 +1015,11 @@ class KimiAudioForConditionalGeneration(
             output = audio_inputs_embeds + text_inputs_embeds
             return output.squeeze(0) if flatten_runtime_batch else output
 
-        return audio_inputs_embeds.squeeze(0) if flatten_runtime_batch else audio_inputs_embeds
+        return (
+            audio_inputs_embeds.squeeze(0)
+            if flatten_runtime_batch
+            else audio_inputs_embeds
+        )
 
     def _pad_runtime_kimi_inputs_embeds(
         self,
@@ -1047,10 +1070,9 @@ class KimiAudioForConditionalGeneration(
             input_ids,
             fill_value=KimiAudioProcessor.KIMIA_TEXT_BLANK,
         )
-        inputs_embeds = (
-            self.language_model.model.embed_tokens(input_ids)
-            + self.language_model.model.embed_tokens(blank_audio_ids)
-        )
+        inputs_embeds = self.language_model.model.embed_tokens(
+            input_ids
+        ) + self.language_model.model.embed_tokens(blank_audio_ids)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
@@ -1061,7 +1083,9 @@ class KimiAudioForConditionalGeneration(
         for embed in multimodal_embeddings:
             if isinstance(embed, (list, tuple)):
                 embedding_items.extend(
-                    tensor if tensor.dim() == 2 else tensor.reshape(-1, tensor.shape[-1])
+                    tensor
+                    if tensor.dim() == 2
+                    else tensor.reshape(-1, tensor.shape[-1])
                     for tensor in embed
                     if isinstance(tensor, torch.Tensor)
                 )
@@ -1144,10 +1168,13 @@ class KimiAudioForConditionalGeneration(
                     self._pad_runtime_kimi_inputs_embeds(
                         input_ids=input_ids,
                         kimi_inputs_embeds=kimi_inputs_embeds,
-                    ))
+                    )
+                )
                 model_input_ids = input_ids if used_runtime_padding else audio_token_ids
             else:
-                model_input_ids = input_ids if input_ids is not None else audio_token_ids
+                model_input_ids = (
+                    input_ids if input_ids is not None else audio_token_ids
+                )
         elif inputs_embeds is None and model_input_ids is not None:
             inputs_embeds = self.embed_input_ids(
                 model_input_ids,
@@ -1176,8 +1203,9 @@ class KimiAudioForConditionalGeneration(
         if not get_pp_group().is_last_rank:
             return None
 
-        logits = self.logits_processor(self.language_model.lm_head,
-                                       hidden_states, sampling_metadata)
+        logits = self.logits_processor(
+            self.language_model.lm_head, hidden_states, sampling_metadata
+        )
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

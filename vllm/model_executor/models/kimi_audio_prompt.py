@@ -41,7 +41,7 @@ class KimiAudioTokenContent:
     def text_extend(self, token_ids: Sequence[int]) -> None:
         self.text_token_ids.extend(token_ids)
 
-    def merge(self, other: "KimiAudioTokenContent") -> None:
+    def merge(self, other: KimiAudioTokenContent) -> None:
         self.audio_token_ids.extend(other.audio_token_ids)
         self.text_token_ids.extend(other.text_token_ids)
         self.is_continuous_mask.extend(other.is_continuous_mask)
@@ -76,7 +76,7 @@ class KimiAudioSpecialTokenIds:
     def from_tokenizer(
         cls,
         tokenizer: _KimiAudioTokenizerLike,
-    ) -> "KimiAudioSpecialTokenIds":
+    ) -> KimiAudioSpecialTokenIds:
         return cls(
             msg_end=tokenizer.convert_tokens_to_ids("<|im_msg_end|>"),
             media_begin=tokenizer.convert_tokens_to_ids("<|im_media_begin|>"),
@@ -90,9 +90,7 @@ class KimiAudioSpecialTokenIds:
                 "<|im_kimia_assistant_msg_start|>"
             ),
             speech_ct=tokenizer.convert_tokens_to_ids("<|im_kimia_speech_ct_id|>"),
-            speech_ctd=tokenizer.convert_tokens_to_ids(
-                "<|im_kimia_speech_ctd_id|>"
-            ),
+            speech_ctd=tokenizer.convert_tokens_to_ids("<|im_kimia_speech_ctd_id|>"),
         )
 
 

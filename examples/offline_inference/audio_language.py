@@ -251,6 +251,7 @@ def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
     from vllm.model_executor.models.kimi_audio_prompt import (
         KimiAudioPromptBuilder,
     )
+
     messages = [
         {"role": "user", "message_type": "text", "content": question},
         {"role": "user", "message_type": "audio"},

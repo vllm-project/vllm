@@ -14,9 +14,9 @@ from vllm.model_executor.models.kimi_audio_prompt import (
     KimiAudioPromptBuilder,
     KimiAudioTokenContent,
 )
-from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
-from vllm.transformers_utils.processors import kimi_audio_speech as speech_utils
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
+from vllm.transformers_utils.processors import kimi_audio_speech as speech_utils
+from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
 
 KIMI_AUDIO_MODEL = "moonshotai/Kimi-Audio-7B-Instruct"
 
@@ -122,10 +122,40 @@ def test_kimi_audio_prompt_builder_builds_token_level_audio_text_streams():
 
     assert isinstance(packed, KimiAudioTokenContent)
     assert packed.audio_token_ids == [
-        6, 4, 1, 7, 4, 4, 4, 1, 6, 2, 152064, 152065, 3, 8, 1, 7,
+        6,
+        4,
+        1,
+        7,
+        4,
+        4,
+        4,
+        1,
+        6,
+        2,
+        152064,
+        152065,
+        3,
+        8,
+        1,
+        7,
     ]
     assert packed.text_token_ids == [
-        4, 10, 4, 4, 20, 21, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        4,
+        10,
+        4,
+        4,
+        20,
+        21,
+        5,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
     ]
     assert packed.is_continuous_mask == [
         False,
@@ -162,7 +192,8 @@ def test_kimi_audio_runtime_padding_preserves_prefix_embeddings():
             model,
             input_ids=torch.arange(6, dtype=torch.long),
             kimi_inputs_embeds=kimi_inputs_embeds,
-        ))
+        )
+    )
 
     assert used_runtime_padding
     assert padded.shape == (6, 4)
@@ -175,7 +206,9 @@ def test_kimi_audio_build_inputs_embeds_supports_runtime_flat_tokens():
     model._normalize_multimodal_embeddings = lambda embeddings, batch_size: []
     model.language_model = SimpleNamespace(
         model=SimpleNamespace(
-            embed_tokens=lambda token_ids: token_ids.unsqueeze(-1).to(torch.float32)))
+            embed_tokens=lambda token_ids: token_ids.unsqueeze(-1).to(torch.float32)
+        )
+    )
 
     outputs = KimiAudioForConditionalGeneration._build_kimi_audio_inputs_embeds(
         model,
@@ -324,7 +357,9 @@ def test_kimi_audio_speech_tokenizer_prefers_local_override(monkeypatch, tmp_pat
 
     monkeypatch.setenv("KIMI_AUDIO_SPEECH_TOKENIZER_PATH", str(local_path))
 
-    resolved = speech_utils._resolve_speech_tokenizer_path("THUDM/glm-4-voice-tokenizer")
+    resolved = speech_utils._resolve_speech_tokenizer_path(
+        "THUDM/glm-4-voice-tokenizer"
+    )
 
     assert resolved == str(local_path)
 
@@ -342,17 +377,22 @@ def test_kimi_audio_speech_tokenizer_honors_device_override(monkeypatch):
 
 def test_kimi_audio_speech_tokenizer_can_import_local_whisper_vq(monkeypatch, tmp_path):
     source_root = tmp_path / "Kimi-Audio"
-    speech_dir = source_root / "kimia_infer" / "models" / "tokenizer" / "glm4" / "speech_tokenizer"
+    speech_dir = (
+        source_root
+        / "kimia_infer"
+        / "models"
+        / "tokenizer"
+        / "glm4"
+        / "speech_tokenizer"
+    )
     speech_dir.mkdir(parents=True)
     (speech_dir / "__init__.py").write_text("", encoding="utf-8")
     (speech_dir / "configuration_whisper.py").write_text(
-        "class WhisperVQConfig:\n"
-        "    pass\n",
+        "class WhisperVQConfig:\n    pass\n",
         encoding="utf-8",
     )
     (speech_dir / "modeling_whisper.py").write_text(
-        "class WhisperVQEncoder:\n"
-        "    pass\n",
+        "class WhisperVQEncoder:\n    pass\n",
         encoding="utf-8",
     )
 
@@ -446,16 +486,18 @@ def test_kimi_audio_processor_can_return_packed_kimi_token_streams():
 
     assert outputs["audio_token_ids"].tolist() == [[6, 2, 152064, 152065, 3, 8, 1, 7]]
     assert outputs["text_token_ids"].tolist() == [[4, 4, 4, 4, 4, 4, 4, 4]]
-    assert outputs["is_continuous_mask"].tolist() == [[
-        False,
-        False,
-        True,
-        True,
-        False,
-        False,
-        False,
-        False,
-    ]]
+    assert outputs["is_continuous_mask"].tolist() == [
+        [
+            False,
+            False,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+        ]
+    ]
 
 
 def test_kimi_audio_processor_batches_packed_kimi_token_streams_per_request():
@@ -497,7 +539,9 @@ class _FakeLanguageModelCore:
         self.embed_tokens = _FakeEmbedTokens()
 
     def __call__(self, input_ids, positions, intermediate_tensors, inputs_embeds=None):
-        return inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
+        return (
+            inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
+        )
 
 
 class _FakeLanguageModel:
@@ -528,12 +572,16 @@ def test_kimi_audio_model_builds_packed_dual_stream_embeddings():
 
     audio_token_ids = torch.tensor([[6, 2, 152064, 152065, 3, 8, 1, 7]])
     text_token_ids = torch.tensor([[4, 4, 4, 4, 4, 4, 4, 4]])
-    is_continuous_mask = torch.tensor([[False, False, True, True, False, False, False, False]])
+    is_continuous_mask = torch.tensor(
+        [[False, False, True, True, False, False, False, False]]
+    )
     multimodal_embeddings = [
-        torch.tensor([
-            [100.0, 100.0],
-            [200.0, 200.0],
-        ])
+        torch.tensor(
+            [
+                [100.0, 100.0],
+                [200.0, 200.0],
+            ]
+        )
     ]
 
     embeds = KimiAudioForConditionalGeneration._build_kimi_audio_inputs_embeds(
@@ -545,16 +593,18 @@ def test_kimi_audio_model_builds_packed_dual_stream_embeddings():
     )
 
     sqrt2 = 2**0.5
-    expected = torch.tensor([
-        [10.0, 10.0],
-        [6.0, 6.0],
-        [(152064.0 + 100.0) * sqrt2 + 4.0, (152064.0 + 100.0) * sqrt2 + 4.0],
-        [(152065.0 + 200.0) * sqrt2 + 4.0, (152065.0 + 200.0) * sqrt2 + 4.0],
-        [7.0, 7.0],
-        [12.0, 12.0],
-        [5.0, 5.0],
-        [11.0, 11.0],
-    ]).unsqueeze(0)
+    expected = torch.tensor(
+        [
+            [10.0, 10.0],
+            [6.0, 6.0],
+            [(152064.0 + 100.0) * sqrt2 + 4.0, (152064.0 + 100.0) * sqrt2 + 4.0],
+            [(152065.0 + 200.0) * sqrt2 + 4.0, (152065.0 + 200.0) * sqrt2 + 4.0],
+            [7.0, 7.0],
+            [12.0, 12.0],
+            [5.0, 5.0],
+            [11.0, 11.0],
+        ]
+    ).unsqueeze(0)
     assert torch.allclose(embeds, expected)
 
 
@@ -562,8 +612,9 @@ def test_kimi_audio_model_matches_official_bfloat16_fusion_formula():
     model = object.__new__(KimiAudioForConditionalGeneration)
     model.language_model = _FakeLanguageModel()
     original_embed_tokens = model.language_model.model.embed_tokens
-    model.language_model.model.embed_tokens = lambda ids: original_embed_tokens(
-        ids).to(torch.bfloat16)
+    model.language_model.model.embed_tokens = lambda ids: original_embed_tokens(ids).to(
+        torch.bfloat16
+    )
 
     audio_token_ids = torch.tensor([[152064, 6]], dtype=torch.long)
     text_token_ids = torch.tensor([[4, 4]], dtype=torch.long)
@@ -581,14 +632,17 @@ def test_kimi_audio_model_matches_official_bfloat16_fusion_formula():
     )
 
     audio_emb = model.language_model.model.embed_tokens(audio_token_ids).to(
-        torch.bfloat16)
+        torch.bfloat16
+    )
     text_emb = model.language_model.model.embed_tokens(text_token_ids).to(
-        torch.bfloat16)
+        torch.bfloat16
+    )
     whisper_emb = torch.zeros_like(audio_emb)
     whisper_emb[0, 0] = torch.tensor([100.0, 100.0], dtype=torch.bfloat16)
     continuous_mask = is_continuous_mask[:, :, None].to(torch.bool)
     sqrt_two = torch.sqrt(
-        torch.tensor(2.0, dtype=audio_emb.dtype, device=audio_emb.device))
+        torch.tensor(2.0, dtype=audio_emb.dtype, device=audio_emb.device)
+    )
     expected = (
         audio_emb * (~continuous_mask)
         + ((audio_emb + whisper_emb) * sqrt_two) * continuous_mask
@@ -633,7 +687,9 @@ def test_kimi_audio_projector_matches_official_activation_and_norm():
 
 def test_kimi_audio_model_process_audio_input_accepts_feature_lists():
     model = object.__new__(KimiAudioForConditionalGeneration)
-    model.audio_tower = lambda features: torch.ones((len(features), 8, 2), dtype=torch.float32)
+    model.audio_tower = lambda features: torch.ones(
+        (len(features), 8, 2), dtype=torch.float32
+    )
     model.multi_modal_projector = lambda features: features + 3.0
 
     audio_embeds = KimiAudioForConditionalGeneration._process_audio_input(
@@ -648,7 +704,9 @@ def test_kimi_audio_model_process_audio_input_accepts_feature_lists():
 
 def test_kimi_audio_model_process_audio_input_accepts_tuple_batches():
     model = object.__new__(KimiAudioForConditionalGeneration)
-    model.audio_tower = lambda features: torch.ones((len(features), 6, 2), dtype=torch.float32)
+    model.audio_tower = lambda features: torch.ones(
+        (len(features), 6, 2), dtype=torch.float32
+    )
     model.multi_modal_projector = lambda features: features + 2.0
 
     audio_embeds = KimiAudioForConditionalGeneration._process_audio_input(
@@ -756,15 +814,18 @@ def test_kimi_audio_model_keeps_main_hidden_states_for_text_output(monkeypatch):
 
 
 def test_kimi_audio_model_compute_logits_uses_lm_head_for_text_output(monkeypatch):
-    captured = {}
+    captured: dict[str, object] = {}
     model = object.__new__(KimiAudioForConditionalGeneration)
     model.use_mimo_text_path = True
     model.mimo_output = object()
     model.language_model = SimpleNamespace(lm_head=object())
-    model.logits_processor = lambda lm_head, hidden_states, sampling_metadata: captured.setdefault(
-        "lm_head",
-        lm_head,
-    ) or hidden_states
+    model.logits_processor = (
+        lambda lm_head, hidden_states, sampling_metadata: captured.setdefault(
+            "lm_head",
+            lm_head,
+        )
+        or hidden_states
+    )
 
     monkeypatch.setattr(
         kimi_audio_model,
@@ -785,17 +846,17 @@ def test_kimi_audio_embed_input_ids_uses_all_multimodal_embeddings():
     model = object.__new__(KimiAudioForConditionalGeneration)
     model.language_model = SimpleNamespace(
         model=SimpleNamespace(
-            embed_tokens=lambda input_ids: input_ids.unsqueeze(-1).repeat(1, 2).to(
-                torch.float32
-            )
+            embed_tokens=lambda input_ids: input_ids.unsqueeze(-1)
+            .repeat(1, 2)
+            .to(torch.float32)
         )
     )
 
     input_ids = torch.tensor([10, 11, 12, 13, 14], dtype=torch.long)
     is_multimodal = torch.tensor([False, True, True, True, False])
-    multimodal_embeddings = (torch.tensor(
-        [[100.0, 100.0], [200.0, 200.0], [300.0, 300.0]]
-    ),)
+    multimodal_embeddings = (
+        torch.tensor([[100.0, 100.0], [200.0, 200.0], [300.0, 300.0]]),
+    )
 
     embeds = KimiAudioForConditionalGeneration.embed_input_ids(
         model,
@@ -823,9 +884,9 @@ def test_kimi_audio_embed_input_ids_does_not_spill_embeddings_across_segments():
     model = object.__new__(KimiAudioForConditionalGeneration)
     model.language_model = SimpleNamespace(
         model=SimpleNamespace(
-            embed_tokens=lambda input_ids: input_ids.unsqueeze(-1).repeat(1, 2).to(
-                torch.float32
-            )
+            embed_tokens=lambda input_ids: input_ids.unsqueeze(-1)
+            .repeat(1, 2)
+            .to(torch.float32)
         )
     )
 

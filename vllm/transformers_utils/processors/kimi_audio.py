@@ -133,7 +133,9 @@ class KimiAudioProcessor(ProcessorMixin):
             batch_size = len(speech_token_lists) // audio_message_count
             message_batches = [messages] * batch_size
             speech_batches = [
-                speech_token_lists[i * audio_message_count : (i + 1) * audio_message_count]
+                speech_token_lists[
+                    i * audio_message_count : (i + 1) * audio_message_count
+                ]
                 for i in range(batch_size)
             ]
         else:
@@ -167,16 +169,11 @@ class KimiAudioProcessor(ProcessorMixin):
 
         max_len = max((len(row) for row in audio_token_rows), default=0)
         padded_audio_rows = [
-            row + [0] * (max_len - len(row))
-            for row in audio_token_rows
+            row + [0] * (max_len - len(row)) for row in audio_token_rows
         ]
-        padded_text_rows = [
-            row + [0] * (max_len - len(row))
-            for row in text_token_rows
-        ]
+        padded_text_rows = [row + [0] * (max_len - len(row)) for row in text_token_rows]
         padded_mask_rows = [
-            row + [False] * (max_len - len(row))
-            for row in is_continuous_rows
+            row + [False] * (max_len - len(row)) for row in is_continuous_rows
         ]
 
         return {
@@ -250,7 +247,9 @@ class KimiAudioProcessor(ProcessorMixin):
             and (return_speech_token_ids or return_packed_kimi_tokens)
         )
         if need_speech_tokens:
-            speech_token_lists = self.speech_tokenizer.encode(
+            speech_tokenizer = self.speech_tokenizer
+            assert speech_tokenizer is not None
+            speech_token_lists = speech_tokenizer.encode(
                 padded_audio,
                 sampling_rate=audio_sampling_rate,
             )
