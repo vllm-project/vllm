@@ -633,6 +633,18 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     _unregister_process_group(pg.group_name)
 
 
+def stateless_abort_torch_distributed_process_group(pg: ProcessGroup) -> None:
+    """Abort a process group without waiting for pending operations.
+
+    Unlike destroy (which calls shutdown and may block if a peer is dead),
+    abort forces the underlying communicator to release immediately.
+    Use this when a rank in the group has died and normal teardown would hang.
+    Works with any backend (NCCL, Gloo, etc.).
+    """
+    pg.abort()
+    _unregister_process_group(pg.group_name)
+
+
 def get_worker_rank_suffix(global_rank: int | None = None) -> str:
     """Generate a descriptive rank suffix for worker identification.
 

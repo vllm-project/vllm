@@ -1213,6 +1213,72 @@ def _replace_active_groups(
     _NODE_COUNT = node_count
 
 
+def _abort_and_replace_active_groups(
+    *,
+    world: GroupCoordinator | None,
+    dp: GroupCoordinator | None,
+    ep: GroupCoordinator | None,
+    eplb: GroupCoordinator | None,
+    node_count: int | None,
+) -> None:
+    """Abort the current DP/EP/WORLD/EPLB groups and replace them.
+
+    Unlike _replace_active_groups, this uses abort() instead of destroy()
+    to avoid hanging when a peer rank has died.
+    """
+    global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
+    for group in (_DP, _EP, _WORLD, _EPLB):
+        if group is not None:
+            # Abort underlying ProcessGroups to unblock pending NCCL/Gloo
+            # ops involving dead ranks.  Wrapped in try/except because the
+            # group may have already been aborted (e.g. EPLB group aborted
+            # early to unblock barriers).
+            try:
+                if hasattr(group, "device_group") and group.device_group:
+                    group.device_group.abort()
+            except Exception:
+                logger.warning(
+                    "[Fault Tolerance] Failed to abort device_group",
+                    exc_info=True,
+                )
+            try:
+                if hasattr(group, "cpu_group") and group.cpu_group:
+                    group.cpu_group.abort()
+            except Exception:
+                logger.warning(
+                    "[Fault Tolerance] Failed to abort cpu_group",
+                    exc_info=True,
+                )
+            # Destroy device communicator last — this is a local cleanup
+            # that doesn't require peer coordination.
+            try:
+                if (hasattr(group, "device_communicator")
+                        and group.device_communicator):
+                    group.device_communicator.destroy()
+            except Exception:
+                logger.warning(
+                    "[Fault Tolerance] Failed to destroy "
+                    "device_communicator",
+                    exc_info=True,
+                )
+    # Synchronize to surface any async CUDA errors from the aborts
+    # immediately, rather than having them appear later during
+    # unrelated operations (per NCCL team recommendation).
+    try:
+        import torch
+        torch.cuda.synchronize()
+    except Exception:
+        logger.warning(
+            "[Fault Tolerance] CUDA sync after abort raised an error",
+            exc_info=True,
+        )
+    _WORLD = world
+    _DP = dp
+    _EP = ep
+    _EPLB = eplb
+    _NODE_COUNT = node_count
+
+
 _TP: GroupCoordinator | None = None
 
 

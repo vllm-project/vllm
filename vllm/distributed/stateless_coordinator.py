@@ -192,6 +192,23 @@ class StatelessGroupCoordinator(GroupCoordinator):
         if self.cpu_group:
             stateless_destroy_torch_distributed_process_group(self.cpu_group)
 
+    def abort(self):
+        """Abort all underlying process groups without waiting for peers.
+
+        Use instead of destroy() when a peer rank in this group has died
+        and normal collective teardown would hang.
+        """
+        from vllm.distributed.utils import (
+            stateless_abort_torch_distributed_process_group,
+        )
+
+        if self.device_communicator:
+            self.device_communicator.destroy()
+        if self.device_group:
+            stateless_abort_torch_distributed_process_group(self.device_group)
+        if self.cpu_group:
+            stateless_abort_torch_distributed_process_group(self.cpu_group)
+
     def size(self) -> int:
         """Return the world size of this group."""
         return self.world_size

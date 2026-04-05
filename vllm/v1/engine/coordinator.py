@@ -312,11 +312,14 @@ class DPCoordinatorProc:
                     decoded = msgspec.msgpack.decode(buffer)
                     if (
                         isinstance(decoded, (list, tuple))
-                        and len(decoded) == 2
+                        and len(decoded) >= 2
                         and decoded[0] == "SCALE_ELASTIC_EP"
                     ):
-                        # Handle scale up notification
                         new_engine_count = decoded[1]
+                        removed_ranks = (
+                            set(decoded[2]) if len(decoded) >= 3
+                            else set()
+                        )
                         current_count = len(self.engines)
                         if new_engine_count > current_count:
                             for _ in range(new_engine_count - current_count):
@@ -335,6 +338,19 @@ class DPCoordinatorProc:
                                 "DPCoordinator scaled up from %s to %s engines",
                                 current_count,
                                 new_engine_count,
+                            )
+                        elif removed_ranks:
+                            # Remove specific engine entries (fault-triggered).
+                            self.engines = [
+                                e for i, e in enumerate(self.engines)
+                                if i not in removed_ranks
+                            ]
+                            logger.info(
+                                "DPCoordinator scaled down from %s to %s "
+                                "engines (removed ranks: %s)",
+                                current_count,
+                                new_engine_count,
+                                sorted(removed_ranks),
                             )
                         else:
                             self.engines = self.engines[:new_engine_count]
