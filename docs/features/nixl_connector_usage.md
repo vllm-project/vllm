@@ -126,9 +126,18 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Set when prefiller and decoder are on different machines
     - Connection info is passed via KVTransferParams from prefiller to decoder for handshake
 
-- `VLLM_NIXL_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
-    - Default: 480
-    - If a request is aborted and the decoder has not yet read the KV-cache blocks through the nixl channel, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
+- `VLLM_NIXL_KV_LEASE_DURATION`: Initial lease duration (in seconds) for KV blocks on the prefiller. (Optional)
+    - Default: 30
+    - After a prefill completes, the prefiller holds KV blocks for this duration. The decoder sends periodic heartbeats to extend the lease.
+    - If no heartbeat is received within the lease duration, blocks are released.
+
+- `VLLM_NIXL_KV_LEASE_EXTENSION`: Lease extension (in seconds) granted per heartbeat. (Optional)
+    - Default: 20
+    - Each heartbeat from the decoder extends the lease by this amount.
+
+- `VLLM_NIXL_KV_HEARTBEAT_INTERVAL`: Interval (in seconds) at which the decoder sends heartbeats. (Optional)
+    - Default: 5
+    - Should be less than `VLLM_NIXL_KV_LEASE_EXTENSION` to ensure timely renewal.
 
 ## Multi-Instance Setup
 
