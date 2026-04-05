@@ -121,6 +121,13 @@ class SupportsMultiModal(Protocol):
     in their raw form and not input embeddings.
     """
 
+    builds_multimodal_inputs_embeds_in_forward: ClassVar[bool] = False
+    """
+    A flag that indicates this model needs the runtime to pass raw multimodal
+    kwargs and encoder outputs through `forward`, instead of pre-merging them
+    with the generic `embed_input_ids` path in the worker.
+    """
+
     _processor_factory: ClassVar[_ProcessorFactories]
     """
     Set internally by `MultiModalRegistry.register_processor`.

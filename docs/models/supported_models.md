@@ -668,6 +668,10 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
 
 !!! note
+    For the currently validated Kimi-Audio support boundary and prompting
+    requirements, see [Kimi-Audio](./kimi_audio.md).
+
+!!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 
 ## Pooling Models

@@ -32,6 +32,7 @@ class ModelRequestData(NamedTuple):
     prompt: str | None = None
     prompt_token_ids: dict[str, list[int]] | None = None
     multi_modal_data: dict[str, Any] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
 
@@ -245,18 +246,29 @@ def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    # Kimi-Audio uses <|im_kimia_text_blank|> as placeholder for audio features
-    audio_placeholder = "<|im_kimia_text_blank|>" * audio_count
-    # Default prompt for transcription
     if not question:
         question = "Please transcribe the audio"
-    prompt = f"{audio_placeholder}{question}"
+    from vllm.model_executor.models.kimi_audio_prompt import (
+        KimiAudioPromptBuilder,
+    )
+    messages = [
+        {"role": "user", "message_type": "text", "content": question},
+        {"role": "user", "message_type": "audio"},
+    ]
+    prompt = KimiAudioPromptBuilder.build_transcription_prompt(
+        question,
+        audio_count=audio_count,
+    )
 
-    # Stop at EOS token (151644) to prevent repetition
+    # Stop at text EOS first, then fall back to the tokenizer EOS ids.
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=[151644],
+        mm_processor_kwargs={
+            "messages": messages,
+            "output_type": "text",
+        },
+        stop_token_ids=[151667, 151645, 151644],
     )
 
 
@@ -654,6 +666,8 @@ def main(args):
                 }
 
         inputs = {"multi_modal_data": mm_data}
+        if req_data.mm_processor_kwargs:
+            inputs["mm_processor_kwargs"] = req_data.mm_processor_kwargs
 
         if req_data.prompt:
             inputs["prompt"] = req_data.prompt

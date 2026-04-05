@@ -24,6 +24,7 @@ nav:
       - TPU: https://docs.vllm.ai/projects/tpu/en/latest/
     - Models:
       - models/supported_models.md
+      - models/kimi_audio.md
       - models/generative_models.md
       - Pooling Models: models/pooling_models
       - models/extensions

@@ -8,6 +8,6 @@
     {% if message['role'] == 'user' -%}
         <|im_kimia_user_msg_start|>{{ message['content'] }}<|im_msg_end|><|im_kimia_assistant_msg_start|>
     {%- elif message['role'] == 'assistant' -%}
-        {{ message['content'] }}<|im_kimia_text_eos|>
+        {{ message['content'] }}<|im_kimia_text_eos|><|im_msg_end|>
     {%- endif -%}
 {% endfor -%}

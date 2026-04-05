@@ -179,9 +179,12 @@ class KimiAudioTokenizer(TokenizerLike):
             "<|im_media_begin|>": 151661,
             "<|im_media_end|>": 151663,
             "<|im_kimia_text_blank|>": 151666,
+            "<|im_kimia_text_eos|>": 151667,
             "<|im_msg_end|>": 151645,
             "<|im_kimia_user_msg_start|>": 151670,
             "<|im_kimia_assistant_msg_start|>": 151671,
+            "<|im_kimia_speech_ct_id|>": 151675,
+            "<|im_kimia_speech_ctd_id|>": 151676,
         }
 
         for token_str, token_id in kimiaudio_special_tokens.items():
@@ -291,9 +294,12 @@ class KimiAudioTokenizer(TokenizerLike):
                 "<|im_media_begin|>",
                 "<|im_media_end|>",
                 "<|im_kimia_text_blank|>",
+                "<|im_kimia_text_eos|>",
                 "<|im_msg_end|>",
                 "<|im_kimia_user_msg_start|>",
                 "<|im_kimia_assistant_msg_start|>",
+                "<|im_kimia_speech_ct_id|>",
+                "<|im_kimia_speech_ctd_id|>",
             },
         )
         if truncation:
