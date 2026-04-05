@@ -148,6 +148,92 @@ class TestContentStreaming:
 # ---------------------------------------------------------------------------
 
 
+class TestToolCallNonStreaming:
+    @pytest.mark.parametrize(
+        "model_output,expected_name,expected_args",
+        [
+            pytest.param(
+                (
+                    "<minimax:tool_call>\n"
+                    '<invoke name="get_weather">\n'
+                    '<parameter name="city">Seattle</parameter>\n'
+                    '<parameter name="date">2000-01-01</parameter>\n'
+                    "</invoke>\n</minimax:tool_call>"
+                ),
+                "get_weather",
+                {"city": "Seattle", "date": "2000-01-01"},
+            ),
+            pytest.param(
+                (
+                    "<minimax:tool_call>\n"
+                    '<invoke name="template_processor">\n'
+                    '<parameter name="template_content">\n'
+                    "<parameter><name>username</name>"
+                    "<type>string</type></parameter>"
+                    "</parameter>\n"
+                    "</invoke>\n</minimax:tool_call>"
+                ),
+                "template_processor",
+                {
+                    "template_content": (
+                        "<parameter><name>username</name>"
+                        "<type>string</type></parameter>"
+                    )
+                },
+            ),
+            pytest.param(
+                (
+                    "<minimax:tool_call>\n"
+                    '<invoke name="judge">\n'
+                    '<parameter name="threshold>100">false</parameter>\n'
+                    "</invoke>\n</minimax:tool_call>"
+                ),
+                "judge",
+                {"threshold>100": "false"},
+            ),
+            pytest.param(
+                (
+                    "<minimax:tool_call>\n"
+                    '<invoke name="template_processor">\n'
+                    '<parameter name="template_content">\n'
+                    "<div>content</div></parameter>\n"
+                    "</invoke>\n</minimax:tool_call>"
+                ),
+                "template_processor",
+                {"template_content": "<div>content</div>"},
+            ),
+            pytest.param(
+                (
+                    "<minimax:tool_call>\n"
+                    '<invoke name="whitespace_test">\n'
+                    '<parameter name = "city">Seattle</parameter>\n'
+                    '<parameter name="date" >2000-01-01</parameter>\n'
+                    "</invoke>\n</minimax:tool_call>"
+                ),
+                "whitespace_test",
+                {"city": "Seattle", "date": "2000-01-01"},
+            ),
+        ],
+    )
+    def test_tool_call(self, parser, model_output, expected_name, expected_args):
+        result = parser.extract_tool_calls(
+            model_output=model_output,
+            request=None,
+        )
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+
+        tc = result.tool_calls[0]
+        assert tc.id is not None
+
+        assert tc.function.name == expected_name, (
+            f"expect {expected_name}, got {tc.function.name}"
+        )
+        got_args = json.loads(tc.function.arguments)
+        assert got_args == expected_args, f"expect {expected_args}, got {got_args}"
+
+
 class TestSingleInvoke:
     """Tests for a single <invoke> block."""
 
@@ -156,10 +242,10 @@ class TestSingleInvoke:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="get_weather">',
-                '<parameter name="city">Seattle</parameter>',
-                "</invoke></minimax:tool_call>",
+                "<minimax:tool_call>\n",
+                '<invoke name="get_weather">\n',
+                '<parameter name="city">Seattle</parameter>\n',
+                "</invoke>\n</minimax:tool_call>",
             ],
         )
         tc = _collect_tool_calls(results)
@@ -173,9 +259,10 @@ class TestSingleInvoke:
         results = _feed(
             parser,
             [
-                '<minimax:tool_call><invoke name="get_weather">'
-                '<parameter name="city">Seattle</parameter>'
-                "</invoke></minimax:tool_call>",
+                "<minimax:tool_call>\n"
+                '<invoke name="get_weather">\n'
+                '<parameter name="city">Seattle</parameter>\n'
+                "</invoke>\n</minimax:tool_call>",
             ],
         )
         tc = _collect_tool_calls(results)
@@ -187,11 +274,11 @@ class TestSingleInvoke:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="get_weather">',
-                '<parameter name="city">Seattle</parameter>',
-                '<parameter name="days">5</parameter>',
-                "</invoke></minimax:tool_call>",
+                "<minimax:tool_call>\n",
+                '<invoke name="get_weather">\n',
+                '<parameter name="city">Seattle</parameter>\n',
+                '<parameter name="days">5</parameter>\n',
+                "</invoke>\n</minimax:tool_call>",
             ],
         )
         tc = _collect_tool_calls(results)
@@ -209,13 +296,13 @@ class TestMultipleInvokes:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="search_web">'
-                '<parameter name="query">OpenAI</parameter>'
-                "</invoke>",
-                '<invoke name="search_web">'
-                '<parameter name="query">Gemini</parameter>'
-                "</invoke>",
+                "<minimax:tool_call>\n",
+                '<invoke name="search_web">\n'
+                '<parameter name="query">OpenAI</parameter>\n'
+                "</invoke>\n",
+                '<invoke name="search_web">\n'
+                '<parameter name="query">Gemini</parameter>\n'
+                "</invoke>\n",
                 "</minimax:tool_call>",
             ],
         )
@@ -231,9 +318,9 @@ class TestMultipleInvokes:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="fn_a"><parameter name="x">1</parameter></invoke>'
-                '<invoke name="fn_b"><parameter name="y">2</parameter></invoke>',
+                "<minimax:tool_call>\n",
+                '<invoke name="fn_a">\n<parameter name="x">1</parameter>\n</invoke>\n',
+                '<invoke name="fn_b">\n<parameter name="y">2</parameter>\n</invoke>\n',
                 "</minimax:tool_call>",
             ],
         )
@@ -247,13 +334,13 @@ class TestMultipleInvokes:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="get_weather">'
-                '<parameter name="city">NYC</parameter>'
-                "</invoke>",
-                '<invoke name="get_stock">'
-                '<parameter name="ticker">AAPL</parameter>'
-                "</invoke>",
+                "<minimax:tool_call>\n",
+                '<invoke name="get_weather">\n'
+                '<parameter name="city">NYC</parameter>\n'
+                "</invoke>\n",
+                '<invoke name="get_stock">\n'
+                '<parameter name="ticker">AAPL</parameter>\n'
+                "</invoke>\n",
                 "</minimax:tool_call>",
             ],
         )
@@ -274,9 +361,10 @@ class TestInternalState:
         _feed(
             parser,
             [
-                '<minimax:tool_call><invoke name="fn">'
-                '<parameter name="a">1</parameter>'
-                "</invoke></minimax:tool_call>",
+                "<minimax:tool_call>\n"
+                '<invoke name="fn">\n'
+                '<parameter name="a">1</parameter>\n'
+                "</invoke>\n</minimax:tool_call>",
             ],
         )
         assert len(parser.prev_tool_call_arr) == 1
@@ -288,9 +376,13 @@ class TestInternalState:
         _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="search"><parameter name="q">hello</parameter></invoke>',
-                '<invoke name="search"><parameter name="q">world</parameter></invoke>',
+                "<minimax:tool_call>\n"
+                '<invoke name="search">\n'
+                '<parameter name="q">hello</parameter>\n'
+                "</invoke>\n",
+                '<invoke name="search">\n'
+                '<parameter name="q">world</parameter>\n'
+                "</invoke>\n",
                 "</minimax:tool_call>",
             ],
         )
@@ -314,9 +406,10 @@ class TestDeltaMessageFormat:
         results = _feed(
             parser,
             [
-                '<minimax:tool_call><invoke name="fn">'
-                '<parameter name="k">v</parameter>'
-                "</invoke></minimax:tool_call>",
+                "<minimax:tool_call>\n"
+                '<invoke name="fn">\n'
+                '<parameter name="k">v</parameter>\n'
+                "</invoke>\n</minimax:tool_call>",
             ],
         )
         tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
@@ -333,9 +426,11 @@ class TestDeltaMessageFormat:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="a"><parameter name="x">1</parameter></invoke>',
-                '<invoke name="b"><parameter name="x">2</parameter></invoke>',
+                "<minimax:tool_call>\n"
+                '<invoke name="a">\n'
+                '<parameter name="x">1</parameter>\n'
+                "</invoke>\n",
+                '<invoke name="b">\n<parameter name="x">2</parameter>\n</invoke>\n',
                 "</minimax:tool_call>",
             ],
         )
@@ -357,8 +452,10 @@ class TestEOSHandling:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="fn"><parameter name="k">v</parameter></invoke>',
+                "<minimax:tool_call>\n"
+                '<invoke name="fn">\n'
+                '<parameter name="k">v</parameter>\n'
+                "</invoke>\n"
                 "</minimax:tool_call>",
                 # EOS: empty delta_text, non-special token id
                 ("", [EOS_ID]),
@@ -372,8 +469,11 @@ class TestEOSHandling:
         results = _feed(
             parser,
             [
-                "<minimax:tool_call>",
-                '<invoke name="fn"><parameter name="k">v</parameter></invoke>',
+                "<minimax:tool_call>\n"
+                '<invoke name="fn">\n'
+                '<parameter name="k">v</parameter>\n'
+                "</invoke>\n"
+                "</minimax:tool_call>",
                 # </minimax:tool_call> arrives as special token
                 ("", [TC_END_ID]),
             ],
@@ -420,11 +520,11 @@ class TestLargeChunks:
 
     def test_header_and_params_in_separate_chunks(self, parser):
         """Header in chunk 1, all params + close in chunk 2, then EOS."""
-        chunk1 = '<minimax:tool_call><invoke name="get_weather">'
+        chunk1 = '<minimax:tool_call>\n<invoke name="get_weather">\n'
         chunk2 = (
-            '<parameter name="city">Seattle</parameter>'
-            '<parameter name="days">5</parameter>'
-            "</invoke></minimax:tool_call>"
+            '<parameter name="city">Seattle</parameter>\n'
+            '<parameter name="days">5</parameter>\n'
+            "</invoke>\n</minimax:tool_call>"
         )
 
         results = _feed(
