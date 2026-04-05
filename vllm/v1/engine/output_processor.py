@@ -439,7 +439,7 @@ class OutputProcessor:
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
 
-        for _, state in self.request_states.items():
+        for state in self.request_states.values():
             assert state.queue is not None
             state.queue.put(e)
 
