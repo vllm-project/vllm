@@ -164,7 +164,7 @@ class QkNormRopePattern:
                 cos_sin_cache=cos_sin_cache,
                 is_neox=self.is_neox,
                 position_ids=positions.view(-1),
-                forced_token_heads_per_warp=-1,
+                forced_token_heads_per_warp=1,
             )
             result_qkv = result[1]
 
