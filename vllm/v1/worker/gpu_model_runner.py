@@ -37,6 +37,7 @@ from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.base import CanonicalKVCaches
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -495,6 +496,7 @@ class GPUModelRunner(
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
+        self.canonical_kv_caches: CanonicalKVCaches | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -6735,7 +6737,15 @@ class GPUModelRunner(
 
         # Try creating KV caches optimized for kv-connector transfers
         cache_dtype = self.cache_config.cache_dtype
-        if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
+        if self.use_canonical_kv_caches(kv_cache_config, self.attn_groups, cache_dtype):
+            kv_caches, self.canonical_kv_caches = self.allocate_canonical_kv_caches(
+                kv_cache_config,
+                self.attn_groups,
+                cache_dtype,
+                self.device,
+                kernel_block_sizes,
+            )
+        elif self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
             kv_caches, cross_layers_kv_cache, attn_backend = (
                 self.allocate_uniform_kv_caches(
                     kv_cache_config,
@@ -6848,13 +6858,27 @@ class GPUModelRunner(
 
         if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
-            if self.cross_layers_kv_cache is not None:
+            if self.canonical_kv_caches is not None:
+                # canonical path: kv_caches already registered via
+                # initialize_worker_connector below
+                pass
+            elif self.cross_layers_kv_cache is not None:
                 assert self.cross_layers_attn_backend is not None
                 kv_transfer_group.register_cross_layers_kv_cache(
                     self.cross_layers_kv_cache, self.cross_layers_attn_backend
                 )
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
+
+            from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+                WorkerConnectorInitializationData,
+            )
+
+            kv_transfer_group.initialize_worker_connector(
+                WorkerConnectorInitializationData(
+                    canonical_kv_caches=self.canonical_kv_caches,
+                )
+            )
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def _get_attention_kv_cache_gid(self) -> int:

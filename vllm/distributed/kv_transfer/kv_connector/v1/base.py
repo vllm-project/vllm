@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -167,6 +168,68 @@ class KVConnectorWorkerMetadata(ABC):
         pass
 
 
+@dataclass
+class KVCacheBlockTensor:
+    """
+    A canonicalized KV cache tensor whose first dimension is num_blocks.
+
+    For attention backends where the raw tensor has num_blocks at a
+    non-leading physical dimension (e.g. FlashAttention's
+    (2, num_blocks, ...) layout), the tensor is split so that each
+    resulting KVCacheBlockTensor starts with (num_blocks, ...).
+    """
+
+    # The KV cache tensor with shape (num_blocks, ...)
+    tensor: torch.Tensor
+    # The (possibly padded) page size per block in bytes
+    page_size_bytes: int
+
+
+@dataclass
+class KVCacheBlockDataRef:
+    """
+    Per-layer (or group of layers) reference to a specific (by index)
+    KVCacheBlockTensor and records the un-padded page size used by that layer.
+    """
+
+    # Index into the list of KVCacheBlockTensor objects
+    tensor_idx: int
+    # The un-padded page size per block in bytes
+    page_size_bytes: int
+
+
+@dataclass
+class CanonicalKVCaches:
+    """
+    Canonicalized block-level representation of the KV caches.
+
+    Composed of:
+        - Unique list of KV cache data tensors,
+          each with shape (num_blocks, page_size_in_bytes) and int8 dtype.
+        - Per-group data references of the tensors.
+          i.e. how each KV cache group maps to the tensors.
+    """
+
+    # Ordered list of unique block tensors, each with shape
+    # (num_blocks, ...).
+    tensors: list[KVCacheBlockTensor]
+    # Per-KV-cache-group list of data references that map each layer
+    # in the group to the appropriate entry in the tensors list.
+    group_data_refs: list[list[KVCacheBlockDataRef]]
+
+
+@dataclass
+class WorkerConnectorInitializationData:
+    """Data passed to initialize_worker_connector().
+
+    Designed to be extended without breaking existing connectors: new optional
+    fields can be added here and connectors that don't need them simply ignore
+    the extra data.
+    """
+
+    canonical_kv_caches: CanonicalKVCaches | None = field(default=None)
+
+
 class KVConnectorBase_V1(ABC):
     """
     Base class for KV connectors.
@@ -285,6 +348,24 @@ class KVConnectorBase_V1(ABC):
         """
         Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> None:
+        """
+        Initialize per-worker connector state after model loading.
+
+        Called once by the GPU model runner after the model and KV caches
+        are ready. The default implementation is a no-op; connectors that
+        need additional initialization should override this method.
+
+        Args:
+            initialization_data: data bag containing optional fields such
+                as ``canonical_kv_caches``. New fields may be added in
+                future versions without breaking existing connectors.
         """
         return
 
