@@ -159,6 +159,13 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashMLADecodeMetadata:
+        if self.is_fp8_kvcache:
+            # The FlashMLA FP8 kernel does NOT guard against seq_lens=0
+            # or block_table=-1 for padded CG entries. Clamp in-place to
+            # safe minimums to avoid illegal memory access.
+            seq_lens_device.clamp_(min=1)
+            block_table_tensor.clamp_(min=0)
+
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         # we use the max but all should be the same due to uniform length requirement
         max_query_len = query_lens_cpu.max().item()
