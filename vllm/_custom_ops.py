@@ -423,6 +423,12 @@ def fused_add_rms_norm(
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
+    out = torch.empty_like(input)
+    torch.ops._C.activation_lut_bf16(out, input, activation)
+    return out
+
+
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     num_heads_q: int,
