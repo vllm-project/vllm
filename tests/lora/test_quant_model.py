@@ -143,6 +143,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available, model
         quantization=model.quantization,
         trust_remote_code=True,
         enable_chunked_prefill=True,
+        tokenizer=tinyllama_lora_files,
     )
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
 
@@ -157,7 +158,9 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available, model
         tensor_parallel_size=2,
         gpu_memory_utilization=0.2,  # avoid OOM
         quantization=model.quantization,
+        trust_remote_code=True,
         enable_chunked_prefill=True,
+        tokenizer=tinyllama_lora_files,
     )
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import shutil
 import tempfile
 from collections import OrderedDict
 from unittest.mock import MagicMock
@@ -249,8 +251,24 @@ def qwen3_woofing_lora_files():
 
 
 @pytest.fixture(scope="session")
-def tinyllama_lora_files():
-    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+def tinyllama_lora_files(tmp_path_factory):
+    source_dir = snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+    patched_dir = tmp_path_factory.mktemp("tinyllama-colorist-lora")
+
+    shutil.copytree(source_dir, patched_dir, dirs_exist_ok=True)
+
+    tokenizer_config_path = patched_dir / "tokenizer_config.json"
+    with open(tokenizer_config_path) as f:
+        tokenizer_config = json.load(f)
+
+    # Transformers v5 no longer tolerates the old TinyLlama tokenizer class
+    # metadata used by this public test checkpoint.
+    tokenizer_config["tokenizer_class"] = "PreTrainedTokenizerFast"
+
+    with open(tokenizer_config_path, "w") as f:
+        json.dump(tokenizer_config, f)
+
+    return str(patched_dir)
 
 
 @pytest.fixture(scope="session")
