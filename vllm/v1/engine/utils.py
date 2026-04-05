@@ -1136,13 +1136,31 @@ def wait_for_engine_startup(
             )
 
         # Receive HELLO and READY messages from the input socket.
-        eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
+        # The handshake port may receive non-engine traffic (e.g. HTTP
+        # health checks or metrics scrapers in K8s).  Rather than
+        # crashing, log the unexpected frame and keep waiting.
+        try:
+            frames = handshake_socket.recv_multipart()
+        except zmq.ZMQError as exc:
+            logger.warning("ZMQ recv error on handshake port: %s", exc)
+            continue
+        if len(frames) != 2:
+            logger.warning(
+                "Ignoring malformed message with %d frame(s) on "
+                "handshake port (expected 2).",
+                len(frames),
+            )
+            continue
+        eng_identity, ready_msg_bytes = frames
         eng_index = int.from_bytes(eng_identity, "little")
         engine = next((e for e in core_engines if e.identity == eng_identity), None)
         if engine is None:
-            raise RuntimeError(
-                f"Message from engine with unexpected data parallel rank: {eng_index}"
+            logger.warning(
+                "Ignoring message from unknown identity on handshake "
+                "port (identity %d bytes). Likely non-engine traffic.",
+                len(eng_identity),
             )
+            continue
         msg = msgspec.msgpack.decode(ready_msg_bytes)
         status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
