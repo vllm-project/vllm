@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based weight transfer engine."""
 
+import json
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -59,15 +60,23 @@ class NCCLTrainerSendWeightsArgs:
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     """Number of buffers for double/triple buffering during packed transfer.
     Must match the value used in NCCLWeightTransferUpdateInfo."""
+    metadata: dict | None = None
+    """When set, broadcast this metadata dict (containing names, dtype_names,
+    shapes) via NCCL before sending weight tensors. The receiver must set
+    receive_metadata=True in NCCLWeightTransferUpdateInfo."""
 
 
 @dataclass
 class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for NCCL weight transfer backend."""
+    """Update info for NCCL weight transfer backend.
 
-    names: list[str]
-    dtype_names: list[str]
-    shapes: list[list[int]]
+    When receive_metadata=True, the metadata fields (names, dtype_names, shapes)
+    are received via NCCL from the trainer instead of being provided upfront.
+    """
+
+    names: list[str] = field(default_factory=list)
+    dtype_names: list[str] = field(default_factory=list)
+    shapes: list[list[int]] = field(default_factory=list)
     packed: bool = False
     """Whether to use packed tensor broadcasting for efficiency.
     When True, multiple tensors are batched together before broadcasting
@@ -78,9 +87,15 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     """Number of buffers for double/triple buffering during packed transfer.
     Both producer and consumer must use the same value."""
+    receive_metadata: bool = False
+    """When True, receive weight metadata (names, dtypes, shapes) via NCCL
+    from the trainer before receiving weight tensors."""
 
     def __post_init__(self):
-        """Validate that all lists have the same length."""
+        """Validate that all lists have the same length.
+        Skipped when receive_metadata=True since metadata arrives via NCCL."""
+        if self.receive_metadata:
+            return
         num_params = len(self.names)
         if len(self.dtype_names) != num_params:
             raise ValueError(
@@ -92,6 +107,39 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
                 f"`shapes` should be of the same size as `names`: "
                 f"got {len(self.shapes)} and {len(self.names)}"
             )
+
+
+def _broadcast_metadata(
+    group: "PyNcclCommunicator",
+    src: int,
+    names: list[str],
+    dtype_names: list[str],
+    shapes: list[list[int]],
+) -> None:
+    """Broadcast weight metadata as a JSON header via NCCL."""
+    metadata_bytes = json.dumps({
+        "names": names,
+        "dtype_names": dtype_names,
+        "shapes": shapes,
+    }).encode("utf-8")
+    size_tensor = torch.tensor([len(metadata_bytes)], dtype=torch.int64, device="cuda")
+    group.broadcast(size_tensor, src=src, stream=torch.cuda.current_stream())
+    metadata_tensor = torch.frombuffer(
+        bytearray(metadata_bytes), dtype=torch.uint8
+    ).cuda()
+    group.broadcast(metadata_tensor, src=src, stream=torch.cuda.current_stream())
+
+
+def _receive_metadata(
+    group: "PyNcclCommunicator",
+    src: int,
+) -> dict:
+    """Receive weight metadata from a JSON header via NCCL."""
+    size_tensor = torch.zeros(1, dtype=torch.int64, device="cuda")
+    group.broadcast(size_tensor, src=src, stream=torch.cuda.current_stream())
+    metadata_tensor = torch.zeros(int(size_tensor.item()), dtype=torch.uint8, device="cuda")
+    group.broadcast(metadata_tensor, src=src, stream=torch.cuda.current_stream())
+    return json.loads(bytes(metadata_tensor.cpu().numpy()))
 
 
 class NCCLWeightTransferEngine(
@@ -159,6 +207,9 @@ class NCCLWeightTransferEngine(
         """
         Receive weights from trainer via NCCL broadcast and load them incrementally.
 
+        If update_info.receive_metadata is True, weight metadata (names, dtypes,
+        shapes) is received via NCCL before the weight tensors.
+
         If update_info.packed is True, uses packed tensor broadcasting for
         efficient transfer of multiple weights in batches. Otherwise, uses simple
         one-by-one broadcasting.
@@ -174,6 +225,12 @@ class NCCLWeightTransferEngine(
                 "NCCL weight transfer not initialized. "
                 "Call init_transfer_engine() first."
             )
+
+        if update_info.receive_metadata:
+            metadata = _receive_metadata(self.model_update_group, src=0)
+            update_info.names = metadata["names"]
+            update_info.dtype_names = metadata["dtype_names"]
+            update_info.shapes = metadata["shapes"]
 
         if update_info.packed:
             # Build iterator of (name, (shape, dtype)) from update_info
@@ -243,6 +300,12 @@ class NCCLWeightTransferEngine(
             post_iter_func = lambda x: x[1]
         else:
             post_iter_func = args.post_iter_func
+
+        if args.metadata is not None:
+            _broadcast_metadata(
+                args.group, args.src,
+                args.metadata["names"], args.metadata["dtype_names"], args.metadata["shapes"],
+            )
 
         if args.packed:
             # Use packed tensor broadcasting for efficiency
