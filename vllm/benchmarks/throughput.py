@@ -356,6 +356,12 @@ def get_requests(args, tokenizer):
         and args.dataset_name not in {"prefix_repetition", "random-mm", "random-rerank"}
     ):
         sample_kwargs["range_ratio"] = args.random_range_ratio
+        sample_kwargs["input_range_ratio"] = getattr(
+            args, "random_input_range_ratio", None
+        )
+        sample_kwargs["output_range_ratio"] = getattr(
+            args, "random_output_range_ratio", None
+        )
         # prefer random_* arguments, fall back to regular arguments
         random_prefix_len = getattr(args, "random_prefix_len", None)
         sample_kwargs["prefix_len"] = (
@@ -452,6 +458,12 @@ def get_requests(args, tokenizer):
             random_prefix_len if random_prefix_len is not None else prefix_len
         )
         sample_kwargs["range_ratio"] = args.random_range_ratio
+        sample_kwargs["input_range_ratio"] = getattr(
+            args, "random_input_range_ratio", None
+        )
+        sample_kwargs["output_range_ratio"] = getattr(
+            args, "random_output_range_ratio", None
+        )
     elif args.dataset_name == "random-rerank":
         dataset_cls = RandomDatasetForReranking
         # prefer random_* arguments, fall back to regular arguments
@@ -470,6 +482,12 @@ def get_requests(args, tokenizer):
         sample_kwargs["batchsize"] = getattr(args, "random_batch_size", 1)
         sample_kwargs["is_reranker"] = not getattr(args, "no_reranker", False)
         sample_kwargs["range_ratio"] = args.random_range_ratio
+        sample_kwargs["input_range_ratio"] = getattr(
+            args, "random_input_range_ratio", None
+        )
+        sample_kwargs["output_range_ratio"] = getattr(
+            args, "random_output_range_ratio", None
+        )
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
