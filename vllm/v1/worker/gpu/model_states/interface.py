@@ -38,6 +38,13 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def postprocess_state(
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+    ) -> None:
+        return None
+
     @abstractmethod
     def get_mm_embeddings(
         self,
@@ -66,6 +73,8 @@ class ModelState(ABC):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        req_states: RequestState | None = None,
+        scheduled_spec_decode_tokens: dict[str, list[int]] | None = None,
         for_capture: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError

@@ -72,6 +72,7 @@ class EagleCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
+                skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
             )
 
             return lambda cg_mode: generate_fn(
