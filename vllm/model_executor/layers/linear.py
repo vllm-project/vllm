@@ -221,7 +221,11 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert input_scale is None, (
+            "UnquantizedLinearMethod does not support input_scale"
+        )
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
@@ -383,11 +387,12 @@ class ReplicatedLinear(LinearBase):
     def forward(
         self,
         x: torch.Tensor,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
 
-        output = self.quant_method.apply(self, x, bias)
+        output = self.quant_method.apply(self, x, bias, input_scale=x_scale)
 
         if not self.return_bias:
             return output
@@ -573,12 +578,15 @@ class ColumnParallelLinear(LinearBase):
     def forward(
         self,
         input_,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        output_parallel = self.quant_method.apply(
+            self, input_, bias, input_scale=x_scale
+        )
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1511,6 +1519,7 @@ class RowParallelLinear(LinearBase):
     def forward(
         self,
         input_,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.input_is_parallel:
             input_parallel = input_
@@ -1522,10 +1531,12 @@ class RowParallelLinear(LinearBase):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        # Only fuse bias add into GEMM for rank 0 (this ensures that
-        # bias will not get added more than once in TP>1 case)
+        # Only fuse bias add into GEMM for rank 0 (ensures bias not
+        # added multiple times in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        output_parallel = self.quant_method.apply(
+            self, input_parallel, bias_, input_scale=x_scale
+        )
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
