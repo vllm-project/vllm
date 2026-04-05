@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import BATCH_SHAPE_ID, support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -337,20 +337,15 @@ class LlamaDecoderLayer(nn.Module):
         return vllm_config.quant_config
 
 
-def llama_model_invariants(
-    input_ids, positions, intermediate_tensors=None, inputs_embeds=None
-):
-    """Shape invariants for Llama model compilation, those are translated to
-    runtime assertions for unbacked dynamic shapes and are compiled away for
-    backed"""
-    if input_ids is not None:
-        torch._check(positions.size()[0] == input_ids.size()[0])
-
-
 @support_torch_compile(
     # TODO[#32068]: Investigate recompilation
     # mark_unbacked_dims={"input_ids": 0},
-    shape_invariants=llama_model_invariants
+    dynamic_arg_dims={
+        "input_ids": {0: BATCH_SHAPE_ID},
+        "positions": {0: BATCH_SHAPE_ID},
+        "intermediate_tensors": {0: BATCH_SHAPE_ID},
+        "inputs_embeds": {0: BATCH_SHAPE_ID},
+    },
 )
 class LlamaModel(nn.Module, EagleModelMixin):
     def __init__(

@@ -33,7 +33,7 @@ import torch
 from torch import nn
 from transformers import Qwen2Config
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import BATCH_SHAPE_ID, support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -312,48 +312,15 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-def qwen_2_model_invariants(
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    intermediate_tensors: IntermediateTensors | None = None,
-    inputs_embeds: torch.Tensor | None = None,
-):
-    """Shape invariants for Qwen2Model Model, those are translated to
-    runtime assertions for unbacked dynamic shapes and are compiled away for
-    backed"""
-    # All these should be equal.
-    # input_ids.size()[0]
-    # positions.size()[-1]
-    # intermediate_tensors["hidden_states"].size()[0]
-    # inputs_embeds.size()[0]
-    torch._check(input_ids.size()[0] == positions.size()[-1])
-    if intermediate_tensors is not None:
-        torch._check(
-            input_ids.size()[0] == intermediate_tensors["hidden_states"].size()[0]
-        )
-
-    if inputs_embeds is not None:
-        torch._check(input_ids.size()[0] == inputs_embeds.size()[0])
-
-    # Hidden dimensions should match (hidden_size)
-    # intermediate_tensors["hidden_states"].size()[1]
-    # inputs_embeds.size()[1]
-    if inputs_embeds is not None and intermediate_tensors is not None:
-        torch._check(
-            inputs_embeds.size()[1] == intermediate_tensors["hidden_states"].size()[1]
-        )
-
-
 @support_torch_compile(
     dynamic_arg_dims={
-        "input_ids": 0,
+        "input_ids": {0: BATCH_SHAPE_ID},
         # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
         # otherwise (seq_len, ).
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    },
-    shape_invariants=qwen_2_model_invariants,
+        "positions": {-1: BATCH_SHAPE_ID},
+        "intermediate_tensors": {0: BATCH_SHAPE_ID},
+        "inputs_embeds": {0: BATCH_SHAPE_ID},
+    }
 )
 class Qwen2Model(nn.Module, EagleModelMixin):
     def __init__(
