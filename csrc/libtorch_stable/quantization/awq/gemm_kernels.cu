@@ -7,10 +7,11 @@ Shang and Dang, Xingyu and Han, Song}, journal={arXiv}, year={2023}
 }
  */
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/ops.h>
+#include "libtorch_stable/torch_utils.h"
 
-#include "dequantize.cuh"
+#include "libtorch_stable/quantization/awq/dequantize.cuh"
 
 #include <cuda_fp16.h>
 
@@ -410,10 +411,11 @@ __global__ void __launch_bounds__(64)
 }  // namespace awq
 }  // namespace vllm
 
-torch::Tensor awq_dequantize(torch::Tensor _kernel,
-                             torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int64_t split_k_iters,
-                             int64_t thx, int64_t thy) {
+torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
+                                     torch::stable::Tensor _scaling_factors,
+                                     torch::stable::Tensor _zeros,
+                                     int64_t split_k_iters, int64_t thx,
+                                     int64_t thy) {
   int in_c = _kernel.size(0);
   int qout_c = _kernel.size(1);
   int out_c = qout_c * 8;
@@ -437,23 +439,24 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
     y_blocks = (int)(in_c / 8);
   }
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(_scaling_factors));
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      _scaling_factors.get_device_index());
 
-  auto options = torch::TensorOptions()
-                     .dtype(_scaling_factors.dtype())
-                     .device(_scaling_factors.device());
-  at::Tensor _de_kernel = torch::empty({in_c, out_c}, options);
+  auto _de_kernel =
+      torch::stable::empty({in_c, out_c}, _scaling_factors.scalar_type(),
+                           std::nullopt, _scaling_factors.device());
 
-  auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-  auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
-  auto scaling_factors =
-      reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-  auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+  auto kernel = reinterpret_cast<int*>(_kernel.mutable_data_ptr<int>());
+  auto de_kernel = reinterpret_cast<half*>(
+      _de_kernel.mutable_data_ptr<torch::headeronly::Half>());
+  auto scaling_factors = reinterpret_cast<half*>(
+      _scaling_factors.mutable_data_ptr<torch::headeronly::Half>());
+  auto zeros = reinterpret_cast<int*>(_zeros.mutable_data_ptr<int>());
 
   dim3 num_blocks(x_blocks, y_blocks);
   dim3 threads_per_block(x_thread, y_thread);
 
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const cudaStream_t stream = get_current_cuda_stream();
   vllm::awq::dequantize_weights<<<num_blocks, threads_per_block, 0, stream>>>(
       kernel, scaling_factors, zeros, de_kernel, G);
 
@@ -466,27 +469,30 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
 // zeros: IC // G, OC // 8 [int32] -> cast to IC // G, OC [uint4b]
 // assume that batch_size < 16 for now
 
-torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
-                       torch::Tensor _scaling_factors, torch::Tensor _zeros,
-                       int64_t split_k_iters) {
+torch::stable::Tensor awq_gemm(torch::stable::Tensor _in_feats,
+                               torch::stable::Tensor _kernel,
+                               torch::stable::Tensor _scaling_factors,
+                               torch::stable::Tensor _zeros,
+                               int64_t split_k_iters) {
   int num_in_feats = _in_feats.size(0);
   int num_in_channels = _in_feats.size(1);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      _in_feats.get_device_index());
 
-  auto options = torch::TensorOptions()
-                     .dtype(_in_feats.dtype())
-                     .device(_in_feats.device());
-  at::Tensor _out_feats =
-      torch::empty({split_k_iters, num_in_feats, _kernel.size(1) * 8}, options);
+  auto _out_feats = torch::stable::empty(
+      {split_k_iters, num_in_feats, _kernel.size(1) * 8},
+      _in_feats.scalar_type(), std::nullopt, _in_feats.device());
   int num_out_feats = _out_feats.size(-2);
   int num_out_channels = _out_feats.size(-1);
 
-  auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
-  auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-  auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
-  auto scaling_factors =
-      reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-  auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+  auto in_feats = reinterpret_cast<half*>(
+      _in_feats.mutable_data_ptr<torch::headeronly::Half>());
+  auto kernel = reinterpret_cast<int*>(_kernel.mutable_data_ptr<int>());
+  auto out_feats = reinterpret_cast<half*>(
+      _out_feats.mutable_data_ptr<torch::headeronly::Half>());
+  auto scaling_factors = reinterpret_cast<half*>(
+      _scaling_factors.mutable_data_ptr<torch::headeronly::Half>());
+  auto zeros = reinterpret_cast<int*>(_zeros.mutable_data_ptr<int>());
   int group_size = num_in_channels / _scaling_factors.size(0);
 
   if (num_out_channels % 64 != 0)
@@ -498,7 +504,7 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
   if (num_out_channels % group_size != 0)
     throw std::invalid_argument("OC is not multiple of Group size");
 
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const cudaStream_t stream = get_current_cuda_stream();
   if (num_out_channels % 128 == 0) {
     int j_factors1 = num_out_channels / 128 / 1;
     dim3 num_blocks((num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
@@ -522,5 +528,5 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros,
             num_in_feats, num_in_channels, num_out_channels, out_feats);
   }
-  return _out_feats.sum(0);
+  return torch::stable::sum(_out_feats, 0);
 }

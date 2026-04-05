@@ -101,47 +101,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
            &convert_vertical_slash_indexes_mergehead);
 #endif
 
-  // Activation ops
-  // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
-  ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
-
+  // Activation ops (quantized only — basic ops moved to _C_stable_libtorch)
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
-
-  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
-  ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
-
-  // Activation function used in GeGLU with `none` approximation.
-  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_and_mul", torch::kCUDA, &gelu_and_mul);
-
-  // Activation function used in GeGLU with `tanh` approximation.
-  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_tanh_and_mul", torch::kCUDA, &gelu_tanh_and_mul);
-
-  // FATReLU implementation.
-  ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
-  ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
-
-  ops.def(
-      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
-      "limit=7.0) "
-      "-> ()");
-  ops.impl("swigluoai_and_mul", torch::kCUDA, &swigluoai_and_mul);
-
-  // GELU implementation used in GPT-2.
-  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_new", torch::kCUDA, &gelu_new);
-
-  // Approximate GELU implementation.
-  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_fast", torch::kCUDA, &gelu_fast);
-
-  // Quick GELU implementation.
-  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -244,22 +207,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_scale_transposed=False) -> ()");
   ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
            &silu_and_mul_per_block_quant);
-  // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
-  ops.def(
-      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
-
-  // Quantized GEMM for AWQ.
-  ops.def(
-      "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, SymInt split_k_iters) -> Tensor");
-  ops.impl("awq_gemm", torch::kCUDA, &awq_gemm);
-
-  // Dequantization for AWQ.
-  ops.def(
-      "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
-  ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -339,39 +286,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 #endif
 
-  // Dequantization for GGML.
-  ops.def(
-      "ggml_dequantize(Tensor W, int type, SymInt m, SymInt n, ScalarType? "
-      "dtype) -> Tensor");
-  ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
-
-  // mmvq kernel for GGML.
-  ops.def(
-      "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, SymInt row) "
-      "-> Tensor");
-  ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
-
-  // mmq kernel for GGML.
-  ops.def(
-      "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
-  ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
-
-  // moe kernel for GGML.
-  ops.def(
-      "ggml_moe_a8(Tensor X, Tensor W, "
-      "Tensor sorted_token_ids, Tensor expert_ids, Tensor "
-      "num_tokens_post_padded, "
-      "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
-  ops.impl("ggml_moe_a8", torch::kCUDA, &ggml_moe_a8);
-
-  ops.def(
-      "ggml_moe_a8_vec(Tensor X, Tensor W, "
-      "Tensor topk_ids, int top_k, "
-      "int type, SymInt row, SymInt tokens) -> Tensor");
-  ops.impl("ggml_moe_a8_vec", torch::kCUDA, &ggml_moe_a8_vec);
-
-  ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
-
 #ifndef USE_ROCM
   // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
   ops.def(
@@ -389,74 +303,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " -> ()");
   // conditionally compiled so impl registration is in source file
 
-  // SM100 CUTLASS MLA decode
-  ops.def(
-      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
-      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
-      "                         Tensor seq_lens, Tensor page_table,"
-      "                         Tensor workspace, float scale,"
-      "                         int num_kv_splits) -> ()");
-  // conditionally compiled so impl in source file
-
-  // SM100 CUTLASS MLA workspace
-  ops.def(
-      "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"
-      "                                     int sm_count, int num_kv_splits) "
-      "-> int");
-  // conditionally compiled so impl in source file
-
 #endif
-
-  // Quantized GEMM for GPTQ.
-  // Note: even though the C++ inferred schema is correct for this op, it seems
-  // to prevent the meta function registry.
-  ops.def(
-      "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
-      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
-      "use_v2_format, int bit) "
-      "-> Tensor");
-  ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
-
-  // Post processing for GPTQ.
-  ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
-  ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
-
-  // Compute FP8 quantized tensor for given scaling factor.
-  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
-  // scaling. Optional group_m/group_n specify the group shape explicitly;
-  // required for 1D scales to disambiguate per-channel vs per-token.
-  ops.def(
-      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
-      "(int, int)? group_shape=None) -> ()");
-  ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
-
-  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
-  ops.def(
-      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
-      "-> "
-      "()");
-  ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
-
-  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
-  ops.def(
-      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
-      "Tensor! scale, Tensor? scale_ub) -> "
-      "()");
-  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
-           &dynamic_per_token_scaled_fp8_quant);
-
-  // Compute int8 quantized tensor for given scaling factor.
-  ops.def(
-      "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale,"
-      "Tensor? azp) -> ()");
-  ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
-
-  // Compute int8 quantized tensor and scaling factor
-  ops.def(
-      "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
-      "Tensor!? azp) -> ()");
-  ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
-           &dynamic_scaled_int8_quant);
 
   // Mamba selective scan kernel
   ops.def(
@@ -476,28 +323,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cu_chunk_seqlen,"
       "Tensor? last_chunk_indices) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
-
-  // Hadamard transforms
-  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
-
-#ifndef USE_ROCM
-  // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
-  ops.def(
-      "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
-      "Tensor? b_zeros, "
-      "bool has_zp, Tensor! b_qweight_reorder, Tensor! b_scales_reorder, "
-      "Tensor!? b_zeros_reorder, "
-      "int K, int N, int N_32align) -> ()");
-  //  conditionally compiled so impl in source file
-
-  // AllSpark quantization ops
-  ops.def(
-      "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
-      "Tensor? b_qzeros, "
-      "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
-      "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
-  //  conditionally compiled so impl in source file
-#endif
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

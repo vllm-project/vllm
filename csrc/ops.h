@@ -167,16 +167,9 @@ void persistent_masked_m_silu_mul_quant(
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     bool use_ue8m0);
 
-void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
-
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
-
-void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
-                     double threshold);
-void swigluoai_and_mul(torch::Tensor& out, torch::Tensor& input,
-                       double alpha = 1.702, double limit = 7.0);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
@@ -192,41 +185,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
 
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
-#ifndef USE_ROCM
-
-torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
-                       torch::Tensor _scaling_factors, torch::Tensor _zeros,
-                       int64_t split_k_iters);
-
-torch::Tensor awq_dequantize(torch::Tensor _kernel,
-                             torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int64_t split_k_iters,
-                             int64_t thx, int64_t thy);
-
-#endif
-
-torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
-                              int64_t n,
-                              std::optional<at::ScalarType> const& dtype);
-
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
-                                  int64_t type, int64_t row);
-
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
-                              int64_t row);
-
-torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
-                          torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t type,
-                          int64_t row, int64_t top_k, int64_t tokens);
-
-torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
-                              torch::Tensor topk_ids, int64_t top_k,
-                              int64_t type, int64_t row, int64_t tokens);
-
-int64_t ggml_moe_get_block_size(int64_t type);
-
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
                               std::optional<torch::Tensor> const& azp);
@@ -234,24 +192,6 @@ void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales,
                                std::optional<torch::Tensor> const& azp);
-
-torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
-                        torch::Tensor b_gptq_qzeros,
-                        torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, bool use_v2_format, int64_t bit);
-
-void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
-
-void static_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,
-    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
-
-void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor& scale);
-
-void dynamic_per_token_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
-    std::optional<torch::Tensor> const& scale_ub);
 
 void selective_scan_fwd(
     const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
@@ -294,8 +234,6 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
 
-torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace);
-
 #ifdef USE_ROCM
 fptr_t init_custom_qr(int64_t rank, int64_t world_size,
                       std::optional<int64_t> qr_max_size = std::nullopt);
@@ -305,9 +243,4 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
-#endif
-
-#ifndef USE_ROCM
-void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
-                       torch::Tensor const& mat_b);
 #endif
