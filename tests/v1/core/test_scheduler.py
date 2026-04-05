@@ -4157,3 +4157,203 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+# ============================================================
+# Tests for KV-cache head-of-line blocking prevention
+# See: https://github.com/vllm-project/vllm/issues/31731
+# ============================================================
+
+
+def test_running_hol_blocking_priority_schedule():
+    """Test that a low-priority running request failing KV allocation
+    does not block higher-priority running requests from being scheduled.
+
+    Before the fix, the scheduler would `break` out of the running loop
+    when any request's preemption cascade failed, preventing all subsequent
+    running requests from being scheduled in that step.
+
+    Scenario (3 scheduling steps):
+      1. Schedule heavy request alone (low priority, 48 tokens, 3 blocks).
+         It goes to RUNNING first, so it occupies the front of self.running.
+      2. Add light request (high priority, 10 tokens, 1 block). Schedule:
+         - RUNNING: heavy gets remaining 16-token chunk (needs 1 new block).
+         - WAITING: light gets prefilled (1 block). Now 0 free blocks.
+         Both are running: self.running = [heavy, light].
+      3. Schedule (decode step):
+         - heavy needs 1 decode token at position 48 → needs a NEW block.
+         - 0 free blocks → preemption cascade picks heavy itself
+           (it has the highest priority value = lowest priority).
+         - heavy is preempted. With `continue`, light still gets scheduled.
+         - With the old `break`, light would be skipped.
+    """
+    # block_size=16, num_blocks=5 => 4 usable blocks => 64 tokens capacity.
+    # Chunked prefill: max_num_batched_tokens=32 forces the 48-token heavy
+    # request to be split into two chunks (32 + 16).
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=4,
+        max_num_batched_tokens=32,
+        num_blocks=5,
+        block_size=16,
+        max_model_len=2048,
+    )
+
+    # Heavy request: low priority (priority=10), 48 prompt tokens.
+    # Needs 3 blocks total, but will be chunked: 32 tokens first, then 16.
+    heavy_req = create_requests_with_priority(
+        num_requests=1,
+        priorities=[10],  # Low priority (high number)
+        arrival_times=[1.0],
+        num_tokens=48,
+        max_tokens=32,
+        req_ids=["heavy"],
+        block_size=16,
+    )[0]
+
+    # --- Step 1: Schedule heavy request alone (first chunk). ---
+    scheduler.add_request(heavy_req)
+    output1 = scheduler.schedule()
+    assert "heavy" in output1.num_scheduled_tokens
+    # Chunked: schedules 32 tokens out of 48. Uses 2 blocks. 2 free.
+    assert output1.num_scheduled_tokens["heavy"] == 32
+
+    # update_from_output: heavy is still prefilling, no sampled token.
+    model_output1 = ModelRunnerOutput(
+        req_ids=["heavy"],
+        req_id_to_index={"heavy": 0},
+        sampled_token_ids=[[]],  # No token sampled during prefill chunk
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output1, model_output1)
+    # After update: heavy.num_computed_tokens = 32, heavy.num_tokens = 48.
+    # heavy is in self.running (still prefilling remaining chunk).
+
+    # --- Step 2: Add light request, schedule both. ---
+    # Light request: high priority (priority=1), 10 prompt tokens, 1 block.
+    light_req = create_requests_with_priority(
+        num_requests=1,
+        priorities=[1],  # High priority (low number)
+        arrival_times=[2.0],
+        num_tokens=10,
+        max_tokens=4,
+        req_ids=["light"],
+        block_size=16,
+    )[0]
+    scheduler.add_request(light_req)
+
+    output2 = scheduler.schedule()
+    # RUNNING: heavy gets remaining 16 tokens (chunk 2). Needs 1 new block.
+    #   2 free → succeeds. heavy now uses 3 blocks. 1 free.
+    # WAITING: light gets 10 tokens prefilled. Needs 1 block.
+    #   1 free → succeeds. light uses 1 block. 0 free.
+    assert "heavy" in output2.num_scheduled_tokens
+    assert output2.num_scheduled_tokens["heavy"] == 16  # Remaining chunk
+    assert "light" in output2.num_scheduled_tokens
+    assert output2.num_scheduled_tokens["light"] == 10
+    # self.running = [heavy, light] (heavy was appended first in step 1).
+
+    # update_from_output: both finished prefilling, each gets 1 sampled token.
+    model_output2 = ModelRunnerOutput(
+        req_ids=["heavy", "light"],
+        req_id_to_index={"heavy": 0, "light": 1},
+        sampled_token_ids=[[100], [200]],  # Each gets one sampled token
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output2, model_output2)
+    # After update:
+    #   heavy: num_tokens=49 (48+1), num_computed_tokens=48
+    #   light: num_tokens=11 (10+1), num_computed_tokens=10
+    # 4 blocks used (3 heavy + 1 light), 0 free.
+
+    # --- Step 3: Decode step - the HOL blocking scenario. ---
+    output3 = scheduler.schedule()
+
+    # heavy (req_index=0) needs 1 decode token at position 48.
+    # Block 3 covers positions 32-47, so position 48 needs a NEW block.
+    # 0 free blocks → allocate_slots fails.
+    # Preemption cascade: max(running, key=(priority, arrival_time))
+    #   = heavy (priority=10 > 1). heavy is preempted immediately.
+    #   preempted_req == request → cascade ends with new_blocks=None.
+    #
+    # With the fix (continue): loop continues to light (now at index 0).
+    #   light needs 1 decode token at position 10, fits in existing block.
+    #   light is scheduled successfully.
+    #
+    # With old code (break): loop exits. light is never processed.
+
+    assert "light" in output3.num_scheduled_tokens, (
+        "Light request should be scheduled even after heavy request's "
+        "preemption cascade fails (HOL blocking fix)"
+    )
+    assert output3.num_scheduled_tokens["light"] == 1  # 1 decode token
+
+    # heavy should be preempted back to waiting.
+    assert "heavy" not in output3.num_scheduled_tokens
+    waiting_ids = set()
+    for req in scheduler.waiting:
+        waiting_ids.add(req.request_id)
+    assert "heavy" in waiting_ids, (
+        "Heavy request should be preempted back to waiting queue"
+    )
+
+
+def test_waiting_hol_blocking_skip_heavy_request():
+    """Test that a waiting request that cannot allocate KV blocks
+    does not block lighter waiting requests from being scheduled.
+
+    Before the fix, the scheduler would `break` out of the waiting loop
+    when any request failed allocation, preventing all subsequent waiting
+    requests from being admitted.
+    """
+    # block_size=16, num_blocks=4 => 3 usable blocks => 48 tokens capacity.
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=200,
+        num_blocks=4,
+        block_size=16,
+        enable_prefix_caching=False,
+    )
+
+    # Create a heavy request that needs more blocks than available.
+    # 80 tokens => needs 5 blocks, but only 3 available.
+    heavy_req = create_requests(
+        num_requests=1,
+        num_tokens=80,
+        max_tokens=4,
+        block_size=16,
+        req_ids=["heavy"],
+    )[0]
+
+    # Create a light request that fits easily.
+    # 10 tokens => needs 1 block.
+    light_req = create_requests(
+        num_requests=1,
+        num_tokens=10,
+        max_tokens=4,
+        block_size=16,
+        req_ids=["light"],
+    )[0]
+
+    # Add heavy first (FCFS order), then light.
+    scheduler.add_request(heavy_req)
+    scheduler.add_request(light_req)
+
+    # Schedule. With the fix, heavy can't allocate but light should
+    # still be admitted.
+    output = scheduler.schedule()
+
+    # The light request should be scheduled even though the heavy
+    # request at the front of the queue couldn't allocate.
+    assert "light" in output.num_scheduled_tokens, (
+        "Light waiting request should be scheduled even when the heavy "
+        "request at the front of the queue cannot allocate KV blocks"
+    )
+
+    # The heavy request should be skipped (still in waiting).
+    assert any(r.request_id == "heavy" for r in scheduler.waiting), (
+        "Heavy request should remain in the waiting queue after being skipped"
+    )

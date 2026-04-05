@@ -506,8 +506,16 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
-                # Cannot schedule this request.
-                break
+                # The preemption cascade failed to free enough blocks for
+                # this request. Instead of stopping the entire scheduling
+                # loop, continue to schedule remaining running requests.
+                # This prevents a single KV-cache-heavy request from
+                # blocking all other running requests in this step.
+                # NOTE: Do not increment req_index here. The failing request
+                # was already removed from self.running during the cascade,
+                # so the next request has shifted to the current index.
+                # See: https://github.com/vllm-project/vllm/issues/31731
+                continue
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -755,13 +763,20 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
-                    # The request cannot be scheduled.
+                    # The request cannot be scheduled due to insufficient
+                    # KV cache blocks. Skip this request and try the next
+                    # one instead of stopping the entire waiting loop.
+                    # This prevents a single KV-cache-heavy waiting request
+                    # from blocking lighter requests that could be scheduled.
+                    # See: https://github.com/vllm-project/vllm/issues/31731
 
-                    # NOTE: we need to untouch the request from the encode cache
-                    # manager
+                    # NOTE: we need to untouch the request from the encode
+                    # cache manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
