@@ -351,6 +351,17 @@ def test_colbert_embed_not_supported(
 @pytest.mark.parametrize("backend", list(COLBERT_MODELS.keys()))
 def test_colbert_hf_comparison(vllm_runner, backend):
     """Test that vLLM ColBERT embeddings match HuggingFace for each backend."""
+    import transformers
+    from packaging.version import Version
+
+    if backend == "jina" and Version(transformers.__version__) >= Version("5.0"):
+        pytest.skip(
+            "jinaai/jina-colbert-v2 uses custom flash_attn that produces "
+            "different results under Transformers v5+ due to dtype handling "
+            "changes (torch_dtype deprecation). The model's remote code "
+            "needs updating for v5 compatibility."
+        )
+
     from transformers import AutoTokenizer
 
     spec = COLBERT_MODELS[backend]
