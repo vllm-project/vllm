@@ -904,6 +904,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=w13,
             w2=w2,
@@ -911,6 +912,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            block_shape=self.weight_block_size,
         )
 
         # Replace parameters with updated versions. Note that this helper
@@ -924,17 +926,27 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # In non-naive DP/EP case, we will create a ModularKernelMethod.
         # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
         # in both cases.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            assert self.experts_cls is not None
-            self.moe_kernel = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
-            )
+        is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
+        self.moe_quant_config = make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            a1_scale=w13_input_scale,
+            a2_scale=w2_input_scale,
+            block_shape=self.weight_block_size,
+            per_act_token_quant=is_per_token,
+            per_out_ch_quant=is_per_token,
+        )
+        assert self.experts_cls is not None
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -946,17 +958,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
-        return make_fp8_moe_quant_config(
-            fp8_backend=self.fp8_backend,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            per_act_token_quant=is_per_token,
-            per_out_ch_quant=is_per_token,
-            block_shape=self.weight_block_size,
+        assert self.moe_quant_config is not None, (
+            "moe_quant_config is not initialized, "
+            "process_weights_after_loading should be called first"
         )
+        return self.moe_quant_config
 
     def apply_monolithic(
         self,

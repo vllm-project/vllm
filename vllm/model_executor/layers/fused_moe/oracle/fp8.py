@@ -26,9 +26,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     get_flashinfer_moe_backend,
     prepare_fp8_moe_layer_for_fi,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    prepare_fp8_moe_layer_for_deepgemm,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
@@ -40,6 +37,53 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+class Fp8MoEPrepMixin:
+    """Default FP8 prepare / quant-config classmethods for expert classes.
+
+    Expert classes serving the FP8 family should inherit this mixin
+    (directly or via an intermediate mixin).
+    Override the classmethods to supply backend-specific behaviour.
+    """
+
+    @classmethod
+    def prepare_fp8_weights(
+        cls,
+        layer: torch.nn.Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        block_shape: list[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Default: no-op (weights already in the right format).
+
+        Returns (w13, w2, w13_scale, w2_scale).
+        """
+        return w13, w2, w13_scale, w2_scale
+
+    @classmethod
+    def make_fp8_quant_config(
+        cls,
+        w1_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        a1_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        block_shape: list[int] | None = None,
+        per_act_token_quant: bool = False,
+        per_out_ch_quant: bool = False,
+    ) -> FusedMoEQuantConfig:
+        """Default: standard fp8_w8a8 quant config."""
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_shape,
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
+        )
 
 
 class Fp8MoeBackend(Enum):
@@ -124,11 +168,14 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+            DeepGemmExperts,
+        )
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
         )
 
-        return [TritonOrDeepGemmExperts]
+        return [TritonOrDeepGemmExperts, DeepGemmExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_DEEPGEMM:
         from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
@@ -235,10 +282,10 @@ def select_fp8_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _make_log_backend(backend: Fp8MoeBackend):
+    def _make_log_backend(backend: Fp8MoeBackend, k_cls: type[mk.FusedMoEExperts]):
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
         return (
-            f"Using {backend.value} Fp8 MoE backend out "
+            f"Using {backend.value} Fp8 MoE backend ({k_cls.__name__}) out "
             f"of potential backends: {available_backend_strs}."
         )
 
@@ -266,7 +313,7 @@ def select_fp8_moe_backend(
                 k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend, k_cls), scope="local")
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
@@ -337,7 +384,9 @@ def select_fp8_moe_backend(
                     )
 
                     if supported:
-                        logger.info_once(_make_log_backend(backend), scope="local")
+                        logger.info_once(
+                            _make_log_backend(backend, k_cls), scope="local"
+                        )
                         return backend, k_cls
                     else:
                         logger.debug_once(
@@ -396,7 +445,7 @@ def select_fp8_moe_backend(
                 activation_format,
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend, k_cls), scope="local")
                 return backend, k_cls
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
@@ -415,6 +464,7 @@ def select_fp8_moe_backend(
 
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
+    experts_cls: type[mk.FusedMoEExperts] | None,
     layer: torch.nn.Module,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -422,16 +472,20 @@ def convert_to_fp8_moe_kernel_format(
     w2_scale: torch.Tensor,
     w13_input_scale: torch.Tensor | None,
     w2_input_scale: torch.Tensor | None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    block_quant = hasattr(layer, "weight_block_size")
-    if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
-        assert block_quant
-        w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_deepgemm(
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            tuple(layer.weight_block_size),
+    """Prepare weights/scales for the chosen FP8 backend.
+
+    For backends that have adopted the mixin pattern (currently DeepGemm),
+    calls ``experts_cls.prepare_fp8_weights(...)`` directly.  Other backends
+    still use ad-hoc preparation functions and will be migrated in follow-up
+    PRs.
+
+    Returns (w13, w2, w13_scale, w2_scale).
+    """
+    if experts_cls is not None and issubclass(experts_cls, Fp8MoEPrepMixin):
+        w13, w2, w13_scale, w2_scale = experts_cls.prepare_fp8_weights(
+            layer, w13, w2, w13_scale, w2_scale, block_shape
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
@@ -480,12 +534,12 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.XPU,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
-
     return w13, w2, w13_scale, w2_scale
 
 
 def make_fp8_moe_quant_config(
     fp8_backend: Fp8MoeBackend,
+    experts_cls: type[mk.FusedMoEExperts] | None,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None,
@@ -503,9 +557,21 @@ def make_fp8_moe_quant_config(
     special Quant configs to handle non-standard inputs to
     their kernel interfaces.
 
-    In a future PR, we will have this function should be
-    a method of the modular kernel itself.
+    For backends that have adopted the mixin pattern (currently DeepGemm),
+    calls ``experts_cls.make_fp8_quant_config(...)`` directly.  Other backends
+    still use ad-hoc logic and will be migrated in follow-up PRs.
     """
+
+    if experts_cls is not None and issubclass(experts_cls, Fp8MoEPrepMixin):
+        return experts_cls.make_fp8_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_shape,
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
+        )
 
     # MARLIN is mixed precision W8A16 config.
     if fp8_backend == Fp8MoeBackend.MARLIN:
