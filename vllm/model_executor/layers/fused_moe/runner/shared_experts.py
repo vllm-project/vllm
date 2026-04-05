@@ -67,9 +67,9 @@ class SharedExperts:
         # The SharedExperts need to handle DBO since they can be called from
         # an MK's finalize method.  We keep a list of outputs indexed by current
         # DBO ubatch id to handle this case.  If DBO is not enabled, the
-        # index is always 0 and the second output list element is ignored.
+        # index is always 0 and only one output slot is needed.
         self.enable_dbo = enable_dbo
-        self._output: list[torch.Tensor | None] = [None, None]
+        self._output: list[torch.Tensor | None] = [None] * (2 if enable_dbo else 1)
         self._layer = layer
         self._moe_config = moe_config
         self._quant_method = quant_method
