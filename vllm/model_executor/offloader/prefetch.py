@@ -54,7 +54,11 @@ class ParamInfo:
         numel = 1
         for dim in self.shape:
             numel *= dim
-        return numel * torch.finfo(self.dtype).bits // 8
+        if self.dtype.is_floating_point:
+            bits = torch.finfo(self.dtype).bits
+        else:
+            bits = torch.iinfo(self.dtype).bits
+        return numel * bits // 8
 
 
 class StaticBufferPool:
