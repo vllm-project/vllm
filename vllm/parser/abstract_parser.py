@@ -37,6 +37,7 @@ from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.utils import Tool
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -542,10 +543,10 @@ class _WrappedParser(DelegatingParser):
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer)
         # Instantiate the underlying parsers from class attributes
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(tokenizer)
         if self.__class__.tool_parser_cls is not None:
-            self._tool_parser = self.__class__.tool_parser_cls(tokenizer)
+            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
