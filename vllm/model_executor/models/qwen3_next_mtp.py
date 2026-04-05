@@ -67,7 +67,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             gather_output=True,
             bias=False,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.fc",
         )
 
@@ -227,7 +227,7 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["up_proj", "down_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
