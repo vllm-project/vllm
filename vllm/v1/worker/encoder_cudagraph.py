@@ -68,23 +68,65 @@ class EncoderCudaGraphManager:
         user_budgets = comp_config.encoder_cudagraph_token_budgets
         user_max_images = comp_config.encoder_cudagraph_max_images_per_batch
 
+        # Invariant: max_batch_size <= min_token_budget.
+        # This ensures per_image_output = budget // max_batch_size >= 1
+        # for every captured budget, preventing reshape crashes on empty
+        # tensors during CUDA graph capture. Validated/enforced below for
+        # each configuration path.
         if user_budgets and user_max_images > 0:
-            # Fully user-specified
+            # Fully user-specified: validate the invariant.
             self.token_budgets = sorted(user_budgets)
             self.max_batch_size = user_max_images
+            min_tok = min(self.token_budgets)
+            if self.max_batch_size > min_tok:
+                raise ValueError(
+                    f"encoder_cudagraph_max_images_per_batch "
+                    f"({self.max_batch_size}) must be <= smallest token "
+                    f"budget ({min_tok}). With budgets="
+                    f"{self.token_budgets}, per_image_output = "
+                    f"{min_tok} // {self.max_batch_size} = "
+                    f"{min_tok // self.max_batch_size}, which would cause "
+                    f"a capture failure. Either increase the smallest "
+                    f"budget or decrease max_images_per_batch."
+                )
         else:
-            # Auto-infer missing values from model
+            # Auto-infer missing values from model.
             min_budget, max_budget = model.get_encoder_cudagraph_budget_range(
                 vllm_config
             )
-            self.token_budgets = (
-                sorted(user_budgets)
-                if user_budgets
-                else self._generate_budgets(min_budget, max_budget)
-            )
-            self.max_batch_size = (
-                user_max_images if user_max_images > 0 else max_budget // min_budget
-            )
+            if min_budget <= 0 or max_budget <= 0:
+                raise ValueError(
+                    f"Invalid encoder cudagraph budget range: "
+                    f"min_budget={min_budget}, max_budget={max_budget}. "
+                    f"Both must be positive."
+                )
+            if min_budget > max_budget:
+                raise ValueError(
+                    f"Invalid encoder cudagraph budget range: "
+                    f"min_budget={min_budget} > max_budget={max_budget}."
+                )
+
+            if user_max_images > 0:
+                # User provided max_images only; adjust auto-inferred
+                # budgets so min(budgets) >= max_batch_size.
+                self.max_batch_size = user_max_images
+                effective_min = max(min_budget, user_max_images)
+                self.token_budgets = self._generate_budgets(effective_min, max_budget)
+            elif user_budgets:
+                # User provided budgets only; cap auto-inferred
+                # max_batch_size to min(user_budgets).
+                self.token_budgets = sorted(user_budgets)
+                self.max_batch_size = min(
+                    max_budget // min_budget,
+                    min(self.token_budgets),
+                )
+            else:
+                # Fully auto-inferred.
+                self.token_budgets = self._generate_budgets(min_budget, max_budget)
+                self.max_batch_size = min(
+                    max_budget // min_budget,
+                    min(self.token_budgets),
+                )
 
         mm_config = vllm_config.model_config.multimodal_config
         self.use_dp = (

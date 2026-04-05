@@ -969,6 +969,14 @@ class CompilationConfig:
                 "non-negative (0 = auto-infer)"
             )
 
+        if self.encoder_cudagraph_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_token_budgets must be positive, "
+                f"got {self.encoder_cudagraph_token_budgets}"
+            )
+
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 

@@ -30,6 +30,62 @@ from vllm.platforms import current_platform
 # ---------------------------------------------------------------------------
 
 
+class _MockCompilationConfig:
+    """Minimal mock for VllmConfig.compilation_config."""
+
+    def __init__(
+        self,
+        token_budgets: list[int] | None = None,
+        max_images: int = 0,
+    ):
+        self.encoder_cudagraph_token_budgets = token_budgets or []
+        self.encoder_cudagraph_max_images_per_batch = max_images
+
+
+class _MockMultimodalConfig:
+    mm_encoder_tp_mode = "replicate"
+
+
+class _MockModelConfig:
+    multimodal_config = _MockMultimodalConfig()
+
+
+class _MockParallelConfig:
+    tensor_parallel_size = 1
+
+
+class _MockVllmConfig:
+    """Minimal mock for VllmConfig used in __init__ tests."""
+
+    def __init__(
+        self,
+        token_budgets: list[int] | None = None,
+        max_images: int = 0,
+    ):
+        self.compilation_config = _MockCompilationConfig(token_budgets, max_images)
+        self.model_config = _MockModelConfig()
+        self.parallel_config = _MockParallelConfig()
+
+
+class _MockModel:
+    """Minimal mock implementing SupportsEncoderCudaGraph for __init__."""
+
+    def __init__(self, min_budget: int = 4, max_budget: int = 128):
+        self._min_budget = min_budget
+        self._max_budget = max_budget
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key="pixel_values",
+            buffer_keys=["dummy_buf"],
+            out_hidden_size=32,
+        )
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config):
+        return (self._min_budget, self._max_budget)
+
+
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """Create a minimal EncoderCudaGraphManager with only token_budgets set.
 
@@ -449,3 +505,113 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# __init__ invariant validation tests (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+class TestInitInvariantValidation:
+    """Ensure max_batch_size <= min(token_budgets) for all config paths."""
+
+    def _make_mgr(
+        self,
+        token_budgets=None,
+        max_images=0,
+        min_budget=4,
+        max_budget=128,
+    ):
+        vllm_config = _MockVllmConfig(token_budgets, max_images)
+        model = _MockModel(min_budget, max_budget)
+        return EncoderCudaGraphManager(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            model=model,
+        )
+
+    # --- Finding 1: fully auto-inferred ---
+
+    def test_auto_inferred_invariant_holds(self):
+        mgr = self._make_mgr(min_budget=64, max_budget=16384)
+        assert mgr.max_batch_size <= min(mgr.token_budgets)
+
+    def test_auto_inferred_small_range(self):
+        mgr = self._make_mgr(min_budget=4, max_budget=128)
+        assert mgr.max_batch_size <= min(mgr.token_budgets)
+
+    # --- Finding 2: fully user-specified, bad combo ---
+
+    def test_user_specified_bad_combo_raises(self):
+        with pytest.raises(ValueError, match="must be <= smallest token budget"):
+            self._make_mgr(token_budgets=[64], max_images=256)
+
+    def test_user_specified_valid_combo(self):
+        mgr = self._make_mgr(token_budgets=[64, 128], max_images=32)
+        assert mgr.max_batch_size == 32
+        assert mgr.token_budgets == [64, 128]
+
+    def test_user_specified_exact_boundary(self):
+        # max_images == min(budgets) is OK (per_image_output = 1)
+        mgr = self._make_mgr(token_budgets=[64, 128], max_images=64)
+        assert mgr.max_batch_size == 64
+
+    # --- Finding 3: user provides only max_images ---
+
+    def test_user_max_images_only_adjusts_budgets(self):
+        # model min_budget=64, user max_images=128 → budgets start at 128
+        mgr = self._make_mgr(max_images=128, min_budget=64, max_budget=16384)
+        assert mgr.max_batch_size == 128
+        assert min(mgr.token_budgets) >= 128
+
+    def test_user_max_images_smaller_than_min_budget(self):
+        # max_images=2, model min=4 → budgets start at 4 (>= 2), OK
+        mgr = self._make_mgr(max_images=2, min_budget=4, max_budget=128)
+        assert mgr.max_batch_size == 2
+        assert min(mgr.token_budgets) >= 2
+
+    # --- Finding 4: user provides only budgets ---
+
+    def test_user_budgets_only_caps_max_batch_size(self):
+        # user budgets start at 32, model min_budget=64
+        # without fix: max_batch_size = min(128//64, 64) = 2 → OK
+        # but if user budgets=[16, 64]:
+        # without fix: max_batch_size = min(128//4, 4) = 4 > 16? No.
+        # Let's use a case that triggers it:
+        # model min=64, max=16384 → max_budget//min_budget = 256
+        # user budgets=[32, 64] → min = 32
+        # without fix: max_batch_size = min(256, 64) = 64 > 32 → BUG
+        # with fix: max_batch_size = min(256, 32) = 32 → OK
+        mgr = self._make_mgr(token_budgets=[32, 64], min_budget=64, max_budget=16384)
+        assert mgr.max_batch_size <= min(mgr.token_budgets)
+        assert mgr.max_batch_size == 32
+
+    # --- Finding 5/6: bad model budget range ---
+
+    def test_zero_min_budget_raises(self):
+        with pytest.raises(ValueError, match="Both must be positive"):
+            self._make_mgr(min_budget=0, max_budget=128)
+
+    def test_negative_max_budget_raises(self):
+        with pytest.raises(ValueError, match="Both must be positive"):
+            self._make_mgr(min_budget=4, max_budget=-1)
+
+    def test_min_greater_than_max_raises(self):
+        with pytest.raises(ValueError, match="min_budget=200 > max_budget=100"):
+            self._make_mgr(min_budget=200, max_budget=100)
+
+    # --- Finding 7: user-provided budgets with non-positive values ---
+
+    def test_user_budgets_zero_raises(self):
+        """Non-positive budgets should be caught at config validation."""
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_token_budgets=[0, 128])
+
+    def test_user_budgets_negative_raises(self):
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
