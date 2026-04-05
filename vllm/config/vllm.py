@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+    from vllm.plugins.observation.interface import ObservationPlugin
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     PretrainedConfig = Any
@@ -289,6 +290,11 @@ class VllmConfig:
         default_factory=ObservabilityConfig
     )
     """Observability configuration."""
+
+    observation_plugins: list["ObservationPlugin"] | None = None
+    """List of observation plugins to load for extracting activations
+    and modifying execution."""
+
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
@@ -413,6 +419,15 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
+
+        # Hash observation plugins by tracking their class names or raw strings
+        if self.observation_plugins:
+            vllm_factors.append(
+                [p if isinstance(p, str) else type(p).__qualname__ for p in self.observation_plugins]  # noqa: E501
+            )
+        else:
+            vllm_factors.append("None")
+
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:
@@ -1723,6 +1738,7 @@ class VllmConfig:
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
             f"observability_config={self.observability_config!r}, "
+            f"observation_plugins={self.observation_plugins}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "

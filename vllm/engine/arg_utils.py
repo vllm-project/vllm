@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     from vllm.config.quantization import OnlineQuantizationConfigArgs
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
+    from vllm.plugins.observation.interface import ObservationPlugin
     from vllm.usage.usage_lib import UsageContext
     from vllm.v1.executor import Executor
 else:
@@ -218,6 +219,8 @@ def collection_to_kwargs(type_hints: set[TypeHint], type: TypeHint) -> dict[str,
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
     """Check if the class is not a built-in type."""
+    if isinstance(type_hint, str) or not hasattr(type_hint, "__module__"):
+        return True
     return type_hint.__module__ != "builtins"
 
 
@@ -625,6 +628,8 @@ class EngineArgs:
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
+
+    observation_plugins: list["ObservationPlugin"] | None = None
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
@@ -1350,6 +1355,9 @@ class EngineArgs:
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
+            "--observation-plugins", **vllm_kwargs.get("observation_plugins", {})
+        )
+        vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
         vllm_group.add_argument("--performance-mode", **vllm_kwargs["performance_mode"])
@@ -2032,6 +2040,7 @@ class EngineArgs:
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
             shutdown_timeout=self.shutdown_timeout,
+            observation_plugins=self.observation_plugins,
         )
 
         return config
