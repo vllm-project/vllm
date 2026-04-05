@@ -1,0 +1,10 @@
+model_name: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+accuracy_threshold: 0.69
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+server_args: >-
+  --max-model-len 4096
+  --tensor-parallel-size 4
+  --enable-expert-parallel
+  --mamba-backend flashinfer

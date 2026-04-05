@@ -2,5 +2,6 @@ DeepSeek-R1-TP.yaml
 DeepSeek-R1-DP.yaml
 DeepSeek-V3.2-TP.yaml
 DeepSeek-V3.2-DP.yaml
+Nemotron-3-Nano-30B-A3B-BF16.yaml
 Nemotron-3-Super-120B-A12B-BF16.yaml
 Nemotron-3-Super-120B-A12B-FP8.yaml
