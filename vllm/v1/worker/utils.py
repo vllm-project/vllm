@@ -455,9 +455,9 @@ def add_kv_sharing_layers_to_kv_cache_groups(
 
 
 def bind_kv_cache(
-    kv_caches: dict[str, torch.Tensor],
+    kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Attention],
-    runner_kv_caches: list[torch.Tensor],
+    runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     num_attn_module: int = 1,
 ) -> None:
     """
