@@ -283,36 +283,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
 
-        self.decode_lens_buffer = torch.empty(
-            (scheduler_config.max_num_batched_tokens,),
-            dtype=torch.int32,
-            device=self.device,
-        )
         self.offsets_buffer = torch.arange(
             next_n, device=self.device, dtype=torch.int32
         )
-        # Pre-allocated decode seq_lens buffer. 2D (max_seqs, next_n) when
-        # spec decoding is enabled so topk kernels get per-token lengths;
-        # 1D (max_seqs,) otherwise.
-        if self.reorder_batch_threshold > 1:
+        if not self.use_flattening and next_n > 1:
+            # Native MTP: 2D buffer for per-token seq_lens.
+            # Flattening path is never used, so no expanded_seq_lens_buffer.
             self.decode_seq_lens_buffer = torch.zeros(
-                (scheduler_config.max_num_seqs, self.reorder_batch_threshold),
+                (scheduler_config.max_num_seqs, next_n),
                 dtype=torch.int32,
                 device=self.device,
             )
         else:
+            # Flattening or no MTP: 1D buffer for expanded seq_lens.
+            # Also serves as decode_lens_buffer (aliased).
             self.decode_seq_lens_buffer = torch.zeros(
-                scheduler_config.max_num_seqs,
+                (scheduler_config.max_num_batched_tokens,),
                 dtype=torch.int32,
                 device=self.device,
             )
         self.arange_buffer = torch.arange(
             scheduler_config.max_num_seqs * next_n,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        self.expanded_seq_lens_buffer = torch.zeros(
-            (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=self.device,
         )
@@ -450,6 +441,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             use_native = not self.use_flattening and max_decode_len == next_n
 
             if not use_native and max_decode_len > 1:
+                assert self.decode_seq_lens_buffer.dim() == 1
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
                 # the kernel always sees next_n=1.
@@ -484,11 +476,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
 
                 # [8, 9, 10, 7, 9, 10, 11, 12, ...] where ... is unused buffer space
-                self.expanded_seq_lens_buffer[:actual_expanded] = (
+                self.decode_seq_lens_buffer[:actual_expanded] = (
                     expanded_base + positions_within + 1
                 )
-                self.expanded_seq_lens_buffer[actual_expanded:] = 0
-                seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
+                self.decode_seq_lens_buffer[actual_expanded:] = 0
+                seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
 
                 # Give each of the flattened entries the same block table row as the
                 # original request.
@@ -520,13 +512,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 min_decode_len = int(decode_lens_cpu.min().item())
                 requires_padding = min_decode_len != max_decode_len
                 if use_native and next_n > 1:
+                    assert self.decode_seq_lens_buffer.dim() == 2
                     # (B, next_n): token j attends to L - next_n + j + 1 KV tokens
                     self.decode_seq_lens_buffer[:num_decodes] = (
                         seq_lens.unsqueeze(1) - next_n + 1 + self.offsets_buffer
                     )
-                else:
-                    self.decode_seq_lens_buffer[:num_decodes] = seq_lens
-                seq_lens = self.decode_seq_lens_buffer[:num_decodes]
+                    seq_lens = self.decode_seq_lens_buffer[:num_decodes]
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and has_deep_gemm():
