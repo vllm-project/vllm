@@ -28,22 +28,22 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"supported in {layer_impl.__class__.__name__}."
                 )
             if dcp_size > 1 and not layer_impl.need_to_return_lse_for_decode:
+                impl_name = layer_impl.__class__.__name__
                 raise RuntimeError(
                     f"DCP requires the attention implementation to return "
-                    f"the softmax LSE for decode, but "
-                    f"{layer_impl.__class__.__name__} does not support this. "
-                    f"Try using a compatible backend with "
-                    f"--attention-backend FLASH_ATTN or "
-                    f"--attention-backend FLASHINFER."
+                    f"the softmax LSE for decode, but {impl_name} does not "
+                    f"support this. Please use a different attention backend "
+                    f"via --attention-backend (e.g. FLASH_ATTN or FLASHINFER) "
+                    f"that supports returning softmax LSE for decode."
                 )
 
             if pcp_size > 1 and not layer_impl.supports_pcp:
+                impl_name = layer_impl.__class__.__name__
                 raise RuntimeError(
                     f"PCP requires attention implementation support, but "
-                    f"{layer_impl.__class__.__name__} does not support PCP. "
-                    f"Try using a compatible backend with "
-                    f"--attention-backend FLASH_ATTN or "
-                    f"--attention-backend FLASHINFER."
+                    f"{impl_name} does not support PCP. Please use a "
+                    f"different attention backend via --attention-backend "
+                    f"that supports PCP."
                 )
 
 
