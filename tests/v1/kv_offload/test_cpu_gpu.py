@@ -141,10 +141,8 @@ def test_transfer(
         if finished:
             assert finished[0].job_id == 1
             assert finished[0].success
-            assert (
-                finished[0].transfer_type == ("GPU", "CPU")
-                if gpu_to_cpu
-                else ("CPU", "GPU")
+            assert finished[0].transfer_type == (
+                ("GPU", "CPU") if gpu_to_cpu else ("CPU", "GPU")
             )
             assert finished[0].transfer_size == (
                 len(gpu_blocks) * handler.group_block_size_in_bytes[0]
@@ -268,12 +266,11 @@ def test_mmap_round_trip(
         num_tensors, num_gpu_blocks, gpu_page_size_bytes, device
     )
 
-    # cpu_page_size: per-worker per-sub-block bytes (no block_size_factor —
-    # the factor expands the row count, not the column width)
-    cpu_page_size = gpu_page_size_bytes * num_tensors
+    # cpu_page_size: per-worker bytes per logical CPU block
+    # = all tensors × GPU page size × block_size_factor sub-blocks
+    cpu_page_size = gpu_page_size_bytes * num_tensors * block_size_factor
     instance_id = str(uuid.uuid4())
-    # num_cpu_blocks * block_size_factor sub-block rows; each row spans all workers
-    total_mmap_bytes = num_cpu_blocks * block_size_factor * num_workers * cpu_page_size
+    total_mmap_bytes = num_cpu_blocks * num_workers * cpu_page_size
 
     mmap_region = SharedMmapRegion(
         instance_id=instance_id,
@@ -290,7 +287,6 @@ def test_mmap_round_trip(
                 block_size_factor=block_size_factor,
                 num_cpu_blocks=num_cpu_blocks,
                 mmap_region=mmap_region,
-                num_workers=num_workers,
             )
 
         # each logical cpu_block maps to block_size_factor GPU sub-blocks,
@@ -314,9 +310,11 @@ def test_mmap_round_trip(
                 for i, cpu_blk in enumerate(cpu_blocks):
                     for j in range(block_size_factor):
                         gpu_blk = gpu_blocks[i * block_size_factor + j]
-                        cpu_sub_blk = cpu_blk * block_size_factor + j
+                        sub_start = j * gpu_page_size_bytes
+                        sub_end = sub_start + gpu_page_size_bytes
                         torch.testing.assert_close(
-                            dst_t[cpu_sub_blk].cpu(), src_t[gpu_blk].cpu()
+                            dst_t[cpu_blk, sub_start:sub_end].cpu(),
+                            src_t[gpu_blk].cpu(),
                         )
         else:
             # round-trip: GPU → CPU → GPU (different destination GPU blocks)
@@ -414,7 +412,6 @@ def test_interleaved_layout(
                     block_size_factor=block_size_factor,
                     num_cpu_blocks=num_cpu_blocks,
                     mmap_region=regions[rank],
-                    num_workers=num_workers,
                 )
 
             gpu_blocks = list(range(len(cpu_blocks_to_use)))
@@ -466,7 +463,7 @@ def test_tp_agnostic_contiguity(
     num_tensors = 2
     device = "cuda:0"
 
-    cpu_page_size = gpu_page_size_bytes * num_tensors
+    cpu_page_size = gpu_page_size_bytes * num_tensors * block_size_factor
     instance_id = str(uuid.uuid4())
     total_mmap_bytes = num_cpu_blocks * num_workers * cpu_page_size
 
@@ -500,10 +497,9 @@ def test_tp_agnostic_contiguity(
                     block_size_factor=block_size_factor,
                     num_cpu_blocks=num_cpu_blocks,
                     mmap_region=regions[rank],
-                    num_workers=num_workers,
                 )
 
-            gpu_blocks = list(range(len(cpu_blocks_to_use)))
+            gpu_blocks = list(range(len(cpu_blocks_to_use) * block_size_factor))
             src_spec = GPULoadStoreSpec(gpu_blocks, group_sizes=(len(gpu_blocks),))
             dst_spec = CPULoadStoreSpec(cpu_blocks_to_use)
 
