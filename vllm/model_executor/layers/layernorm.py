@@ -382,21 +382,19 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        orig_dtype = x.dtype
+        weight = self.weight.data.float() + 1.0
         if residual is None:
-            return ir.ops.rms_norm(
-                x, self.weight.data.float() + 1.0, self.variance_epsilon
-            )
-        else:
-            orig_dtype = x.dtype
-            x = (
-                x.float() + residual.float()
-                if orig_dtype == torch.float16
-                else x + residual
-            )
-            residual = x
-            return ir.ops.rms_norm(
-                x, self.weight.data.float() + 1.0, self.variance_epsilon
-            ).to(orig_dtype), residual
+            return ir.ops.rms_norm(x, weight, self.variance_epsilon).to(orig_dtype)
+
+        x = (
+            x.float() + residual.float()
+            if orig_dtype == torch.float16
+            else x + residual
+        )
+        residual = x
+        out = ir.ops.rms_norm(x, weight, self.variance_epsilon).to(orig_dtype)
+        return out, residual
 
     def forward_cuda(
         self,

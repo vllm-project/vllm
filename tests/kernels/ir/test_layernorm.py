@@ -71,7 +71,7 @@ class TestRMSNorm:
         out4 = rms_norm_native(x, None, epsilon=epsilon)
         torch.testing.assert_close(out3, out4)
 
-        # Native impl should support mixed dtypes and still return x's dtype.
+        # Native impl should support mixed dtypes and follow dtype promotion.
         mixed_weight_dtype = (
             torch.float32 if x.dtype != torch.float32 else torch.float16
         )
@@ -79,7 +79,7 @@ class TestRMSNorm:
             x.shape[-1], dtype=mixed_weight_dtype, device=x.device
         )
         out_mixed = rms_norm_native(x, mixed_weight, epsilon=epsilon)
-        assert out_mixed.dtype == x.dtype
+        assert out_mixed.dtype == torch.promote_types(x.dtype, mixed_weight_dtype)
 
     @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels"])
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
@@ -150,7 +150,7 @@ class TestRMSNorm:
         assert not impl.supports_args(*args)
 
         out_native = rms_norm_native(*args)
-        assert out_native.dtype == x.dtype
+        assert out_native.dtype == torch.promote_types(dtype, mixed_weight_dtype)
 
         # Dispatch should fall back to native for mixed dtype inputs.
         with ir.ops.rms_norm.set_priority([provider, "native"]):
