@@ -3,13 +3,16 @@
 import hashlib
 import uuid
 from dataclasses import field
-from typing import Any, Literal, get_args
+from enum import Enum
+from typing import Any
 
 from vllm.config.utils import config
 
-ECProducer = Literal["ec_producer", "ec_both"]
-ECConsumer = Literal["ec_consumer", "ec_both"]
-ECRole = Literal[ECProducer, ECConsumer]
+
+class ECRole(str, Enum):
+    EC_PRODUCER = "ec_producer"
+    EC_CONSUMER = "ec_consumer"
+    EC_BOTH = "ec_both"
 
 
 @config
@@ -79,29 +82,47 @@ class ECTransferConfig:
         if self.engine_id is None:
             self.engine_id = str(uuid.uuid4())
 
-        if self.ec_role is not None and self.ec_role not in get_args(ECRole):
+        if isinstance(self.ec_role, str):
+            try:
+                self.ec_role = ECRole(self.ec_role)
+            except ValueError as e:
+                supported_roles = [r.value for r in ECRole]
+                raise ValueError(
+                    f"Unsupported ec_role: {self.ec_role}. "
+                    f"Supported roles are {supported_roles}"
+                ) from e
+
+        if self.ec_role is not None and not isinstance(self.ec_role, ECRole):
+            supported_roles = [r.value for r in ECRole]
             raise ValueError(
                 f"Unsupported ec_role: {self.ec_role}. "
-                f"Supported roles are {get_args(ECRole)}"
+                f"Supported roles are {supported_roles}"
             )
 
         if self.ec_connector is not None and self.ec_role is None:
+            supported_roles = [r.value for r in ECRole]
             raise ValueError(
                 "Please specify ec_role when ec_connector "
-                f"is set, supported roles are {get_args(ECRole)}"
+                f"is set, supported roles are {supported_roles}"
             )
 
     @property
     def is_ec_transfer_instance(self) -> bool:
-        return self.ec_connector is not None and self.ec_role in get_args(ECRole)
+        return self.ec_connector is not None and self.ec_role is not None
 
     @property
     def is_ec_producer(self) -> bool:
-        return self.ec_connector is not None and self.ec_role in get_args(ECProducer)
+        return self.ec_connector is not None and self.ec_role in (
+            ECRole.EC_PRODUCER,
+            ECRole.EC_BOTH,
+        )
 
     @property
     def is_ec_consumer(self) -> bool:
-        return self.ec_connector is not None and self.ec_role in get_args(ECConsumer)
+        return self.ec_connector is not None and self.ec_role in (
+            ECRole.EC_CONSUMER,
+            ECRole.EC_BOTH,
+        )
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.ec_connector_extra_config.get(key, default)
