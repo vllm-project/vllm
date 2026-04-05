@@ -54,6 +54,7 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai_harmony import Author, Role, TextContent
 from openai_harmony import Message as HarmonyMessage
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -97,12 +98,20 @@ class StreamingState:
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
 
+    # Channel-transition tracking for mid-message done events
+    last_channel: str | None = None
+    last_recipient: str | None = None
+    accumulated_text: str = ""
+
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
         self.current_output_index += 1
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
+        self.last_channel = None
+        self.last_recipient = None
+        self.accumulated_text = ""
 
 
 def is_mcp_tool_by_namespace(recipient: str | None) -> bool:
@@ -237,6 +246,7 @@ def emit_function_call_delta_events(
     events: list[StreamingResponsesResponse] = []
     if state.is_first_function_call_delta is False:
         state.is_first_function_call_delta = True
+        state.sent_output_item_added = True
         state.current_item_id = f"fc_{random_uuid()}"
         state.current_call_id = f"call_{random_uuid()}"
         tool_call_item = ResponseFunctionToolCall(
@@ -547,22 +557,13 @@ def emit_mcp_completion_events(
 # =====================================================================
 
 
-def emit_content_delta_events(
-    ctx: StreamingHarmonyContext,
+def _emit_delta_for_channel(
+    channel: str | None,
+    recipient: str | None,
+    delta: str,
     state: StreamingState,
 ) -> list[StreamingResponsesResponse]:
-    """Emit events for content delta streaming based on channel type.
-
-    This is a Harmony-specific dispatcher that extracts values from the
-    Harmony context and delegates to shared leaf helpers.
-    """
-    delta = ctx.last_content_delta
-    if not delta:
-        return []
-
-    channel = ctx.parser.current_channel
-    recipient = ctx.parser.current_recipient
-
+    """Emit events for a single (channel, recipient, delta) triple."""
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
@@ -582,6 +583,71 @@ def emit_content_delta_events(
             return emit_mcp_delta_events(delta, state, recipient)
 
     return []
+
+
+def _needs_channel_transition(
+    state: StreamingState,
+    channel: str | None,
+    recipient: str | None,
+) -> bool:
+    """Return True when the channel/recipient changed from the last delta."""
+    if state.last_channel is None:
+        return False
+    return channel != state.last_channel or recipient != state.last_recipient
+
+
+def _emit_channel_done_events(
+    state: StreamingState,
+) -> list[StreamingResponsesResponse]:
+    """Emit done events for the channel currently tracked in state."""
+    synthetic_msg = HarmonyMessage(
+        author=Author(role=Role.ASSISTANT),
+        content=[TextContent(text=state.accumulated_text)],
+        channel=state.last_channel,
+        recipient=state.last_recipient,
+    )
+    return emit_previous_item_done_events(synthetic_msg, state)
+
+
+def emit_content_delta_events(
+    ctx: StreamingHarmonyContext,
+    state: StreamingState,
+) -> list[StreamingResponsesResponse]:
+    """Emit events for content delta streaming based on channel type.
+
+    This is a Harmony-specific dispatcher that extracts values from the
+    Harmony context and delegates to shared leaf helpers.
+
+    When a token batch crosses a channel boundary (e.g. analysis ->
+    commentary), ctx.channel_deltas contains one entry per contiguous
+    (channel, recipient) run so each segment is emitted with the correct
+    event type.
+
+    If the channel/recipient changes from the previous delta (either
+    within this batch or across batches), done events are emitted for
+    the previous channel before starting the new one.
+    """
+    if not ctx.channel_deltas:
+        return []
+
+    events: list[StreamingResponsesResponse] = []
+    for channel, recipient, delta in ctx.channel_deltas:
+        # Detect mid-message channel transition (e.g. analysis → final)
+        if state.sent_output_item_added and _needs_channel_transition(
+            state, channel, recipient
+        ):
+            events.extend(_emit_channel_done_events(state))
+            state.reset_for_new_item()
+
+        segment_events = _emit_delta_for_channel(channel, recipient, delta, state)
+        if not segment_events:
+            continue
+
+        events.extend(segment_events)
+        state.last_channel = channel
+        state.last_recipient = recipient
+        state.accumulated_text += delta
+    return events
 
 
 def emit_previous_item_done_events(
@@ -777,22 +843,5 @@ def emit_tool_action_events(
         and previous_item.recipient.startswith("browser.")
     ):
         events.extend(emit_browser_tool_events(previous_item, state))
-
-    # Handle tool completion
-    if (
-        tool_server is not None
-        and previous_item.recipient is not None
-        and state.current_item_id is not None
-        and state.sent_output_item_added
-    ):
-        recipient = previous_item.recipient
-        if recipient == "python":
-            events.extend(emit_code_interpreter_completion_events(previous_item, state))
-        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(recipient):
-            events.extend(
-                emit_mcp_completion_events(
-                    recipient, previous_item.content[0].text, state
-                )
-            )
 
     return events

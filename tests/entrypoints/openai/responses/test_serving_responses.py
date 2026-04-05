@@ -27,7 +27,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    SimpleContext,
+    StreamingHarmonyContext,
+)
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
@@ -36,6 +40,8 @@ from vllm.entrypoints.openai.responses.serving import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
+    _emit_channel_done_events,
+    emit_content_delta_events,
 )
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -463,6 +469,7 @@ class TestHarmonyPreambleStreaming:
         """Build a lightweight mock StreamingHarmonyContext."""
         ctx = MagicMock()
         ctx.last_content_delta = delta
+        ctx.channel_deltas = [(channel, recipient, delta)]
         ctx.parser.current_channel = channel
         ctx.parser.current_recipient = recipient
         return ctx
@@ -617,6 +624,52 @@ def _make_serving_instance_with_reasoning():
         reasoning_parser="qwen3",
     )
     return serving
+
+
+def _make_serving_instance_with_harmony():
+    """Create an OpenAIServingResponses configured for Harmony models."""
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "gpt_oss"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    models = MagicMock()
+    tool_server = MagicMock(spec=ToolServer)
+    tool_server.has_tool.return_value = False
+
+    return OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        openai_serving_render=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        tool_server=tool_server,
+    )
+
+
+def _make_streaming_harmony_ctx(
+    channel_deltas,
+    *,
+    expecting_start: bool = False,
+    assistant_action: bool = False,
+    parser_messages: list | None = None,
+):
+    """Build a lightweight StreamingHarmonyContext for SSE event tests."""
+    ctx = StreamingHarmonyContext(messages=[], available_tools=[])
+    ctx.finish_reason = None
+    ctx.channel_deltas = channel_deltas
+    ctx.parser = MagicMock()
+    ctx.parser.messages = parser_messages or []
+    ctx.is_expecting_start = lambda: expecting_start
+    ctx.is_assistant_action_turn = lambda: assistant_action
+    return ctx
 
 
 def _identity_increment(event):
@@ -877,3 +930,137 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+class TestHarmonyStreamingLifecycle:
+    """Regression tests for Harmony SSE item lifecycle ordering."""
+
+    @pytest.mark.asyncio
+    async def test_function_call_done_includes_tail_from_final_batch(self):
+        """The final batch's argument tail must be streamed before *.done."""
+        serving = _make_serving_instance_with_harmony()
+        contexts = [
+            _make_streaming_harmony_ctx(
+                [("analysis", "functions.get_weather", '{"location":"Ber')]
+            ),
+            _make_streaming_harmony_ctx(
+                [("analysis", "functions.get_weather", 'lin"}')],
+                expecting_start=True,
+            ),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore[attr-defined]
+
+        events = []
+        async for event in serving._process_harmony_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        type_names = [e.type for e in events]
+        assert type_names == [
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+        ]
+
+        deltas = [
+            e.delta
+            for e in events
+            if e.type == "response.function_call_arguments.delta"
+        ]
+        done_event = next(
+            e for e in events if e.type == "response.function_call_arguments.done"
+        )
+        assert "".join(deltas) == '{"location":"Berlin"}'
+        assert done_event.arguments == '{"location":"Berlin"}'
+
+    @pytest.mark.asyncio
+    async def test_channel_transition_closes_reasoning_before_text_done(self):
+        """analysis -> final in one batch must close reasoning first."""
+        serving = _make_serving_instance_with_harmony()
+        contexts = [
+            _make_streaming_harmony_ctx(
+                [
+                    ("analysis", None, "thinking"),
+                    ("final", None, "answer"),
+                ],
+                expecting_start=True,
+            )
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore[attr-defined]
+
+        events = []
+        async for event in serving._process_harmony_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        type_names = [e.type for e in events]
+        assert type_names == [
+            "response.output_item.added",
+            "response.reasoning_part.added",
+            "response.reasoning_text.delta",
+            "response.reasoning_text.done",
+            "response.reasoning_part.done",
+            "response.output_item.done",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+        ]
+
+    def test_ignored_segments_do_not_contaminate_done_payload(self):
+        """Unsupported segments should not leak into the later *.done text."""
+        ctx = _make_streaming_harmony_ctx(
+            [
+                ("unknown_channel", None, "hidden"),
+                ("final", None, "visible"),
+            ]
+        )
+        state = StreamingState()
+
+        events = emit_content_delta_events(ctx, state)
+        done_events = _emit_channel_done_events(state)
+
+        deltas = [e.delta for e in events if e.type == "response.output_text.delta"]
+        done_event = next(
+            e for e in done_events if e.type == "response.output_text.done"
+        )
+        assert deltas == ["visible"]
+        assert done_event.text == "visible"

@@ -98,8 +98,8 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
+    _emit_channel_done_events,
     emit_content_delta_events,
-    emit_previous_item_done_events,
     emit_tool_action_events,
 )
 from vllm.entrypoints.openai.responses.utils import (
@@ -1462,9 +1462,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     id=current_item_id,
                                     call_id=current_tool_call_id,
                                     name=current_tool_call_name,
-                                    arguments=delta_message.tool_calls[
-                                        0
-                                    ].function.arguments,
+                                    arguments="",
                                     status="in_progress",
                                 ),
                             )
@@ -1916,19 +1914,34 @@ class OpenAIServingResponses(OpenAIServing):
             # finish_reason='error' indicates a retryable error
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
-            if ctx.is_expecting_start():
-                if len(ctx.parser.messages) > 0:
-                    previous_item = ctx.parser.messages[-1]
-                    for event in emit_previous_item_done_events(previous_item, state):
-                        yield _increment_sequence_number_and_return(event)
-                state.reset_for_new_item()
-
-            # Stream the output of a harmony message
+            # Stream the output of a harmony message.
+            # emit_content_delta_events detects mid-message channel
+            # transitions (e.g. analysis → final) and emits done events
+            # for the previous channel before starting the new one.
             for event in emit_content_delta_events(ctx, state):
                 yield _increment_sequence_number_and_return(event)
 
-            # Stream tool call outputs
+            # Stream synthetic browser/web-search events. Function-call,
+            # MCP, and code-interpreter items are finalized through the
+            # state-based channel flush below so they do not double-emit
+            # completion events.
             for event in emit_tool_action_events(ctx, state, self.tool_server):
+                yield _increment_sequence_number_and_return(event)
+
+            # If this batch completed a Harmony message, flush done
+            # events only after the batch's deltas have been emitted.
+            # Otherwise the current batch's tail would be missing from
+            # the corresponding *.done payload.
+            if ctx.is_expecting_start():
+                if state.sent_output_item_added and state.last_channel is not None:
+                    for event in _emit_channel_done_events(state):
+                        yield _increment_sequence_number_and_return(event)
+                state.reset_for_new_item()
+
+        # Flush done events for the final item when the stream ends
+        # without a subsequent message boundary.
+        if state.sent_output_item_added and state.last_channel is not None:
+            for event in _emit_channel_done_events(state):
                 yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
