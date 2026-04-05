@@ -482,6 +482,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
+        longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
@@ -524,6 +525,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     for group_id, blocks in zip(group_ids, hit_blocks):
                         hit_blocks_by_group[group_id] = blocks
 
+                # Collect information on the longest cached prefix overall
+                # (no matter the attention type) to allow for more complex
+                # caching policies
+                longest_hit_length = max(longest_hit_length, curr_hit_length)
+
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
@@ -541,7 +547,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
-        ), hit_length
+        ), longest_hit_length  # longest_hit_length >= hit_length
 
 
 def get_kv_cache_coordinator(

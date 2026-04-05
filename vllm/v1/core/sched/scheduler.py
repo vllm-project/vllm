@@ -301,6 +301,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
+        mamba_tokens_lag: int = 0,
     ) -> int:
         assert num_external_computed_tokens == 0, (
             "External KV connector is not verified yet"
@@ -343,6 +344,27 @@ class Scheduler(SchedulerInterface):
             else:
                 # prefill the last few tokens
                 pass
+
+            # Marconi cache admission optimization:
+            # Create cache entries at divergence points of common prefixes.
+            #
+            # Implementation:
+            # If uncached common prefix (mamba_tokens_lag) is long enough
+            # to justify its caching ( >= block_size)
+            #   AND
+            # currently scheduled token count is longer than the common prefix
+            if mamba_tokens_lag >= block_size and num_new_tokens > mamba_tokens_lag:
+                # Then force to cache at the end of the common prefix
+                # by limiting the num_new_tokens to the length of that prefix:
+                num_new_tokens = mamba_tokens_lag
+                # This should be still block aligned as:
+                #  - token hit counts are block aligned
+                #  - thus mamba_tokens_lag is block aligned
+                #  - attention and mamba block sizes are equal
+                # Optionally, we can verify this:
+                assert mamba_tokens_lag % block_size == 0
+                # Or force block re-alignment:
+                # num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -613,6 +635,24 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
 
+                    # More proper check would be:
+                    # if isinstance(self.kv_cache_manager.coordinator,
+                    #               HybridKVCacheCoordinator):
+                    # but this check is similar and avoids
+                    # importing HybridKVCacheCoordinator:
+                    if self.has_mamba_layers:
+                        # HybridKVCacheCoordinator returns the longest hit:
+                        longest_hit_length = num_new_local_computed_tokens
+                        # HybridKVCacheCoordinator returns the blocks of
+                        # the common hit, from which we obtain the hit length:
+                        common_hit_length = (
+                            len(new_computed_blocks.blocks[0]) * self.block_size
+                        )
+                        # How many tokens mamba cache is behind the longest hit:
+                        mamba_tokens_lag = longest_hit_length - common_hit_length
+                        # Resume default scheduler logic based on the common hit
+                        num_new_local_computed_tokens = common_hit_length
+
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
                         ext_tokens, load_kv_async = (
@@ -704,6 +744,7 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
+                        mamba_tokens_lag,
                     )
                     if num_new_tokens == 0:
                         break
