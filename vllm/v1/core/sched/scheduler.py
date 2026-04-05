@@ -280,8 +280,16 @@ class Scheduler(SchedulerInterface):
                 ]
             )
             num_groups = len(kv_cache_config.kv_cache_groups)
+            if kv_cache_config.per_group_num_blocks is not None:
+                # With per-group pools, count only attention (O(n)) groups
+                attn_group_count = max(1, sum(
+                    1 for nb in kv_cache_config.per_group_num_blocks
+                    if nb == kv_cache_config.num_blocks
+                ))
+            else:
+                attn_group_count = num_groups
             self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // num_groups
+                kv_cache_config.num_blocks // attn_group_count
             ) * min_block_size
             dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
             pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
