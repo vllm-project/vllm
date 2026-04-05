@@ -22,6 +22,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -187,7 +188,17 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
+
+        out_dtype = (
+            torch.bfloat16
+            if is_quantized_kv_cache(self.kv_cache_dtype)
+            else q.dtype
+        )
+        out = torch.zeros(q.shape[0], q.shape[2], self.kv_lora_rank,
+                  dtype=out_dtype, device=q.device)
+
         o = trtllm_batch_decode_with_kv_cache_mla(
+            out=out,
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
