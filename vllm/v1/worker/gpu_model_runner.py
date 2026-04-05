@@ -2949,7 +2949,24 @@ class GPUModelRunner(
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                if encoder_output is None:
+                    if shift_computed_tokens > 0:
+                        # MTP draft path: under memory pressure the
+                        # encoder cache may evict entries that MTP
+                        # draft proposals still reference.  Skip the
+                        # missing embedding so the request can still
+                        # complete — the draft step simply proceeds
+                        # without this multimodal input.
+                        # See: https://github.com/vllm-project/vllm/issues/38551
+                        logger.warning(
+                            "Encoder cache miss for %s — skipping "
+                            "multimodal embedding for this draft step.",
+                            mm_hash,
+                        )
+                        continue
+                    # Regular forward path: a cache miss here is a
+                    # genuine scheduler bug and must fail fast.
+                    raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
