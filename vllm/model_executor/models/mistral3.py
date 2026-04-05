@@ -437,6 +437,7 @@ class Mistral3ForConditionalGeneration(
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
+                architectures=["Ministral3ForCausalLM"],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
