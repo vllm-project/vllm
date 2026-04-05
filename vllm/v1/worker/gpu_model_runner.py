@@ -613,6 +613,19 @@ class GPUModelRunner(
         )
         self._init_block_sizes = [placeholder_block_size]
         self._init_kernel_block_sizes = [placeholder_block_size]
+        logitsprocs = build_logitsprocs(
+            self.vllm_config,
+            self.device,
+            self.pin_memory,
+            self.is_pooling_model,
+            custom_logitsprocs,
+        )
+        # ThinkingTokenBudgetLogitsProcessor also needs output token ids to
+        # correctly track think start/end token sequences in async scheduling.
+        logitsprocs_need_output_token_ids = (
+            logitsprocs.has_custom
+            or self.vllm_config.reasoning_config is not None
+        )
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             # We need to use the encoder length for encoder-decoder
@@ -625,19 +638,8 @@ class GPUModelRunner(
             block_sizes=[placeholder_block_size],
             kernel_block_sizes=[placeholder_block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
-            logitsprocs=build_logitsprocs(
-                self.vllm_config,
-                self.device,
-                self.pin_memory,
-                self.is_pooling_model,
-                custom_logitsprocs,
-            ),
-            # We currently don't know whether a particular custom logits processor
-            # uses output token ids so we set this conservatively.
-            # ThinkingTokenBudgetLogitsProcessor also needs output token ids to
-            # correctly track think start/end token sequences in async scheduling.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs)
-            or self.vllm_config.reasoning_config is not None,
+            logitsprocs=logitsprocs,
+            logitsprocs_need_output_token_ids=logitsprocs_need_output_token_ids,
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
