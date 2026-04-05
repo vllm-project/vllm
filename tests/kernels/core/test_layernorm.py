@@ -173,6 +173,7 @@ def test_fused_rms_norm_static_fp8_quant_mixed_fp32_weight(
 
     out_mixed = torch.empty_like(x, dtype=FP8_DTYPE)
     out_cast = torch.empty_like(x, dtype=FP8_DTYPE)
+    out_ref = torch.empty_like(x, dtype=FP8_DTYPE)
 
     if add_residual:
         residual = torch.randn_like(x)
@@ -184,7 +185,10 @@ def test_fused_rms_norm_static_fp8_quant_mixed_fp32_weight(
         torch.ops._C.fused_add_rms_norm_static_fp8_quant(
             out_cast, x, residual_cast, weight_cast, quant_scale_t, 1e-6
         )
-        torch.testing.assert_close(residual_mixed, residual_cast)
+        residual_ref = x + residual
+        x_accum = residual_ref.float()
+        torch.testing.assert_close(residual_mixed, residual_ref)
+        torch.testing.assert_close(residual_cast, residual_ref)
     else:
         torch.ops._C.rms_norm_static_fp8_quant(
             out_mixed, x, weight_fp32, quant_scale_t, 1e-6
@@ -192,5 +196,12 @@ def test_fused_rms_norm_static_fp8_quant_mixed_fp32_weight(
         torch.ops._C.rms_norm_static_fp8_quant(
             out_cast, x, weight_cast, quant_scale_t, 1e-6
         )
+        x_accum = x.float()
 
-    torch.testing.assert_close(out_mixed.to(torch.float32), out_cast.to(torch.float32))
+    variance = x_accum.pow(2).mean(dim=-1, keepdim=True)
+    norm = x_accum * torch.rsqrt(variance + 1e-6) * weight_fp32
+    torch.ops._C.static_scaled_fp8_quant(out_ref, norm, quant_scale_t)
+
+    diff_mixed = (out_mixed.to(torch.float32) - out_ref.to(torch.float32)).abs().mean()
+    diff_cast = (out_cast.to(torch.float32) - out_ref.to(torch.float32)).abs().mean()
+    assert diff_mixed <= diff_cast + 1e-6

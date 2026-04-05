@@ -315,7 +315,7 @@ def test_rms_norm(
 @pytest.mark.parametrize("group_size", [None, [1, 64]])
 @pytest.mark.parametrize("add_residual", [False, True])
 @torch.inference_mode()
-def test_rms_norm_mixed_fp32_weight_matches_explicit_cast(
+def test_gemma_rms_norm_mixed_fp32_weight_matches_fp32_reference(
     group_size: list[int] | None, add_residual: bool
 ) -> None:
     if not torch.cuda.is_available():
@@ -329,7 +329,8 @@ def test_rms_norm_mixed_fp32_weight_matches_explicit_cast(
     )
     residual = torch.randn_like(x) if add_residual else None
 
-    weight_fp32 = torch.randn(hidden_size, dtype=torch.float32, device="cuda")
+    gemma_weight_param = torch.randn(hidden_size, dtype=torch.float32, device="cuda")
+    weight_fp32 = gemma_weight_param + 1.0
     weight_cast = weight_fp32.to(dtype)
     scale_ub = torch.tensor(1.0, dtype=torch.float32, device="cuda")
     if group_size is not None:
@@ -342,7 +343,52 @@ def test_rms_norm_mixed_fp32_weight_matches_explicit_cast(
         weight_cast, x, quant_dtype, residual, scale_ub, group_size, 0
     )
 
-    torch.testing.assert_close(out_mixed, out_cast)
-    torch.testing.assert_close(scales_mixed, scales_cast)
+    if residual is not None:
+        # GemmaRMSNorm semantics (bf16 path): accumulate in bf16, then cast.
+        residual_ref = x + residual
+        x_accum = residual_ref.float()
+    else:
+        residual_ref = None
+        x_accum = x.float()
+    variance = x_accum.pow(2).mean(dim=-1, keepdim=True)
+    norm = x_accum * torch.rsqrt(variance + EPS) * weight_fp32
+
+    if group_size is None:
+        out_ref, scales_ref = ops.scaled_fp8_quant(
+            norm, scale_ub=scale_ub, use_per_token_if_dynamic=True
+        )
+    else:
+        out_ref, scales_ref = per_token_group_quant_fp8(
+            norm, group_size=group_size[1], use_ue8m0=False
+        )
+
+    if group_size is None:
+        ref_deq = out_ref.to(torch.float32) * scales_ref.to(torch.float32)
+        mixed_deq = out_mixed.to(torch.float32) * scales_mixed.to(torch.float32)
+        cast_deq = out_cast.to(torch.float32) * scales_cast.to(torch.float32)
+    else:
+        assert group_size is not None
+        scales_ref_expanded = scales_ref.repeat_interleave(group_size[1], dim=1)
+        scales_mixed_expanded = scales_mixed.repeat_interleave(group_size[1], dim=1)
+        scales_cast_expanded = scales_cast.repeat_interleave(group_size[1], dim=1)
+        ref_deq = out_ref.to(torch.float32) * scales_ref_expanded.to(torch.float32)
+        mixed_deq = out_mixed.to(torch.float32) * scales_mixed_expanded.to(
+            torch.float32
+        )
+        cast_deq = out_cast.to(torch.float32) * scales_cast_expanded.to(torch.float32)
+
+    out_diff_mixed = (mixed_deq - ref_deq).abs().mean()
+    out_diff_cast = (cast_deq - ref_deq).abs().mean()
+    assert out_diff_mixed <= out_diff_cast + 1e-6
+
+    scale_diff_mixed = (
+        (scales_mixed.to(torch.float32) - scales_ref.to(torch.float32)).abs().mean()
+    )
+    scale_diff_cast = (
+        (scales_cast.to(torch.float32) - scales_ref.to(torch.float32)).abs().mean()
+    )
+    assert scale_diff_mixed <= scale_diff_cast + 1e-6
     if add_residual:
-        torch.testing.assert_close(residual_mixed, residual_cast)
+        assert residual_ref is not None
+        torch.testing.assert_close(residual_mixed, residual_ref)
+        torch.testing.assert_close(residual_cast, residual_ref)
