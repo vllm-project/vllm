@@ -111,7 +111,6 @@ def test_parse_fine_tuned_lora_name_invalid():
         with pytest.raises(ValueError, match="unsupported LoRA weight"):
             parse_fine_tuned_lora_name(name)
 
-
 def test_replace_submodule():
     model = nn.Sequential(
         OrderedDict(
