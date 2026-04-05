@@ -120,7 +120,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 FROM base AS build_rixl
 ARG RIXL_BRANCH="f33a5599"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
-ARG UCX_BRANCH="da3fac2a"
+ARG UCX_BRANCH="33b3b2a2"
 ARG UCX_REPO="https://github.com/ROCm/ucx.git"
 ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
