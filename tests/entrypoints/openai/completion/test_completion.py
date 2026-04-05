@@ -10,6 +10,7 @@ from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.tokenizers import get_tokenizer
+from vllm.utils.request_id import normalize_request_id
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
@@ -71,6 +72,30 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
     )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_completion_response_id_preserves_public_id(
+    client: openai.AsyncOpenAI, model_name: str
+) -> None:
+    transport_request_id = (
+        "___prefill_addr_10.0.0.1:31000___decode_addr_10.0.0.2:32000_deadbeef"
+    )
+
+    completion = await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        max_tokens=1,
+        temperature=0.0,
+        extra_headers={"X-Request-Id": transport_request_id},
+    )
+
+    assert completion.id == f"cmpl-{transport_request_id}"
+    assert normalize_request_id(completion.id) == transport_request_id
 
 
 @pytest.mark.asyncio

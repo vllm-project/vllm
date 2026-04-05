@@ -26,12 +26,14 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool,
 )
+from vllm.utils.request_id import normalize_request_id
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import current_stream
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEM_POOL_SIZE_GB = 32
+RECV_TENSOR_WAIT_LOG_INTERVAL_S = 5.0
 
 
 @contextmanager
@@ -312,9 +314,25 @@ class P2pNcclEngine:
     ) -> torch.Tensor:
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
+            last_wait_log_time = start_time
             with self.recv_store_cv:
                 while tensor_id not in self.recv_store:
-                    self.recv_store_cv.wait()
+                    self.recv_store_cv.wait(timeout=RECV_TENSOR_WAIT_LOG_INTERVAL_S)
+                    now = time.time()
+                    if tensor_id not in self.recv_store and (
+                        now - last_wait_log_time
+                    ) >= RECV_TENSOR_WAIT_LOG_INTERVAL_S:
+                        logger.warning(
+                            "Still waiting for KV tensor: tensor_id=%s "
+                            "remote_address=%s rank=%d elapsed_ms=%.3f "
+                            "buffered_tensors=%d",
+                            tensor_id,
+                            remote_address,
+                            self.rank,
+                            (now - start_time) * 1000,
+                            len(self.recv_store),
+                        )
+                        last_wait_log_time = now
                 tensor = self.recv_store[tensor_id]
 
             if tensor is not None:
@@ -323,6 +341,13 @@ class P2pNcclEngine:
                     tensor = self.pool.load_tensor(addr, dtype, shape, self.device)
                 else:
                     self.buffer_size -= tensor.element_size() * tensor.numel()
+                logger.debug(
+                    "KV tensor received from store: tensor_id=%s remote_address=%s "
+                    "rank=%d",
+                    tensor_id,
+                    remote_address,
+                    self.rank,
+                )
             else:
                 duration = time.time() - start_time
                 logger.warning(
@@ -462,13 +487,13 @@ class P2pNcclEngine:
                 )
 
     def have_sent_tensor_id(self, tensor_id: str):
-        request_id = tensor_id.split("#")[0]
+        request_id = self._request_id_from_tensor_id(tensor_id)
         if request_id not in self.send_request_id_to_tensor_ids:
             self.send_request_id_to_tensor_ids[request_id] = set()
         self.send_request_id_to_tensor_ids[request_id].add(tensor_id)
 
     def have_received_tensor_id(self, tensor_id: str):
-        request_id = tensor_id.split("#")[0]
+        request_id = self._request_id_from_tensor_id(tensor_id)
         if request_id not in self.recv_request_id_to_tensor_ids:
             self.recv_request_id_to_tensor_ids[request_id] = set()
         self.recv_request_id_to_tensor_ids[request_id].add(tensor_id)
@@ -552,17 +577,29 @@ class P2pNcclEngine:
         """
 
         # Clear the buffer upon request completion.
-        for request_id in finished_req_ids:
+        for raw_request_id in finished_req_ids:
+            request_id = normalize_request_id(raw_request_id)
+            logger.debug(
+                "Cleaning up finished request tensors: raw_request_id=%s "
+                "normalized_request_id=%s",
+                raw_request_id,
+                request_id,
+            )
+            self._cleanup_send_store(request_id)
+            tensor_ids = self.recv_request_id_to_tensor_ids.pop(request_id, set())
+            if not tensor_ids:
+                tensor_ids = {
+                    request_id + "#" + layer_name for layer_name in no_compile_layers
+                }
             for layer_name in no_compile_layers:
-                tensor_id = request_id + "#" + layer_name
-                if tensor_id in self.recv_store:
-                    with self.recv_store_cv:
-                        tensor = self.recv_store.pop(tensor_id, None)
-                        self.send_request_id_to_tensor_ids.pop(request_id, None)
-                        self.recv_request_id_to_tensor_ids.pop(request_id, None)
-                    if isinstance(tensor, tuple):
-                        addr, _, _ = tensor
-                        self.pool.free(addr)
+                tensor_ids.add(request_id + "#" + layer_name)
+            for tensor_id in tensor_ids:
+                with self.recv_store_cv:
+                    tensor = self.recv_store.pop(tensor_id, None)
+                if isinstance(tensor, tuple):
+                    addr, _, _ = tensor
+                    self.pool.free(addr)
+            self.send_request_id_to_tensor_ids.pop(request_id, None)
 
         # TODO:Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
@@ -571,6 +608,25 @@ class P2pNcclEngine:
         finished_recving: set[str] = set()
 
         return finished_sending or None, finished_recving or None
+
+    @staticmethod
+    def _request_id_from_tensor_id(tensor_id: str) -> str:
+        request_id, _, _ = tensor_id.partition("#")
+        return normalize_request_id(request_id)
+
+    def _cleanup_send_store(self, request_id: str) -> None:
+        if not hasattr(self, "send_store"):
+            return
+
+        tensor_ids = self.send_request_id_to_tensor_ids.pop(request_id, set())
+        if not tensor_ids:
+            return
+
+        with self.send_store_cv:
+            for tensor_id in tensor_ids:
+                tensor = self.send_store.pop(tensor_id, None)
+                if tensor is not None:
+                    self.buffer_size -= tensor.element_size() * tensor.numel()
 
     def ping(self):
         sock = self.context.socket(zmq.DEALER)
