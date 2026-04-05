@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is used for /tests and /benchmarks"""
 
+import operator
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -199,7 +200,15 @@ def group_broadcast(t, shape):
         # If tensor has fewer dimensions than target shape, treat missing
         # dimensions as size 1 (standard PyTorch broadcasting behavior)
         t_dim_size = t.shape[i] if i < t.ndim else 1
-        if t_dim_size != s and t_dim_size != 1:
+
+        # Use operator.and_ instead of Python's `and` to avoid
+        # data-dependent errors (DDE) with unbacked SymInts under
+        # torch.compile. Python's `and` eagerly evaluates `t_dim_size != s`
+        # which triggers a guard on the symbolic value (e.g., Ne(u0, 1)).
+        # operator.and_ evaluates both sides independently and combines
+        # the results, so cases like `1 != u0 and 1 != 1` resolve to
+        # False without requiring a guard on the unbacked symbol.
+        if operator.and_(t_dim_size != s, t_dim_size != 1):
             assert s % t_dim_size == 0
             t = (
                 t.unsqueeze(i + 1)

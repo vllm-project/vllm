@@ -55,12 +55,10 @@ def test_dynamic_shapes_compilation(
     evaluate_guards,
 ):
     """Test that all dynamic shapes types compile successfully"""
-    if use_bytecode_hook and shapes_type == DynamicShapesType.UNBACKED:
-        pytest.skip("UNBACKED dynamic shapes require VLLM_USE_BYTECODE_HOOK=0")
-
     if evaluate_guards and shapes_type == DynamicShapesType.UNBACKED:
         pytest.skip("unbacked dynamic shapes do not add guards")
 
+    # TODO is this still a requirement?
     if evaluate_guards and use_aot_compile:
         pytest.skip("evaluate_guards requires use_aot_compile=0")
 
@@ -222,3 +220,25 @@ def test_model_specialization_with_evaluate_guards(
         torch.randn(1, 10).cuda(),
         is_01_specialization=True,
     )
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_quantized_model_unbacked(monkeypatch):
+    """Test that quantized models (e.g. NVFP4) compile with unbacked shapes.
+    Exercises the group_broadcast fix for DDE with unbacked SymInts."""
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "0")
+
+    model = LLM(
+        model="nvidia/Llama-3.1-8B-Instruct-NVFP4",
+        compilation_config={
+            "mode": CompilationMode.VLLM_COMPILE,
+            "dynamic_shapes_config": {
+                "type": DynamicShapesType.UNBACKED.value,
+            },
+        },
+        max_model_len=1024,
+    )
+
+    output = model.generate("Hello, my name is")
+    assert len(output[0].outputs[0].text) > 0
