@@ -27,19 +27,23 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
                     f"supported in {layer_impl.__class__.__name__}."
                 )
-            if dcp_size > 1:
-                assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer_impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
+            if dcp_size > 1 and not layer_impl.need_to_return_lse_for_decode:
+                impl_name = layer_impl.__class__.__name__
+                raise RuntimeError(
+                    f"DCP requires the attention implementation to return "
+                    f"the softmax LSE for decode, but {impl_name} does not "
+                    f"support this. Please use a different attention backend "
+                    f"via --attention-backend (e.g. FLASH_ATTN or FLASHINFER) "
+                    f"that supports returning softmax LSE for decode."
                 )
 
-            if pcp_size > 1:
-                assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
+            if pcp_size > 1 and not layer_impl.supports_pcp:
+                impl_name = layer_impl.__class__.__name__
+                raise RuntimeError(
+                    f"PCP requires attention implementation support, but "
+                    f"{impl_name} does not support PCP. Please use a "
+                    f"different attention backend via --attention-backend "
+                    f"that supports PCP."
                 )
 
 
