@@ -258,8 +258,10 @@ class Qwen2Decoder2Encoder(nn.Module):
 
         token_type_ids = torch.cat(
             [
-                torch.zeros(bs, n_query, dtype=torch.long),
-                torch.ones(bs, n_query, dtype=torch.long),
+                torch.zeros(bs, n_query, dtype=torch.long,
+                            device=x_combined.device),
+                torch.ones(bs, n_query, dtype=torch.long,
+                           device=x_combined.device),
             ],
             dim=1,
         )
