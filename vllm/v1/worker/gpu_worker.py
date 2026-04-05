@@ -54,7 +54,12 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import (
+    classify_batch_stage,
+    compute_iteration_details,
+    record_function_or_nullcontext,
+    report_usage_stats,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -742,7 +747,8 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        with record_function_or_nullcontext("sampling"):
+            return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
     def execute_model(
@@ -804,7 +810,10 @@ class Worker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
-        with self.annotate_profile(scheduler_output):
+        with (
+            self.annotate_profile(scheduler_output),
+            record_function_or_nullcontext(classify_batch_stage(scheduler_output)),
+        ):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
