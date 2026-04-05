@@ -11,12 +11,10 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    initialize_single_dummy_weight,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
+    SKIP_TENSORS,
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
@@ -127,6 +125,8 @@ def initialize_online_processing(layer: torch.nn.Module):
     # Wrap each parameter's weight loader
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
+        if name in SKIP_TENSORS:
+            continue
         if _get_weight_loader(tensor).__name__ != "online_process_loader":
             tensor.weight_loader = make_online_process_loader(layer, name)
 
@@ -224,13 +224,13 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         # No weights were loaded
         elif info.load_numel <= 0:
-            # first load but received no weights. This happens on dummy load
+            # first load: checkpoint did not contain weights for this layer
             if info.kernel_tensors is None:
                 _layerwise_process(layer, info)
                 continue
 
             # reloading: place kernel tensors back as a fallback
-            else:
+            elif info.load_numel_total > 0:  # type: ignore[operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
                 _place_kernel_tensors(layer, info)
 
@@ -261,12 +261,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     """
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
-
-    # If no weights were loaded (e.g. dummy loading), initialize with
-    # small random values to avoid NaN from zero/garbage data
-    if len(info.loaded_weights) <= 0:
-        for tensor in get_layer_tensors(layer).values():
-            initialize_single_dummy_weight(tensor)
 
     # Reset online quantization flag so process_weights_after_loading
     # will run again during reload

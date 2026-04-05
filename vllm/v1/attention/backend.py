@@ -10,6 +10,11 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+)
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -17,7 +22,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+
+from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -740,6 +747,13 @@ class AttentionImplBase(ABC, Generic[T]):
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
 
+    kv_cache_dtype: str
+
+    @property
+    def kv_quant_mode(self) -> "KVQuantMode":
+        """Return the KV cache quantization mode for this layer."""
+        return get_kv_quant_mode(self.kv_cache_dtype)
+
     @abstractmethod
     def __init__(
         self,
@@ -864,6 +878,14 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+        """
+        Does this attention implementation support fused output quantization.
+        Since MLA quantization is done manually in forward_impl (common code),
+        all MLA backends support it by default.
+        """
+        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+
     def do_kv_cache_update(
         self,
         kv_c_normed: torch.Tensor,
@@ -893,6 +915,14 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     Sparse MLA implementations only support decode (MQA-style) attention.
     They do not support prefill (MHA-style) attention.
     """
+
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+        """
+        Does this attention implementation support fused output quantization.
+        Since MLA quantization is done manually in forward_impl (common code),
+        all MLA backends support it by default.
+        """
+        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
 
     @abstractmethod
     def __init__(
@@ -952,10 +982,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(
