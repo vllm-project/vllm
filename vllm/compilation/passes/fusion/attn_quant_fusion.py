@@ -11,7 +11,9 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    ScaleDesc,
     kNvfp4Dynamic,
     kStaticTensorScale,
 )
@@ -233,6 +235,155 @@ class AttnNvfp4QuantPattern(
         ]
 
 
+class AttnFp8GroupQuantPattern(
+    VllmPatternReplacement[..., tuple[torch.Tensor, torch.Tensor]]
+):
+    """
+    Fusion for Attention+Fp8DynamicGroupQuant.
+
+    Only triggers when the attention implementation returns True in
+    `fused_output_quant_supported()`. If the pattern is found, the
+    per-group Fp8 quant op will be removed from the graph, and its
+    scale output will be produced by the attention kernel directly
+    via the `output_block_scale` argument.
+    """
+
+    def __init__(
+        self,
+        layer: Attention,
+        dtype: torch.dtype,
+        group_shape: GroupShape,
+        has_col_major_scales: bool = False,
+        is_e8m0: bool = False,
+        is_tma_aligned: bool = False,
+    ) -> None:
+        self._layer_name = layer.layer_name
+        self._num_heads = layer.num_heads
+        self._head_size = layer.head_size
+        self._dtype = dtype
+        self._group_shape = group_shape
+        self._group_size = group_shape[1]
+        self._has_col_major_scales = has_col_major_scales
+        self._is_e8m0 = is_e8m0
+        self._is_tma_aligned = is_tma_aligned
+
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        self._quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
+
+        assert self._quant_key in QUANT_OPS, (
+            f"unsupported quantization scheme {self._quant_key}"
+        )
+        self._QUANT_OP = QUANT_OPS[self._quant_key]
+
+    @property
+    def pattern(
+        self,
+    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        def _pattern(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            output_attn: torch.Tensor,
+            output_scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at1 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=self._layer_name,
+                output_scale=None,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            attn_out_view = RESHAPE_OP(
+                at1[1], [q.shape[0], self._num_heads * self._head_size]
+            )
+
+            finfo = torch.finfo(FP8_DTYPE)
+            result = torch.empty(
+                attn_out_view.shape,
+                device=attn_out_view.device,
+                dtype=FP8_DTYPE,
+            )
+            _, result, output_scale = auto_functionalized(
+                self._QUANT_OP,
+                input=attn_out_view,
+                output_q=result,
+                output_s=output_scale,
+                group_size=self._group_size,
+                eps=1e-10,
+                fp8_min=finfo.min,
+                fp8_max=finfo.max,
+                scale_ue8m0=self._is_e8m0,
+                dummy_is_scale_transposed=self._has_col_major_scales,
+                dummy_is_tma_aligned=self._is_tma_aligned,
+            )
+            return result, output_scale
+
+        return _pattern
+
+    @property
+    def replacement(
+        self,
+    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        def _replacement(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            output_attn: torch.Tensor,
+            output_scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            # Attention output directly in FP8
+            output_attn = torch.empty(
+                [q.shape[0], self._num_heads, self._head_size],
+                dtype=FP8_DTYPE,
+                device=q.device,
+            )
+            at1 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=self._layer_name,
+                output_scale=None,
+                output_block_scale=output_scale,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            output = RESHAPE_OP(at1[1], [-1, self._num_heads * self._head_size])
+            return output, at1[2]
+
+        return _replacement
+
+    def get_inputs(self):
+        dtype = self._dtype
+        num_heads = self._num_heads
+        head_size = self._head_size
+        hidden_size = num_heads * head_size
+        num_groups = hidden_size // self._group_size
+
+        # Construct scale tensor shape for pattern matching.
+        # The scale shape depends on layout (col-major vs row-major)
+        # but the pattern matcher only needs a representative tensor.
+        if self._has_col_major_scales:
+            scale_tensor = self.empty_fp32(num_groups, 5).permute(1, 0)
+        else:
+            scale_tensor = self.empty_fp32(5, num_groups)
+
+        return [
+            self.empty(5, num_heads, head_size, dtype=dtype),  # q
+            self.empty(5, num_heads, head_size, dtype=dtype),  # k
+            self.empty(5, num_heads, head_size, dtype=dtype),  # v
+            self.empty(5, num_heads, head_size, dtype=dtype),  # output_attn
+            scale_tensor,  # output_scale
+            self.empty(0, dtype=dtype),  # kv_cache_dummy_dep
+        ]
+
+
 class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
     """
     This pass fuses post-attention quantization onto attention if supported.
@@ -241,9 +392,10 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
     cannot be wildcarded. This also lets us check support on attention layers
     upon registration instead of during pattern matching.
 
-    Currently, only static fp8 quant is supported, but patterns could easily be
-    added for other quant schemes and dtypes. The bigger hurdle for wider
-    support are attention kernels, which need to support fusing output quant.
+    Supported fusions:
+    - Static per-tensor FP8 (output_scale)
+    - NVFP4 dynamic (output_scale + output_block_scale)
+    - Dynamic per-group FP8 (output_block_scale, group_size 64/128)
     """
 
     def __init__(self, config: VllmConfig) -> None:
@@ -267,5 +419,27 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
             for layer in layers:
                 if layer.impl.fused_output_quant_supported(kNvfp4Dynamic):
                     self.register(AttnNvfp4QuantPattern(layer, dtype))
+
+        for layer in layers:
+            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                scale = ScaleDesc(torch.float32, False, group_shape)
+                quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
+                if quant_key not in QUANT_OPS:
+                    continue
+                if not layer.impl.fused_output_quant_supported(quant_key):
+                    continue
+                for has_col_major in [True, False]:
+                    for is_e8m0 in [False, True]:
+                        for is_tma_aligned in [False, True]:
+                            self.register(
+                                AttnFp8GroupQuantPattern(
+                                    layer,
+                                    dtype,
+                                    group_shape=group_shape,
+                                    has_col_major_scales=has_col_major,
+                                    is_e8m0=is_e8m0,
+                                    is_tma_aligned=is_tma_aligned,
+                                )
+                            )
 
         self.dump_patterns(config, self.pm_pass)

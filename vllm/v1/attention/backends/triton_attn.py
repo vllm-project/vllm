@@ -441,7 +441,20 @@ class TritonAttentionImpl(AttentionImpl):
         self._v_scale_cache.fill_(1.0)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
-        return quant_key == kFp8StaticTensorSym
+        if quant_key == kFp8StaticTensorSym:
+            return True
+        # Per-group FP8 dynamic quant is supported when the dtype is FP8,
+        # the scale is per-group, and group_size evenly divides head_size
+        # (groups must align with head boundaries).
+        if (
+            quant_key.dtype == self.fp8_dtype
+            and quant_key.scale.group_shape.is_per_group()
+            and not quant_key.scale.static
+            and quant_key.symmetric
+        ):
+            group_size = quant_key.scale.group_shape[1]
+            return self.head_size % group_size == 0
+        return False
 
     def __init__(
         self,
@@ -522,10 +535,10 @@ class TritonAttentionImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_block_scale is not None:
+        if output_block_scale is not None and output_scale is not None:
             raise NotImplementedError(
-                "fused block_scale output quantization is not yet supported"
-                " for TritonAttentionImpl"
+                "simultaneous output_scale and output_block_scale is not "
+                "supported for TritonAttentionImpl"
             )
 
         if attn_metadata is None:
@@ -628,6 +641,7 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_segm_expsum=softmax_segm_expsum,
             sinks=self.sinks,
             output_scale=output_scale,
+            output_group_scale=output_block_scale,
             mm_prefix_range=mm_prefix_range_tensor,
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,

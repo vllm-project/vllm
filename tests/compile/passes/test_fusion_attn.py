@@ -32,6 +32,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -217,12 +218,52 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
         )
 
 
+class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
+    """Test model for AttentionFp8GroupQuantPattern fusion.
+
+    Uses per-group (group_size=128) dynamic FP8 quantization after attention,
+    via TestFP8Layer which handles quant + matmul internally.
+    """
+
+    quant_key = kFp8Dynamic128Sym
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        hidden_size = self.num_qo_heads * self.head_size
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
+            device=self.device,
+        )
+
+        w = kwargs.get("w")
+        if w is not None:
+            self.fp8_linear.weight = w["weight"]
+            self.fp8_linear.weight_scale = w["wscale"]
+            self.fp8_linear.input_scale = w["scale"]
+
+        self.w = {
+            "weight": self.fp8_linear.weight,
+            "wscale": self.fp8_linear.weight_scale,
+            "scale": self.fp8_linear.input_scale,
+        }
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        """Forward pass: attention -> per-group FP8 quant + matmul"""
+        attn_output = self.attn(q, k, v)
+        return self.fp8_linear(attn_output)
+
+
 PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
 PATTERN_TEST_MODELS_FP4: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_FP8_GROUP: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []
 SPLIT_ATTENTION: list[bool] = []
 BACKENDS_FP8: list[AttentionBackendEnum] = []
 BACKENDS_FP4: list[AttentionBackendEnum] = []
+BACKENDS_FP8_GROUP: list[AttentionBackendEnum] = []
 
 if current_platform.is_cuda():
     HEADS = [(64, 8), (40, 8)]
@@ -240,6 +281,13 @@ if current_platform.is_cuda():
     ]
     BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
+    PATTERN_TEST_MODELS_FP8_GROUP = [
+        (
+            "Qwen/Qwen3-30B-A3B-FP8",
+            TestAttentionFp8GroupQuantPatternModel,
+        )
+    ]
+    BACKENDS_FP8_GROUP = [AttentionBackendEnum.TRITON_ATTN]
 
 elif current_platform.is_rocm():
     HEADS = [(32, 8), (40, 8)]
@@ -268,7 +316,11 @@ elif current_platform.is_rocm():
         )
     )
     # quant_fp4 only has the custom impl
-    + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""])),
+    + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""]))
+    # per-group fp8 quant
+    + list(
+        flat_product(BACKENDS_FP8_GROUP, PATTERN_TEST_MODELS_FP8_GROUP, ["+quant_fp8"])
+    ),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
@@ -451,13 +503,20 @@ def test_attention_quant_pattern(
     assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
         "Attention should not have output_scale before fusion"
     )
-    assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
-        "Attention should have output_scale after fusion"
-    )
-
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
     )
+
+    is_per_group = quant_key.scale.group_shape.is_per_group()
+    if is_per_group:
+        # Per-group FP8: output_block_scale is set, output_scale is not
+        assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
+            "Per-group FP8 fusion should set output_block_scale"
+        )
+    else:
+        assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
+            "Attention should have output_scale after fusion"
+        )
 
     kv_cache_dummy_dep_pre_is_none = (
         attn_nodes_pre[0].kwargs.get("kv_cache_dummy_dep") is None
@@ -469,7 +528,7 @@ def test_attention_quant_pattern(
         "The kv_cache_dummy_dep should be consistent before and after fusion"
     )
 
-    if quant_key.dtype == FP8_DTYPE:
+    if quant_key.dtype == FP8_DTYPE and not is_per_group:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
             "Attention should not have output_block_scale after FP8 fusion"
         )
@@ -478,5 +537,7 @@ def test_attention_quant_pattern(
             "Attention should have output_block_scale after FP4 fusion"
         )
 
-    # Check that results are close
-    torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+    # Per-group FP8 has slightly higher quant error due to dynamic scale
+    atol = 5e-2 if is_per_group else 1e-2
+    rtol = 5e-2 if is_per_group else 1e-2
+    torch.testing.assert_close(result_unfused, result_fused, atol=atol, rtol=rtol)
