@@ -121,15 +121,19 @@ class Executor(ABC):
         underlying workers.
         """
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-        compilation_times: list[float] = self.collective_rpc("compile_or_warm_up_model")
+        compilation_times: list[float | None] = self.collective_rpc(
+            "compile_or_warm_up_model"
+        )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
         # process config is never updated. Use max across workers since they
         # compile in parallel.
+        # Filter out None values from workers that didn't compile
+        # (e.g., PP follower nodes).
         if compilation_times:
-            self.vllm_config.compilation_config.compilation_time = max(
-                compilation_times
-            )
+            valid_times = [t for t in compilation_times if t is not None]
+            if valid_times:
+                self.vllm_config.compilation_config.compilation_time = max(valid_times)
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
         """
