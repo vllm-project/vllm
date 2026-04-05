@@ -26,6 +26,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
@@ -1436,6 +1437,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "custom_mm",
             "prefix_repetition",
             "spec_bench",
+            "speed_bench",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -1618,6 +1620,34 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=128,
         help="Number of output tokens per request, used only for prefix "
         "repetition dataset.",
+    )
+
+    speed_bench_group = parser.add_argument_group("speed bench dataset options")
+    speed_bench_group.add_argument(
+        "--speed-bench-dataset-subset",
+        type=str,
+        default="qualitative",
+        choices={
+            "qualitative",
+            "throughput_1k",
+            "throughput_2k",
+            "throughput_8k",
+            "throughput_16k",
+            "throughput_32k",
+        },
+        help="Subset of the SPEED-Bench dataset.",
+    )
+    speed_bench_group.add_argument(
+        "--speed-bench-output-len",
+        type=int,
+        default=4096,
+        help="Num of output tokens per request, used only for speed bench dataset.",
+    )
+    speed_bench_group.add_argument(
+        "--speed-bench-category",
+        type=str,
+        default=None,
+        help="Category for speed bench dataset. If None, use all categories.",
     )
 
 
@@ -2070,6 +2100,19 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 suffix_len=args.prefix_repetition_suffix_len,
                 num_prefixes=args.prefix_repetition_num_prefixes,
                 output_len=args.prefix_repetition_output_len,
+                request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
+            ),
+            "speed_bench": lambda: SpeedBench(
+                dataset_path=args.dataset_path,
+                dataset_subset=args.speed_bench_dataset_subset,
+                category=args.speed_bench_category,
+                disable_shuffle=args.disable_shuffle,
+            ).sample(
+                num_requests=args.num_prompts,
+                tokenizer=tokenizer,
+                output_len=args.speed_bench_output_len,
+                enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
@@ -3543,3 +3586,48 @@ class MMStarDataset(HuggingFaceDataset):
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Speed Bench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class SpeedBench(CustomDataset):
+    """
+    Implements the SPEED-Bench dataset: https://huggingface.co/datasets/nvidia/SPEED-Bench
+    Download the dataset using:
+    curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -
+    """  # noqa: E501
+
+    def __init__(self, **kwargs) -> None:
+        self.dataset_subset = kwargs.pop("dataset_subset", "qualitative")
+        self.category = kwargs.pop("category", None)
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        self.data = []
+
+        # Load the JSONL file
+        jsonl_data = pd.read_json(
+            path_or_buf=Path(self.dataset_path) / f"{self.dataset_subset}.jsonl",
+            lines=True,
+        )
+
+        # check if the JSONL file has a 'turns' column
+        if "messages" not in jsonl_data.columns:
+            raise ValueError("JSONL file must contain a 'messages' column.")
+
+        for _, row in jsonl_data.iterrows():
+            # sample only from a specific category if specified
+            if (not self.category) or (self.category == row["category"]):
+                prompt = row["messages"][0]["content"]
+                self.data.append({"prompt": prompt})
+
+        random.seed(self.random_seed)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(self.data)
