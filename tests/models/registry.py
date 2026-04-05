@@ -810,6 +810,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         revision="refs/pr/17",
     ),
+    "FireRedAsrAedLForConditionalGeneration": _HfExamplesInfo(
+        "Leebin/FireRedASR-AED-L-vllm",
+    ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
     ),
