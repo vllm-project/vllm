@@ -300,8 +300,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 device=self.device,
             )
         else:
-            # Flattening or no MTP: 1D buffer for expanded seq_lens.
-            # Also serves as decode_lens_buffer (aliased).
+            # Flattening or no MTP: 1D buffer for expanded per-token seq_lens.
             self.decode_seq_lens_buffer = torch.zeros(
                 (scheduler_config.max_num_batched_tokens,),
                 dtype=torch.int32,
