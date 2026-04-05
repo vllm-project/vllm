@@ -168,7 +168,10 @@ async def send_request_to_service(
         "remote_port": None,
     }
     req_data["stream"] = False
-    req_data["max_tokens"] = 1
+    if endpoint == "/responses" or "max_output_tokens" in req_data:
+        req_data["max_output_tokens"] = 1
+    else:
+        req_data["max_tokens"] = 1
     if "max_completion_tokens" in req_data:
         req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
@@ -262,6 +265,16 @@ async def handle_completions(request: Request):
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
     return await _handle_completions("/chat/completions", request)
+
+
+@app.post("/v1/responses")
+async def handle_responses(request: Request):
+    return await _handle_completions("/responses", request)
+
+
+@app.post("/v1/messages")
+async def handle_messages(request: Request):
+    return await _handle_completions("/messages", request)
 
 
 @app.get("/healthcheck")
