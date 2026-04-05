@@ -28,6 +28,11 @@ def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
     for node in graph.graph.nodes:
         if node.op == "placeholder":
             fake_args.append(node.meta["example_value"])
+        elif node.op == "get_attr":
+            # get_attr nodes (e.g., from torch.cond branch subgraphs)
+            # can be interspersed with placeholders after split_module;
+            # skip them as they are not positional inputs.
+            continue
         else:
             break
     return fake_args
