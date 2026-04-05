@@ -68,23 +68,51 @@ def _listen_for_register(hostname, port):
         if router_socket in socks:
             remote_addr, msg = router_socket.recv_multipart()
             data = msgpack.loads(msg)
-            if data["type"] == "HELLO":
+            if data.get("type") == "HELLO":
                 pass
-            elif (
-                data["type"] == "register"
-                and data["role"] == "P"
-                and data["request_address"] not in prefill_instances
-            ):
-                with _list_lock:
-                    _append_whole_dict_unique(prefill_instances, data)
+            elif data.get("type") == "P":  # Prefill registration
+                # Convert new format to internal format
+                instance = {
+                    "role": "P",
+                    "request_address": f"http://{data['http_address']}/v1/completions",
+                    "http_address": data["http_address"],
+                    "zmq_address": data["zmq_address"],
+                }
+                # Parse zmq_address to extract ports (format: "handshake:6301,notify:61005")
+                for part in data["zmq_address"].split(','):
+                    if ':' in part:
+                        key, value = part.split(':', 1)
+                        if key == "handshake":
+                            instance["handshake_port"] = int(value)
+                        elif key == "notify":
+                            instance["notify_port"] = int(value)
 
-            elif (
-                data["type"] == "register"
-                and data["role"] == "D"
-                and data["request_address"] not in decode_instances
-            ):
                 with _list_lock:
-                    _append_whole_dict_unique(decode_instances, data)
+                    if data["http_address"] not in [i.get("http_address") for i in prefill_instances]:
+                        prefill_instances.append(instance)
+                        print(f"Registered Prefill: {instance}")
+
+            elif data.get("type") == "D":  # Decode registration
+                # Convert new format to internal format
+                instance = {
+                    "role": "D",
+                    "request_address": f"http://{data['http_address']}/v1/completions",
+                    "http_address": data["http_address"],
+                    "zmq_address": data["zmq_address"],
+                }
+                # Parse zmq_address to extract ports
+                for part in data["zmq_address"].split(','):
+                    if ':' in part:
+                        key, value = part.split(':', 1)
+                        if key == "handshake":
+                            instance["handshake_port"] = int(value)
+                        elif key == "notify":
+                            instance["notify_port"] = int(value)
+
+                with _list_lock:
+                    if data["http_address"] not in [i.get("http_address") for i in decode_instances]:
+                        decode_instances.append(instance)
+                        print(f"Registered Decode: {instance}")
 
 
 def start_service_discovery(hostname, port):

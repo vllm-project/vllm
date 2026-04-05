@@ -585,6 +585,7 @@ class MoRIIOConnectorScheduler:
             )
 
         # If we execute in P-D serial mode, no notification port is needed.
+        # Return KV transfer params that will be forwarded to decode instance by router
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -592,6 +593,8 @@ class MoRIIOConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_host=self.host_ip,
             remote_port=self.handshake_port,
+            remote_handshake_port=self.handshake_port,  # For router compatibility
+            remote_notify_port=self.notify_port,        # For router compatibility
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
 
@@ -846,7 +849,10 @@ class MoRIIOConnectorWorker:
         ]
 
     def _ping(self, zmq_context):
-        http_request_address = f"http://{self.request_address}/v1/completions"
+        # Use host:port format for http_address (compatible with official router)
+        http_address = f"{self.request_address}"
+        # Build ZMQ address with handshake and notify ports
+        zmq_address = f"handshake:{self.handshake_port},notify:{self.notify_port}"
         role = "P" if self.is_producer else "D"
 
         retry_count = 0
@@ -856,16 +862,11 @@ class MoRIIOConnectorWorker:
 
             while True:
                 try:
+                    # Format compatible with official vLLM router's ServiceRegistration
                     data = {
-                        "type": "register",
-                        "role": role,
-                        "index": str(index),
-                        "request_address": http_request_address,
-                        "handshake_port": self.handshake_port,
-                        "notify_port": self.notify_port,
-                        "dp_size": self.moriio_config.dp_size,
-                        "tp_size": self.moriio_config.tp_size,
-                        "transfer_mode": self.mode.name,
+                        "type": role,  # "P" or "D"
+                        "http_address": http_address,  # Just host:port
+                        "zmq_address": zmq_address,    # handshake:PORT,notify:PORT
                     }
 
                     sock.send(msgpack.dumps(data))
