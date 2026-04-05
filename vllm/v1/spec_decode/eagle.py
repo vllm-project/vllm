@@ -1491,7 +1491,11 @@ class SpecDecodeBaseProposer:
             # ParallelLMHead inside each MTP layer), not self.model.lm_head.
             # If the checkpoint omits a copy of the lm_head weights at the
             # MTP layer path, shared_head.head stays uninitialised and
-            # produces NaN logits. Always share it explicitly.
+            # produces NaN logits. Share it explicitly only if the MTP model
+            # does not have its own trained shared_head weights.
+            # Some MTP models (e.g., Step-3.5-Flash, DeepSeek V3.2) have
+            # independently trained shared_head weights that should not be
+            # overwritten.
             inner = getattr(self.model, "model", None)
             layers = getattr(inner, "layers", None) if inner else None
             if layers is not None:
@@ -1499,11 +1503,42 @@ class SpecDecodeBaseProposer:
                 for layer in items:
                     sh = getattr(layer, "shared_head", None)
                     if sh is not None and hasattr(sh, "head"):
-                        del sh.head
-                        sh.head = target_language_model.lm_head
-                        logger.info(
-                            "Shared target model lm_head with MTP shared_head.head."
-                        )
+                        # Check if shared_head.head has valid trained weights.
+                        # If it has NaN (uninitialized) or equals target lm_head,
+                        # share the target's lm_head. Otherwise, keep MTP's own
+                        # weights (e.g., Step-3.5-Flash has independently trained
+                        # shared_head weights).
+                        has_own_trained_weights = False
+                        if hasattr(sh.head, "weight") and hasattr(
+                            target_language_model.lm_head, "weight"
+                        ):
+                            mtp_head_weight = sh.head.weight
+                            target_head_weight = target_language_model.lm_head.weight
+                            if isinstance(mtp_head_weight, torch.Tensor) and isinstance(
+                                target_head_weight, torch.Tensor
+                            ):
+                                # Check if weights are valid (not NaN/uninitialized)
+                                if not torch.isnan(mtp_head_weight).any():
+                                    # Weights are initialized, check if different
+                                    # from target lm_head
+                                    if not torch.equal(
+                                        mtp_head_weight.cpu(),
+                                        target_head_weight.cpu(),
+                                    ):
+                                        # MTP has its own trained weights
+                                        has_own_trained_weights = True
+
+                        if has_own_trained_weights:
+                            logger.info(
+                                "MTP model has its own trained shared_head weights. "
+                                "Keeping separate from target model lm_head."
+                            )
+                        else:
+                            del sh.head
+                            sh.head = target_language_model.lm_head
+                            logger.info(
+                                "Shared target model lm_head with MTP shared_head.head."
+                            )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
