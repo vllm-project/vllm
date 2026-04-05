@@ -234,3 +234,18 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+
+- label: MTP Acceptance Length (B200)
+  timeout_in_minutes: 60
+  device: b200
+  optional: true
+  num_devices: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/model_executor/models/deepseek_mtp.py
+  - tests/v1/spec_decode/test_acceptance_length.py
+  commands:
+    - pip install "vllm[bench]"
+    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py::test_mtp_acceptance_length

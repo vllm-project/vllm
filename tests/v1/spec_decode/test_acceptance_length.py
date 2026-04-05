@@ -310,3 +310,153 @@ def test_eagle3_acceptance_length(
             print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
             if expected_per_pos:
                 print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
+
+
+# ============================================================
+# MTP Acceptance Length Regression Tests
+# ============================================================
+
+
+@dataclass
+class MTPModelConfig:
+    """Model configuration for MTP acceptance length tests."""
+
+    verifier: str
+    expected_acceptance_length: float
+    expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
+    id: str = ""
+    num_speculative_tokens: int = 1
+    tensor_parallel_size: int = 1
+    max_model_len: int = DEFAULT_MAX_MODEL_LEN
+    gpu_memory_utilization: float = 0.7
+    excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
+    marks: list = field(default_factory=list)
+    rtol: float | None = None
+
+
+# Baselines measured with examples/offline_inference/spec_decode.py
+# --method mtp --num_spec_tokens 1 --num-prompts 80 --temp 0
+# --dataset-name hf --dataset-path philschmid/mt-bench
+MTP_MODEL_CONFIGS = [
+    MTPModelConfig(
+        verifier="deepseek-ai/DeepSeek-V3",
+        expected_acceptance_length=1.04,
+        expected_acceptance_lengths_per_pos=[0.04],
+        id="deepseek-v3-mtp",
+        tensor_parallel_size=4,
+        gpu_memory_utilization=0.95,
+        marks=[pytest.mark.slow_test],
+        rtol=0.15,
+    ),
+]
+
+
+@large_gpu_mark(min_gb=40)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test is only supported on CUDA platform.",
+)
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        pytest.param(config, id=config.id, marks=config.marks)
+        for config in MTP_MODEL_CONFIGS
+    ],
+)
+@pytest.mark.parametrize("attention_backend", get_attention_backend_params())
+def test_mtp_acceptance_length(
+    model_config: MTPModelConfig,
+    attention_backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    MTP Acceptance Length Regression Tests.
+
+    Verifies that acceptance lengths for MTP speculative decoding
+    do not regress across vLLM commits. Each test runs inference
+    on the MT-Bench dataset and asserts that the mean acceptance
+    length is within tolerance of the expected baseline.
+    """
+    backend_enum = AttentionBackendEnum[attention_backend]
+    if backend_enum in model_config.excluded_backends:
+        pytest.skip(f"{attention_backend} incompatible with {model_config.id}")
+
+    num_spec_tokens = model_config.num_speculative_tokens
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        with VllmRunner(
+            model_name=model_config.verifier,
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": num_spec_tokens,
+            },
+            attention_config={"backend": attention_backend},
+            tensor_parallel_size=model_config.tensor_parallel_size,
+            gpu_memory_utilization=model_config.gpu_memory_utilization,
+            disable_log_stats=False,
+            max_model_len=model_config.max_model_len,
+            trust_remote_code=True,
+        ) as vllm_runner:
+            tokenizer = vllm_runner.llm.get_tokenizer()
+            prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
+
+            sampling_params = SamplingParams(
+                temperature=0,
+                max_tokens=DEFAULT_OUTPUT_LEN,
+            )
+            vllm_runner.llm.generate(
+                [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
+                sampling_params=sampling_params,
+            )
+
+            metrics = vllm_runner.llm.get_metrics()
+            results = extract_acceptance_metrics(metrics, num_spec_tokens)
+
+            actual = results["acceptance_length"]
+            expected = model_config.expected_acceptance_length
+            actual_per_pos = results["acceptance_lengths_per_pos"]
+            expected_per_pos = model_config.expected_acceptance_lengths_per_pos
+
+            rel_error = abs(actual - expected) / expected
+            rtol = model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+
+            assert rel_error <= rtol, (
+                f"MTP acceptance length regression for "
+                f"{model_config.id}!\n"
+                f"  Expected: {expected:.3f}\n"
+                f"  Actual:   {actual:.3f}\n"
+                f"  Relative error: {rel_error:.2%} "
+                f"(tolerance: {rtol:.2%})\n"
+                f"  Drafts: {results['num_drafts']}, "
+                f"Accepted: {results['num_accepted_tokens']}"
+            )
+
+            if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
+                rtol = (
+                    model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+                )
+                for pos, (act, exp) in enumerate(zip(actual_per_pos, expected_per_pos)):
+                    if exp > 0:
+                        pos_err = abs(act - exp) / exp
+                        assert pos_err <= rtol, (
+                            f"Per-position regression at pos {pos} "
+                            f"for {model_config.id}!\n"
+                            f"  Expected: {exp:.3f}\n"
+                            f"  Actual:   {act:.3f}\n"
+                            f"  Error: {pos_err:.2%} "
+                            f"(tolerance: {rtol:.2%})"
+                        )
+
+            print(
+                f"\n{model_config.id} "
+                f"[tp={model_config.tensor_parallel_size}, "
+                f"backend={attention_backend}]: "
+                f"acceptance_length={actual:.3f}"
+                f" (expected={expected:.3f}, "
+                f"rel_error={rel_error:.2%})"
+            )
+            print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
+            if expected_per_pos:
+                print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
