@@ -1185,6 +1185,9 @@ class FusedMoEConfig:
 
     moe_backend: str = "auto"
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+    # Maximum number of tokens in a single scheduler iteration.
+    # Used to size NVFP4 MoE blockscale buffers.
+    max_num_batched_tokens: int = 2048
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False

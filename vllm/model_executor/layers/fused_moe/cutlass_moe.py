@@ -499,6 +499,7 @@ def run_cutlass_moe_fp4(
     k: int,
     e: int,
     device: torch.device,
+    max_num_batched_tokens: int,
     apply_router_weight_on_input: bool = False,
 ) -> None:
     """
@@ -605,6 +606,7 @@ def run_cutlass_moe_fp4(
         expert_offsets,
         blockscale_offsets,
         num_topk,
+        max_num_batched_tokens,
     )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))
@@ -626,12 +628,22 @@ def run_cutlass_moe_fp4(
         # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
         # c3 reuses workspace13 after c1 is consumed.
         int_fp4, int_blockscale = ops.silu_and_mul_scaled_fp4_experts_quant(
-            c1, a2_gscale, expert_offsets, blockscale_offsets, num_topk
+            c1,
+            a2_gscale,
+            expert_offsets,
+            blockscale_offsets,
+            num_topk,
+            max_num_batched_tokens,
         )
     else:
         apply_moe_activation(activation, c2, c1)
         int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
-            c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
+            c2,
+            a2_gscale,
+            expert_offsets,
+            blockscale_offsets,
+            num_topk,
+            max_num_batched_tokens,
         )
 
     ops.cutlass_fp4_moe_mm(
@@ -791,6 +803,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
             k=k,
             e=e,
             device=hidden_states.device,
+            max_num_batched_tokens=self.moe_config.max_num_batched_tokens,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 

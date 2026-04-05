@@ -1725,6 +1725,7 @@ def scaled_fp4_experts_quant(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
     topk: int,
+    max_num_batched_tokens: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to NVFP4 and return quantized tensor and scale, for
@@ -1734,6 +1735,9 @@ def scaled_fp4_experts_quant(
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
+        topk: Number of top-k experts selected
+        max_num_batched_tokens: Maximum tokens per scheduler iteration,
+            used to size the blockscale output buffer.
     Outputs:
         output: The quantized tensor in NVFP4
         output_scales: The blockscale tensor in FP8-E4M3
@@ -1743,18 +1747,19 @@ def scaled_fp4_experts_quant(
         f"input.ndim needs to be == 2, but got {input_tensor.ndim}."
     )
 
-    # Control the maximum number of tokens per expert supported by the
-    # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
-    # from running out of memory. This value can also be increased to support
-    # larger models.
-    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
     m_numtopk, k = input_tensor.shape
+    num_experts = expert_offsets.shape[0] - 1
+    # Worst-case padding: each expert's blockscale rows are rounded up to a
+    # multiple of 128 (CUTLASS swizzle constraint). If every expert has a
+    # remainder of 1 token, that's 127 padding tokens per expert.
+    max_buffer_rows = max_num_batched_tokens * topk + 127 * num_experts
 
-    assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk, (
-        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
-        f"{MAX_TOKENS_PER_EXPERT})"
-        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}. Use"
-        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value."
+    assert m_numtopk <= max_num_batched_tokens * topk, (
+        f"m_numtopk must be less than max_num_batched_tokens * topk ("
+        f"{max_num_batched_tokens} * {topk} = "
+        f"{max_num_batched_tokens * topk})"
+        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}."
+        f" Use --max-num-batched-tokens to increase this value."
     )
     scales_k = k // 16
     padded_k = (scales_k + (4 - 1)) // 4
@@ -1764,7 +1769,7 @@ def scaled_fp4_experts_quant(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
     output_scales = torch.empty(
-        MAX_TOKENS_PER_EXPERT * topk,
+        max_buffer_rows,
         padded_k,
         dtype=torch.int32,
         device=input_tensor.device,
@@ -1787,6 +1792,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
     topk: int,
+    max_num_batched_tokens: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Fused SiLU+Mul+NVFP4 quantization for MoE intermediate activations.
@@ -1797,6 +1803,8 @@ def silu_and_mul_scaled_fp4_experts_quant(
         expert_offsets: The expert offsets tensor [n_experts+1]
         blockscale_offsets: The blockscale offsets tensor [n_experts+1]
         topk: Number of top-k experts selected
+        max_num_batched_tokens: Maximum tokens per scheduler iteration,
+            used to size the blockscale output buffer.
     Outputs:
         output: The quantized tensor in NVFP4 [m_topk, k/2]
         output_scales: The blockscale tensor in FP8-E4M3
@@ -1806,20 +1814,21 @@ def silu_and_mul_scaled_fp4_experts_quant(
         f"input.ndim needs to be == 2, but got {input_tensor.ndim}."
     )
 
-    # Control the maximum number of tokens per expert supported by the
-    # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
-    # from running out of memory. This value can also be increased to support
-    # larger models.
-    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
     m_numtopk, k_times_2 = input_tensor.shape
     assert k_times_2 % 2 == 0, "input width must be even (gate || up layout)"
     k = k_times_2 // 2
+    num_experts = expert_offsets.shape[0] - 1
+    # Worst-case padding: each expert's blockscale rows are rounded up to a
+    # multiple of 128 (CUTLASS swizzle constraint). If every expert has a
+    # remainder of 1 token, that's 127 padding tokens per expert.
+    max_buffer_rows = max_num_batched_tokens * topk + 127 * num_experts
 
-    assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk, (
-        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
-        f"{MAX_TOKENS_PER_EXPERT})"
-        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}. Use"
-        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value."
+    assert m_numtopk <= max_num_batched_tokens * topk, (
+        f"m_numtopk must be less than max_num_batched_tokens * topk ("
+        f"{max_num_batched_tokens} * {topk} = "
+        f"{max_num_batched_tokens * topk})"
+        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}."
+        f" Use --max-num-batched-tokens to increase this value."
     )
     scales_k = k // 16
     padded_k = (scales_k + (4 - 1)) // 4
@@ -1829,7 +1838,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
     output_scales = torch.empty(
-        MAX_TOKENS_PER_EXPERT * topk,
+        max_buffer_rows,
         padded_k,
         dtype=torch.int32,
         device=input_tensor.device,
