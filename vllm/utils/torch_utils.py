@@ -8,6 +8,9 @@ import threading
 from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import warnings
+
+import pybase64 as base64
 import numpy as np
 import numpy.typing as npt
 import torch
@@ -466,6 +469,23 @@ def async_tensor_h2d(
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=target_device, non_blocking=True)
+
+
+def base64_to_tensor(data: str, dtype: torch.dtype) -> torch.Tensor:
+    """Efficiently convert base64 to torch tensor without non-writable warnings."""
+    decoded = base64.b64decode(data)
+    return from_buffer(decoded, dtype=dtype)
+
+
+def from_buffer(buffer: bytes | bytearray, dtype: torch.dtype) -> torch.Tensor:
+    """Efficiently convert buffer to torch tensor without non-writable warnings."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=UserWarning,
+            message="The given buffer is not writable",
+        )
+        return torch.frombuffer(buffer, dtype=dtype)
 
 
 def make_ndarray_with_pad(

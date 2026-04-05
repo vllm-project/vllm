@@ -11,6 +11,8 @@ import numpy.typing as npt
 import pybase64
 import torch
 
+from vllm.utils.torch_utils import from_buffer
+
 sys_byteorder = sys.byteorder
 
 
@@ -90,9 +92,15 @@ def binary2tensor(
 
     dtype_info = EMBED_DTYPES[embed_dtype]
 
-    np_array = np.frombuffer(binary, dtype=dtype_info.numpy_view_dtype).reshape(shape)
+    # Use from_buffer to avoid "non-writable buffer" warning
+    tensor = from_buffer(binary, dtype=dtype_info.torch_view_dtype).reshape(shape)
 
     if endianness != "native" and endianness != sys_byteorder:
-        np_array = np_array.byteswap()
+        # Since the tensor is from a read-only buffer, we need to copy it
+        # before we can byteswap it (if it's not already a copy).
+        # However, .byteswap() on a numpy view of a torch tensor might be tricky.
+        # Given this is a rare case (non-native endianness), we can afford a copy.
+        np_array = tensor.numpy().copy().byteswap()
+        return torch.from_numpy(np_array).view(dtype_info.torch_dtype)
 
-    return torch.from_numpy(np_array).view(dtype_info.torch_dtype)
+    return tensor.view(dtype_info.torch_dtype)
