@@ -233,6 +233,14 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
 
+        # Only emit the deferred count when non-zero to keep idle-system logs
+        # clean.  A non-zero value here means the scheduler is holding back
+        # requests due to a constraint (LoRA, async KV, blocked status) and is
+        # worth surfacing to the operator alongside the total waiting count.
+        if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
+            log_parts.append("Deferred: %d reqs")
+            log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
+
         log_parts.extend(
             [
                 "GPU KV cache usage: %.1f%%",
@@ -327,6 +335,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             )
             self.last_scheduler_stats.num_running_reqs += (
                 last_scheduler_stats.num_running_reqs
+            )
+            # Sum the deferred sub-population across engines just like the
+            # parent waiting count — the total skipped across all DP shards is
+            # the meaningful aggregate for cross-engine dashboards.
+            self.last_scheduler_stats.num_skipped_waiting_reqs += (
+                last_scheduler_stats.num_skipped_waiting_reqs
             )
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
@@ -451,6 +465,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_scheduler_waiting = create_metric_per_engine(
             gauge_scheduler_waiting, per_engine_labelvalues
+        )
+
+        # Subset of vllm:num_requests_waiting that were deferred during the
+        # most recent scheduling pass due to a transient constraint rather than
+        # lack of capacity.  Common causes include:
+        #   - LoRA adapter slot budget exhausted for this step
+        #   - Request waiting for an async remote KV-cache transfer to complete
+        #   - Request in a blocked/paused status (e.g. encoder-decoder pipeline)
+        #
+        # A sustained high value here (relative to num_requests_waiting) points
+        # to a resource constraint bottleneck.  A value near zero means the
+        # waiting queue is draining normally and backlog is simply load-driven.
+        gauge_scheduler_skipped_waiting = self._gauge_cls(
+            name="vllm:num_requests_skipped_waiting",
+            documentation=(
+                "Number of waiting requests deferred by the scheduler due to "
+                "a transient constraint (LoRA budget, async KV transfer, "
+                "blocked status).  Subset of vllm:num_requests_waiting."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_scheduler_skipped_waiting = create_metric_per_engine(
+            gauge_scheduler_skipped_waiting, per_engine_labelvalues
         )
 
         gauge_engine_sleep_state = self._gauge_cls(
@@ -1042,6 +1080,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs
+            )
+            # Expose the deferred sub-population so dashboards can split
+            # "waiting due to load" from "waiting due to constraint".
+            self.gauge_scheduler_skipped_waiting[engine_idx].set(
+                scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 

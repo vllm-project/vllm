@@ -1954,7 +1954,16 @@ class Scheduler(SchedulerInterface):
         )
         return SchedulerStats(
             num_running_reqs=len(self.running),
+            # Preserve the existing combined count so existing metrics and
+            # dashboards that read num_waiting_reqs are unaffected.
             num_waiting_reqs=len(self.waiting) + len(self.skipped_waiting),
+            # New: expose the skipped sub-population separately so operators
+            # can distinguish constraint-blocked requests from fresh arrivals.
+            # self.skipped_waiting holds requests that were popped from the
+            # waiting queue during a scheduling pass but re-queued because a
+            # transient constraint (LoRA budget, async KV load, blocked status)
+            # prevented allocation.  See Scheduler.schedule() for the push sites.
+            num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
