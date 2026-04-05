@@ -53,6 +53,7 @@ class TrtLlmFp8ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
+        self.moe_config = moe_config
         self.quant_config = quant_config
 
     @staticmethod
@@ -256,13 +257,18 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     ) -> bool:
         """
         The FlashInfer TRTLLM FP8 kernel expects bfloat16 router_logits by default.
-        Only DeepSeekV3 routing supports float32 router_logits (which is converted
-        internally in the kernel).
+        DeepSeekV3 routing supports float32 router_logits (converted internally).
+        Simulated routing generates synthetic decisions and is agnostic to dtype.
         """
         if router_logits_dtype == torch.float32:
-            # Only DeepSeekV3 routing handles float32 logits
+            # DeepSeekV3 routing handles float32 logits internally.
+            # Simulated routing generates synthetic decisions, so the
+            # kernel doesn't care about the actual logits dtype.
             # https://github.com/flashinfer-ai/flashinfer/issues/2469
-            return routing_method == RoutingMethodType.DeepSeekV3
+            return routing_method in (
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Simulated,
+            )
         return True
 
     @staticmethod
@@ -271,13 +277,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        """Monolithic kernels need to express router support.
-        Renormalize/RenormalizeNaive are excluded: the monolithic kernel's
-        internal routing for these methods produces output uncorrelated
-        with the modular kernel's output and with Triton kernel's output
-        for Qwen3.5-35B-A3B-FP8.
-        See: https://github.com/vllm-project/vllm/issues/37591
-        """
+        """Monolithic kernels need to express router support."""
         # NOTE(dbari): TopK routing could also be enabled, but need to validate models
         # NOTE(dbari): Default is not implemented and should not be enabled until it is
 
@@ -288,12 +288,18 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             # NOTE(rob): potentially allow others here. This is a conservative list.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Simulated,
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
             # NOTE(dbari): as above, potentially allow others here.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Llama4,
+                RoutingMethodType.Simulated,
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
             ]
         else:
             raise ValueError("Unsupported quantization scheme.")
@@ -398,6 +404,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         # The DeepSeekV3 routing method requires float32 router logits.
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
+
+        # Currently FI requires bfloat16 routing bias.
+        # https://github.com/flashinfer-ai/flashinfer/issues/2909
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
