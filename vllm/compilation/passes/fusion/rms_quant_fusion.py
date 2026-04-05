@@ -38,6 +38,30 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 
+def _node_or_tensor_dtype(value: Any) -> torch.dtype | None:
+    if isinstance(value, fx.Node):
+        node_val = value.meta.get("val")
+        if isinstance(node_val, torch.Tensor):
+            return node_val.dtype
+        tensor_meta = value.meta.get("tensor_meta")
+        if tensor_meta is not None:
+            return tensor_meta.dtype
+        return None
+    return value.dtype if isinstance(value, torch.Tensor) else None
+
+
+def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
+    # All RMSNorm+quant patterns use (input, weight, ...) as their first args.
+    if len(match.args) < 2:
+        return True
+    input_dtype = _node_or_tensor_dtype(match.args[0])
+    weight_dtype = _node_or_tensor_dtype(match.args[1])
+    # If dtype metadata is unavailable, keep previous behavior.
+    if input_dtype is None or weight_dtype is None:
+        return True
+    return input_dtype == weight_dtype
+
+
 def empty_bf16(*args: Any, **kwargs: Any) -> torch.Tensor:
     return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
 
@@ -186,7 +210,14 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
         ]
         pattern(*inputs)
 
-        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
+        )
 
 
 class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
@@ -249,6 +280,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -350,6 +382,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             self.rmsnorm_matcher.inputs() + [scale],
             pm.fwd_only,
             pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -445,6 +478,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             ],
             pm.fwd_only,
             pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -503,6 +537,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             ],
             pm.fwd_only,
             pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -559,6 +594,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             self.rmsnorm_matcher.inputs(),
             pm.fwd_only,
             pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 

@@ -386,9 +386,8 @@ class GemmaRMSNorm(CustomOp):
         weight = self.weight.data.float() + 1.0
         if residual is None:
             # compute rms+weight in fp32, cast once at the end.
-            return ir.ops.rms_norm(x.float(), weight, self.variance_epsilon).to(
-                orig_dtype
-            )
+            out = ir.ops.rms_norm(x.float(), weight, self.variance_epsilon)
+            return out.to(orig_dtype)
 
         x = (
             x.float() + residual.float()
@@ -396,7 +395,8 @@ class GemmaRMSNorm(CustomOp):
             else x + residual
         )
         residual = x
-        out = ir.ops.rms_norm(x.float(), weight, self.variance_epsilon).to(orig_dtype)
+        out = ir.ops.rms_norm(x.float(), weight, self.variance_epsilon)
+        out = out.to(orig_dtype)
         return out, residual
 
     def forward_cuda(
