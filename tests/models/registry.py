@@ -760,8 +760,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
+    "AudioFlamingoNextForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/audio-flamingo-next-hf", min_transformers_version="5.6.0"
+    ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
+        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.5.0"
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
