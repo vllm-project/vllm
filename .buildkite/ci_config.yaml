@@ -8,7 +8,7 @@ run_all_patterns:
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/cuda.txt"
-  - "requirements/build.txt"
+  - "requirements/build/cuda.txt"
   - "requirements/test/cuda.txt"
   - "setup.py"
   - "csrc/"

@@ -107,10 +107,10 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
     fi
 
 # Copy build requirements
-COPY requirements/cpu-build.txt requirements/build.txt
+COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/build.txt
+    uv pip install -r requirements/build/cpu.txt
 
 COPY . .
 
