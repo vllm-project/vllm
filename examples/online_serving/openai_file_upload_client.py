@@ -113,8 +113,11 @@ def _ask(model: str, prefix: str, file_id: str, prompt: str) -> str:
 
 
 def run(path: Path, custom_prompt: str | None) -> None:
-    model = get_first_model(client)
+    # Validate modality before connecting to the server — unsupported
+    # file types fail fast with a clear error, without waiting on a
+    # network round-trip.
     prefix = _detect_modality(path)
+    model = get_first_model(client)
 
     # 1. Upload the local file once. The server streams it to disk and
     #    returns a 128-bit capability handle (file-<32 hex>).
