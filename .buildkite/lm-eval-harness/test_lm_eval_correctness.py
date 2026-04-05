@@ -53,7 +53,6 @@ def launch_lm_eval(eval_config, tp_size):
     backend = eval_config.get("backend", "vllm")
     enforce_eager = eval_config.get("enforce_eager", "true")
     kv_cache_dtype = eval_config.get("kv_cache_dtype", "auto")
-    mamba_backend = eval_config.get("mamba_backend", None)
     model_args = (
         f"pretrained={eval_config['model_name']},"
         f"tensor_parallel_size={tp_size},"
@@ -64,8 +63,6 @@ def launch_lm_eval(eval_config, tp_size):
         f"max_model_len={max_model_len},"
         "allow_deprecated_quantization=True,"
     )
-    if mamba_backend is not None:
-        model_args += f"mamba_backend={mamba_backend},"
 
     if current_platform.is_rocm() and "Nemotron-3" in eval_config["model_name"]:
         model_args += "attention_backend=TRITON_ATTN"
