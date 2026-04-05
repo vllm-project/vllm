@@ -124,6 +124,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
+    VLLM_DISABLE_CUTLASS_BLOCK_FP8: bool = False
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
@@ -1045,6 +1046,30 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+    # Disable CUTLASS block FP8 kernel and use Triton instead
+    # Default to disabled (1) on sm103 (Blackwell), enabled (0) otherwise
+    # Note: CUTLASS block FP8 on sm103 can cause accuracy issues, so we default
+    # to using Triton kernel which provides better numerical stability
+    "VLLM_DISABLE_CUTLASS_BLOCK_FP8": lambda: (
+        bool(
+            int(
+                os.getenv(
+                    "VLLM_DISABLE_CUTLASS_BLOCK_FP8",
+                    (
+                        lambda: (
+                            "1"
+                            if (
+                                __import__("torch").cuda.is_available()
+                                and __import__("torch").cuda.get_device_capability()
+                                == (10, 3)
+                            )
+                            else "0"
+                        )
+                    )(),
+                )
+            )
+        )
+    ),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
     # Whether to use the shuffled kv cache layout
