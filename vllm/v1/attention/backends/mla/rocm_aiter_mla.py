@@ -368,6 +368,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
         self._needs_head_repeat = num_heads < 16
         self._head_repeat_factor = 16 // num_heads if num_heads < 16 else 1
+        self._is_fp8_kv_cache = kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
@@ -410,7 +411,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
 
-        if self._needs_head_repeat:
+        # AITER's ASM kernel works with nhead=4 natively for BF16
+        # (confirmed by rocm_aiter_mla_sparse.py which calls with nhead=4).
+        # For FP8, AITER's get_block_n_fp8 dict lacks nhead*max_seqlen_q=4,
+        # so we must pad to nhead=16 via repeat_interleave.
+        use_head_repeat = self._needs_head_repeat and self._is_fp8_kv_cache
+
+        if use_head_repeat:
             q = q.repeat_interleave(self._head_repeat_factor, dim=1)
             kernel_num_heads = 16
         else:
@@ -446,7 +453,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             reduce_partial_map=attn_metadata.reduce_partial_map,
         )
 
-        if self._needs_head_repeat:
+        if use_head_repeat:
             o = o[:, :: self._head_repeat_factor, :]
 
         return o, None
