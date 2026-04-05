@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVQuantMode
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
@@ -1004,12 +1005,19 @@ def _get_tile_size(
     """
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
-        return 32
+        tile_size = 32
+    else:
+        # Default behavior
+        if is_prefill:
+            tile_size = 32
+        else:
+            tile_size = 16 if element_size >= 2 else 32
 
-    # Default behavior
-    if is_prefill:
-        return 32
-    return 16 if element_size >= 2 else 32
+    # Hardware-aware safety check for large head dimensions on older GPUs
+    if tile_size == 32 and head_size >= 512 and get_max_shared_memory_bytes() < 98304:
+        tile_size = 16
+
+    return tile_size
 
 
 def unified_attention(
