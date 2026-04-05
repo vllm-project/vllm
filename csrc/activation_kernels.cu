@@ -79,16 +79,19 @@ __global__ void act_and_mul_kernel(
 
 template <typename T>
 __device__ __forceinline__ T silu_kernel(const T& x) {
+  const float xf = static_cast<float>(x);
   // x * sigmoid(x)
-  return (T)(((float)x) / (1.0f + expf((float)-x)));
+  // early return for zero
+  return static_cast<T>((xf == 0.0f) ? 0.0f : xf / (1.0f + expf(-xf)));
 }
 
 template <typename packed_t>
 __device__ __forceinline__ packed_t packed_silu_kernel(const packed_t& val) {
-  // x * sigmoid(x)
   float2 fval = cast_to_float2(val);
-  fval.x = fval.x / (1.0f + expf(-fval.x));
-  fval.y = fval.y / (1.0f + expf(-fval.y));
+  // x * sigmoid(x)
+  // early return for zero per lane
+  fval.x = (fval.x == 0.0f) ? 0.0f : fval.x / (1.0f + expf(-fval.x));
+  fval.y = (fval.y == 0.0f) ? 0.0f : fval.y / (1.0f + expf(-fval.y));
   return cast_to_packed<packed_t>(fval);
 }
 
