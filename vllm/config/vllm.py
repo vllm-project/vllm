@@ -1223,7 +1223,10 @@ class VllmConfig:
         if not current_platform.support_hybrid_kv_cache():
             # Hybrid KV cache manager is not supported on non-GPU platforms.
             need_disable_hybrid_kv_cache_manager = True
-        if self.kv_events_config is not None:
+        if (
+            self.kv_events_config is not None
+            and self.kv_events_config.enable_kv_cache_events
+        ):
             # Hybrid KV cache manager is not compatible with KV events.
             need_disable_hybrid_kv_cache_manager = True
         if (
