@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
+from vllm.utils.torch_utils import current_stream
 
 from .utils import _get_lora_device, try_get_optimal_moe_lora_config
 
@@ -172,20 +173,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"
                 ]
-                result = func(*args, **kwargs)
-                return result
 
-            return wrapper
-
-        def act_decorator(layer, func):
-            def wrapper(*args, **kwargs):
-                _, output, input = args
-
-                hidden_states = moe_state_dict["hidden_states"]
-                topk_weights = moe_state_dict["topk_weights"]
-                curr_topk_ids = moe_state_dict["topk_ids"]
-
-                expert_map = moe_state_dict["expert_map"]
+                hidden_states = kwargs["hidden_states"]
+                topk_weights = kwargs["topk_weights"]
+                curr_topk_ids = kwargs["topk_ids"]
+                expert_map = kwargs["expert_map"]
 
                 config_dtype = _get_config_dtype_str(
                     dtype=hidden_states.dtype,
@@ -207,8 +199,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     config_dtype=config_dtype,
                 )
 
-                # SPARSITY_FACTOR is a heuristic margin ensuring tokens * top_k
-                # activates only a small fraction of total experts * loras.
                 SPARSITY_FACTOR = 8
                 naive_block_assignment = (
                     expert_map is None
@@ -216,7 +206,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     <= self.base_layer.local_num_experts * self.max_loras
                 )
 
-                # get the block size of m from customized config or default config
                 (
                     token_lora_mapping,
                     sorted_token_ids_lora,
@@ -240,31 +229,59 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 )
                 moe_state_dict["token_lora_mapping"] = token_lora_mapping
 
-                if sorted_token_ids_lora is not None:
-                    expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                    sorted_token_ids_lora = sorted_token_ids_lora.view(
-                        self.max_loras, -1
-                    )
-                #
+                # Calculate w13 output shape - must match intermediate tensor shape
+                top_k_num = curr_topk_ids.size(1)
+                N = sum(b.shape[-2] for b in self.w13_lora_b_stacked)
+                lora_delta_w13 = torch.zeros(
+                    (num_tokens, top_k_num, N),
+                    device=hidden_states.device,
+                    dtype=hidden_states.dtype,
+                )
+                moe_state_dict["lora_delta_w13"] = lora_delta_w13
+
+                # Launch LoRA w13 on separate stream
+                lora_stream = self.punica_wrapper.lora_stream
+                lora_stream.wait_stream(current_stream())
+                # hidden_states.record_stream(self.lora_stream)
+                with torch.cuda.stream(lora_stream):
+                    result = func(*args, **kwargs)
 
                 self.punica_wrapper.add_lora_fused_moe(
-                    input.view(-1, top_k, input.shape[-1]),
+                    lora_delta_w13,
                     hidden_states,
                     self.w13_lora_a_stacked,
                     self.w13_lora_b_stacked,
                     topk_weights,
-                    sorted_token_ids_lora,
-                    expert_ids_lora,
+                    sorted_token_ids_lora.view(self.max_loras, -1)
+                    if sorted_token_ids_lora is not None
+                    else None,
+                    expert_ids_lora.view(self.max_loras, -1)
+                    if expert_ids_lora is not None
+                    else None,
                     num_tokens_post_padded_lora,
                     max_lora_rank,
                     top_k,
-                    shrink_config,  ## pass the shrink config
-                    expand_config,  ## pass the expand config
+                    shrink_config,
+                    expand_config,
                     self.adapter_enabled,
                     fully_sharded=self.fully_sharded,
                     token_lora_mapping=token_lora_mapping,
                 )
 
+                # Launch base MoE (runs in parallel with LoRA!)
+                # result = func(*args, **kwargs)
+                current_stream().wait_stream(lora_stream)
+                return result
+
+            return wrapper
+
+        def act_decorator(layer, func):
+            def wrapper(*args, **kwargs):
+                _, output, input = args
+                lora_delta_w13 = moe_state_dict.get("lora_delta_w13")
+                if lora_delta_w13 is not None:
+                    input.add_(lora_delta_w13.view(-1, lora_delta_w13.size(-1)))
+                # Apply activation
                 result = func(*args, **kwargs)
 
                 moe_state_dict["intermediate_cache2"] = output
