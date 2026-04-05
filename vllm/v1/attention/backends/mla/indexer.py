@@ -286,6 +286,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.offsets_buffer = torch.arange(
             next_n, device=self.device, dtype=torch.int32
         )
+        self.decode_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
         if not self.use_flattening and next_n > 1:
             # Native MTP: 2D buffer for per-token seq_lens.
             # Flattening path is never used, so no expanded_seq_lens_buffer.
