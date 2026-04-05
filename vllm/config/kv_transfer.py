@@ -64,6 +64,13 @@ class KVTransferConfig:
     """The Python module path to dynamically load the KV connector from.
     Only supported in V1."""
 
+    kv_connector_class_name: str | None = None
+    """The class name of the KV connector to load from kv_connector_module_path.
+    When set, this takes precedence over kv_connector as the class name,
+    allowing kv_connector to be used as an alias that avoids name conflicts
+    with built-in registered connectors. Only used when
+    kv_connector_module_path is also set."""
+
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
