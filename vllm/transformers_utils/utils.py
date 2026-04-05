@@ -9,6 +9,9 @@ from os import PathLike
 from pathlib import Path
 from typing import Any
 
+import huggingface_hub.errors
+import huggingface_hub.utils
+
 import vllm.envs as envs
 from vllm.logger import init_logger
 
@@ -29,6 +32,15 @@ def is_azure(model_or_path: str) -> bool:
 
 def is_cloud_storage(model_or_path: str) -> bool:
     return is_s3(model_or_path) or is_gcs(model_or_path) or is_azure(model_or_path)
+
+
+def is_hub_model(model_or_path: str) -> bool:
+    """Check if the string is a valid HuggingFace Hub model identifier."""
+    try:
+        huggingface_hub.utils.validate_repo_id(model_or_path)
+        return True
+    except huggingface_hub.errors.HFValidationError:
+        return False
 
 
 def without_trust_remote_code(kwargs: dict[str, Any]) -> dict[str, Any]:
