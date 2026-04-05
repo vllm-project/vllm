@@ -79,8 +79,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-HANDSHAKE_TIMEOUT_MINS = 5
-
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
@@ -1016,10 +1014,12 @@ class EngineCoreProc(EngineCore):
 
         # Receive initialization message.
         logger.debug("Waiting for init message from front-end.")
-        if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
+        handshake_timeout_mins = envs.VLLM_HANDSHAKE_TIMEOUT_MINS
+        if not handshake_socket.poll(
+                timeout=handshake_timeout_mins * 60_000):
             raise RuntimeError(
                 "Did not receive response from front-end "
-                f"process within {HANDSHAKE_TIMEOUT_MINS} "
+                f"process within {handshake_timeout_mins} "
                 f"minutes"
             )
         init_bytes = handshake_socket.recv()
