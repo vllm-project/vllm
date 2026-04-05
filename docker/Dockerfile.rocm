@@ -118,7 +118,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # RIXL/UCX build stages
 FROM base AS build_rixl
-ARG RIXL_BRANCH="56346270"
+ARG RIXL_BRANCH="56346271"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
 ARG UCX_BRANCH="06caea93"
 ARG UCX_REPO="https://github.com/ROCm/ucx.git"
