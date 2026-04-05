@@ -118,18 +118,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         self._sm_count = torch.cuda.get_device_properties(0).multi_processor_count
 
-    def _flash_attn_varlen_diff_headdims(
-        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
-    ):
-        return super()._flash_attn_varlen_diff_headdims(
-            q,
-            k,
-            v,
-            return_softmax_lse=return_softmax_lse,
-            softmax_scale=softmax_scale,
-            **kwargs,
-        )
-
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
