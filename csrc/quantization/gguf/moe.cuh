@@ -30,7 +30,7 @@ static __device__ __forceinline__ void moe_q(
   }
 
   const int exp_idx = expert_ids[blockIdx.y];
-  if (exp_idx > 255 || exp_idx < 0) return;
+  if (exp_idx < 0) return;
   if (blockIdx.y * mmq_x > num_tokens_post_padded[0]) return;
 
   const block_q_t* x = (const block_q_t*)((char*)vx + exp_idx * exp_stride);
