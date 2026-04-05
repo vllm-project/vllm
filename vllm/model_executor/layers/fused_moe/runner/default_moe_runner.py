@@ -18,6 +18,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -153,6 +154,8 @@ direct_register_custom_op(
 )
 
 
+# --8<-- [start:default_moe_runner]
+@PluggableLayer.register("default_moe_runner")
 class DefaultMoERunner(MoERunner):
     """
     Default implementation of the MoE runner for executing Mixture of Experts layers.
@@ -174,6 +177,8 @@ class DefaultMoERunner(MoERunner):
     Eventually, this class will be split up and specialized for different
     configurations, e.g. the presence or absence of shared experts, a gate, etc.
     """
+
+    # --8<-- [end:default_moe_runner]
 
     def __init__(
         self,
