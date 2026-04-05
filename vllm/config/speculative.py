@@ -134,6 +134,15 @@ class SpeculativeConfig:
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
 
+    # Rejection sampling control
+    acceptance_threshold: float = 0.0
+    """Threshold to bias rejection sampling toward accepting more draft tokens.
+    Must be in [0, 1]. The uniform probability used in rejection sampling is
+    scaled by (1 - acceptance_threshold). A value of 0 gives standard behavior,
+    while higher values make acceptance more likely, trading output quality for
+    speed. A value of 1.0 means all tokens are accepted.
+    Only affects random (non-greedy) sampling."""
+
     # Alternative drafting strategies
     speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
@@ -830,6 +839,12 @@ class SpeculativeConfig:
                 f"{self.method} is only supported for {aux_hidden_states_supported}"
                 f" models. Got {self.target_model_config.hf_text_config.model_type=}"
             )
+        if not (0 <= self.acceptance_threshold <= 1):
+            raise ValueError(
+                f"acceptance_threshold must be in [0, 1], "
+                f"got {self.acceptance_threshold}"
+            )
+
         self.verify_equal_vocab_size_if_draft_model()
         return self
 

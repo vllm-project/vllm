@@ -574,7 +574,10 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = RejectionSampler(
+                self.sampler,
+                acceptance_threshold=self.speculative_config.acceptance_threshold,
+            )
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
