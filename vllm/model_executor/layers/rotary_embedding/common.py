@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from importlib.util import find_spec
 
 import torch
 
@@ -134,10 +133,13 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        if find_spec("flash_attn") is not None:
-            from flash_attn.ops.triton.rotary import apply_rotary
-
+        try:
+            from flash_attn.ops.triton.rotary import apply_rotary  # noqa: F401
             self.apply_rotary_emb_flash_attn = apply_rotary
+        except (ImportError, ModuleNotFoundError):
+            # flash_attn.ops is not available in flash-attn-4, but still uses the
+            # flash_attn namespace
+            pass
 
     @staticmethod
     def forward_static(
