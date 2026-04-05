@@ -247,7 +247,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         for i, (shard_id, shard_size) in enumerate(
             zip(self.output_ids, self.output_slices)
         ):
-            if (lora_b_i := lora_b[i]) is not None:
+            # bounds check: lora_b may have fewer entries than n_slices
+            # in certain TP configurations (issue #36478, #36372)
+            if i < len(lora_b) and (lora_b_i := lora_b[i]) is not None:
                 sliced_lora_b[i] = lora_b_i[
                     shard_size * shard_id : shard_size * (shard_id + 1), :
                 ]
@@ -265,12 +267,15 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
-        for i in range(self.n_slices):
-            if (lora_a_i := lora_a[i]) is not None:
+        # Use zip instead of range(n_slices) so we don't index past the end
+        # of lora_a/lora_b when they have fewer entries than n_slices
+        # in certain TP configurations (issue #36478, #36372)
+        for i, (lora_a_i, lora_b_i) in enumerate(zip(lora_a, lora_b, strict=False)):
+            if lora_a_i is not None:
                 self.lora_a_stacked[i][
                     index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
                 ].copy_(lora_a_i, non_blocking=True)
-            if (lora_b_i := lora_b[i]) is not None:
+            if lora_b_i is not None:
                 self.lora_b_stacked[i][
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
@@ -396,8 +401,57 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         """
         The main reason for overloading this function is to handle inconsistent
         weight dimensions in qkv lora.
+
+        For GQA models (e.g. Qwen3, Llama3, Mistral) the Q projection has more
+        heads than K/V, so the three slices have different output sizes:
+            Q:  num_heads    * head_size  (e.g. 32 * 128 = 4096)
+            K:  num_kv_heads * head_size  (e.g.  8 * 128 = 1024)
+            V:  num_kv_heads * head_size  (e.g.  8 * 128 = 1024)
+
+        The parent class allocates lora_b_stacked using self.output_slices
+        which are already correct (q_proj_shard_size, kv_proj_shard_size,
+        kv_proj_shard_size). However it also uses a single lora_a shape for
+        all slices. We call super() which handles both correctly.
+
+        The critical thing this override guarantees is that lora_b_stacked[i]
+        has the right per-slice capacity so that set_lora() can copy per-slice
+        tensors of heterogeneous sizes without a shape mismatch (issue #36478).
         """
-        super().create_lora_weights(max_loras, lora_config, model_config)
+        self.lora_config = lora_config
+
+        lora_a_output_size_per_partition = (
+            lora_config.max_lora_rank
+            if not lora_config.fully_sharded_loras
+            else divide(lora_config.max_lora_rank, self.tp_size)
+        )
+
+        self.lora_a_stacked = tuple(
+            torch.zeros(
+                max_loras,
+                1,
+                lora_a_output_size_per_partition,
+                self.input_size,
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            )
+            for _ in range(self.n_slices)
+        )
+
+        # Allocate lora_b_stacked using the actual per-slice output sizes.
+        # self.output_slices = (q_proj_shard_size, kv_proj_shard_size,
+        #                       kv_proj_shard_size) set in __init__, which
+        # correctly accounts for GQA asymmetry.
+        self.lora_b_stacked = tuple(
+            torch.zeros(
+                max_loras,
+                1,
+                output_size,
+                lora_config.max_lora_rank,
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            )
+            for output_size in self.output_slices
+        )
 
     @classmethod
     @_not_fully_sharded_can_replace
