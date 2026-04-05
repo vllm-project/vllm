@@ -93,7 +93,7 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     for layer in model.modules():
         info = get_layerwise_info(layer)
 
-        # Skip if the layer has already been initialized (shared tensors)
+        # Skip if the layer has already been initialized
         if info.can_load():
             continue
 

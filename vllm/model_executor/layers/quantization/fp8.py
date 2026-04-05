@@ -1022,22 +1022,17 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
         # Minimize memory usage by writing quantized values into input buffer;
         # Linear processing guarantees that reads happen before writes
-        w2 = layer.w2_weight.view(dtype=fp8_dtype).view(2, *layer.w2_weight.shape)
-        for expert in range(layer.local_num_experts):
-            w2[0, expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert, :, :]
-            )
-        del layer.w2_weight
-        w2 = w2[0]
-
-        # Process w13 after w2 because w2 is smaller
         w13 = layer.w13_weight.view(dtype=fp8_dtype).view(2, *layer.w13_weight.shape)
+        w2 = layer.w2_weight.view(dtype=fp8_dtype).view(2, *layer.w2_weight.shape)
         for expert in range(layer.local_num_experts):
             w13[0, expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
                 layer.w13_weight[expert, :, :]
             )
-        del layer.w13_weight
-        w13 = w13[0]
+            w2[0, expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
+                layer.w2_weight[expert, :, :]
+            )
+        del layer.w13_weight, layer.w2_weight
+        w13, w2 = w13[0], w2[0]
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
