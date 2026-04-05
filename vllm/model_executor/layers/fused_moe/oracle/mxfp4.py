@@ -204,7 +204,7 @@ def select_mxfp4_moe_backend(
     triton_kernels_supported = has_triton_kernels() and (
         9,
         0,
-    ) <= current_platform.get_device_capability() < (11, 0)
+    ) <= current_platform.get_device_capability() < (13, 0)
 
     # LoRA: separate experts backend path
     if config.is_lora_enabled:
