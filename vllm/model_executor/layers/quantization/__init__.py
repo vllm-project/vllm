@@ -46,7 +46,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
     "fbgemm_fp8",
     "fp_quant",
-    "experts_int8",
 ]
 
 # The customized quantization methods which will be added to this dict.
