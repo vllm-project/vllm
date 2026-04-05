@@ -104,6 +104,30 @@ class Step3ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.think_end_token_id in input_ids
 
+    def reasoning_end_index(self, input_ids: Sequence[int]) -> int:
+        return next(
+            (
+                i
+                for i, token_id in enumerate(input_ids)
+                if token_id == self.think_end_token_id
+            ),
+            -1,
+        )
+
+    def reasoning_end_delta_index(
+        self,
+        previous_input_ids: Sequence[int],
+        delta_ids: Sequence[int],
+    ) -> int:
+        return next(
+            (
+                i
+                for i, token_id in enumerate(delta_ids)
+                if token_id == self.think_end_token_id
+            ),
+            -1,
+        )
+
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:

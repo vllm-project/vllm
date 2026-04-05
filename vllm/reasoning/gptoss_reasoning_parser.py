@@ -84,21 +84,24 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_max_num_between_tokens = 20
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        return self.reasoning_end_index(input_ids) != -1
+
+    def reasoning_end_index(self, input_ids: Sequence[int]) -> int:
         end_token_ids_prefix = self.reasoning_end_token_ids_prefix
         end_token_ids_suffix = self.reasoning_end_token_ids_suffix
         assert len(end_token_ids_prefix) > 0, "reasoning_end_token_ids_prefix is empty"
         assert len(end_token_ids_suffix) > 0, "reasoning_end_token_ids_suffix is empty"
-        # Check if the end sequence is present in the input_ids.
-        # We search from the end of input_ids to find the last match.
+        # Search from the end to find the latest valid reasoning/content
+        # transition in the full token sequence.
         for i in range(len(input_ids) - len(end_token_ids_prefix), -1, -1):
             if input_ids[i] == self.eom_token_id:
                 # We looped backwards far enough to find the end of a previous message,
                 # which means we have searched the entirety of the current message
                 # and can exit early without searching further back into prior
                 # messages of the conversation.
-                return False
+                return -1
             if input_ids[i : i + len(end_token_ids_prefix)] == end_token_ids_prefix:
-                # We have found the prefix, now we look for the suffix after the prefix.
+                # We have found the prefix, now we look for the suffix after it.
                 suffix_start = i + len(end_token_ids_prefix)
                 for j in range(
                     suffix_start, len(input_ids) - len(end_token_ids_suffix) + 1
@@ -109,8 +112,31 @@ class GptOssReasoningParser(ReasoningParser):
                         input_ids[j : j + len(end_token_ids_suffix)]
                         == end_token_ids_suffix
                     ):
-                        return True
-        return False
+                        return j + len(end_token_ids_suffix) - 1
+        return -1
+
+    def reasoning_end_delta_index(
+        self,
+        previous_input_ids: Sequence[int],
+        delta_ids: Sequence[int],
+    ) -> int:
+        if not delta_ids:
+            return -1
+
+        end_token_ids_prefix = self.reasoning_end_token_ids_prefix
+        end_token_ids_suffix = self.reasoning_end_token_ids_suffix
+        max_between = self.reasoning_max_num_between_tokens
+        assert len(end_token_ids_prefix) > 0, "reasoning_end_token_ids_prefix is empty"
+        assert len(end_token_ids_suffix) > 0, "reasoning_end_token_ids_suffix is empty"
+
+        lookbehind = len(end_token_ids_prefix) + max_between + len(end_token_ids_suffix)
+        prefix_tail = previous_input_ids[-lookbehind:] if lookbehind > 0 else ()
+        window = list(prefix_tail)
+        window.extend(delta_ids)
+
+        idx = self.reasoning_end_index(window)
+        delta_start = len(window) - len(delta_ids)
+        return idx - delta_start if idx != -1 else -1
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         _, content, _ = parse_chat_output(input_ids)

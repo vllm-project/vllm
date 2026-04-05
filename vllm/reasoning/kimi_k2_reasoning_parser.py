@@ -73,25 +73,44 @@ class KimiK2ReasoningParser(ReasoningParser):
         1. The end token (</think>)
         2. The tool section start token (<|tool_calls_section_begin|>)
         """
-        if self._identity_parser is not None:
-            return self._identity_parser.is_reasoning_end(input_ids)
+        return self.reasoning_end_index(input_ids) != -1
 
-        start_token_id = self._start_token_id
-        end_token_id = self._end_token_id
-        tool_section_start_token_id = self._tool_section_start_token_id
+    def reasoning_end_index(self, input_ids: Sequence[int]) -> int:
+        if self._identity_parser is not None:
+            return self._identity_parser.reasoning_end_index(input_ids)
 
         for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] == start_token_id:
-                return False
-            if input_ids[i] == end_token_id:
-                return True
-            # Implicit reasoning end via tool call section
+            if input_ids[i] == self._start_token_id:
+                return -1
+            if input_ids[i] == self._end_token_id:
+                return i
             if (
-                tool_section_start_token_id is not None
-                and input_ids[i] == tool_section_start_token_id
+                self._tool_section_start_token_id is not None
+                and input_ids[i] == self._tool_section_start_token_id
             ):
-                return True
-        return False
+                return i
+        return -1
+
+    def reasoning_end_delta_index(
+        self,
+        previous_input_ids: Sequence[int],
+        delta_ids: Iterable[int],
+    ) -> int:
+        if self._identity_parser is not None:
+            return self._identity_parser.reasoning_end_delta_index(
+                previous_input_ids, delta_ids
+            )
+
+        for i, token_id in enumerate(delta_ids):
+            # Check for explicit end token or implicit tool section start in delta
+            if token_id == self._end_token_id:
+                return i
+            if (
+                self._tool_section_start_token_id is not None
+                and token_id == self._tool_section_start_token_id
+            ):
+                return i
+        return -1
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -99,21 +118,7 @@ class KimiK2ReasoningParser(ReasoningParser):
         """
         Check if the reasoning content ends in the input_ids on a decode step.
         """
-        if self._identity_parser is not None:
-            return self._identity_parser.is_reasoning_end_streaming(
-                input_ids, delta_ids
-            )
-
-        # Materialize iterable for membership checks
-        delta_ids_set = set(delta_ids)
-
-        # Check for explicit end token or implicit tool section start in delta
-        if self._end_token_id in delta_ids_set:
-            return True
-        return (
-            self._tool_section_start_token_id is not None
-            and self._tool_section_start_token_id in delta_ids_set
-        )
+        return self.reasoning_end_delta_index(input_ids, delta_ids) != -1
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

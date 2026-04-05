@@ -1,40 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
 
-from transformers import PreTrainedTokenizerBase
-
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser
+from vllm.reasoning import (
+    ReasoningParser,
+)
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
-
-from .identity_reasoning_parser import IdentityReasoningParser
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
-class DeepSeekV3ReasoningParser(ReasoningParser):
+class Holo2ReasoningParser(ReasoningParser):
     """
-    V3 parser that delegates to either DeepSeekR1ReasoningParser or
-    IdentityReasoningParser based on `thinking` and `separate_reasoning`.
+    Reasoning parser for the Holo2 models which are based on Qwen3.
+
+    The Holo2 model uses <think>...</think> tokens to denote reasoning text but <think>
+    is part of the chat template. This parser extracts the reasoning content until
+    </think> in the model's output.
+
+    The model provides a switch to enable or disable reasoning
+    output via the 'thinking=False' parameter.
+
+    Chat template args:
+    - thinking: Whether to enable reasoning output (default: True)
+
+
+    Parsing rules on model output:
+        - thinking == False
+            -> Model output is treated as purely the content |content|
+        - thinking == True
+            -> Model output is |reasoning_content|</think>|content|
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = bool(chat_kwargs.get("thinking", False))
-        enable_thinking = bool(chat_kwargs.get("enable_thinking", False))
-        thinking = thinking or enable_thinking
+        # Deepseek V3 and Holo2 are similar. However, Holo2 models think by default.
+        # this parser without user specified chat template args is initiated once for
+        # all requests in the structured output manager. So it is important that without
+        # user specified chat template args, the default thinking is True.
 
-        self._parser: ReasoningParser
+        thinking = bool(chat_kwargs.get("thinking", True))
+        enable_thinking = bool(chat_kwargs.get("enable_thinking", True))
+        thinking = thinking and enable_thinking
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:
@@ -54,7 +71,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.reasoning_end_delta_index(previous_input_ids, delta_ids)
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
@@ -62,7 +79,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.extract_content_ids(input_ids)
 
     def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
+        self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[str | None, str | None]:
         return self._parser.extract_reasoning(model_output, request)
 
@@ -74,7 +91,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> "DeltaMessage | None":
+    ) -> DeltaMessage | None:
         return self._parser.extract_reasoning_streaming(
             previous_text,
             current_text,
@@ -83,19 +100,3 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
             current_token_ids,
             delta_token_ids,
         )
-
-
-class DeepSeekV3ReasoningWithThinkingParser(DeepSeekV3ReasoningParser):
-    """
-    DeepSeekV3ReasoningParser that defaults to thinking mode.
-    """
-
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
-        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = chat_kwargs.get("thinking", None)
-        enable_thinking = chat_kwargs.get("enable_thinking", None)
-        if thinking is None and enable_thinking is None:
-            chat_kwargs["thinking"] = True
-            chat_kwargs["enable_thinking"] = True
-            kwargs["chat_template_kwargs"] = chat_kwargs
-        super().__init__(tokenizer, *args, **kwargs)

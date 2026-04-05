@@ -2679,6 +2679,123 @@ class GPUModelRunner(
         ]
         return logits_indices_padded
 
+    def _clip_spec_decode_metadata_for_transition(
+        self,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> SpecDecodeMetadata | None:
+        if spec_decode_metadata is None:
+            return None
+        if not scheduler_output.num_invalid_spec_tokens:
+            return spec_decode_metadata
+
+        scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        if not scheduled_spec_tokens:
+            return spec_decode_metadata
+
+        effective_num_draft_tokens: list[int] = []
+        changed = False
+        for req_id, orig_num_draft_tokens in zip(
+            self.input_batch.req_ids, spec_decode_metadata.num_draft_tokens
+        ):
+            if orig_num_draft_tokens == 0:
+                effective_num_draft_tokens.append(0)
+                continue
+
+            spec_token_ids = scheduled_spec_tokens.get(req_id)
+            if spec_token_ids is None:
+                effective_num_draft_tokens.append(orig_num_draft_tokens)
+                continue
+
+            effective_num_draft_tokens_i = next(
+                (i for i, token_id in enumerate(spec_token_ids) if token_id == -1),
+                len(spec_token_ids),
+            )
+            effective_num_draft_tokens_i = min(
+                effective_num_draft_tokens_i, orig_num_draft_tokens
+            )
+            effective_num_draft_tokens.append(effective_num_draft_tokens_i)
+            changed |= effective_num_draft_tokens_i != orig_num_draft_tokens
+
+        if not changed:
+            return spec_decode_metadata
+
+        draft_token_slices: list[torch.Tensor] = []
+        target_logits_index_slices: list[torch.Tensor] = []
+        logits_index_slices: list[torch.Tensor] = []
+        bonus_logits_indices: list[torch.Tensor] = []
+
+        draft_offset = 0
+        for req_idx, (orig_num_draft_tokens, effective_num_draft_tokens_i) in enumerate(
+            zip(
+                spec_decode_metadata.num_draft_tokens,
+                effective_num_draft_tokens,
+            )
+        ):
+            next_draft_offset = draft_offset + orig_num_draft_tokens
+
+            if effective_num_draft_tokens_i > 0:
+                draft_slice = spec_decode_metadata.draft_token_ids[
+                    draft_offset : draft_offset + effective_num_draft_tokens_i
+                ]
+                target_slice = spec_decode_metadata.target_logits_indices[
+                    draft_offset : draft_offset + effective_num_draft_tokens_i
+                ]
+                draft_token_slices.append(draft_slice)
+                target_logits_index_slices.append(target_slice)
+                logits_index_slices.append(target_slice)
+
+            if effective_num_draft_tokens_i < orig_num_draft_tokens:
+                bonus_index = spec_decode_metadata.target_logits_indices[
+                    draft_offset + effective_num_draft_tokens_i
+                ]
+            else:
+                bonus_index = spec_decode_metadata.bonus_logits_indices[req_idx]
+            bonus_index = bonus_index.unsqueeze(0)
+            bonus_logits_indices.append(bonus_index)
+            logits_index_slices.append(bonus_index)
+            draft_offset = next_draft_offset
+
+        device = spec_decode_metadata.draft_token_ids.device
+        draft_token_ids = (
+            torch.cat(draft_token_slices)
+            if draft_token_slices
+            else torch.empty(0, dtype=torch.int32, device=device)
+        )
+        target_logits_indices = (
+            torch.cat(target_logits_index_slices)
+            if target_logits_index_slices
+            else torch.empty(0, dtype=torch.int32, device=device)
+        )
+        logits_indices = torch.cat(logits_index_slices)
+        bonus_logits_indices_tensor = torch.cat(bonus_logits_indices)
+
+        cu_num_draft_tokens = torch.tensor(
+            np.cumsum(effective_num_draft_tokens, dtype=np.int32),
+            device=device,
+        )
+        cu_num_sampled_tokens = torch.tensor(
+            np.cumsum(
+                np.asarray(effective_num_draft_tokens, dtype=np.int32) + 1,
+                dtype=np.int32,
+            ),
+            device=device,
+        )
+
+        clipped_metadata = SpecDecodeMetadata(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=effective_num_draft_tokens,
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            cu_num_sampled_tokens=cu_num_sampled_tokens,
+            target_logits_indices=target_logits_indices,
+            bonus_logits_indices=bonus_logits_indices_tensor,
+            logits_indices=logits_indices,
+        )
+        # Preserve the padded output width expected by downstream speculative
+        # decoding paths even when this step clips the effective draft prefix.
+        clipped_metadata.max_spec_len = spec_decode_metadata.max_spec_len
+        return clipped_metadata
+
     def _batch_mm_inputs_from_scheduler(
         self,
         scheduler_output: "SchedulerOutput",
@@ -4150,6 +4267,9 @@ class GPUModelRunner(
         if grammar_output is not None:
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
+            )
+            spec_decode_metadata = self._clip_spec_decode_metadata_for_transition(
+                scheduler_output, spec_decode_metadata
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
