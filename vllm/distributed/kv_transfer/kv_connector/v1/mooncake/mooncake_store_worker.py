@@ -41,8 +41,9 @@ from .mooncake_store_scheduler import get_zmq_rpc_path_lookup
 
 logger = init_logger(__name__)
 
-DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1 GiB
-DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1 GiB
+DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
+DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
+MOONCAKE_NO_AVAILABLE_HANDLE = -200
 
 
 @dataclass
@@ -219,6 +220,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.enable_kv_event = enable_kv_event
 
+        # Pause store requests when CPU/disk offloading is under pressure.
+        self._store_pressure_active = False
+        self._skip_store_requests: set[str] = set()
+
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
@@ -232,6 +237,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self.done_task_lock:
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
+            self._skip_store_requests.discard(req_id)
+
+    def _should_skip_request(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            return self._store_pressure_active and req_id in self._skip_store_requests
+
+    def _mark_request_skipped_for_pressure(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            already_skipped = req_id in self._skip_store_requests
+            self._store_pressure_active = True
+            self._skip_store_requests.add(req_id)
+        return already_skipped
+
+    def _clear_store_pressure(self) -> bool:
+        with self.done_task_lock:
+            if not self._store_pressure_active and not self._skip_store_requests:
+                return False
+            self._store_pressure_active = False
+            self._skip_store_requests.clear()
+        return True
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
@@ -240,6 +265,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         current_event = req_meta.current_event
 
         if req_id not in self.stored_requests:
+            self.request_queue.task_done()
+            return
+        if self._should_skip_request(req_id):
+            logger.debug(
+                "Skipping Mooncake store for request %s while CPU/disk offloading "
+                "is under pressure",
+                req_id,
+            )
+            self.dec_stored_request(req_id)
             self.request_queue.task_done()
             return
 
@@ -328,7 +362,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 # Compute total bytes attempted for this batch
                 total_bytes = sum(sum(s) if isinstance(s, list) else s for s in sizes)
                 failed_codes = set(res[i] for i in failed)
-                logger.error(
+                logger.warning(
                     "batch_put failed: %d/%d keys failed "
                     "(codes=%s, batch_bytes=%d, num_keys=%d), "
                     "first_key=%s",
@@ -338,6 +372,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     total_bytes,
                     len(keys),
                     keys[0] if keys else "N/A",
+                )
+                if (
+                    MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
+                    and not self._mark_request_skipped_for_pressure(req_id)
+                ):
+                    logger.warning(
+                        "Detected Mooncake CPU/disk offloading pressure "
+                        "(NO_AVAILABLE_HANDLE); skipping future store "
+                        "batches for request %s until a later store "
+                        "batch succeeds",
+                        req_id,
+                    )
+            elif self._clear_store_pressure():
+                logger.info(
+                    "Mooncake CPU/offload pressure cleared after a "
+                    "successful store batch"
                 )
         except Exception as e:
             logger.error("Failed to put key %s, error: %s", keys, e)
@@ -599,11 +649,15 @@ class MooncakeStoreWorker:
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, shape %s, "
-            "num_blocks: %d, block_len: %s",
+            "num_blocks: %d, block_len: %s, "
+            "per_key_bytes: %d, "
+            "num_segments: %d",
             self.use_mla,
             first_kv_cache.shape,
             self.num_blocks,
             list(set(self.block_len)),
+            sum(self.block_len),
+            len(self.kv_caches_base_addr),
         )
 
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
