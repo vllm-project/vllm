@@ -92,4 +92,5 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         initialize_online_processing(layer)
 
     @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None: ...
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
