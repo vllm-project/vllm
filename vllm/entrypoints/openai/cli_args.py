@@ -217,6 +217,10 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    health_port: int | None = None
+    """If set, start a dedicated health check process on this port. The
+    process responds to GET /health independently of the main event loop,
+    avoiding delays caused by a busy asyncio event loop."""
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[

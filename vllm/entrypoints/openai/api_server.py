@@ -607,10 +607,23 @@ async def build_and_serve(
 
     logger.info("Starting vLLM server on %s", listen_address)
 
+    health_port = getattr(args, "health_port", None)
+    engine_dead_shared = None
+    if health_port is not None:
+        engine_dead_shared = getattr(engine_client, "engine_dead_shared", None)
+        if engine_dead_shared is None:
+            logger.warning(
+                "--health-port is set but the engine client does not expose "
+                "engine_dead_shared; out-of-band health server will not start."
+            )
+            health_port = None
+
     return await serve_http(
         app,
         sock=sock,
         enable_ssl_refresh=args.enable_ssl_refresh,
+        health_port=health_port,
+        engine_dead_shared=engine_dead_shared,
         host=args.host,
         port=args.port,
         log_level=args.uvicorn_log_level,

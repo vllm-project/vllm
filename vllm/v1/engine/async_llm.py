@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import ctypes
+import multiprocessing
 import os
 import socket
 import time
@@ -174,6 +176,12 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self._client_count = client_count
+
+        # Shared flag for out-of-band health process (see --health-port).
+        # Written by the main process, read by the health subprocess.
+        self._engine_dead_shared: multiprocessing.Value = multiprocessing.Value(
+            ctypes.c_bool, False
+        )
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -1024,7 +1032,15 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core.resources.engine_dead or not self.is_running
+        dead = self.engine_core.resources.engine_dead or not self.is_running
+        if dead and not self._engine_dead_shared.value:
+            self._engine_dead_shared.value = True
+        return dead
+
+    @property
+    def engine_dead_shared(self) -> multiprocessing.Value:
+        """Shared multiprocessing.Value for the out-of-band health process."""
+        return self._engine_dead_shared
 
     @property
     def dead_error(self) -> BaseException:
