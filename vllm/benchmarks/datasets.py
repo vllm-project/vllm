@@ -2409,11 +2409,37 @@ class SonnetDataset(BenchmarkDataset):
         # Determine how many poem lines to use.
         num_input_lines = round((input_len - base_offset) / avg_len)
         num_prefix_lines = max(round((prefix_len - base_offset) / avg_len), 0)
+
+        if num_input_lines <= 0:
+            raise ValueError(
+                f"'input_len' ({input_len}) is too small to fit any poem "
+                f"lines after the base prompt ({base_offset} tokens). "
+                f"Please increase 'input_len'."
+            )
+        if num_input_lines <= num_prefix_lines:
+            raise ValueError(
+                f"'input_len' ({input_len}) leaves room for only "
+                f"{num_input_lines} poem line(s), which is not enough to "
+                f"exceed the prefix ({num_prefix_lines} line(s)). "
+                f"Please increase 'input_len' or decrease 'prefix_len'."
+            )
+
         prefix_lines = self.data[:num_prefix_lines]
 
+        _MAX_SAMPLE_ATTEMPTS = num_requests * 100
         samples = []
         ind = 0
+        attempts = 0
         while len(samples) < num_requests:
+            if attempts >= _MAX_SAMPLE_ATTEMPTS:
+                raise RuntimeError(
+                    f"Failed to generate {num_requests} samples after "
+                    f"{_MAX_SAMPLE_ATTEMPTS} attempts. The requested "
+                    f"'input_len' ({input_len}) may be too small relative "
+                    f"to the variance in poem line lengths. "
+                    f"Please increase 'input_len'."
+                )
+            attempts += 1
             extra_lines = random.choices(
                 self.data, k=num_input_lines - num_prefix_lines
             )
