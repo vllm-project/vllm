@@ -38,6 +38,11 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 
+def _rms_weight_dtype_matches_input(input: torch.Tensor, weight: torch.Tensor) -> bool:
+    # Fused RMSNorm quant kernels require homogeneous input/weight dtype.
+    return input.dtype == weight.dtype
+
+
 def empty_bf16(*args: Any, **kwargs: Any) -> torch.Tensor:
     return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
 
@@ -164,6 +169,10 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
         def replacement(
             input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> torch.Tensor:
+            if not _rms_weight_dtype_matches_input(input, weight):
+                result_rms = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
+                return self.quant_matcher(result_rms, scale)[0]
+
             result = torch.empty(
                 input.shape, device=input.device, dtype=self.quant_dtype
             )
@@ -219,6 +228,11 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             residual: torch.Tensor,
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            if not _rms_weight_dtype_matches_input(input, weight):
+                result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
+                result, _ = self.quant_matcher(result_rms, scale)
+                return result, residual
+
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
@@ -320,6 +334,32 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             residual: torch.Tensor,
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            if not _rms_weight_dtype_matches_input(input, weight):
+                result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
+                result = torch.empty(
+                    result_rms.shape,
+                    device=result_rms.device,
+                    dtype=self.quant_matcher.quant_key.dtype,
+                )
+                assert scale is not None
+                finfo = torch.finfo(self.quant_matcher.quant_key.dtype)
+                fp8_min = finfo.min
+                fp8_max = finfo.max
+                _, result, scale = auto_functionalized(
+                    self.quant_matcher.QUANT_OP,
+                    input=result_rms,
+                    output_q=result,
+                    output_s=scale,
+                    group_size=self.quant_matcher.quant_key.scale.group_shape[1],
+                    eps=1e-10,
+                    fp8_min=fp8_min,
+                    fp8_max=fp8_max,
+                    scale_ue8m0=self.quant_matcher.is_e8m0,
+                    dummy_is_scale_transposed=self.has_col_major_scales,
+                    dummy_is_tma_aligned=self.is_tma_aligned,
+                )
+                return result, residual, scale
+
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
@@ -414,6 +454,32 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         def replacement(
             input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            if not _rms_weight_dtype_matches_input(input, weight):
+                result_rms = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
+                result = torch.empty(
+                    result_rms.shape,
+                    device=result_rms.device,
+                    dtype=self.quant_matcher.quant_key.dtype,
+                )
+                assert scale is not None
+                finfo = torch.finfo(self.quant_matcher.quant_key.dtype)
+                fp8_min = finfo.min
+                fp8_max = finfo.max
+                _, result, scale = auto_functionalized(
+                    self.quant_matcher.QUANT_OP,
+                    input=result_rms,
+                    output_q=result,
+                    output_s=scale,
+                    group_size=self.quant_matcher.quant_key.scale.group_shape[1],
+                    eps=1e-10,
+                    fp8_min=fp8_min,
+                    fp8_max=fp8_max,
+                    scale_ue8m0=self.quant_matcher.is_e8m0,
+                    dummy_is_scale_transposed=self.has_col_major_scales,
+                    dummy_is_tma_aligned=self.is_tma_aligned,
+                )
+                return result, scale
+
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
@@ -474,6 +540,10 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
         def replacement(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            if not _rms_weight_dtype_matches_input(input, weight):
+                result_rms = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
+                return self.quant_matcher(result_rms)  # type: ignore[no-any-return]
+
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
@@ -533,6 +603,11 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         def replacement(
             input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            if not _rms_weight_dtype_matches_input(input, weight):
+                result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
+                result, scale = self.quant_matcher(result_rms)
+                return result, residual, scale
+
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
