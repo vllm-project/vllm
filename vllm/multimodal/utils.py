@@ -180,9 +180,9 @@ def group_and_batch_mm_items(
         pin_memory: Whether to pin memory for faster host-to-device transfer.
 
     Yields:
-        A tuple `(num_items, grouped_kwargs)`, where:
-        - `kwargs` is a dictionary of keyword arguments to pass to the model;
-        - `num_items` is the corresponding number of items.
+        A tuple `(num_items, kwargs)`, where:
+        - `num_items` is the corresponding number of items;
+        - `kwargs` is a dictionary of keyword arguments to pass to the model.
     """
     group_ids = [
         tuple(
@@ -231,10 +231,10 @@ def group_and_batch_mm_kwargs(
         pin_memory: Whether to pin memory for faster host-to-device transfer.
 
     Yields:
-        A tuple `(modality, num_items, grouped_kwargs)`, where:
+        A tuple `(modality, num_items, kwargs)`, where:
         - `modality` is the modality of the batch;
-        - `kwargs` is a dictionary of keyword arguments to pass to the model;
-        - `num_items` is the corresponding number of items.
+        - `num_items` is the corresponding number of items;
+        - `kwargs` is a dictionary of keyword arguments to pass to the model.
     """
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]

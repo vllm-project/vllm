@@ -1016,6 +1016,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """Given the HF-processed data, output the metadata of each field."""
         raise NotImplementedError
 
+    def get_mm_batcher(self):
+        from transformers import BatchFeature
+
+        from ..batcher import MultiModalFieldBatcher
+
+        return MultiModalFieldBatcher(
+            lambda data: self._get_mm_fields_config(BatchFeature(data), {})
+        )
+
     @abstractmethod
     def _get_prompt_updates(
         self,
