@@ -32,6 +32,7 @@ from openai.types.responses import (
     ResponseTextDoneEvent,
     response_text_delta_event,
 )
+from openai.types.responses.response import ResponseError
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
@@ -86,6 +87,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseFailedEvent,
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
@@ -330,6 +332,7 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> (
         AsyncGenerator[StreamingResponsesResponse, None]
         | ResponsesResponse
+        | ResponseFailedEvent
         | ErrorResponse
     ):
         error_check_ret = await self._check_model(request)
@@ -496,6 +499,69 @@ class OpenAIServingResponses(OpenAIServing):
         if request.store:
             self.msg_store[request.request_id] = messages
 
+        try:
+            return await self._create_response_with_result_generator(
+                request,
+                result_generator,
+                sampling_params=sampling_params,
+                context=context,
+                model_name=model_name,
+                tokenizer=tokenizer,
+                request_metadata=request_metadata,
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to create response for request %s", request.request_id
+            )
+            created_time = int(time.time())
+
+            # Best-effort extraction of input/output messages
+            # for debugging. Context may be partially populated.
+            input_messages: ResponseInputOutputMessage | None = None
+            output_messages: ResponseInputOutputMessage | None = None
+            if request.enable_response_messages:
+                try:
+                    if isinstance(context, HarmonyContext):
+                        input_messages = context.messages[: context.num_init_messages]
+                        output_messages = context.messages[context.num_init_messages :]
+                    elif hasattr(context, "input_messages"):
+                        input_messages = context.input_messages
+                        output_messages = context.output_messages
+                except Exception:
+                    pass
+
+            failed_response = ResponsesResponse.from_request(
+                request,
+                sampling_params,
+                model_name=model_name,
+                created_time=created_time,
+                output=[],
+                status="failed",
+                usage=None,
+                error=ResponseError(
+                    code="server_error",
+                    message=str(e),
+                ),
+                input_messages=input_messages,
+                output_messages=output_messages,
+            )
+            return ResponseFailedEvent(
+                response=failed_response,
+                type="response.failed",
+                sequence_number=0,
+            )
+
+    async def _create_response_with_result_generator(
+        self,
+        request: ResponsesRequest,
+        result_generator: AsyncGenerator[ConversationContext, None],
+        sampling_params: SamplingParams,
+        *,
+        context: ConversationContext,
+        model_name: str,
+        tokenizer: Any,
+        request_metadata: RequestResponseMetadata,
+    ) -> AsyncGenerator[StreamingResponsesResponse, None] | ResponsesResponse:
         if request.background:
             created_time = int(time.time())
             response = ResponsesResponse.from_request(
@@ -2010,6 +2076,29 @@ class OpenAIServingResponses(OpenAIServing):
                 error_json = self._convert_generation_error_to_streaming_response(e)
                 yield _increment_sequence_number_and_return(
                     TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                )
+                return
+            except Exception as e:
+                logger.exception("Error in responses stream generator.")
+                failed_response = ResponsesResponse.from_request(
+                    request,
+                    sampling_params,
+                    model_name=model_name,
+                    created_time=created_time,
+                    output=[],
+                    status="failed",
+                    usage=None,
+                    error=ResponseError(
+                        code="server_error",
+                        message=str(e),
+                    ),
+                )
+                yield _increment_sequence_number_and_return(
+                    ResponseFailedEvent(
+                        type="response.failed",
+                        sequence_number=-1,
+                        response=failed_response,
+                    )
                 )
                 return
 

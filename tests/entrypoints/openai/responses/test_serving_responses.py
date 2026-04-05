@@ -877,3 +877,63 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+class TestResponseFailedEventOnStreamingError:
+    """Tests that unexpected exceptions during streaming emit a
+    response.failed event instead of silently dropping the connection."""
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_emits_response_failed(self, monkeypatch):
+        """When _process_simple_streaming_events raises an unexpected
+        exception, responses_stream_generator should catch it and yield
+        a ResponseFailedEvent with status='failed'."""
+
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+
+        # Make _process_simple_streaming_events raise a ValueError
+        async def _exploding_processor(*args, **kwargs):
+            raise ValueError("SimpleContext only supports 5 outputs.")
+            # Make it a generator
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(
+            serving,
+            "_process_simple_streaming_events",
+            _exploding_processor,
+        )
+
+        async def result_generator():
+            yield None
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+
+        events = []
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+        ):
+            events.append(event)
+
+        event_types = [e.type for e in events]
+
+        # Must start with created + in_progress
+        assert event_types[0] == "response.created"
+        assert event_types[1] == "response.in_progress"
+
+        # Must end with response.failed (not response.completed)
+        assert event_types[-1] == "response.failed"
+        assert events[-1].response.status == "failed"
+        assert events[-1].response.error is not None
+        assert "SimpleContext only supports 5 outputs" in (
+            events[-1].response.error.message
+        )
