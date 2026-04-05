@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from vllm.v1.attention.ops.tq4_rotation import get_tq4_rotation
+from vllm.v1.attention.ops.tq4_rotation import _compute_rotation_cpu, get_tq4_rotation
 from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
 
 
@@ -36,27 +36,27 @@ class TestTQ4Rotation:
     def test_deterministic(self):
         R1 = get_tq4_rotation(128, device="cpu", seed=42)
         # Clear cache to force recomputation
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
         R2 = get_tq4_rotation(128, device="cpu", seed=42)
         assert torch.equal(R1, R2)
 
     def test_different_seeds_differ(self):
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
         R1 = get_tq4_rotation(128, device="cpu", seed=42)
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
         R2 = get_tq4_rotation(128, device="cpu", seed=99)
         assert not torch.equal(R1, R2)
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
 
     def test_preserves_norms(self):
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
         R = get_tq4_rotation(128, device="cpu")
         x = torch.randn(1000, 128)
         x_rot = x @ R.T
         norms_orig = torch.norm(x, dim=-1)
         norms_rot = torch.norm(x_rot, dim=-1)
         assert torch.allclose(norms_orig, norms_rot, atol=1e-4)
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
 
 
 class TestTQ4Quantization:
@@ -91,7 +91,7 @@ class TestTQ4Quantization:
     @pytest.mark.parametrize("head_dim", [64, 128])
     def test_mse_with_rotation(self, head_dim):
         """Rotation improves MSE by spreading energy uniformly."""
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
         R = get_tq4_rotation(head_dim, device="cpu")
         x = torch.randn(10000, head_dim)
         deq_no_rot = self._quantize_dequantize(x)
@@ -102,7 +102,7 @@ class TestTQ4Quantization:
         assert mse_with_rot < mse_no_rot * 1.5, (
             f"Rotation degraded quality: {mse_with_rot} vs {mse_no_rot}"
         )
-        get_tq4_rotation.cache_clear()
+        _compute_rotation_cpu.cache_clear()
 
     def test_compression_ratio(self):
         """TQ4 in int8 storage gives same footprint as INT8 per-token-head.

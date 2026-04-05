@@ -620,12 +620,19 @@ def triton_reshape_and_cache_flash_tq4(
     Reference: Zandieh et al., "TurboQuant: Online Vector Quantization with
     Near-optimal Distortion Rate", arXiv:2504.19874, 2025.
     """
+    head_size = key.shape[2]
+    head_size_v = value.shape[2]
+
     # Apply rotation pre-processing if rotation matrix is available.
+    # Only rotate dimensions that match the rotation matrix size.
+    # Keys always have head_size == rotation dim; values may differ
+    # in models with separate value head sizes (e.g., MQA variants).
     if rotation_matrix is not None:
-        # key: [num_tokens, num_kv_heads, head_size]
-        # rotation_matrix: [head_size, head_size]
         key = torch.matmul(key.float(), rotation_matrix.T).to(key.dtype)
-        value = torch.matmul(value.float(), rotation_matrix.T).to(value.dtype)
+        if head_size_v == head_size:
+            value = torch.matmul(
+                value.float(), rotation_matrix.T
+            ).to(value.dtype)
 
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
