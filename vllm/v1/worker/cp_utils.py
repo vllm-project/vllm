@@ -25,21 +25,25 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
-                    f"supported in {layer_impl.__class__.__name__}."
+                    f"supported in {layer_impl.__class__.__name__}. "
+                    "Try setting VLLM_ATTENTION_BACKEND to a compatible "
+                    "backend (e.g. FLASH_ATTN or FLASHINFER)."
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer_impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
+                    "DCP requires attention impls to return the softmax lse "
+                    f"for decode, but {layer_impl.__class__.__name__} does "
+                    "not support this. Try setting VLLM_ATTENTION_BACKEND to "
+                    "a compatible backend such as FLASH_ATTN, FLASHINFER, "
+                    "FLASHMLA, TRITON_MLA, CUTLASS_MLA, or FLASH_ATTN_MLA."
                 )
 
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
                     "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
+                    f"but {layer_impl.__class__.__name__} does not support "
+                    "PCP. Try setting VLLM_ATTENTION_BACKEND to a compatible "
+                    "backend (e.g. FLASH_ATTN or FLASHINFER)."
                 )
 
 
