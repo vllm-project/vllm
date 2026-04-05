@@ -107,12 +107,11 @@ class KVConnectorFactory:
         if connector_name is None:
             raise ValueError("Connector name is not set in KVTransferConfig")
         compat_sig = False
-        if connector_name in cls._registry:
-            connector_cls = cls._registry[connector_name]()
-        else:
-            connector_module_path = kv_transfer_config.kv_connector_module_path
-            if connector_module_path is None:
-                raise ValueError(f"Unsupported connector type: {connector_name}")
+        connector_module_path = kv_transfer_config.kv_connector_module_path
+        if connector_module_path is not None and not connector_module_path:
+            raise ValueError("kv_connector_module_path cannot be an empty string.")
+        if connector_module_path:
+            # External module path takes priority over internal registry.
             connector_module = importlib.import_module(connector_module_path)
             try:
                 connector_cls = getattr(connector_module, connector_name)
@@ -128,6 +127,10 @@ class KVConnectorFactory:
                     "Please update to include kv_cache_config as the second argument.",
                     connector_cls.__name__,
                 )
+        elif connector_name in cls._registry:
+            connector_cls = cls._registry[connector_name]()
+        else:
+            raise ValueError(f"Unsupported connector type: {connector_name}")
         return connector_cls, compat_sig
 
     @classmethod
