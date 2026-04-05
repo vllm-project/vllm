@@ -18,7 +18,11 @@ from .index import prepare_chunk_indices
 from .op import exp
 from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
-BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
+# BKV values are tile dimensions, not memory sizes. The Triton autotuner
+# compiles each (BK, BV, num_stages, num_warps) combination and skips any
+# that exceed available shared memory. Offer a generous range and let the
+# autotuner find the best fit for the hardware.
+BKV_LIST = [32, 64, 128]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
