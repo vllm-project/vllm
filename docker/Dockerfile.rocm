@@ -180,7 +180,12 @@ RUN git clone ${RIXL_REPO} /opt/rixl && \
     ninja install
 
 # Generate RIXL wheel
-RUN cd /opt/rixl && mkdir -p /app/install && \
+# Exclude libcore from auditwheel: it is a transitive gRPC dependency
+# that is not shipped in the wheel and varies across base images.
+RUN cd /opt/rixl && \
+    sed -i "s/--exclude 'libamdhip64\*'/--exclude 'libamdhip64*' --exclude 'libcore*'/" \
+        contrib/build-wheel.sh && \
+    mkdir -p /app/install && \
     ./contrib/build-wheel.sh \
         --output-dir /app/install \
         --rocm-dir ${ROCM_PATH} \
