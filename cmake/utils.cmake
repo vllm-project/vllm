@@ -112,9 +112,11 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
   elseif(${GPU_LANG} STREQUAL "HIP")
     #
     # Get common HIP/HIPCC flags from torch.
+    # Filter out any flags that contain warning patterns from offload-arch stderr,
+    # which can occur when building in Docker without GPU passthrough.
     #
     run_python(GPU_FLAGS
-      "import torch.utils.cpp_extension as t; print(';'.join(t.COMMON_HIP_FLAGS + t.COMMON_HIPCC_FLAGS))"
+      "import torch.utils.cpp_extension as t; flags=[f for f in t.COMMON_HIP_FLAGS + t.COMMON_HIPCC_FLAGS if '[WARNING]' not in f and '[stderr]' not in f]; print(';'.join(flags))"
       "Failed to determine torch nvcc compiler flags")
 
     list(APPEND GPU_FLAGS
