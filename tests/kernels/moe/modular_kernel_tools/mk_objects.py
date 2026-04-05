@@ -237,7 +237,7 @@ if has_mori():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
@@ -298,7 +298,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
 
 if has_aiter():
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
     )
 
@@ -367,7 +367,9 @@ else:
     CutlassExpertsFp8 = None
 
 if cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
 
     register_experts(
         CutlassExpertsFp4,

@@ -17,13 +17,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    TritonExperts,
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel

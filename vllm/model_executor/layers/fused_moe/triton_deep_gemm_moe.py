@@ -14,8 +14,8 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     _valid_deep_gemm_shape,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
-from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
 )

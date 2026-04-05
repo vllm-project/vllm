@@ -26,7 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
@@ -451,7 +451,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         if self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
                 rocm_aiter_fused_experts,
             )
 
@@ -640,7 +640,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             rocm_aiter_fused_experts,
         )
 
@@ -1149,7 +1149,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # Existing code for emulation/AITER paths
         if not self.emulate:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
                 rocm_aiter_fused_experts,
             )
 

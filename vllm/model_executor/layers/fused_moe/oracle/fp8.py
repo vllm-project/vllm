@@ -117,7 +117,7 @@ def backend_to_kernel_cls(
         return [TrtLlmFp8ExpertsMonolithic, TrtLlmFp8ExpertsModular]
 
     elif backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
@@ -138,14 +138,14 @@ def backend_to_kernel_cls(
         return [BatchedDeepGemmExperts]
 
     elif backend == Fp8MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
         return [MarlinExperts]
 
     elif backend == Fp8MoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
         )
 
@@ -159,7 +159,7 @@ def backend_to_kernel_cls(
         return [BatchedTritonExperts]
 
     elif backend == Fp8MoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
@@ -173,14 +173,14 @@ def backend_to_kernel_cls(
         return [TritonOrCutlassExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             CutlassBatchedExpertsFp8,
         )
 
         return [CutlassBatchedExpertsFp8]
 
     elif backend == Fp8MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsFp8,
         )
 
