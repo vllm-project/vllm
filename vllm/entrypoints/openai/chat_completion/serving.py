@@ -754,6 +754,8 @@ class OpenAIServingChat(OpenAIServing):
                         else:
                             current_token_ids = as_list(output.token_ids)
 
+                    suppressed_auto_tool_delta = False
+
                     if self.use_harmony:
                         delta_message, tools_streamed_flag = (
                             extract_harmony_streaming_delta(
@@ -969,6 +971,7 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_token_ids=delta_token_ids,
                                 request=request,
                             )
+                            suppressed_auto_tool_delta = delta_message is None
                             if delta_message and delta_message.tool_calls:
                                 tools_streamed[i] = True
                     # when only tool calls
@@ -983,6 +986,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta_token_ids=output.token_ids,
                             request=request,
                         )
+                        suppressed_auto_tool_delta = delta_message is None
                         if delta_message and delta_message.tool_calls:
                             tools_streamed[i] = True
 
@@ -1028,13 +1032,17 @@ class OpenAIServingChat(OpenAIServing):
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
                     if delta_message is None:
-                        # NOTE: If return_token_ids is enabled, we still need to
-                        # send a chunk with token_ids even if delta_message is None
-                        # to ensure all tokens are included in the response
-                        if (
-                            output.finish_reason is None
-                            and not request.return_token_ids
-                        ):
+                        # Keep metadata-only chunks only for finish events,
+                        # token_ids, or auto tool parser control tokens.
+                        should_emit_empty_delta_chunk = (
+                            output.finish_reason is not None
+                            or request.return_token_ids
+                            or (
+                                suppressed_auto_tool_delta
+                                and logprobs is not None
+                            )
+                        )
+                        if not should_emit_empty_delta_chunk:
                             continue
                         delta_message = DeltaMessage()
 
