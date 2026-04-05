@@ -342,8 +342,8 @@ def test_get_nans_in_logits(model_runner, dist_init):
         ],
         device=DEVICE_TYPE,
     )
-    result = model_runner._get_nans_in_logits(logits)
-    assert result == {"req_0": 0, "req_1": 0}
+    result = model_runner._get_nans_in_logits(logits, None)
+    np.testing.assert_array_equal(result, np.array([0, 0], dtype=np.int64))
 
     logits = torch.tensor(
         [
@@ -352,8 +352,8 @@ def test_get_nans_in_logits(model_runner, dist_init):
         ],
         device=DEVICE_TYPE,
     )
-    result = model_runner._get_nans_in_logits(logits)
-    assert result == {"req_0": 1, "req_1": 2}
+    result = model_runner._get_nans_in_logits(logits, None)
+    np.testing.assert_array_equal(result, np.array([1, 2], dtype=np.int64))
 
     logits = torch.tensor(
         [
@@ -362,11 +362,14 @@ def test_get_nans_in_logits(model_runner, dist_init):
         ],
         device=DEVICE_TYPE,
     )
-    result = model_runner._get_nans_in_logits(logits)
-    assert result == {"req_0": 0, "req_1": 2}
+    result = model_runner._get_nans_in_logits(logits, None)
+    np.testing.assert_array_equal(result, np.array([0, 2], dtype=np.int64))
 
-    result = model_runner._get_nans_in_logits(logits=None)
-    assert result == {"req_0": 0, "req_1": 0}
+    result = model_runner._get_nans_in_logits(
+        logits=None,
+        spec_decode_metadata=None,
+    )
+    np.testing.assert_array_equal(result, np.array([0, 0], dtype=np.int64))
 
     logits = torch.tensor(
         [
@@ -374,8 +377,8 @@ def test_get_nans_in_logits(model_runner, dist_init):
         ],
         device=DEVICE_TYPE,
     )
-    result = model_runner._get_nans_in_logits(logits)
-    assert result == {"req_0": 1, "req_1": 0}
+    result = model_runner._get_nans_in_logits(logits, None)
+    np.testing.assert_array_equal(result, np.array([1, 0], dtype=np.int64))
 
     logits = torch.tensor(
         [
@@ -385,8 +388,8 @@ def test_get_nans_in_logits(model_runner, dist_init):
         ],
         device=DEVICE_TYPE,
     )
-    result = model_runner._get_nans_in_logits(logits)
-    assert result == {"req_0": 2, "req_1": 0}
+    result = model_runner._get_nans_in_logits(logits, None)
+    np.testing.assert_array_equal(result, np.array([2, 0], dtype=np.int64))
 
 
 def test_update_states_no_changes(model_runner, dist_init):

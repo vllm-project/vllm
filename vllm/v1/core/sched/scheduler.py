@@ -1443,8 +1443,8 @@ class Scheduler(SchedulerInterface):
                         req_id,
                     )
 
-            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
-                request.num_nans_in_logits = num_nans_in_logits[req_id]
+            if num_nans_in_logits is not None and req_index < len(num_nans_in_logits):
+                request.num_nans_in_logits = int(num_nans_in_logits[req_index])
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)

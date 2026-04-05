@@ -195,8 +195,8 @@ class ModelRunnerOutput:
 
     ec_connector_output: ECConnectorOutput | None = None
 
-    # req_id -> num_nans_in_logits
-    num_nans_in_logits: dict[str, int] | None = None
+    # [num_reqs]
+    num_nans_in_logits: np.ndarray | None = None
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
