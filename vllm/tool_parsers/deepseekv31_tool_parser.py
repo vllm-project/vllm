@@ -215,10 +215,16 @@ class DeepSeekV31ToolParser(ToolParser):
                         if diff is str
                         else diff
                     )
-                    if '"}' not in delta_text:
+                    # Handle cases where `"` and `}` may arrive in
+                    # separate streaming deltas, so `"}` never appears
+                    # as a substring of a single delta_text.
+                    if "}" in delta_text:
+                        end_loc = delta_text.rindex("}")
+                        diff = delta_text[:end_loc] + "}"
+                    else:
+                        diff = delta_text.rstrip("\n`")
+                    if diff == "":
                         return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
                     logger.debug(
                         "Finishing tool and found diff that had not "
                         "been streamed yet: %s",
