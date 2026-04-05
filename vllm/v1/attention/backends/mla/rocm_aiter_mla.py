@@ -9,6 +9,7 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -25,6 +27,8 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+logger = init_logger(__name__)
 
 
 class AiterMLABackend(MLACommonBackend):
@@ -378,6 +382,146 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self._absorption_weights_ready = False
+        self._W_UK_T: torch.Tensor | None = None
+        self._W_UV_ctx: torch.Tensor | None = None
+
+    def _ensure_absorption_weights(self) -> None:
+        """Lazily extract W_UK^T and W_UV from kv_b_proj for Q absorption.
+
+        These are the same weights the decode path uses for the MQA approach.
+        We duplicate them here so that the prefill context path can compute
+        attention directly against the paged cache without expanding K/V
+        through kv_b_proj.
+        """
+        if self._absorption_weights_ready:
+            return
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            get_and_maybe_dequant_weights,
+        )
+
+        kv_b_w = get_and_maybe_dequant_weights(
+            self.kv_b_proj, out_dtype=torch.bfloat16
+        ).T.view(
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        W_UK = kv_b_w[..., : self.qk_nope_head_dim]
+        W_UV = kv_b_w[..., self.qk_nope_head_dim :]
+        self._W_UK_T = W_UK.permute(1, 2, 0).contiguous()  # [N, P, L]
+        self._W_UV_ctx = W_UV.transpose(0, 1).contiguous()  # [N, L, V]
+        self._absorption_weights_ready = True
+
+    def _compute_prefill_context(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: AiterMLAMetadata,
+        k_scale: torch.Tensor,
+    ):
+        """Use AITER mla_prefill_fwd for context attention.
+
+        Instead of the base class's chunk-by-chunk approach (gather cached KV,
+        expand through kv_b_proj, flash_attn, merge), this computes
+        absorbed-Q attention directly against the paged KV cache in a single
+        assembly kernel call, eliminating the expensive KV expansion.
+        """
+        prefill = attn_metadata.prefill
+        assert prefill is not None
+        ctx = prefill.chunked_context
+        assert ctx is not None
+
+        if prefill.q_data_type == current_platform.fp8_dtype():
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+            )
+
+        try:
+            from aiter.mla import mla_prefill_fwd
+        except ImportError:
+            return super()._compute_prefill_context(
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+            )
+
+        self._ensure_absorption_weights()
+        assert self._W_UK_T is not None and self._W_UV_ctx is not None
+
+        q_nope = q[..., : self.qk_nope_head_dim]
+        q_pe = q[..., self.qk_nope_head_dim :]
+        T, N, _ = q_nope.shape
+        L = self.kv_lora_rank
+
+        # q_nope: [T, N, P]  W_UK_T: [N, P, L] -> q_absorbed: [T, N, L]
+        q_absorbed = torch.bmm(
+            q_nope.transpose(0, 1), self._W_UK_T
+        ).transpose(0, 1)
+        q_mqa = torch.cat([q_absorbed, q_pe], dim=-1)  # [T, N, L+R]
+
+        iters = len(ctx.seq_tot)
+        batch_size = ctx.cu_seq_lens[0].shape[0] - 1
+        context_lens = torch.zeros(
+            batch_size, dtype=torch.int32, device=q.device
+        )
+        for i in range(iters):
+            cu = ctx.cu_seq_lens[i]
+            context_lens += (cu[1:] - cu[:-1]).int()
+
+        kv_indptr = torch.zeros(
+            batch_size + 1, dtype=torch.int32, device=q.device
+        )
+        torch.cumsum(context_lens, dim=0, out=kv_indptr[1:])
+
+        total_pages = int(kv_indptr[-1].item())
+        if total_pages == 0:
+            output = torch.zeros(
+                T, N, self.v_head_dim, dtype=q.dtype, device=q.device
+            )
+            lse = torch.full(
+                (N, T), float("-inf"), dtype=torch.float32, device=q.device
+            )
+            return output, lse
+
+        page_indices = torch.empty(
+            total_pages, dtype=torch.int32, device=q.device
+        )
+        max_ctx = max(int(context_lens.max().item()), 1)
+        _copy_page_indices_kernel[(batch_size,)](
+            page_indices,
+            prefill.block_table,
+            prefill.block_table.stride(0),
+            kv_indptr,
+            BLOCK_SIZE=triton.next_power_of_2(max_ctx),
+        )
+        kv_last_page_lens = torch.where(
+            context_lens > 0, 1, 0
+        ).int()  # block_size=1
+
+        o_compressed = torch.zeros(
+            T, N, L, dtype=torch.float32, device=q.device
+        )
+        kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
+
+        _, attn_lse = mla_prefill_fwd(
+            q_mqa,
+            kv_buffer,
+            o_compressed,
+            prefill.query_start_loc,
+            kv_indptr,
+            page_indices,
+            kv_last_page_lens,
+            prefill.max_query_len,
+            sm_scale=self.scale,
+        )
+
+        output = torch.bmm(
+            o_compressed.to(self._W_UV_ctx.dtype).transpose(0, 1),
+            self._W_UV_ctx,
+        ).transpose(0, 1)
+
+        lse = attn_lse.squeeze(-1).squeeze(1).transpose(0, 1).contiguous()
+
+        return output, lse
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs

@@ -464,6 +464,52 @@ def _rocm_aiter_mla_decode_fwd_fake(
     pass
 
 
+def _rocm_aiter_mla_prefill_fwd_impl(
+    q: torch.Tensor,
+    kv_buffer: torch.Tensor,
+    o: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    max_seqlen_qo: int,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
+    sm_scale: float = 1.0,
+    logit_cap: float = 0.0,
+    num_kv_splits: int | None = None,
+) -> None:
+    from aiter.mla import mla_prefill_fwd
+
+    mla_prefill_fwd(
+        q,
+        kv_buffer.view(-1, 1, 1, q.shape[-1]),
+        o,
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        max_seqlen_qo,
+        sm_scale=sm_scale,
+        logit_cap=logit_cap,
+        num_kv_splits=num_kv_splits,
+    )
+
+
+def _rocm_aiter_mla_prefill_fwd_fake(
+    q: torch.Tensor,
+    kv_buffer: torch.Tensor,
+    o: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    max_seqlen_qo: int,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
+    sm_scale: float = 1.0,
+    logit_cap: float = 0.0,
+    num_kv_splits: int | None = None,
+) -> None:
+    pass
+
+
 def _rocm_aiter_gemm_a8w8_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1309,6 +1355,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_mla_prefill_fwd",
+                op_func=_rocm_aiter_mla_prefill_fwd_impl,
+                mutates_args=["o"],
+                fake_impl=_rocm_aiter_mla_prefill_fwd_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_gemm_a8w8",
                 op_func=_rocm_aiter_gemm_a8w8_impl,
                 mutates_args=[],
@@ -1720,6 +1773,34 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+        )
+
+    @staticmethod
+    def mla_prefill_fwd(
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        sm_scale: float,
+        qo_indptr: torch.Tensor,
+        max_seqlen_qo: int,
+        kv_indptr: torch.Tensor | None = None,
+        kv_indices: torch.Tensor | None = None,
+        kv_last_page_lens: torch.Tensor | None = None,
+        logit_cap: float = 0.0,
+        num_kv_splits: int | None = None,
+    ):
+        torch.ops.vllm.rocm_aiter_mla_prefill_fwd(
+            q,
+            kv_buffer.view(-1, 1, 1, q.shape[-1]),
+            o,
+            qo_indptr,
+            max_seqlen_qo,
+            kv_indptr,
+            kv_indices,
+            kv_last_page_lens,
+            sm_scale=sm_scale,
+            logit_cap=logit_cap,
+            num_kv_splits=num_kv_splits,
         )
 
     @staticmethod
