@@ -509,7 +509,9 @@ def _support_torch_compile(
 
             rank = self.vllm_config.parallel_config.rank
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
-            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+            dev = torch.accelerator.current_device_index()
+            cache_dir = os.path.join(cache_dir,
+                                     f"rank_{rank}_{dp_rank}_dev{dev}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             if not envs.VLLM_DISABLE_COMPILE_CACHE:
                 loaded_fn = _try_load_aot_compiled_fn(self, aot_compilation_path)
