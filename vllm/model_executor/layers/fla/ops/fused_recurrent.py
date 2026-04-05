@@ -23,7 +23,7 @@ from .op import exp
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["N", "T"])
+@triton.jit(do_not_specialize=["T"])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
@@ -37,7 +37,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     ssm_state_indices,
     num_accepted_tokens,
     scale,
-    N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
     B: tl.constexpr,
     H: tl.constexpr,
@@ -49,7 +48,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
-    stride_indices_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
@@ -207,12 +205,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
 
-    if ssm_state_indices is None:
-        stride_indices_seq, stride_indices_tok = 1, 1
-    elif ssm_state_indices.ndim == 1:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
-    else:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+    stride_indices_seq = 1 if ssm_state_indices is None else ssm_state_indices.stride(0)
 
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
@@ -228,7 +221,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         scale=scale,
-        N=N,
         T=T,
         B=B,
         H=H,
@@ -240,7 +232,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
-        stride_indices_tok=stride_indices_tok,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
