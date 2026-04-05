@@ -47,6 +47,28 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
+def _tq4_unpack(packed: torch.Tensor) -> torch.Tensor:
+    """Unpack uint8 nibble-packed 4-bit data to int8.
+
+    Each input byte encodes two signed 4-bit values:
+      high nibble (bits 7..4) = even-indexed dimension
+      low  nibble (bits 3..0) = odd-indexed dimension
+    Decoding: ``signed = unsigned - 8`` (reverses the +8 bias applied
+    during packing).
+
+    Args:
+        packed: ``[..., head_size // 2]`` uint8 tensor.
+
+    Returns:
+        ``[..., head_size]`` int8 tensor with interleaved even/odd dims.
+    """
+    high = ((packed >> 4) & 0xF).to(torch.int8) - 8  # even dims
+    low = (packed & 0xF).to(torch.int8) - 8  # odd dims
+    return torch.stack([high, low], dim=-1).reshape(
+        *packed.shape[:-1], packed.shape[-1] * 2
+    )
+
+
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
@@ -279,6 +301,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8_e5m2",
         "int8_per_token_head",
         "fp8_per_token_head",
+        "tq4",
     ]
 
     @staticmethod
@@ -312,9 +335,6 @@ class TritonAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         if kv_cache_uses_per_token_head_scales(cache_dtype_str):
-            # Pad head_size by sizeof(float32)/sizeof(cache_dtype) so
-            # the per-head scale fits inline.  The backend extracts
-            # data[:head_size] and scale[head_size:] via typed views.
             from vllm.utils.torch_utils import (
                 STR_DTYPE_TO_TORCH_DTYPE,
                 get_dtype_size,
@@ -322,7 +342,14 @@ class TritonAttentionBackend(AttentionBackend):
 
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
-            return (num_blocks, 2, block_size, num_kv_heads, head_size + scale_pad)
+
+            # TQ4: nibble-packed, so data dimension is head_size // 2.
+            hs = head_size // 2 if cache_dtype_str == "tq4" else head_size
+
+            # Pad by sizeof(float32)/sizeof(cache_dtype) so the
+            # per-head scale fits inline.  The backend extracts
+            # data[:hs] and scale[hs:] via typed views.
+            return (num_blocks, 2, block_size, num_kv_heads, hs + scale_pad)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -568,8 +595,27 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
+        # TQ4 nibble-packed: unpack uint8 -> int8 before attention.
+        if self._is_tq4:
+            self._ensure_scale_caches(kv_cache)
+            key_cache, value_cache = kv_cache.unbind(1)
+            # The last dim is (head_size//2 + scale_pad) where scale_pad
+            # holds the inline float32 scale.  Strip the scale padding
+            # before unpacking the data nibbles.
+            from vllm.utils.torch_utils import get_dtype_size
+            scale_pad = (
+                get_dtype_size(torch.float32)
+                // get_dtype_size(key_cache.dtype)
+            )
+            packed_hs = key_cache.shape[-1] - scale_pad
+            key_cache = _tq4_unpack(key_cache[..., :packed_hs])
+            value_cache = _tq4_unpack(value_cache[..., :packed_hs])
+            k_descale = None
+            v_descale = None
+            k_scale_cache = self._k_scale_cache
+            v_scale_cache = self._v_scale_cache
         # Per-token-head quantized KV cache: use separate scale caches.
-        if self._is_per_token_head_quant or self._is_tq4:
+        elif self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
             if key_cache.dtype == torch.uint8:
@@ -708,6 +754,17 @@ class TritonAttentionImpl(AttentionImpl):
         if self._is_tq4:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
+            # Strip inline scale padding so the kernel sees only the
+            # packed data region (head_size // 2 uint8 bytes per head).
+            from vllm.utils.torch_utils import get_dtype_size
+            scale_pad = (
+                get_dtype_size(torch.float32)
+                // get_dtype_size(key_cache.dtype)
+            )
+            key_cache = key_cache[..., : key_cache.shape[-1] - scale_pad]
+            value_cache = value_cache[
+                ..., : value_cache.shape[-1] - scale_pad
+            ]
             triton_reshape_and_cache_flash_tq4(
                 key,
                 value,

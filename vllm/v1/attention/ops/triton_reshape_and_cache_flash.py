@@ -601,21 +601,173 @@ def triton_reshape_and_cache_flash_diffkv(
     )
 
 
+@triton.jit
+def _tq4_pack_and_cache(
+    key_ptr,  # [num_tokens, num_kv_heads, head_size]
+    value_ptr,  # [num_tokens, num_kv_heads, head_size_v]
+    key_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size//2] uint8
+    value_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size_v//2]
+    k_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32
+    v_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32
+    slot_mapping_ptr,  # [num_tokens]
+    stride_key_tok: tl.int64,
+    stride_key_head: tl.int64,
+    stride_val_tok: tl.int64,
+    stride_val_head: tl.int64,
+    stride_kc_blk: tl.int64,
+    stride_kc_slot: tl.int64,
+    stride_kc_head: tl.int64,
+    stride_vc_blk: tl.int64,
+    stride_vc_slot: tl.int64,
+    stride_vc_head: tl.int64,
+    stride_ks_blk: tl.int64,
+    stride_ks_slot: tl.int64,
+    stride_ks_head: tl.int64,
+    stride_vs_blk: tl.int64,
+    stride_vs_slot: tl.int64,
+    stride_vs_head: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+    head_size_v: tl.constexpr,
+    HALF_HEAD: tl.constexpr,  # next_power_of_2(max(head_size, head_size_v) // 2)
+):
+    """Triton kernel for TQ4 nibble-packed cache write.
+
+    Grid: (num_tokens, num_kv_heads).
+    Each program packs one (token, head) pair of K and V into uint8 bytes
+    where each byte holds two signed 4-bit values: high nibble = even dim,
+    low nibble = odd dim.
+    """
+    tok = tl.program_id(0)
+    head = tl.program_id(1)
+
+    slot = tl.load(slot_mapping_ptr + tok).to(tl.int64)
+    if slot < 0:
+        return
+
+    blk = slot // block_size
+    slot_in_blk = slot % block_size
+
+    pack_offs = tl.arange(0, HALF_HEAD)
+    even_offs = pack_offs * 2  # [0, 2, 4, ...]
+    odd_offs = even_offs + 1  # [1, 3, 5, ...]
+
+    # ---- Key: load even/odd dims, quantize, pack ----
+    k_even_mask = even_offs < head_size
+    k_odd_mask = odd_offs < head_size
+    k_base = key_ptr + tok * stride_key_tok + head * stride_key_head
+
+    k_even = tl.load(k_base + even_offs, mask=k_even_mask, other=0.0).to(
+        tl.float32
+    )
+    k_odd = tl.load(k_base + odd_offs, mask=k_odd_mask, other=0.0).to(
+        tl.float32
+    )
+
+    k_absmax = tl.maximum(
+        tl.max(tl.abs(k_even), axis=0), tl.max(tl.abs(k_odd), axis=0)
+    )
+    k_scale = tl.maximum(k_absmax / 7.0, 1e-6)
+
+    tl.store(
+        k_scale_cache_ptr
+        + blk * stride_ks_blk
+        + slot_in_blk * stride_ks_slot
+        + head * stride_ks_head,
+        k_scale,
+    )
+
+    k_q_even = tl.clamp(
+        tl.extra.cuda.libdevice.rint(k_even / k_scale), -8.0, 7.0
+    )
+    k_q_odd = tl.clamp(
+        tl.extra.cuda.libdevice.rint(k_odd / k_scale), -8.0, 7.0
+    )
+
+    k_u_even = (k_q_even + 8.0).to(tl.uint8)  # 0..15, high nibble
+    k_u_odd = (k_q_odd + 8.0).to(tl.uint8)  # 0..15, low nibble
+    k_packed = (k_u_even << 4) | k_u_odd
+
+    k_pack_mask = pack_offs < (head_size // 2)
+    tl.store(
+        key_cache_ptr
+        + blk * stride_kc_blk
+        + slot_in_blk * stride_kc_slot
+        + head * stride_kc_head
+        + pack_offs,
+        k_packed,
+        mask=k_pack_mask,
+    )
+
+    # ---- Value: load even/odd dims, quantize, pack ----
+    v_even_mask = even_offs < head_size_v
+    v_odd_mask = odd_offs < head_size_v
+    v_base = value_ptr + tok * stride_val_tok + head * stride_val_head
+
+    v_even = tl.load(v_base + even_offs, mask=v_even_mask, other=0.0).to(
+        tl.float32
+    )
+    v_odd = tl.load(v_base + odd_offs, mask=v_odd_mask, other=0.0).to(
+        tl.float32
+    )
+
+    v_absmax = tl.maximum(
+        tl.max(tl.abs(v_even), axis=0), tl.max(tl.abs(v_odd), axis=0)
+    )
+    v_scale = tl.maximum(v_absmax / 7.0, 1e-6)
+
+    tl.store(
+        v_scale_cache_ptr
+        + blk * stride_vs_blk
+        + slot_in_blk * stride_vs_slot
+        + head * stride_vs_head,
+        v_scale,
+    )
+
+    v_q_even = tl.clamp(
+        tl.extra.cuda.libdevice.rint(v_even / v_scale), -8.0, 7.0
+    )
+    v_q_odd = tl.clamp(
+        tl.extra.cuda.libdevice.rint(v_odd / v_scale), -8.0, 7.0
+    )
+
+    v_u_even = (v_q_even + 8.0).to(tl.uint8)
+    v_u_odd = (v_q_odd + 8.0).to(tl.uint8)
+    v_packed = (v_u_even << 4) | v_u_odd
+
+    v_pack_mask = pack_offs < (head_size_v // 2)
+    tl.store(
+        value_cache_ptr
+        + blk * stride_vc_blk
+        + slot_in_blk * stride_vc_slot
+        + head * stride_vc_head
+        + pack_offs,
+        v_packed,
+        mask=v_pack_mask,
+    )
+
+
 def triton_reshape_and_cache_flash_tq4(
     key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
-    key_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size]
-    value_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size_v]
+    key_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size//2]
+    value_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size_v//2]
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping: torch.Tensor,  # [num_tokens]
     rotation_matrix: torch.Tensor | None = None,  # [head_size, head_size]
 ):
-    """TurboQuant 4-bit quantize key/value per (token, head) and write to
-    paged cache.
+    """TurboQuant 4-bit quantize and nibble-pack key/value into paged cache.
 
-    Like per-token-head INT8 but with 4-bit range (QUANT_MAX=7, QUANT_MIN=-8)
-    and optional rotation pre-processing for near-optimal MSE.
+    Each uint8 byte in the cache stores two signed 4-bit values:
+      high nibble = even dim index, low nibble = odd dim index.
+    Encoding: unsigned = signed + 8 (maps -8..7 -> 0..15).
+
+    The cache last dimension is ``head_size // 2`` (half the original),
+    delivering 2x memory savings over int8 storage.
+
+    Optional rotation pre-processing spreads coordinate energy uniformly
+    before scalar quantization for near-optimal MSE.
 
     Reference: Zandieh et al., "TurboQuant: Online Vector Quantization with
     Near-optimal Distortion Rate", arXiv:2504.19874, 2025.
@@ -624,9 +776,6 @@ def triton_reshape_and_cache_flash_tq4(
     head_size_v = value.shape[2]
 
     # Apply rotation pre-processing if rotation matrix is available.
-    # Only rotate dimensions that match the rotation matrix size.
-    # Keys always have head_size == rotation dim; values may differ
-    # in models with separate value head sizes (e.g., MQA variants).
     if rotation_matrix is not None:
         key = torch.matmul(key.float(), rotation_matrix.T).to(key.dtype)
         if head_size_v == head_size:
@@ -636,15 +785,15 @@ def triton_reshape_and_cache_flash_tq4(
 
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
-    head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
+    half_head = triton.next_power_of_2(max(head_size, head_size_v) // 2)
     block_size = key_cache.shape[1]
 
     if current_platform.is_rocm() or current_platform.is_xpu():
         num_warps = 4
     else:
-        num_warps = min(16, max(1, head_size_padded // 32))
+        num_warps = min(16, max(1, half_head // 32))
 
-    _reshape_cache_per_token_head[(num_tokens, num_kv_heads)](
+    _tq4_pack_and_cache[(num_tokens, num_kv_heads)](
         key_ptr=key,
         value_ptr=value,
         key_cache_ptr=key_cache,
@@ -671,8 +820,6 @@ def triton_reshape_and_cache_flash_tq4(
         block_size=block_size,
         head_size=head_size,
         head_size_v=head_size_v,
-        HEAD_SIZE_PADDED=head_size_padded,
-        QUANT_MAX=7.0,
-        QUANT_MIN=-8.0,
+        HALF_HEAD=half_head,
         num_warps=num_warps,
     )

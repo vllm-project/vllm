@@ -138,11 +138,14 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        hs = self.head_size
+        if self.kv_quant_mode == KVQuantMode.TQ4:
+            hs = hs // 2  # 4-bit packed: two values per byte
         return (
             2
             * self.block_size
             * self.num_kv_heads
-            * self.head_size
+            * hs
             * get_dtype_size(self.dtype)
         )
 
@@ -240,10 +243,15 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        hs_k = self.head_size
+        hs_v = self.head_size_v
+        if self.kv_quant_mode == KVQuantMode.TQ4:
+            hs_k = hs_k // 2  # 4-bit packed: two values per byte
+            hs_v = hs_v // 2
         return (
             self.block_size
             * self.num_kv_heads
-            * (self.head_size + self.head_size_v)
+            * (hs_k + hs_v)
             * get_dtype_size(self.dtype)
         )
 
