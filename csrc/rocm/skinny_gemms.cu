@@ -339,6 +339,11 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
 __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
 }
+// Shorten dpp funcs
+template <unsigned int md>
+__device__ inline float _dpp_mv(float a) {
+  return __builtin_amdgcn_mov_dpp(a, md, 0xf, 0xf, 1);
+}
 
 #if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets cases where A[] fits LDS capacity
@@ -369,24 +374,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     scalar8 h8;
   };
 
-  //----------------------------------------------------
-  // Reserving 64/160 KB of LDS to have 1 WG / CU
-  // Goal is to bring the activation matrix A to the LDS
-  // and use it across the lifetime of the work group
-  // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not going to work!
-  //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
-  //----------------------------------------------------
   // Fetch the activation matrix to LDS
-  // Loop iteration:
-  // - Each thread (lane) is fetching 8 elements (A_Chunk)
-  // - Each wave will fetch 64*8=> 512 elements
-  // - Each WG will fetch 512 * 16 => 8K elements
-  // - Then the WG will move to another 8 K elements
-  // TODO: Logic below will only work when K is multiple of 8
-  //----------------------------------------------------
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
        k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
   #if defined(__gfx950__)
@@ -401,35 +391,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
-  //----------------------------------------------------
-  // Each wave works on a single column of weight matrix.
-  // There are 16 waves per WG, and hence, each WG is
-  // working on 16 columns of weight matrix. Moreover,
-  // we tile in column direction by YTILE, so when YTILE=1
-  // the above math is right, however, when YTILE=2 then
-  // each wave  will be working on 2 columns and WG will
-  // be working on 32 columns.
-  //
-  // Top level loop that makes WGs persistent!
-  // - WGs iterates across columns of weight matrix
-  // - Each wave within WG works on a given column(s)
-  // - After completing first set of columns, WGs start
-  //   working on the next set of available columns
-  //----------------------------------------------------
   while (m < M) {
-    //----------------------------------------------------
-    // 'sum' accumulates the matrix A x B computation
-    // split across 64 lanes.
-    //
-    // YTILE represents how many column of weight matrix
-    // are being worked on by each wave.
-    //----------------------------------------------------
     float sum[N][YTILE] = {};
     scalar8 sum4[N][YTILE] = {};
 
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
-      bigType bigA[N][UNRL] = {};
+      bigType bigA[N][UNRL] = {};  // Only zero-init A[], bound-check its loads
       bigType bigB[YTILE][UNRL];
+
       // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
@@ -467,26 +436,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     }
-    __builtin_amdgcn_sched_barrier(0);
-    //----------------------------------------------------
+
     // Final reduction step using shuffle
-    //----------------------------------------------------
     if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
-                                                1);  // row_shr8
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
-                                                1);  // row_shr4
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x112, 0xf, 0xf,
-                                                1);  // row_shr2
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
-                                                1);  // row_shr1
+          sum[n][y] += _dpp_mv<0x118>(sum[n][y]);  // row_shr8
+          sum[n][y] += _dpp_mv<0x114>(sum[n][y]);  // row_shr4
+          sum[n][y] += _dpp_mv<0x112>(sum[n][y]);  // row_shr2
+          sum[n][y] += _dpp_mv<0x111>(sum[n][y]);  // row_shr1
   #if defined(__HIP__GFX9__)
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
-                                                1);  // ROW_BCAST15
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
-                                                1);  // ROW_BCAST31
+          sum[n][y] += _dpp_mv<0x142>(sum[n][y]);  // ROW_BCAST15
+          sum[n][y] += _dpp_mv<0x143>(sum[n][y]);  // ROW_BCAST31
   #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
   #endif
@@ -518,28 +479,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
     #pragma unroll
         for (int y = 0; y < YTILE; y++) {
-          /*float accm1 = 0;
-           for (int i=0; i<64; i++)
-              accm1 += __shfl(sum4[n][y][i%4], i);
-          sum4[n][y][0] = accm1;*/
           float accm = sum4[n][y][0];
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][1], 0x101, 0xf, 0xf,
-                                           1);  // row_shl1
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][2], 0x102, 0xf, 0xf,
-                                           1);  // row_shl2
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][3], 0x103, 0xf, 0xf,
-                                           1);  // row_shl3
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x104, 0xf, 0xf,
-                                           1);  // row_shl4
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x108, 0xf, 0xf,
-                                           1);  // row_shl8
-          accm = __builtin_amdgcn_mov_dpp(accm, 0x11f, 0xf, 0xf,
-                                          1);  // row_shr15
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x142, 0xf, 0xf,
-                                           1);  // ROW_BCAST15
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x143, 0xf, 0xf,
-                                           1);  // ROW_BCAST31
-
+          accm += _dpp_mv<0x101>(sum4[n][y][1]);  // row_shl1
+          accm += _dpp_mv<0x102>(sum4[n][y][2]);  // row_shl2
+          accm += _dpp_mv<0x103>(sum4[n][y][3]);  // row_shl3
+          accm += _dpp_mv<0x104>(accm);           // row_shl4
+          accm += _dpp_mv<0x108>(accm);           // row_shl8
+          accm = _dpp_mv<0x11f>(accm);            // row_shr15
+          accm += _dpp_mv<0x142>(accm);           // row_bcast15
+          accm += _dpp_mv<0x143>(accm);           // row_bcast31
           sum4[n][y][0] = accm;
         }
       }
@@ -608,9 +556,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   __shared__ scalar_t s[max_lds_len];
 
-  //----------------------------------------------------
-  // Computation of columns that need to be committed to memory!
-  //----------------------------------------------------
   uint32_t commitColumn[YTILE];
   for (uint32_t i = 0; i < YTILE; i++) {
     commitColumn[i] = 1;
@@ -648,6 +593,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
       bigType bigB[YTILE][UNRL];
+
       // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
@@ -695,19 +641,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
-                                                1);  // row_shr8
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
-                                                1);  // row_shr4
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x112, 0xf, 0xf,
-                                                1);  // row_shr2
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
-                                                1);  // row_shr1
+          sum[n][y] += _dpp_mv<0x118>(sum[n][y]);  // row_shr8
+          sum[n][y] += _dpp_mv<0x114>(sum[n][y]);  // row_shr4
+          sum[n][y] += _dpp_mv<0x112>(sum[n][y]);  // row_shr2
+          sum[n][y] += _dpp_mv<0x111>(sum[n][y]);  // row_shr1
   #if defined(__HIP__GFX9__)
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
-                                                1);  // ROW_BCAST15
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
-                                                1);  // ROW_BCAST31
+          sum[n][y] += _dpp_mv<0x142>(sum[n][y]);  // ROW_BCAST15
+          sum[n][y] += _dpp_mv<0x143>(sum[n][y]);  // ROW_BCAST31
   #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
   #endif
@@ -741,26 +681,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
     #pragma unroll
         for (int y = 0; y < YTILE; y++) {
-          // float accm1 = 0;
-          // for (int i=0; i<64; i++)
-          //    accm1 += __shfl(sum4[n][y][i%4], i);
           float accm = sum4[n][y][0];
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][1], 0x101, 0xf, 0xf,
-                                           1);  // row_shl1
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][2], 0x102, 0xf, 0xf,
-                                           1);  // row_shl2
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][3], 0x103, 0xf, 0xf,
-                                           1);  // row_shl3
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x104, 0xf, 0xf,
-                                           1);  // row_shl4
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x108, 0xf, 0xf,
-                                           1);  // row_shl8
-          accm = __builtin_amdgcn_mov_dpp(accm, 0x11f, 0xf, 0xf,
-                                          1);  // row_shr15
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x142, 0xf, 0xf,
-                                           1);  // ROW_BCAST15
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x143, 0xf, 0xf,
-                                           1);  // ROW_BCAST31
+          accm += _dpp_mv<0x101>(sum4[n][y][1]);  // row_shl1
+          accm += _dpp_mv<0x102>(sum4[n][y][2]);  // row_shl2
+          accm += _dpp_mv<0x103>(sum4[n][y][3]);  // row_shl3
+          accm += _dpp_mv<0x104>(accm);           // row_shl4
+          accm += _dpp_mv<0x108>(accm);           // row_shl8
+          accm = _dpp_mv<0x11f>(accm);            // row_shr15
+          accm += _dpp_mv<0x142>(accm);           // ROW_BCAST15
+          accm += _dpp_mv<0x143>(accm);           // ROW_BCAST31
           sum4[n][y][0] = accm;
         }
       }
@@ -840,35 +769,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     scalar8 h8;
   };
 
-  //----------------------------------------------------
-  // Reserving 64/160 KB of LDS to have 1 WG / CU
-  // Goal is to bring the activation matrix A to the LDS
-  // and use it across the lifetime of the work group
-  // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not going to work!
-  //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
-  //----------------------------------------------------
-  // Computation of columns that need to be committed to memory!
-  //----------------------------------------------------
   uint32_t commitColumn[YTILE];
   for (uint32_t i = 0; i < YTILE; i++) {
     commitColumn[i] = 1;
   }
 
-  // int _WvPrGrp = mindiv(N, CuCount * YTILE, WvPrGrp);
   if (threadIdx.y >= _WvPrGrp) return;
 
-  //----------------------------------------------------
-  // Indexing function into the column of weight matrix B
-  // Algorithm does 64 lane k-splitting / wave and uses
-  // WG ID and Thread ID to find the index.
-  //----------------------------------------------------
   uint32_t m = (blockIdx.x * _WvPrGrp + threadIdx.y) * YTILE;
 
-  // Check whether there will be fragmentation!
-  // This will happen only for the last wave!
   if (m < M && (m + YTILE) >= M) {
     uint32_t startColumn = M - YTILE;
     for (uint32_t i = 0; i < (m - startColumn); i++) {
@@ -876,28 +787,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
     m = startColumn;
   }
-
-  //----------------------------------------------------
-  // Fetch the activation matrix to LDS
-  // Loop iteration:
-  // - Each thread (lane) is fetching 8 elements (A_Chunk)
-  // - Each wave will fetch 64*8=> 512 elements
-  // - Each WG will fetch 512 * 16 => 8K elements
-  // - Then the WG will move to another 8 K elements
-  // TODO: Logic below will only work when K is multiple of 8
-  //----------------------------------------------------
-  #define PCML
-  #ifndef PCML
-  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
-    #if defined(__gfx950__)
-    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
-    #else
-    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
-    #endif
-  }
-  __syncthreads();
-  #endif
 
   #define TUC (THRDS * UNRL * A_CHUNK)
   uint32_t kBase = 0;
@@ -911,60 +800,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // if (kFit == 0) kFit = TUC;
   kFit = min__(kFit, Kap);
 
-  //----------------------------------------------------
-  // Each wave works on a single column of weight matrix.
-  // There are 16 waves per WG, and hence, each WG is
-  // working on 16 columns of weight matrix. Moreover,
-  // we tile in column direction by YTILE, so when YTILE=1
-  // the above math is right, however, when YTILE=2 then
-  // each wave  will be working on 2 columns and WG will
-  // be working on 32 columns.
-  //
-  // Top level loop that makes WGs persistent!
-  // - WGs iterates across columns of weight matrix
-  // - Each wave within WG works on a given column(s)
-  // - After completing first set of columns, WGs start
-  //   working on the next set of available columns
-  //----------------------------------------------------
-  #ifdef PCML
   int YW = (YTILE * _WvPrGrp);
   uint32_t Mrndp = (M % YW == 0) ? M : (M - M % YW + YW);
   while (m < Mrndp) {
-  #else
-  while (m < M) {
-  #endif
-    //----------------------------------------------------
-    // 'sum' accumulates the matrix A x B computation
-    // split across 64 lanes.
-    //
-    // YTILE represents how many column of weight matrix
-    // are being worked on by each wave.
-    //----------------------------------------------------
     float sum[N][YTILE] = {};
     scalar8 sum4[N][YTILE] = {};
 
-    //----------------------------------------------------
-    // Fetch weight matrix B in interleaved K-split!
-    // - Each thread (lane) is fetching 8 elements (A_Chunk)
-    // - Each wave will fetch 64*8=> 512 elements (1024B)
-    // - YTILE represents the number of column being serviced
-    //   by wave
-    // - Loop for fetching weight matrix (B) are unrolled
-    //
-    // Fetch activation matrix A from LDS
-    // - Loop for fetching activation matrix (A) are unrolled
-    //
-    // Finally, do the matrix multiplication in an unrolled
-    // fashion. This provides lot of food for compiler
-    // scheduling.
-    //
-    // TODO: Logic below will only work when K is multiple of 8
-    //----------------------------------------------------
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
       bigType bigB[YTILE][UNRL];
 
-  #ifdef PCML
       if ((k1 == 0) || (k1 == kBase + kFit)) {  // load next chunk of A[] to LDS
         if (k1 != 0) kBase += kFit;
         __syncthreads();
@@ -975,20 +820,19 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (uint32_t n = 0; n < N; n++) {
             uint32_t k_in = kBase + n * Kap + kOff;
             uint32_t k_ot = n * kFit + kOff;
-    #if defined(__gfx950__)
+  #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds((int*)(&A[k_in]), (int*)(&s[k_ot]),
                                              16, 0, 0);
-    #else
+  #else
             *((bigType*)(&s[k_ot])) = *((bigType*)(&A[k_in]));
-    #endif
+  #endif
           }
         }
         __syncthreads();
       }
       if (m >= M) continue;
-  #endif
 
-      // Fetch the weight matrix from memory!
+      // Fetch the weight from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
@@ -998,21 +842,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
       }
 
-      // Fetch activation matrix from either just LDS or from both LDS / memory
+      // Fetch activation from LDS
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
         for (int n = 0; n < N; n++) {
-  #ifdef PCML
           bigA[n][k2] = *((const bigType*)(&(s[k_ - kBase + kFit * n])));
-  #else
-          if (k_ + Kap * n < max_lds_len)
-            bigA[n][k2] = *((const bigType*)(&(s[k_ + Kap * n])));
-          else
-            bigA[n][k2] = *((const bigType*)(&(A[k_ + Kap * n])));
-  #endif
         }
       }
 
@@ -1034,33 +871,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       }
     }
 
-  #ifdef PCML
     if (m >= M) {
       m += CuCount * _WvPrGrp * YTILE;
       kBase = 0;
       continue;
     }
-  #endif
 
-    //----------------------------------------------------
-    // Final reduction step using shuffle
-    //----------------------------------------------------
+    // Final reduction step
     if constexpr (!use_mfma) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x118, 0xf, 0xf,
-                                                1);  // row_shr8
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x114, 0xf, 0xf,
-                                                1);  // row_shr4
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x112, 0xf, 0xf,
-                                                1);  // row_shr2
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x111, 0xf, 0xf,
-                                                1);  // row_shr1
+          sum[n][y] += _dpp_mv<0x118>(sum[n][y]);  // row_shr8
+          sum[n][y] += _dpp_mv<0x114>(sum[n][y]);  // row_shr4
+          sum[n][y] += _dpp_mv<0x112>(sum[n][y]);  // row_shr2
+          sum[n][y] += _dpp_mv<0x111>(sum[n][y]);  // row_shr1
   #if defined(__HIP__GFX9__)
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x142, 0xf, 0xf,
-                                                1);  // ROW_BCAST15
-          sum[n][y] += __builtin_amdgcn_mov_dpp(sum[n][y], 0x143, 0xf, 0xf,
-                                                1);  // ROW_BCAST31
+          sum[n][y] += _dpp_mv<0x142>(sum[n][y]);  // row_bcast15
+          sum[n][y] += _dpp_mv<0x143>(sum[n][y]);  // row_bcast31
   #else
           sum[n][y] += __shfl_xor(sum[n][y], 16);
   #endif
@@ -1095,22 +922,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     #pragma unroll
         for (int y = 0; y < YTILE; y++) {
           float accm = sum4[n][y][0];
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][1], 0x101, 0xf, 0xf,
-                                           1);  // row_shl1
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][2], 0x102, 0xf, 0xf,
-                                           1);  // row_shl2
-          accm += __builtin_amdgcn_mov_dpp(sum4[n][y][3], 0x103, 0xf, 0xf,
-                                           1);  // row_shl3
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x104, 0xf, 0xf,
-                                           1);  // row_shl4
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x108, 0xf, 0xf,
-                                           1);  // row_shl8
-          accm = __builtin_amdgcn_mov_dpp(accm, 0x11f, 0xf, 0xf,
-                                          1);  // row_shr15
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x142, 0xf, 0xf,
-                                           1);  // ROW_BCAST15
-          accm += __builtin_amdgcn_mov_dpp(accm, 0x143, 0xf, 0xf,
-                                           1);  // ROW_BCAST31
+          accm += _dpp_mv<0x101>(sum4[n][y][1]);  // row_shl1
+          accm += _dpp_mv<0x102>(sum4[n][y][2]);  // row_shl2
+          accm += _dpp_mv<0x103>(sum4[n][y][3]);  // row_shl3
+          accm += _dpp_mv<0x104>(accm);           // row_shl4
+          accm += _dpp_mv<0x108>(accm);           // row_shl8
+          accm = _dpp_mv<0x11f>(accm);            // row_shr15
+          accm += _dpp_mv<0x142>(accm);           // ROW_BCAST15
+          accm += _dpp_mv<0x143>(accm);           // ROW_BCAST31
           sum4[n][y][0] = accm;
         }
       }
@@ -1959,18 +1778,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        sum[n][y] += _dpp_mv<0x118>(sum[n][y]);  // row_shr8
+        sum[n][y] += _dpp_mv<0x114>(sum[n][y]);  // row_shr4
+        sum[n][y] += _dpp_mv<0x112>(sum[n][y]);  // row_shr2
+        sum[n][y] += _dpp_mv<0x111>(sum[n][y]);  // row_shr1
         sum[n][y] += __shfl_xor(sum[n][y], 16);
       }
     }
@@ -1979,12 +1790,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
         float accm0 = sum[n][y][0];
-        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
-                                          1);  // row_shl1
-        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
-                                          1);  // row_shl2
-        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
-                                          1);  // row_shl3
+        accm0 += _dpp_mv<0x101>(sum[n][y][1]);  // row_shl1
+        accm0 += _dpp_mv<0x102>(sum[n][y][2]);  // row_shl2
+        accm0 += _dpp_mv<0x103>(sum[n][y][3]);  // row_shl3
         accm0 += __shfl_down(accm0, 20);
         accm0 += __shfl_down(accm0, 40);
         sum[n][y][0] = accm0;
@@ -2156,18 +1964,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
-            : "=v"(sum[n][y])
-            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        sum[n][y] += _dpp_mv<0x118>(sum[n][y]);  // row_shr8
+        sum[n][y] += _dpp_mv<0x114>(sum[n][y]);  // row_shr4
+        sum[n][y] += _dpp_mv<0x112>(sum[n][y]);  // row_shr2
+        sum[n][y] += _dpp_mv<0x111>(sum[n][y]);  // row_shr1
         sum[n][y] += __shfl_xor(sum[n][y], 16);
       }
     }
@@ -2176,12 +1976,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
         float accm0 = sum[n][y][0];
-        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][1], 0x101, 0xf, 0xf,
-                                          1);  // row_shl1
-        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][2], 0x102, 0xf, 0xf,
-                                          1);  // row_shl2
-        accm0 += __builtin_amdgcn_mov_dpp(sum[n][y][3], 0x103, 0xf, 0xf,
-                                          1);  // row_shl3
+        accm0 += _dpp_mv<0x101>(sum[n][y][1]);  // row_shl1
+        accm0 += _dpp_mv<0x102>(sum[n][y][2]);  // row_shl2
+        accm0 += _dpp_mv<0x103>(sum[n][y][3]);  // row_shl3
         accm0 += __shfl_down(accm0, 20);
         accm0 += __shfl_down(accm0, 40);
         sum[n][y][0] = accm0;
