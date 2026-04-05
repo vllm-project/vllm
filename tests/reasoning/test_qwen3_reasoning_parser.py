@@ -118,6 +118,29 @@ TRUNCATED_NO_START_TOKEN_STREAM = {
     "content": None,
 }
 
+# --- Tool call inside reasoning block (implicit boundary) ---
+
+# <tool_call> before </think> — existing behavior.
+TOOL_CALL_BEFORE_THINK_END = {
+    "output": "Let me check this\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>",
+    "reasoning": "Let me check this\n",
+    "content": "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>",
+}
+
+# <function= before </think> without <tool_call> wrapper — the bug case.
+FUNCTION_PREFIX_BEFORE_THINK_END = {
+    "output": "Let me write a test\n<function=bash>\n<parameter=command>\ncat > /tmp/test.java << 'EOF'\npublic class Test {}\nEOF\n</parameter>\n</function>",
+    "reasoning": "Let me write a test\n",
+    "content": "<function=bash>\n<parameter=command>\ncat > /tmp/test.java << 'EOF'\npublic class Test {}\nEOF\n</parameter>\n</function>",
+}
+
+# <function= in reasoning with </think> coming later — </think> should win.
+FUNCTION_PREFIX_WITH_THINK_END = {
+    "output": "I need <function=bash></think>\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>",
+    "reasoning": "I need <function=bash>",
+    "content": "\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>",
+}
+
 TEST_CASES = [
     pytest.param(
         False,
@@ -199,6 +222,21 @@ TEST_CASES = [
         TRUNCATED_NO_START_TOKEN_STREAM,
         id="truncated_no_start_token_stream",
     ),
+    pytest.param(
+        False,
+        TOOL_CALL_BEFORE_THINK_END,
+        id="tool_call_before_think_end",
+    ),
+    pytest.param(
+        False,
+        FUNCTION_PREFIX_BEFORE_THINK_END,
+        id="function_prefix_before_think_end",
+    ),
+    pytest.param(
+        False,
+        FUNCTION_PREFIX_WITH_THINK_END,
+        id="function_prefix_with_think_end",
+    ),
 ]
 
 
@@ -278,6 +316,93 @@ def test_reasoning_streaming_multi_token_deltas(
 
     assert reconstructor.reasoning == expected_reasoning
     assert (reconstructor.other_content or None) == expected_content
+
+
+# --- Tests for tool calls inside reasoning block (streaming) ---
+#
+# When the model generates <tool_call> or <function= inside <think>,
+# the boundary delta can contain BOTH reasoning and content. The standard
+# StreamingReasoningReconstructor rejects that, so we use a custom helper.
+
+
+IMPLICIT_BOUNDARY_STREAMING_CASES = [
+    pytest.param(
+        # <tool_call> token in reasoning block (existing implicit boundary)
+        ["Let me check\n", "<tool_call>\n<function=bash>"],
+        "Let me check\n",
+        "<tool_call>\n<function=bash>",
+        id="tool_call_implicit_boundary_stream",
+    ),
+    pytest.param(
+        # <function= without <tool_call> wrapper (the bug this fixes)
+        ["Let me write a test\n", "<function=bash>\n<parameter=command>\nls"],
+        "Let me write a test\n",
+        "<function=bash>\n<parameter=command>\nls",
+        id="function_prefix_implicit_boundary_stream",
+    ),
+    pytest.param(
+        # <function= arrives in the same delta as preceding reasoning text
+        ["Let me try\n<function=bash>\n<parameter=command>\nls"],
+        "Let me try\n",
+        "<function=bash>\n<parameter=command>\nls",
+        id="function_prefix_in_same_delta_stream",
+    ),
+    pytest.param(
+        # <function= with no preceding reasoning
+        ["<function=bash>\n<parameter=command>\nls"],
+        None,
+        "<function=bash>\n<parameter=command>\nls",
+        id="function_prefix_no_preceding_reasoning_stream",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "deltas, expected_reasoning, expected_content",
+    IMPLICIT_BOUNDARY_STREAMING_CASES,
+)
+def test_reasoning_streaming_implicit_boundary(
+    deltas: list[str],
+    expected_reasoning: str | None,
+    expected_content: str | None,
+    qwen3_tokenizer,
+):
+    """Test that <tool_call> and <function= inside reasoning end it."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
+        parser_name
+    )(qwen3_tokenizer)
+
+    # Manually drive the streaming parser and collect reasoning/content,
+    # allowing a single boundary delta to carry both fields.
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    previous_text = ""
+    previous_tokens: list[int] = []
+
+    for delta in deltas:
+        token_delta = [
+            parser.vocab.get(token)
+            for token in parser.model_tokenizer.tokenize(delta)
+            if token in parser.vocab
+        ]
+        current_text = previous_text + delta
+        current_tokens = previous_tokens + token_delta
+        dm = parser.extract_reasoning_streaming(
+            previous_text, current_text, delta,
+            previous_tokens, current_tokens, token_delta,
+        )
+        if dm is not None:
+            if dm.reasoning:
+                reasoning_parts.append(dm.reasoning)
+            if dm.content:
+                content_parts.append(dm.content)
+        previous_text = current_text
+        previous_tokens = current_tokens
+
+    actual_reasoning = "".join(reasoning_parts) if reasoning_parts else None
+    actual_content = "".join(content_parts) if content_parts else None
+    assert actual_reasoning == expected_reasoning
+    assert actual_content == expected_content
 
 
 # --- Tests for enable_thinking=False (thinking explicitly disabled) ---
