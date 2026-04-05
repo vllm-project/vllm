@@ -124,6 +124,11 @@ class EngineCore:
         kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
+        # SGLang-style: re-derive max_num_seqs (and max_num_batched_tokens if
+        # needed) from the actual KV cache token capacity now that profiling is
+        # done.  Only runs when the user did NOT explicitly set those values.
+        self._auto_adjust_scheduler_config(vllm_config)
+
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
@@ -225,7 +230,136 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
-    @instrument(span_name="Prepare model")
+    def _auto_adjust_scheduler_config(self, vllm_config: VllmConfig) -> None:
+        """Re-derive max_num_seqs from actual KV cache token capacity.
+
+        This mirrors SGLang's ``_resolve_max_num_reqs`` heuristic: instead of
+        using a static hardware-tier default we compute a data-driven estimate
+        after the memory profiler has told us exactly how many KV cache tokens
+        are available.
+
+        The formula (same as SGLang):
+            estimated = floor(token_capacity / max_model_len * 512)
+            estimated = clamp(estimated, 64, 4096)
+            new_max_num_seqs = min(estimated, token_capacity // 2)
+
+        The ``512`` factor encodes the assumption that the *average* request
+        uses roughly ``max_model_len / 512`` tokens.  The lower clamp (64)
+        prevents extremely conservative values on tiny KV caches; the upper
+        clamp (4096) prevents unbounded growth that would dwarf
+        ``max_num_batched_tokens``.
+
+        Only fires when the user did not explicitly pass ``--max-num-seqs``
+        (tracked by ``SchedulerConfig.max_num_seqs_auto``).
+        """
+        scheduler_config = vllm_config.scheduler_config
+
+        if not scheduler_config.max_num_seqs_auto:
+            return
+
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+        if not num_gpu_blocks:
+            return
+
+        block_size = vllm_config.cache_config.block_size
+        max_model_len = vllm_config.model_config.max_model_len
+        token_capacity = num_gpu_blocks * block_size
+
+        estimated = int(token_capacity / max_model_len * 512)
+        estimated = max(min(estimated, 4096), 64)
+        new_max_num_seqs = min(estimated, token_capacity // 2)
+        new_max_num_seqs = max(new_max_num_seqs, 1)
+
+        old_max_num_seqs = scheduler_config.max_num_seqs
+        if new_max_num_seqs != old_max_num_seqs:
+            logger.info(
+                "Auto-adjusting max_num_seqs: %d → %d "
+                "(KV cache %d blocks × %d = %d tokens, max_model_len=%d). "
+                "Override with --max-num-seqs to fix the value.",
+                old_max_num_seqs,
+                new_max_num_seqs,
+                num_gpu_blocks,
+                block_size,
+                token_capacity,
+                max_model_len,
+            )
+            scheduler_config.max_num_seqs = new_max_num_seqs
+
+        if (
+            scheduler_config.max_num_batched_tokens_auto
+            and scheduler_config.max_num_batched_tokens < scheduler_config.max_num_seqs
+        ):
+            old_batched = scheduler_config.max_num_batched_tokens
+            scheduler_config.max_num_batched_tokens = scheduler_config.max_num_seqs
+            logger.info(
+                "Auto-adjusting max_num_batched_tokens: %d → %d "
+                "to satisfy max_num_batched_tokens >= max_num_seqs.",
+                old_batched,
+                scheduler_config.max_num_seqs,
+            )
+
+        if scheduler_config.profile_optimal_concurrency:
+            self._profile_and_set_optimal_max_num_seqs(vllm_config)
+
+    def _profile_and_set_optimal_max_num_seqs(self, vllm_config: VllmConfig) -> None:
+        import time
+
+        scheduler_config = vllm_config.scheduler_config
+        kv_cache_bound = scheduler_config.max_num_seqs
+
+        candidates: list[int] = []
+        b = 16
+        while b <= min(kv_cache_bound, 4096):
+            candidates.append(b)
+            b *= 2
+
+        if not candidates:
+            return
+
+        logger.info(
+            "Profiling decode throughput at batch sizes %s (adds ~%ds to startup)...",
+            candidates,
+            len(candidates) * 2,
+        )
+        t_start = time.perf_counter()
+
+        results_per_worker: list[dict[int, float]] = (
+            self.model_executor.profile_decode_throughput(
+                candidates, num_warmup=3, num_iters=10
+            )
+        )
+        results = results_per_worker[0]
+
+        optimal_batch = candidates[0]
+        best_tps = 0.0
+        for batch_size in candidates:
+            tps = results.get(batch_size, 0.0)
+            if tps > best_tps * 1.05:
+                best_tps = tps
+                optimal_batch = batch_size
+
+        elapsed = time.perf_counter() - t_start
+        for batch_size in candidates:
+            tps = results.get(batch_size, 0.0)
+            marker = " <- optimal" if batch_size == optimal_batch else ""
+            logger.info(
+                "  decode throughput  batch=%4d: %8.0f tokens/sec%s",
+                batch_size,
+                tps,
+                marker,
+            )
+
+        old = scheduler_config.max_num_seqs
+        scheduler_config.max_num_seqs = optimal_batch
+        logger.info(
+            "Profiling done (%.1fs): max_num_seqs %d → %d "
+            "(%.0f tokens/sec at optimal batch).",
+            elapsed,
+            old,
+            optimal_batch,
+            best_tps,
+        )
+
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 

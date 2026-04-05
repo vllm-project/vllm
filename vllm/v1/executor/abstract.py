@@ -141,6 +141,18 @@ class Executor(ABC):
     def determine_available_memory(self) -> list[int]:  # in bytes
         return self.collective_rpc("determine_available_memory")
 
+    def profile_decode_throughput(
+        self,
+        batch_sizes: list[int],
+        num_warmup: int = 3,
+        num_iters: int = 10,
+    ) -> list[dict[int, float]]:
+        return self.collective_rpc(
+            "profile_decode_throughput",
+            args=(batch_sizes,),
+            kwargs={"num_warmup": num_warmup, "num_iters": num_iters},
+        )
+
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 

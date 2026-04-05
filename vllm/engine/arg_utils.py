@@ -474,6 +474,7 @@ class EngineArgs:
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    profile_optimal_concurrency: bool = False
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
@@ -1242,6 +1243,18 @@ class EngineArgs:
             },
         )
         scheduler_group.add_argument(
+            "--profile-optimal-concurrency",
+            action="store_true",
+            default=False,
+            help=(
+                "Run a short decode-throughput benchmark at startup (after "
+                "model warmup) to find the batch size that maximises "
+                "tokens/sec, and use it as max_num_seqs.  Adds ~20-40 s to "
+                "startup.  Has no effect when --max-num-seqs is set "
+                "explicitly."
+            ),
+        )
+        scheduler_group.add_argument(
             "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
         )
         scheduler_group.add_argument(
@@ -1861,6 +1874,11 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            max_num_seqs_auto=getattr(self, "_max_num_seqs_auto", False),
+            max_num_batched_tokens_auto=getattr(
+                self, "_max_num_batched_tokens_auto", False
+            ),
+            profile_optimal_concurrency=self.profile_optimal_concurrency,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
@@ -2245,6 +2263,11 @@ class EngineArgs:
                 usage_context,
                 SchedulerConfig.DEFAULT_MAX_NUM_SEQS,
             )
+
+        # Track whether these values were auto-calculated (not user-specified).
+        # Used later by EngineCore to re-derive them from actual KV cache size.
+        self._max_num_seqs_auto = orig_max_num_seqs is None
+        self._max_num_batched_tokens_auto = orig_max_num_batched_tokens is None
 
         # If throughput mode is set, double max_num_batched_tokens and max_num_seqs.
         if self.performance_mode == "throughput":

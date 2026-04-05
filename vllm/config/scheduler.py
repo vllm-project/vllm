@@ -153,6 +153,26 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    max_num_seqs_auto: bool = Field(default=False)
+    """Internal flag: True if max_num_seqs was auto-calculated (not user-specified).
+    When True, the engine will re-compute max_num_seqs after KV cache profiling
+    using the actual token capacity, similar to SGLang's approach."""
+
+    max_num_batched_tokens_auto: bool = Field(default=False)
+    """Internal flag: True if max_num_batched_tokens was auto-calculated
+    (not user-specified). Used together with max_num_seqs_auto to ensure
+    consistent post-profiling adjustment."""
+
+    profile_optimal_concurrency: bool = Field(default=False)
+    """If True, run a short decode-throughput benchmark at server startup
+    (after model warmup) to empirically find the batch size that maximises
+    tokens-per-second.  The result is used to set ``max_num_seqs`` instead
+    of the default KV-cache formula.
+
+    Enabling this adds roughly ``len(candidate_batch_sizes) × 2`` seconds to
+    startup time (typically 20–40 s).  Only effective when ``max_num_seqs``
+    was not explicitly set by the user (i.e. ``max_num_seqs_auto=True``)."""
+
     @staticmethod
     def default_factory(**kwargs):
         """

@@ -481,6 +481,28 @@ class Worker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
+    @torch.inference_mode()
+    def profile_decode_throughput(
+        self,
+        batch_sizes: list[int],
+        num_warmup: int = 3,
+        num_iters: int = 10,
+    ) -> dict[int, float]:
+        """Delegate decode-throughput profiling to the model runner.
+
+        Called via :meth:`~vllm.v1.executor.abstract.ExecutorBase.collective_rpc`
+        from :class:`~vllm.v1.engine.core.EngineCore` after all warmup and
+        CUDA-graph capture steps have finished.
+
+        Returns:
+            Dict mapping batch_size -> tokens-per-second (rank-local value).
+        """
+        return self.model_runner.profile_decode_throughput(
+            batch_sizes,
+            num_warmup=num_warmup,
+            num_iters=num_iters,
+        )
+
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
 
