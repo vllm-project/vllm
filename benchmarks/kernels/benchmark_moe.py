@@ -318,6 +318,10 @@ def benchmark_config(
         graph.replay()
     torch.accelerator.synchronize()
 
+    # Flush L2 cache with 256 MB data
+    cache_flush = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+    cache_flush.zero_()
+
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
 
@@ -331,6 +335,8 @@ def benchmark_config(
         end_event.record()
         end_event.synchronize()
         latencies.append(start_event.elapsed_time(end_event))
+        # Flush L2 cache again after the iteration
+        cache_flush.zero_()
     avg = sum(latencies) / (num_iters * 10) * 1000  # us
     graph.reset()
     return avg
