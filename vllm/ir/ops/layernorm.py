@@ -16,7 +16,11 @@ def rms_norm(
     x_var = x if variance_size is None else x[..., :variance_size]
     variance = x_var.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + epsilon)
-    x = x.to(orig_dtype)
-    if weight is not None:
+    if weight is not None and weight.dtype != orig_dtype:
+        # Used by GemmaRMSNorm: bf16 input, fp32 weight.
         x = x * weight
+    else:
+        x = x.to(orig_dtype)
+        if weight is not None:
+            x = x * weight
     return x
