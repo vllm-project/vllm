@@ -91,7 +91,7 @@ def try_get_optimal_moe_lora_config(
     dtype: str | None,
     M: int,
     block_shape: list[int] | None = None,
-) -> dict[str, int | None]:
+) -> dict[str, int | bool | None]:
     config = try_get_optimal_moe_config(
         w1_shape, w2_shape, top_k, dtype, M, block_shape
     ).copy()
