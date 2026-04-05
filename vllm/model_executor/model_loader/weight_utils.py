@@ -479,12 +479,24 @@ def download_gguf(
     # - *-{quant_type}-*.gguf (root sharded)
     # - */*-{quant_type}.gguf (subdir)
     # - */*-{quant_type}-*.gguf (subdir sharded)
-    allow_patterns = [
+    model_patterns = [
         f"*-{quant_type}.gguf",
         f"*-{quant_type}-*.gguf",
         f"*/*-{quant_type}.gguf",
         f"*/*-{quant_type}-*.gguf",
     ]
+
+    # Also download mmproj files needed by multimodal GGUF models (e.g.
+    # Gemma 3).  These live alongside the backbone weights and are
+    # detected later by ``detect_gguf_multimodal``.
+    mmproj_patterns = [
+        "mmproj*.gguf",
+        "*/mmproj*.gguf",
+        "*mmproj*.gguf",
+        "*/*mmproj*.gguf",
+    ]
+
+    allow_patterns = model_patterns + mmproj_patterns
 
     # Use download_weights_from_hf which handles caching and downloading
     folder = download_weights_from_hf(
@@ -495,12 +507,13 @@ def download_gguf(
         ignore_patterns=ignore_patterns,
     )
 
-    # Find the downloaded file(s) in the folder
-    local_files = []
-    for pattern in allow_patterns:
-        # Convert pattern to glob pattern for local filesystem
+    # Find the downloaded model file(s) in the folder (excluding mmproj)
+    local_files: list[str] = []
+    for pattern in model_patterns:
         glob_pattern = os.path.join(folder, pattern)
-        local_files.extend(glob.glob(glob_pattern))
+        local_files.extend(
+            f for f in glob.glob(glob_pattern) if "mmproj" not in os.path.basename(f)
+        )
 
     if not local_files:
         raise ValueError(
