@@ -274,7 +274,12 @@ class Llama4Attention(nn.Module):
 
     def _get_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         floor = torch.floor((positions + 1.0) / self.floor_scale)
-        attn_scale = torch.log(floor + 1.0) * self.attn_scale + 1.0
+
+        log_input = floor + 1.0
+        # ROCm sometimes compiles problematically on torch.log on MI325
+        if current_platform.is_rocm():
+            log_input = torch.clamp(log_input, min=1e-6)
+        attn_scale = torch.log(log_input) * self.attn_scale + 1.0
 
         return attn_scale.unsqueeze(-1)
 
