@@ -169,18 +169,41 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     Get available backends in priority order based on platform and config.
+    Only backends supported by the current platform are included.
     Only includes BF16 backends. MXFP8 backends are selected via env vars.
     """
-    _AVAILABLE_BACKENDS = [
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.AITER,
-        Mxfp4MoeBackend.TRITON,
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-        Mxfp4MoeBackend.TRITON_UNFUSED,
-        Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.BATCHED_MARLIN,
-        Mxfp4MoeBackend.XPU,
-    ]
+    if current_platform.is_rocm():
+        _AVAILABLE_BACKENDS = [
+            Mxfp4MoeBackend.AITER,
+            Mxfp4MoeBackend.TRITON,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+        ]
+    elif current_platform.is_cuda():
+        _AVAILABLE_BACKENDS = [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON,
+            Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+            Mxfp4MoeBackend.MARLIN,
+            Mxfp4MoeBackend.BATCHED_MARLIN,
+        ]
+    elif current_platform.is_xpu():
+        _AVAILABLE_BACKENDS = [
+            Mxfp4MoeBackend.XPU,
+        ]
+    else:
+        # Fallback for unknown platforms: include all backends and let
+        # is_supported_config() filter them.
+        _AVAILABLE_BACKENDS = [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER,
+            Mxfp4MoeBackend.TRITON,
+            Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+            Mxfp4MoeBackend.MARLIN,
+            Mxfp4MoeBackend.BATCHED_MARLIN,
+            Mxfp4MoeBackend.XPU,
+        ]
     return _AVAILABLE_BACKENDS
 
 
@@ -281,8 +304,10 @@ def select_mxfp4_moe_backend(
     # Handle explicit FlashInfer MXFP4 BF16 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
         if not envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
-            AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
-            AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
+            if Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16 in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
+            if Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16 in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
         else:
             if current_platform.is_device_capability(90):
                 return _return_or_raise(
