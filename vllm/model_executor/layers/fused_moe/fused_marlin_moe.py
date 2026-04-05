@@ -85,17 +85,19 @@ def _fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
+    layer: torch.nn.Module | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
-    N = marlin_moe_intermediate_size(w1, w2)
+    N = marlin_moe_intermediate_size(w1, w2, layer)
     w13_num_shards = 2 if activation.is_gated else 1
+    w13_size_n = getattr(layer, "marlin_moe_w13_size_n", w13_num_shards * N)
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
-            (M * num_topk * max(w13_num_shards * N, K),),
+            (M * num_topk * max(w13_size_n, K),),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
@@ -108,7 +110,7 @@ def _fused_marlin_moe(
         )
 
     intermediate_cache1 = _resize_cache(
-        intermediate_cache13, (M * num_topk, w13_num_shards * N)
+        intermediate_cache13, (M * num_topk, w13_size_n)
     )
 
     intermediate_cache3 = _resize_cache(intermediate_cache13, (M * num_topk, K))
@@ -145,7 +147,7 @@ def _fused_marlin_moe(
         mul_topk_weights=apply_router_weight_on_input,
         b_q_type=quant_type,
         size_m=M,
-        size_n=w13_num_shards * N,
+        size_n=w13_size_n,
         size_k=K,
         is_k_full=is_k_full,
         use_atomic_add=False,
@@ -155,7 +157,7 @@ def _fused_marlin_moe(
     activation_func(
         activation,
         intermediate_cache2,
-        intermediate_cache1.view(-1, w13_num_shards * N),
+        intermediate_cache1.view(-1, w13_size_n),
     )
 
     if output is None:
@@ -244,6 +246,7 @@ def fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     inplace: bool = False,
+    layer: torch.nn.Module | None = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -360,6 +363,7 @@ def fused_marlin_moe(
         output=None,
         input_dtype=input_dtype,
         is_k_full=is_k_full,
+        layer=layer,
     ).view(-1, topk, K)
 
     if output is None:
@@ -562,6 +566,14 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
 
+    # Propagate padded intermediate sizes from weight preparation to experts instance
+    # marlin_moe_intermediate_size: unpadded N (w2's size_k)
+    # marlin_moe_w13_size_n: padded w13 output size(first GEMM's size_n)
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        for attr in ("marlin_moe_intermediate_size", "marlin_moe_w13_size_n"):
+            if hasattr(layer, attr):
+                setattr(self, attr, getattr(layer, attr))
+
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
@@ -634,7 +646,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
         E = w1.size(0)
         K = a1.size(-1)
-        N = marlin_moe_intermediate_size(w1, w2)
+        N = marlin_moe_intermediate_size(w1, w2, self)
 
         if a1.dim() == 2:
             # Make sure we are using the correct a1 (pre-permute).
@@ -746,6 +758,7 @@ class MarlinExperts(MarlinExpertsBase):
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
+            layer=self,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:

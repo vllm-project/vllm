@@ -20,7 +20,15 @@ from vllm.scalar_type import scalar_types
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
+# marlin kernel requires size_n to be divisible by 64
+MARLIN_TILE_N = 64
+
 logger = init_logger(__name__)
+
+
+def _pad_to_marlin_tile(size: int) -> int:
+    """Round size up to the nearest multiple of MARLIN_TILE_N"""
+    return (size + MARLIN_TILE_N - 1) // MARLIN_TILE_N * MARLIN_TILE_N
 
 
 def is_fp4_marlin_supported():
@@ -162,8 +170,13 @@ def apply_fp4_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
+    padded_size_n = _pad_to_marlin_tile(size_n)
     use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
+        m=reshaped_x.size(0),
+        n=padded_size_n,
+        k=size_k,
+        device=input.device,
+        dtype=input.dtype,
     )
 
     inputs = reshaped_x
@@ -191,11 +204,15 @@ def apply_fp4_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float4_e2m1f,
         size_m=reshaped_x.size(0),
-        size_n=size_n,
+        size_n=padded_size_n,
         size_k=size_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
+
+    # Slice off N-dimension padding if present
+    if padded_size_n != size_n:
+        output = output[:, :size_n]
 
     return output.reshape(out_shape)
 
@@ -220,20 +237,25 @@ def prepare_fp4_layer_for_marlin(
 
     device = layer.weight.device
 
+    padded_size_n = _pad_to_marlin_tile(part_size_n)
+    n_padding = padded_size_n - part_size_n
+    layer.marlin_n_padding = n_padding
+
     # WORKSPACE
     layer.workspace = marlin_make_workspace_new(device)
 
     # WEIGHT
     # Repack weights to marlin format
     perm = torch.empty(0, dtype=torch.int, device=device)
-    qweight = layer.weight.view(torch.int32).T.contiguous()
+    weight = torch.nn.functional.pad(layer.weight, (0, 0, 0, n_padding))
+    qweight = weight.view(torch.int32).T.contiguous()
 
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
         perm=perm,
         size_k=part_size_k,
-        size_n=part_size_n,
+        size_n=padded_size_n,
         num_bits=4,
         is_a_8bit=is_a_8bit,
     )
@@ -241,7 +263,8 @@ def prepare_fp4_layer_for_marlin(
 
     # WEIGHT SCALES
     # Permute scales
-    weight_scale = layer.weight_scale.T.contiguous()
+    weight_scale = torch.nn.functional.pad(layer.weight_scale, (0, 0, 0, n_padding))
+    weight_scale = weight_scale.T.contiguous()
 
     if not is_nvfp4:
         weight_scale = weight_scale.view(torch.float8_e8m0fnu)
@@ -250,7 +273,7 @@ def prepare_fp4_layer_for_marlin(
     weight_scale = marlin_permute_scales(
         s=weight_scale,
         size_k=part_size_k,
-        size_n=part_size_n,
+        size_n=padded_size_n,
         group_size=group_size,
         is_a_8bit=is_a_8bit,
     )
@@ -321,24 +344,49 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
     # WEIGHT
     # Repack weights to marlin format
-    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
-        tensor_list = []
-        num_shards = 2 if is_act_and_mul else 1
+    num_shards = 2 if is_act_and_mul else 1
+
+    # Compute the padded w13 output size.
+    # For gated activations (num_shards=2), the activation output
+    #   is w13_padded_size_n // 2.
+    # For non-gated activations(num_shards=1), the activation output
+    #   is w13_padded_size_n.
+    # In both cases, activation_out_size = w13_padded_size_n // num_shards.
+    # This must also equal w2's size_k,
+    # so w2 weights are repacked with size_k = activation_out_size.
+    w13_padded_size_n = _pad_to_marlin_tile(N * num_shards)
+    activation_out_size = w13_padded_size_n // num_shards
+
+    def _get_moe_sizes(name: str) -> tuple[int, int, int, int]:
+        """return (size_n, size_k, padded_size_n, padded_size_k) for w13/w2"""
         if "w13" in name:
             size_n, size_k = N * num_shards, K
+            return size_n, size_k, w13_padded_size_n, size_k
         else:
+            # w2: size_n=K (output), size_k=N (input from activation).
+            # activation_out_size may differ from N when N is not a multiple
+            # of marlin_tile_n / num_shards.
             size_n, size_k = K, N
+            return size_n, size_k, _pad_to_marlin_tile(size_n), activation_out_size
+
+    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
+        size_n, size_k, padded_size_n, padded_size_k = _get_moe_sizes(name)
+        n_padding = padded_size_n - size_n
+        k_padding = padded_size_k - size_k
 
         assert weight.shape == (E, size_n, size_k // 2)
 
+        tensor_list = []
         for i in range(E):
-            qweight = weight[i].view(torch.int32).T.contiguous()
+            expert_weight = torch.nn.functional.pad(weight[i], (0, 0, 0, n_padding))
+            expert_weight = torch.nn.functional.pad(expert_weight, (0, k_padding // 2))
+            qweight = expert_weight.view(torch.int32).T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
                 b_q_weight=qweight,
                 perm=perm,
-                size_k=size_k,
-                size_n=size_n,
+                size_k=padded_size_k,
+                size_n=padded_size_n,
                 num_bits=4,
                 is_a_8bit=is_a_8bit,
             )
@@ -349,12 +397,24 @@ def prepare_nvfp4_moe_layer_for_marlin(
     w13 = repack_weight(w13, "w13")
     w2 = repack_weight(w2, "w2")
 
+    # Store the intermediate sizes for MoE kernel to use.
+    # marlin_moe_intermediate_size: the activation output size, used as
+    #  w2's size_k in second GEMM.
+    # marlin_moe_w13_size_n: the padded w13 output size, used as
+    #  size_n in the first GEMM.
+    layer.marlin_moe_intermediate_size = activation_out_size
+    layer.marlin_moe_w13_size_n = w13_padded_size_n
+
     # WEIGHT SCALES
     # Permute scales
     def premute_scales(
         scales: torch.Tensor, g_scales: torch.Tensor, name: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
         scales = scales.to(param_dtype)
+
+        size_n, size_k, padded_size_n, padded_size_k = _get_moe_sizes(name)
+        n_padding = padded_size_n - size_n
+        k_scale_padding = (padded_size_k - size_k) // GROUP_SIZE
 
         tensor_list = []
         num_shards = 2 if is_act_and_mul else 1
@@ -368,11 +428,12 @@ def prepare_nvfp4_moe_layer_for_marlin(
         combined_scale_factor = _nvfp4_compute_scale_factor(scales, param_dtype)
 
         for i in range(E):
-            scale = scales[i].T
+            scale = torch.nn.functional.pad(scales[i], (0, 0, 0, n_padding))
+            scale = torch.nn.functional.pad(scale, (0, k_scale_padding)).T
             marlin_scales = marlin_permute_scales(
                 s=scale,
-                size_k=size_k,
-                size_n=size_n,
+                size_k=padded_size_k,
+                size_n=padded_size_n,
                 group_size=GROUP_SIZE,
                 is_a_8bit=is_a_8bit,
             )
@@ -425,16 +486,20 @@ def prepare_moe_fp4_layer_for_marlin(
         else:
             size_n, size_k = k, n
 
+        padded_size_n = _pad_to_marlin_tile(size_n)
+        n_padding = padded_size_n - size_n
+
         assert weight.shape == (e, size_n, size_k // 2)
 
         for i in range(e):
-            qweight = weight[i].view(torch.int32).T.contiguous()
+            expert_weight = torch.nn.functional.pad(weight[i], (0, 0, 0, n_padding))
+            qweight = expert_weight.view(torch.int32).T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
                 b_q_weight=qweight,
                 perm=perm,
                 size_k=size_k,
-                size_n=size_n,
+                size_n=padded_size_n,
                 num_bits=4,
                 is_a_8bit=is_a_8bit,
             )
@@ -461,18 +526,21 @@ def prepare_moe_fp4_layer_for_marlin(
         else:
             size_n, size_k = k, n
 
+        padded_size_n = _pad_to_marlin_tile(size_n)
+        n_padding = padded_size_n - size_n
+
         # For NVFP4: compute unified scale_factor across all experts
         combined_scale_factor = None
         if is_nvfp4:
             combined_scale_factor = _nvfp4_compute_scale_factor(scales, param_dtype)
 
         for i in range(e):
-            scale = scales[i].T
+            scale = torch.nn.functional.pad(scales[i], (0, 0, 0, n_padding)).T
 
             marlin_scales = marlin_permute_scales(
                 s=scale,
                 size_k=size_k,
-                size_n=size_n,
+                size_n=padded_size_n,
                 group_size=group_size,
                 is_a_8bit=is_a_8bit,
             )
@@ -506,10 +574,13 @@ def prepare_moe_fp4_layer_for_marlin(
             continue
         bias = getattr(layer, name).to(param_dtype)
 
+        size_n = n * 2 if "w13" in name else k
+        padded_size_n = _pad_to_marlin_tile(size_n)
+        n_padding = padded_size_n - size_n
+
         tensor_list = []
         for i in range(e):
-            expert_bias = bias[i]
-
+            expert_bias = torch.nn.functional.pad(bias[i], (0, n_padding))
             tensor_list.append(marlin_permute_bias(expert_bias))
 
         bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
