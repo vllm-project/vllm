@@ -379,7 +379,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         use_a16: bool = False,
     ):
         super().__init__(moe)
-        self.group_size = 16
+
+        # The number of 4bit values per scaling factor.
+        self.nvfp4_block_size: int = 16
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
@@ -438,7 +440,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 num_experts,
                 w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
-                hidden_size // self.group_size,
+                hidden_size // self.nvfp4_block_size,
                 dtype=torch.float8_e4m3fn,
             ),
             requires_grad=False,
@@ -454,7 +456,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 num_experts,
                 hidden_size,
                 # 2 fp4 items are packed in the input dimension
-                intermediate_size_per_partition // self.group_size,
+                intermediate_size_per_partition // self.nvfp4_block_size,
                 dtype=torch.float8_e4m3fn,
             ),
             requires_grad=False,
@@ -466,44 +468,44 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # Weight Global Scales
-        w13_weight_scale_2 = torch.nn.Parameter(
+        w13_weight_global_scale = torch.nn.Parameter(
             torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
             requires_grad=False,
         )
-        layer.register_parameter("w13_weight_global_scale", w13_weight_scale_2)
+        layer.register_parameter("w13_weight_global_scale", w13_weight_global_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+        set_weight_attrs(w13_weight_global_scale, extra_weight_attrs)
 
-        w2_weight_scale_2 = torch.nn.Parameter(
+        w2_weight_global_scale = torch.nn.Parameter(
             torch.empty(num_experts, dtype=torch.float32), requires_grad=False
         )
-        layer.register_parameter("w2_weight_global_scale", w2_weight_scale_2)
+        layer.register_parameter("w2_weight_global_scale", w2_weight_global_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+        set_weight_attrs(w2_weight_global_scale, extra_weight_attrs)
 
         # Input Global Scales
-        w13_input_scale = torch.nn.Parameter(
+        w13_input_global_scale = torch.nn.Parameter(
             torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
             requires_grad=False,
         )
-        layer.register_parameter("w13_input_global_scale", w13_input_scale)
+        layer.register_parameter("w13_input_global_scale", w13_input_global_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        set_weight_attrs(w13_input_scale, extra_weight_attrs)
+        set_weight_attrs(w13_input_global_scale, extra_weight_attrs)
 
-        w2_input_scale = torch.nn.Parameter(
+        w2_input_global_scale = torch.nn.Parameter(
             torch.empty(num_experts, dtype=torch.float32), requires_grad=False
         )
-        layer.register_parameter("w2_input_global_scale", w2_input_scale)
+        layer.register_parameter("w2_input_global_scale", w2_input_global_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        set_weight_attrs(w2_input_scale, extra_weight_attrs)
+        set_weight_attrs(w2_input_global_scale, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: FusedMoE) -> None:
         """
@@ -561,10 +563,29 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
-        layer.w13_weight_scale_2 = w13_scale_2
-        layer.w2_weight_scale_2 = w2_scale_2
-        layer.w13_input_scale = a13_scale
-        layer.w2_input_scale = a2_scale
+        # Ensure contiguity: some backends (e.g. expand() in FlashInfer)
+        # return non-contiguous views.  EPLB's get_expert_weights requires
+        # all nn.Parameters to be contiguous.
+        replace_parameter(
+            layer,
+            "w13_weight_scale_2",
+            w13_scale_2.contiguous() if w13_scale_2 is not None else None,
+        )
+        replace_parameter(
+            layer,
+            "w2_weight_scale_2",
+            w2_scale_2.contiguous() if w2_scale_2 is not None else None,
+        )
+        replace_parameter(
+            layer,
+            "w13_input_scale",
+            a13_scale.contiguous() if a13_scale is not None else None,
+        )
+        replace_parameter(
+            layer,
+            "w2_input_scale",
+            a2_scale.contiguous() if a2_scale is not None else None,
+        )
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)

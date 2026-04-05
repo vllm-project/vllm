@@ -1,0 +1,282 @@
+# Makefile.eplb-accuracy — Accuracy evaluation for Mistral-Large-3-675B NVFP4 with EP4 + EPLB
+#
+# Parallelism: TP=1, DP=4, EP=4 (attention data-parallel, experts sharded across 4 GPUs)
+# Hardware:    4× NVIDIA GB200 (~185 GB each)
+# Model:       compressed-tensors NVFP4, 128 experts, 4 active/tok, 61 layers
+#
+# Usage:
+#   make -f Makefile.eplb-accuracy setup       # one-time env + deps
+#   make -f Makefile.eplb-accuracy all          # full sweep: no-EPLB baseline vs EPLB vs EPLB+redundant
+#   make -f Makefile.eplb-accuracy gsm8k-all    # fast GSM8K only
+#   make -f Makefile.eplb-accuracy report       # comparison table
+
+SHELL := /bin/bash
+.ONESHELL:
+.DELETE_ON_ERROR:
+
+# ── Paths & tunables ──────────────────────────────────────────────────────────
+MODEL           := /sandbox/Mistral-Large-3-675B-Instruct-2512-NVFP4
+VLLM_ROOT       := /workspace/vllm
+PYTHON          := /workspace/venv/bin/python
+RESULTS_DIR     := $(VLLM_ROOT)/results/eplb-accuracy
+GSM8K_EVAL      := $(VLLM_ROOT)/tests/evals/gsm8k/gsm8k_eval.py
+MAX_MODEL_LEN   := 4096
+MAX_WAIT        := 900
+NUM_QUESTIONS   := 1319
+NUM_FEWSHOT     := 5
+BASE_PORT       := 8100
+NUM_REDUNDANT   := 4
+
+# Fixed parallelism layout: EP4 with attention data-parallel
+TP := 1
+DP := 4
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+define wait_for_server
+	@echo "⏳ Waiting for server on port $(1) (up to $(MAX_WAIT)s)…"
+	@timeout $(MAX_WAIT) bash -c '\
+		until curl -sf http://127.0.0.1:$(1)/health >/dev/null 2>&1; do sleep 2; done'
+	@echo "✓ Server healthy on port $(1)"
+endef
+
+define kill_server
+	@if [ -f $(1) ]; then \
+		PID=$$(cat $(1)); \
+		kill $$PID 2>/dev/null || true; \
+		for i in $$(seq 1 30); do kill -0 $$PID 2>/dev/null || break; sleep 1; done; \
+		kill -9 $$PID 2>/dev/null || true; \
+		rm -f $(1); \
+	fi
+endef
+
+COMMON_SERVE_ARGS := \
+	--model $(MODEL) \
+	--trust-remote-code \
+	--tensor-parallel-size $(TP) \
+	--data-parallel-size $(DP) \
+	--enable-expert-parallel \
+	--max-model-len $(MAX_MODEL_LEN) \
+	--enforce-eager \
+	--disable-uvicorn-access-log
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+.PHONY: setup
+setup:
+	@echo "── Setting up environment ──"
+	cd $(VLLM_ROOT) && uv venv --python 3.12 || true
+	cd $(VLLM_ROOT) && source .venv/bin/activate && \
+		VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto && \
+		uv pip install -r requirements/test.in && \
+		uv pip install "lm-eval[api]"
+	mkdir -p $(RESULTS_DIR)
+
+$(RESULTS_DIR):
+	mkdir -p $@
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIG 1 — EP4, no EPLB (baseline)
+# ═══════════════════════════════════════════════════════════════════════════════
+BASELINE_PORT     := $(BASE_PORT)
+BASELINE_PID_FILE := $(RESULTS_DIR)/baseline.pid
+
+.PHONY: serve-baseline stop-baseline gsm8k-baseline lmeval-baseline
+
+serve-baseline: | $(RESULTS_DIR)
+	$(call kill_server,$(BASELINE_PID_FILE))
+	VLLM_DEEP_GEMM_WARMUP=skip \
+	$(PYTHON) -m vllm.entrypoints.openai.api_server \
+		$(COMMON_SERVE_ARGS) \
+		--port $(BASELINE_PORT) \
+		> $(RESULTS_DIR)/baseline.log 2>&1 &
+	echo $$! > $(BASELINE_PID_FILE)
+	$(call wait_for_server,$(BASELINE_PORT))
+
+stop-baseline:
+	$(call kill_server,$(BASELINE_PID_FILE))
+
+gsm8k-baseline: serve-baseline
+	@echo "── GSM8K: EP4 baseline (no EPLB) ──"
+	$(PYTHON) $(GSM8K_EVAL) \
+		--host http://127.0.0.1 --port $(BASELINE_PORT) \
+		--num-questions $(NUM_QUESTIONS) --num-shots $(NUM_FEWSHOT) \
+		--save-results $(RESULTS_DIR)/gsm8k_baseline.json
+	$(call kill_server,$(BASELINE_PID_FILE))
+	@echo "✓ Saved → $(RESULTS_DIR)/gsm8k_baseline.json"
+
+lmeval-baseline: serve-baseline
+	@echo "── lm-eval (gsm8k + mmlu_pro): EP4 baseline ──"
+	$(PYTHON) -m lm_eval \
+		--model local-completions \
+		--model_args "model=$(MODEL),base_url=http://127.0.0.1:$(BASELINE_PORT)/v1/completions,num_concurrent=64,tokenized_requests=False" \
+		--tasks gsm8k,mmlu_pro \
+		--num_fewshot 5 \
+		--batch_size auto \
+		--output_path $(RESULTS_DIR)/lmeval_baseline \
+		--log_samples
+	$(call kill_server,$(BASELINE_PID_FILE))
+	@echo "✓ Saved → $(RESULTS_DIR)/lmeval_baseline/"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIG 2 — EP4 + EPLB
+# ═══════════════════════════════════════════════════════════════════════════════
+EPLB_PORT     := $(shell echo $$(($(BASE_PORT)+1)))
+EPLB_PID_FILE := $(RESULTS_DIR)/eplb.pid
+
+.PHONY: serve-eplb stop-eplb gsm8k-eplb lmeval-eplb
+
+serve-eplb: | $(RESULTS_DIR)
+	$(call kill_server,$(EPLB_PID_FILE))
+	VLLM_DEEP_GEMM_WARMUP=skip \
+	$(PYTHON) -m vllm.entrypoints.openai.api_server \
+		$(COMMON_SERVE_ARGS) \
+		--enable-eplb \
+		--port $(EPLB_PORT) \
+		> $(RESULTS_DIR)/eplb.log 2>&1 &
+	echo $$! > $(EPLB_PID_FILE)
+	$(call wait_for_server,$(EPLB_PORT))
+
+stop-eplb:
+	$(call kill_server,$(EPLB_PID_FILE))
+
+gsm8k-eplb: serve-eplb
+	@echo "── GSM8K: EP4 + EPLB ──"
+	$(PYTHON) $(GSM8K_EVAL) \
+		--host http://127.0.0.1 --port $(EPLB_PORT) \
+		--num-questions $(NUM_QUESTIONS) --num-shots $(NUM_FEWSHOT) \
+		--save-results $(RESULTS_DIR)/gsm8k_eplb.json
+	$(call kill_server,$(EPLB_PID_FILE))
+	@echo "✓ Saved → $(RESULTS_DIR)/gsm8k_eplb.json"
+
+lmeval-eplb: serve-eplb
+	@echo "── lm-eval (gsm8k + mmlu_pro): EP4 + EPLB ──"
+	$(PYTHON) -m lm_eval \
+		--model local-completions \
+		--model_args "model=$(MODEL),base_url=http://127.0.0.1:$(EPLB_PORT)/v1/completions,num_concurrent=64,tokenized_requests=False" \
+		--tasks gsm8k,mmlu_pro \
+		--num_fewshot 5 \
+		--batch_size auto \
+		--output_path $(RESULTS_DIR)/lmeval_eplb \
+		--log_samples
+	$(call kill_server,$(EPLB_PID_FILE))
+	@echo "✓ Saved → $(RESULTS_DIR)/lmeval_eplb/"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIG 3 — EP4 + EPLB + redundant experts
+# ═══════════════════════════════════════════════════════════════════════════════
+EPLB_RED_PORT     := $(shell echo $$(($(BASE_PORT)+2)))
+EPLB_RED_PID_FILE := $(RESULTS_DIR)/eplb_redundant.pid
+
+.PHONY: serve-eplb-redundant stop-eplb-redundant gsm8k-eplb-redundant lmeval-eplb-redundant
+
+serve-eplb-redundant: | $(RESULTS_DIR)
+	$(call kill_server,$(EPLB_RED_PID_FILE))
+	VLLM_DEEP_GEMM_WARMUP=skip \
+	$(PYTHON) -m vllm.entrypoints.openai.api_server \
+		$(COMMON_SERVE_ARGS) \
+		--enable-eplb \
+		--eplb-config '{"num_redundant_experts": $(NUM_REDUNDANT)}' \
+		--port $(EPLB_RED_PORT) \
+		> $(RESULTS_DIR)/eplb_redundant.log 2>&1 &
+	echo $$! > $(EPLB_RED_PID_FILE)
+	$(call wait_for_server,$(EPLB_RED_PORT))
+
+stop-eplb-redundant:
+	$(call kill_server,$(EPLB_RED_PID_FILE))
+
+gsm8k-eplb-redundant: serve-eplb-redundant
+	@echo "── GSM8K: EP4 + EPLB + $(NUM_REDUNDANT) redundant experts ──"
+	$(PYTHON) $(GSM8K_EVAL) \
+		--host http://127.0.0.1 --port $(EPLB_RED_PORT) \
+		--num-questions $(NUM_QUESTIONS) --num-shots $(NUM_FEWSHOT) \
+		--save-results $(RESULTS_DIR)/gsm8k_eplb_redundant.json
+	$(call kill_server,$(EPLB_RED_PID_FILE))
+	@echo "✓ Saved → $(RESULTS_DIR)/gsm8k_eplb_redundant.json"
+
+lmeval-eplb-redundant: serve-eplb-redundant
+	@echo "── lm-eval (gsm8k + mmlu_pro): EP4 + EPLB + redundant experts ──"
+	$(PYTHON) -m lm_eval \
+		--model local-completions \
+		--model_args "model=$(MODEL),base_url=http://127.0.0.1:$(EPLB_RED_PORT)/v1/completions,num_concurrent=64,tokenized_requests=False" \
+		--tasks gsm8k,mmlu_pro \
+		--num_fewshot 5 \
+		--batch_size auto \
+		--output_path $(RESULTS_DIR)/lmeval_eplb_redundant \
+		--log_samples
+	$(call kill_server,$(EPLB_RED_PID_FILE))
+	@echo "✓ Saved → $(RESULTS_DIR)/lmeval_eplb_redundant/"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+.PHONY: report
+report:
+	@echo ""
+	@echo "════════════════════════════════════════════════════════════════════"
+	@echo "  Mistral-Large-3-675B NVFP4 — EP4 + Attention DP — Accuracy"
+	@echo "  Layout: TP=$(TP)  DP=$(DP)  EP=4  (attention replicated)"
+	@echo "════════════════════════════════════════════════════════════════════"
+	@echo ""
+	@printf "%-30s  %8s  %10s  %8s  %10s\n" "Configuration" "Accuracy" "Invalid %" "Latency" "Tok/s"
+	@printf "%-30s  %8s  %10s  %8s  %10s\n" "─────────────────────────────" "────────" "──────────" "────────" "──────────"
+	@for f in \
+		"EP4 (no EPLB):$(RESULTS_DIR)/gsm8k_baseline.json" \
+		"EP4 + EPLB:$(RESULTS_DIR)/gsm8k_eplb.json" \
+		"EP4 + EPLB + redundant:$(RESULTS_DIR)/gsm8k_eplb_redundant.json"; \
+	do \
+		NAME=$${f%%:*}; FILE=$${f#*:}; \
+		if [ -f "$$FILE" ]; then \
+			$(PYTHON) -c "\
+import json; \
+d=json.load(open('$$FILE')); \
+print(f'  {\"$$NAME\":<28s}  {d[\"accuracy\"]:8.4f}  {d[\"invalid_rate\"]*100:9.2f}%  {d[\"latency\"]:7.1f}s  {d[\"tokens_per_second\"]:9.1f}')"; \
+		else \
+			printf "  %-28s  %8s  %10s  %8s  %10s\n" "$$NAME" "—" "—" "—" "—"; \
+		fi; \
+	done
+	@echo ""
+	@echo "Result files: $(RESULTS_DIR)/"
+	@ls -1 $(RESULTS_DIR)/*.json 2>/dev/null || echo "  (none yet)"
+	@echo ""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AGGREGATE TARGETS
+# ═══════════════════════════════════════════════════════════════════════════════
+.PHONY: gsm8k-all lmeval-all all clean stop-all help
+
+gsm8k-all: gsm8k-baseline gsm8k-eplb gsm8k-eplb-redundant report
+lmeval-all: lmeval-baseline lmeval-eplb lmeval-eplb-redundant
+all: gsm8k-all lmeval-all report
+
+stop-all: stop-baseline stop-eplb stop-eplb-redundant
+clean: stop-all
+	rm -rf $(RESULTS_DIR)
+
+help:
+	@echo "Accuracy evaluation: Mistral-Large-3-675B NVFP4 — EP4 + Attention DP"
+	@echo "Parallelism: TP=$(TP) DP=$(DP) EP=4 (attention weights replicated, experts sharded)"
+	@echo ""
+	@echo "Setup:"
+	@echo "  make setup                     Install venv, vLLM, test deps, lm-eval"
+	@echo ""
+	@echo "GSM8K (fast, ~10 min/config):"
+	@echo "  make gsm8k-baseline            EP4, no EPLB"
+	@echo "  make gsm8k-eplb                EP4 + EPLB"
+	@echo "  make gsm8k-eplb-redundant      EP4 + EPLB + $(NUM_REDUNDANT) redundant experts"
+	@echo "  make gsm8k-all                 All three + report"
+	@echo ""
+	@echo "lm-eval (gsm8k + mmlu_pro, ~30 min/config):"
+	@echo "  make lmeval-baseline           EP4, no EPLB"
+	@echo "  make lmeval-eplb               EP4 + EPLB"
+	@echo "  make lmeval-eplb-redundant     EP4 + EPLB + redundant experts"
+	@echo "  make lmeval-all                All three"
+	@echo ""
+	@echo "Reporting & lifecycle:"
+	@echo "  make report                    Side-by-side accuracy table"
+	@echo "  make all                       Full sweep + report"
+	@echo "  make stop-all                  Kill any running servers"
+	@echo "  make clean                     Stop servers + remove results"
+	@echo ""
+	@echo "Overrides:"
+	@echo "  NUM_QUESTIONS=200              Fewer questions (default: $(NUM_QUESTIONS))"
+	@echo "  MAX_MODEL_LEN=8192             Context length  (default: $(MAX_MODEL_LEN))"
+	@echo "  NUM_REDUNDANT=8                Redundant experts (default: $(NUM_REDUNDANT))"

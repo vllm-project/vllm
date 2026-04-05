@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import swizzle_mxfp4
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -725,11 +725,11 @@ def convert_to_mxfp4_moe_kernel_format(
         w13_bias = w13_bias.to(torch.float32)
         w2_bias = w2_bias.to(torch.float32)
 
-        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+        w13_weight, w13_flex, w13_scale = swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
         )
-        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
+        w2_weight, w2_flex, w2_scale = swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
         )
