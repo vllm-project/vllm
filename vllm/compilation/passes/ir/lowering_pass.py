@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
+import torch
 from torch import fx
 from torch._inductor.pattern_matcher import (
     CallFunctionVarArgs,
     Match,
     PatternMatcherPass,
+    fwd_only,
     register_graph_pattern,
 )
 from torch._ops import OpOverload, OpOverloadPacket
@@ -64,12 +67,52 @@ class VllmIRLoweringPass(VllmInductorPass):
         self.selected_impls: dict[str, dict[str, str]] = defaultdict(lambda: {})
         self.ops = [ir_op.torch_op for ir_op in IrOp.registry.values()]
 
+        # Cache traced replacement graphs to avoid re-tracing the same impl.
+        # Key: (impl_fn, arg_metadata_tuple)
+        # Value: traced GraphModule
+        self._replacement_cache: dict[
+            tuple[Callable, tuple[Any, ...]], fx.GraphModule
+        ] = {}
+
         # Look for any call_function node where the target is a vLLM IR op.
         # Then, lower_matched_op will select, trace, and insert the implementation.
         register_graph_pattern(
             CallFunctionVarArgs(self.ops),
             pass_dict=self.patterns,
         )(self.lower_matched_op)
+
+    @staticmethod
+    def _make_arg_meta(val: Any) -> Any:
+        """Extract hashable metadata from a fake tensor or scalar value."""
+        if isinstance(val, torch.Tensor):
+            # Use str(shape) because dynamic shapes contain SymInt
+            # which is not hashable.
+            return (str(val.shape), val.dtype, val.device)
+        return val
+
+    def _get_or_trace_replacement(
+        self,
+        impl_fn: Callable,
+        example_vals: tuple[Any, ...],
+    ) -> fx.GraphModule:
+        """
+        Return a cached traced replacement graph, or trace and cache a new one.
+        """
+        cache_key = (
+            impl_fn,
+            tuple(self._make_arg_meta(v) for v in example_vals),
+        )
+
+        if cache_key not in self._replacement_cache:
+            replacement = fwd_only(impl_fn, example_vals)
+            self._replacement_cache[cache_key] = replacement
+            logger.debug(
+                "Traced replacement for %s (cache size: %d)",
+                getattr(impl_fn, "__name__", impl_fn),
+                len(self._replacement_cache),
+            )
+
+        return self._replacement_cache[cache_key]
 
     def lower_matched_op(self, match: Match, *args, **kwargs):
         # TODO(luka) I think args and kwargs are for the match, but just use the node?
@@ -87,17 +130,33 @@ class VllmIRLoweringPass(VllmInductorPass):
 
         # replace_by_example wants node args, not the fake tensors
         # TODO(luka): Use aot_export_module to get functionalized graph
-        # TODO(luka): Cache the fx_replacement to avoid re-tracing the same impl
 
         # Defaults not present on node.args but required for replacement tracing
         bound_args = ir_op._py_signature.bind(*node.args)
         bound_args.apply_defaults()
-        match.replace_by_example(ir_op_impl.impl_fn, bound_args.args)
+
+        # Get example values from the node args for tracing
+        example_vals = fx.map_arg(
+            bound_args.args,
+            lambda arg: arg.meta["val"]
+            if "val" in arg.meta
+            else arg.meta["example_value"],
+        )
+
+        # Get or trace the replacement graph (cached)
+        replacement = self._get_or_trace_replacement(
+            ir_op_impl.impl_fn, tuple(example_vals)
+        )
+
+        match.replace_with_graph(replacement, bound_args.args)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         # clear at the beginning instead of end, so that tests can inspect
         self.selected_impls.clear()
+        # Note: _replacement_cache is NOT cleared here. The traced replacement
+        # graph for a given (impl_fn, arg_shapes) is valid across subgraphs,
+        # so we keep it alive for the lifetime of this pass instance.
 
         count = self.patterns.apply(graph)
         logger.debug("VllmIRLoweringPass lowered %d vLLM IR nodes", count)
