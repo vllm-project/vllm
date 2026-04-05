@@ -3491,3 +3491,17 @@ if hasattr(torch.ops._C, "hadacore_transform"):
     @register_fake("_C::hadacore_transform")
     def _hadacore_transform_fake(x: torch.Tensor, inplace: bool) -> torch.Tensor:
         return torch.empty_like(x) if not inplace else x
+
+
+if hasattr(torch.ops._C, "minimax_allreduce_rms"):
+
+    @register_fake("_C::minimax_allreduce_rms")
+    def _minimax_allreduce_rms_fake(
+        input: torch.Tensor,
+        norm_weight: torch.Tensor,
+        workspace: torch.Tensor,
+        rank: int,
+        nranks: int,
+        eps: float,
+    ) -> torch.Tensor:
+        return torch.empty_like(input)

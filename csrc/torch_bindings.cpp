@@ -496,6 +496,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? b_qzeros, "
       "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
+
+  ops.def(
+      "minimax_allreduce_rms("
+      "Tensor input,"
+      "Tensor norm_weight,"
+      "Tensor workspace,"
+      "int rank,"
+      "int nranks,"
+      "float eps) -> Tensor");
+  ops.impl("minimax_allreduce_rms", torch::kCUDA, &minimax_allreduce_rms);
+  ops.def(
+      "minimax_allreduce_rms_qk("
+      "Tensor(a!) qkv,"
+      "Tensor norm_weight_q,"
+      "Tensor norm_weight_k,"
+      "Tensor workspace,"
+      "int q_size,"
+      "int kv_size,"
+      "int rank,"
+      "int nranks,"
+      "float eps) -> ()");
+  ops.impl("minimax_allreduce_rms_qk", torch::kCUDA, &minimax_allreduce_rms_qk);
+
   //  conditionally compiled so impl in source file
 #endif
 }
