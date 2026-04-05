@@ -502,10 +502,12 @@ def test_empty_tool_section(kimi_k2_tool_parser):
     assert kimi_k2_tool_parser.in_tool_section is False
 
 
-def test_malformed_tool_section_recovery(kimi_k2_tool_parser):
+def test_large_tool_section_stays_open(kimi_k2_tool_parser):
     """
-    Test that the parser recovers from a malformed tool section
-    that never closes properly.
+    Test that the parser does NOT force-exit tool sections based on
+    character count.  Large tool-call arguments (e.g. generated source
+    files) must be streamed without truncation; the engine provides
+    proper termination via section-end markers.
     """
     kimi_k2_tool_parser.reset_streaming_state()
 
@@ -523,11 +525,10 @@ def test_malformed_tool_section_recovery(kimi_k2_tool_parser):
     )
     assert kimi_k2_tool_parser.in_tool_section is True
 
-    # Simulate a lot of text without proper tool calls or section end
-    # This should trigger the error recovery mechanism
-    large_text = "x" * 10000  # Exceeds max_section_chars
+    # Feed a very large chunk — should NOT trigger force-exit
+    large_text = "x" * 50000
 
-    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
+    _result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
         previous_text="<|tool_calls_section_begin|>",
         current_text="<|tool_calls_section_begin|>" + large_text,
         delta_text=large_text,
@@ -537,11 +538,10 @@ def test_malformed_tool_section_recovery(kimi_k2_tool_parser):
         request=None,
     )
 
-    # Parser should have force-exited the tool section
-    assert kimi_k2_tool_parser.in_tool_section is False
-    # And returned the content as reasoning
-    assert result2 is not None
-    assert result2.content == large_text
+    # Parser must still be inside the tool section
+    assert kimi_k2_tool_parser.in_tool_section is True
+    # Character counter should have tracked the content
+    assert kimi_k2_tool_parser.section_char_count == len(large_text)
 
 
 def test_state_reset(kimi_k2_tool_parser):
