@@ -43,6 +43,12 @@ steps:
       - image-build-amd
     
 
+- label: Model strategy test
+  device: b200
+  source_file_dependencies: []
+  commands:
+    - pytest -v -s models/nightly/guidellm/gptoss_gllm.py
+
 - label: Basic Models Test (Other CPU) # 5min
   depends_on: 
   - image-build-cpu
