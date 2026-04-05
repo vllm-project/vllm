@@ -174,3 +174,24 @@ def test_seed(llm):
 
     assert out_1[0].outputs[0].text == out_2[0].outputs[0].text
     assert out_1[0].outputs[0].text != out_3[0].outputs[0].text
+
+
+def test_prompt_logprobs_mode_respected():
+    """Prompt logprobs should not be identical for raw_logits vs raw_logprobs."""
+    prompt = "Hello world"
+    per_mode_value = {}
+
+    for mode in ("raw_logits", "raw_logprobs"):
+        llm = LLM(MODEL, enforce_eager=True, logprobs_mode=mode)
+        output = llm.generate(
+            prompt, SamplingParams(max_tokens=1, prompt_logprobs=0, temperature=0)
+        )[0]
+        assert output.prompt_logprobs is not None
+        assert output.prompt_logprobs[1] is not None
+        prompt_token_id = output.prompt_token_ids[1]
+        per_mode_value[mode] = output.prompt_logprobs[1][prompt_token_id].logprob
+        del llm
+
+    assert per_mode_value["raw_logits"] != per_mode_value["raw_logprobs"], (
+        "prompt_logprobs should reflect logprobs_mode (logits vs logprobs)."
+    )

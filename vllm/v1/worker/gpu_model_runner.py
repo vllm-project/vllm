@@ -186,6 +186,7 @@ from vllm.v1.worker.cp_utils import (
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
+from vllm.v1.worker.gpu.sample.mode_utils import compute_prompt_scores_for_mode
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -5070,10 +5071,15 @@ class GPUModelRunner(
             # to gather the logprob for.
             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
 
-            # Compute prompt logprobs.
-            logprobs = self.sampler.compute_logprobs(logits)
+            # NOTE: Prompt logprobs currently do not apply request-time
+            # logits processors. Therefore, "raw_*" and "processed_*" share
+            # the same source tensor here; the distinction is whether we
+            # return logits or logprobs.
+            scores = compute_prompt_scores_for_mode(
+                logits, self.model_config.logprobs_mode, self.sampler.compute_logprobs
+            )
             token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
+                scores, num_prompt_logprobs, tgt_token_ids
             )
 
             # Transfer GPU->CPU async.
