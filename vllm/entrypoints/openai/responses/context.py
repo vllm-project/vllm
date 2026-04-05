@@ -140,6 +140,22 @@ class ConversationContext(ABC):
         raise NotImplementedError("Should not be called.")
 
 
+def _extract_content_text(msg: Any) -> str:
+    """Safely extract text from the first content item.
+
+    Works with both Harmony ``Message`` objects and MCP ``CallToolResult``
+    objects — any object whose ``.content`` is a list of items with a
+    ``.text`` attribute.
+
+    Returns an empty string if the content list is empty, preventing
+    IndexError crashes when the model generates a tool call with no
+    content or a tool server returns an empty result.
+    """
+    if not msg.content:
+        return ""
+    return msg.content[0].text
+
+
 def _create_json_parse_error_messages(
     last_msg: Message, e: json.JSONDecodeError
 ) -> list[Message]:
@@ -720,13 +736,13 @@ class HarmonyContext(ConversationContext):
         tool_name = last_msg.recipient.split(".")[1]
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
-                args = json.loads(last_msg.content[0].text)
+                args = json.loads(_extract_content_text(last_msg))
             except json.JSONDecodeError as e:
                 return _create_json_parse_error_messages(last_msg, e)
         else:
-            args = json.loads(last_msg.content[0].text)
+            args = json.loads(_extract_content_text(last_msg))
         result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
+        result_str = _extract_content_text(result)
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [
@@ -745,10 +761,10 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         param = {
-            "code": last_msg.content[0].text,
+            "code": _extract_content_text(last_msg),
         }
         result = await tool_session.call_tool("python", param)
-        result_str = result.content[0].text
+        result_str = _extract_content_text(result)
 
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name="python")
@@ -807,13 +823,13 @@ class HarmonyContext(ConversationContext):
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
-                args = json.loads(last_msg.content[0].text)
+                args = json.loads(_extract_content_text(last_msg))
             except json.JSONDecodeError as e:
                 return _create_json_parse_error_messages(last_msg, e)
         else:
-            args = json.loads(last_msg.content[0].text)
+            args = json.loads(_extract_content_text(last_msg))
         result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
+        result_str = _extract_content_text(result)
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [
