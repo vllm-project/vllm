@@ -67,8 +67,8 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 
 // More efficient version of A[..., perm]
 //  taken from gptq_marlin.cu
-torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
-                                   torch::stable::Tensor const& perm) {
+torch::stable::Tensor permute_cols(torch::stable::Tensor A,
+                                   torch::stable::Tensor perm) {
   const int32_t dev = A.get_device_index();
   const torch::stable::accelerator::DeviceGuard device_guard(dev);
   const auto stream = get_current_cuda_stream(dev);
