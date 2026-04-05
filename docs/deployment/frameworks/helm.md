@@ -52,6 +52,7 @@ The following table describes configurable parameters of the chart in `values.ya
 
 | Key | Type | Default | Description |
 | --- | ---- | ------- | ----------- |
+| affinity | object | {} | Pod affinity |
 | autoscaling | object | {"enabled":false,"maxReplicas":100,"minReplicas":1,"targetCPUUtilizationPercentage":80} | Autoscaling configuration |
 | autoscaling.enabled | bool | false | Enable autoscaling |
 | autoscaling.maxReplicas | int | 100 | Maximum replicas |
