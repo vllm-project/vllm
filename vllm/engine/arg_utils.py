@@ -526,6 +526,8 @@ class EngineArgs:
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
+    enable_lora_weight_merge: bool = LoRAConfig.enable_lora_weight_merge
+    lora_weight_merge_golden_device: str = LoRAConfig.lora_weight_merge_golden_device
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -1879,6 +1881,8 @@ class EngineArgs:
                 target_modules=self.lora_target_modules,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
+                enable_lora_weight_merge=self.enable_lora_weight_merge,
+                lora_weight_merge_golden_device=(self.lora_weight_merge_golden_device),
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,

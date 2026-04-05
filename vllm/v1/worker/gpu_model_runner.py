@@ -3571,6 +3571,12 @@ class GPUModelRunner(
             if force_num_active_loras is not None
             else len(self.input_batch.lora_id_to_lora_request)
         )
+        # When automerge (enable_lora_weight_merge) is active, adapter
+        # weights are already in base — force has_lora=False so the
+        # non-LoRA CUDA graph is selected.
+        if force_has_lora is None and getattr(self, "_automerge_active", False):
+            force_has_lora = False
+            num_active_loras = 0
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
