@@ -374,16 +374,17 @@ class Glm4MoeModelToolParser(ToolParser):
             if end_pos != -1 and (key_pos == -1 or end_pos < key_pos):
                 self._buffer = self._buffer[end_pos + len(self.tool_call_end_token) :]
                 frag_or_none = self._close_args_if_needed()
-                # Finalize prev_tool_call_arr with complete parsed arguments
+                # Finalize prev_tool_call_arr with complete arguments as JSON string
                 if self._current_tool_name:
                     try:
                         full_args_str = self.streamed_args_for_tool[
                             self.current_tool_id
                         ]
-                        args_dict = json.loads(full_args_str)
+                        # Validate that it's valid JSON, but store as string
+                        json.loads(full_args_str)  # Validate only
                         self.prev_tool_call_arr[self.current_tool_id] = {
                             "name": self._current_tool_name,
-                            "arguments": args_dict,
+                            "arguments": full_args_str,  # Store as string, not dict
                         }
                     except (json.JSONDecodeError, IndexError) as e:
                         logger.warning(
