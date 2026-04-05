@@ -235,6 +235,25 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 - Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
 - Implements additional authentication, rate limiting, and logging at the proxy layer
 
+## gRPC Server Authentication
+
+The gRPC server (`--grpc` flag, requires `pip install vllm[grpc]`) **does not support API key authentication**. The `--api-key` flag and `VLLM_API_KEY` environment variable have no effect when vLLM is running in gRPC mode.
+
+When `--grpc` is passed to `vllm serve`, the gRPC server runs as a replacement for the HTTP server. The gRPC server:
+
+- Does not implement any authentication mechanism (no interceptors)
+- Does not support TLS (`add_insecure_port()` only)
+- Accepts connections from any network client
+- Enables gRPC reflection, allowing clients to enumerate available services
+
+Passing `--api-key` together with `--grpc` is accepted by the CLI parser without error or warning, but the API key is silently ignored. Do not rely on `--api-key` to protect a gRPC deployment.
+
+### Recommended Mitigations
+
+1. **Network isolation**: Restrict access to the gRPC port using firewall rules or network policies so that only trusted clients can connect.
+2. **Reverse proxy with authentication**: Place the gRPC server behind a proxy (such as Envoy) that enforces authentication and TLS termination.
+3. **Kubernetes NetworkPolicy**: In Kubernetes deployments, use NetworkPolicy resources to restrict which pods can reach the gRPC port.
+
 ## Request Parameter Resource Limits
 
 Certain API request parameters can have a large impact on resource consumption and may be abused to exhaust server resources. The `n` parameter in the `/v1/completions` and `/v1/chat/completions` endpoints controls how many independent output sequences are generated per request. A very large value causes the engine to allocate memory, CPU, and GPU time proportional to `n`, which can lead to out-of-memory conditions on the host and block the server from processing other requests.
