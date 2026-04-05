@@ -367,7 +367,9 @@ else:
     CutlassExpertsFp8 = None
 
 if cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
 
     register_experts(
         CutlassExpertsFp4,
