@@ -842,7 +842,10 @@ class FusedMoE(CustomOp):
         if shard_id == "w2":
             hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
             expert_data = self._narrow_expert_data_for_padding(
-                expert_data, loaded_weight, hidden_dim=hidden_dim
+                expert_data,
+                loaded_weight,
+                hidden_dim=hidden_dim,
+                intermediate_dim=shard_dim,
             )
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
@@ -882,29 +885,32 @@ class FusedMoE(CustomOp):
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         hidden_dim: int,
+        intermediate_dim: int = -1,
     ) -> torch.Tensor:
-        """Narrow expert_data hidden dim to match loaded_weight for padded
-        hidden_size.
+        """Narrow expert_data to match loaded_weight for padded dimensions.
 
         When backends (e.g., DeepEP) round up hidden_size, weight parameters
-        are larger than checkpoint weights. Narrow the padded hidden dimension
-        before copying.
+        are larger than checkpoint weights. Similarly, on the last TP rank the
+        intermediate dimension of loaded_weight may be smaller than the padded
+        allocation. Narrow both dimensions before copying.
 
         Args:
             expert_data: The (possibly padded) parameter tensor to narrow.
             loaded_weight: The checkpoint weight tensor with original size.
             hidden_dim: The dimension index corresponding to hidden_size.
                 Must be non-negative.
+            intermediate_dim: The dimension index corresponding to the
+                intermediate size. When >= 0, expert_data is also narrowed
+                along this axis if it is larger than loaded_weight.
         """
-        if (
-            loaded_weight.ndim > 0
-            and 0 <= hidden_dim < expert_data.ndim
-            and hidden_dim < loaded_weight.ndim
-            and expert_data.shape[hidden_dim] > loaded_weight.shape[hidden_dim]
-        ):
-            expert_data = expert_data.narrow(
-                hidden_dim, 0, loaded_weight.shape[hidden_dim]
-            )
+        for dim in (hidden_dim, intermediate_dim):
+            if (
+                loaded_weight.ndim > 0
+                and 0 <= dim < expert_data.ndim
+                and dim < loaded_weight.ndim
+                and expert_data.shape[dim] > loaded_weight.shape[dim]
+            ):
+                expert_data = expert_data.narrow(dim, 0, loaded_weight.shape[dim])
         return expert_data
 
     def _load_w13(
@@ -922,6 +928,7 @@ class FusedMoE(CustomOp):
             shard_size = expert_data.shape[shard_dim] // 2
         else:
             shard_size = expert_data.shape[shard_dim]
+
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
@@ -946,7 +953,10 @@ class FusedMoE(CustomOp):
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data, loaded_weight, hidden_dim=hidden_dim
+            expert_data,
+            loaded_weight,
+            hidden_dim=hidden_dim,
+            intermediate_dim=shard_dim,
         )
         expert_data.copy_(loaded_weight)
 
@@ -962,6 +972,7 @@ class FusedMoE(CustomOp):
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
+
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
@@ -979,7 +990,10 @@ class FusedMoE(CustomOp):
         # w2, down_proj: Load into only logical weight of w2.
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data, loaded_weight, hidden_dim=hidden_dim
+            expert_data,
+            loaded_weight,
+            hidden_dim=hidden_dim,
+            intermediate_dim=shard_dim,
         )
         expert_data.copy_(loaded_weight)
 
