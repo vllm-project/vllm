@@ -383,8 +383,9 @@ def test_should_split():
         ([1, 256], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         ([], None, 1, False, 2048, CUDAGraphMode.NONE, 0),
         (None, 0, 1, False, 2048, CUDAGraphMode.NONE, 0),
-        # truncated to nearest multiple of 8 or 16
-        (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        # include the exact configured max even when it is off the default step
+        (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 257),
+        (None, 300, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 300),
         # max from list
         ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
         # filtered out 15 due to SP

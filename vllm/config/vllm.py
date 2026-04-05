@@ -1484,6 +1484,8 @@ class VllmConfig:
                     cudagraph_capture_sizes += list(
                         range(256, max_cudagraph_capture_size + 1, 16)
                     )
+                if max_cudagraph_capture_size not in cudagraph_capture_sizes:
+                    cudagraph_capture_sizes.append(max_cudagraph_capture_size)
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
