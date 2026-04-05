@@ -194,12 +194,20 @@ class RoutedExpertsCapturer:
         if self._device_buffer is not None:
             self._device_buffer.zero_()
 
-    def save_captured_experts(self, indices: np.ndarray) -> None:
+    def save_captured_experts(
+        self,
+        indices: np.ndarray,
+        layer_range: tuple[int, int] | None = None,
+    ) -> None:
         """
         Save captured experts from device buffer to shared memory.
 
         Args:
             indices: Array of indices indicating where to store the data.
+            layer_range: Optional (start, end) layer slice to write.  When
+                running with pipeline parallelism each rank should only write
+                the layers it owns to avoid clobbering data from other ranks.
+                If *None*, all layers are written.
         """
         if get_tensor_model_parallel_rank() != 0:
             return
@@ -211,10 +219,16 @@ class RoutedExpertsCapturer:
             raise RuntimeError("Device buffer not initialized.")
 
         num_tokens = len(indices)
-        data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
-        with _file_lock(self._lock_file):
-            self._host_buffer_view[indices, :, :] = data
+        if layer_range is not None:
+            ls, le = layer_range
+            data = self._device_buffer[:num_tokens, ls:le, :].cpu().numpy()
+            with _file_lock(self._lock_file):
+                self._host_buffer_view[indices, ls:le, :] = data
+        else:
+            data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
+            with _file_lock(self._lock_file):
+                self._host_buffer_view[indices, :, :] = data
 
     def cleanup(self) -> None:
         """Explicitly clean up shared memory resources."""
