@@ -76,6 +76,9 @@ class EngineCoreClient(ABC):
     * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
     """
 
+    engine_ranks_managed: list[int]
+    resources: Any
+
     @staticmethod
     def make_client(
         multiprocess_mode: bool,
@@ -243,6 +246,17 @@ class EngineCoreClient(ABC):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
+    async def pause_scheduler_async(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        raise NotImplementedError
+
+    async def resume_scheduler_async(self) -> None:
+        raise NotImplementedError
+
+    async def is_scheduler_paused_async(self) -> bool:
+        raise NotImplementedError
+
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -270,6 +284,22 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
 
+@dataclass
+class InprocResources:
+    """Finalizer-managed resources for in-process EngineCore client."""
+
+    engine_core: EngineCore
+    engine_dead: bool = False
+
+    def __call__(self):
+        # Idempotent cleanup path invoked by weakref finalizer and shutdown().
+        if self.engine_dead:
+            return
+        self.engine_dead = True
+        with contextlib.suppress(Exception):
+            self.engine_core.shutdown()
+
+
 class InprocClient(EngineCoreClient):
     """
     InprocClient: client for in-process EngineCore. Intended
@@ -282,6 +312,13 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
+        # This will ensure resources created so far are closed
+        # when the client is garbage collected, even if an
+        # exception is raised mid-construction.
+        self.resources = InprocResources(engine_core=self.engine_core)
+        self._finalizer = weakref.finalize(self, self.resources)
+        # Single-engine ranks managed in inproc mode.
+        self.engine_ranks_managed = [0]
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
@@ -300,7 +337,7 @@ class InprocClient(EngineCoreClient):
             self.engine_core.abort_requests(request_ids)
 
     def shutdown(self, timeout: float | None = None) -> None:
-        self.engine_core.shutdown()
+        self._finalizer()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.engine_core.profile(is_start, profile_prefix)
@@ -361,6 +398,88 @@ class InprocClient(EngineCoreClient):
 
     def dp_engines_running(self) -> bool:
         return False
+
+    # Async wrappers for in-process client so callers expecting async
+    # interfaces (e.g. AsyncLLM) can await these without blocking the
+    # event loop. They simply run the blocking sync methods in a thread.
+    async def get_output_async(self) -> EngineCoreOutputs:
+        return await asyncio.to_thread(self.get_output)
+
+    async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
+        return await asyncio.to_thread(self.get_supported_tasks)
+
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        return await asyncio.to_thread(self.add_request, request)
+
+    async def profile_async(
+        self, is_start: bool = True, profile_prefix: str | None = None
+    ) -> None:
+        return await asyncio.to_thread(self.profile, is_start, profile_prefix)
+
+    async def reset_mm_cache_async(self) -> None:
+        return await asyncio.to_thread(self.reset_mm_cache)
+
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return await asyncio.to_thread(
+            self.reset_prefix_cache, reset_running_requests, reset_connector
+        )
+
+    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        return await asyncio.to_thread(self.sleep, level, mode)
+
+    async def pause_scheduler_async(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        await asyncio.to_thread(self.engine_core.pause_scheduler, mode, clear_cache)
+        return None  # To keep mypy happy.
+
+    async def resume_scheduler_async(self) -> None:
+        return await asyncio.to_thread(self.engine_core.resume_scheduler)
+
+    async def is_scheduler_paused_async(self) -> bool:
+        return await asyncio.to_thread(self.engine_core.is_scheduler_paused)
+
+    async def wake_up_async(self, tags: list[str] | None = None) -> None:
+        return await asyncio.to_thread(self.wake_up, tags)
+
+    async def is_sleeping_async(self) -> bool:
+        return await asyncio.to_thread(self.is_sleeping)
+
+    async def execute_dummy_batch_async(self) -> None:
+        return await asyncio.to_thread(self.execute_dummy_batch)
+
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
+        return await asyncio.to_thread(self.abort_requests, request_ids)
+
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        return await asyncio.to_thread(self.add_lora, lora_request)
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        return await asyncio.to_thread(self.remove_lora, lora_id)
+
+    async def list_loras_async(self) -> set[int]:
+        return await asyncio.to_thread(self.list_loras)
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
+        return await asyncio.to_thread(self.pin_lora, lora_id)
+
+    async def save_sharded_state_async(
+        self, path: str, pattern: str | None = None, max_size: int | None = None
+    ) -> None:
+        return await asyncio.to_thread(self.save_sharded_state, path, pattern, max_size)
+
+    async def collective_rpc_async(
+        self,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> list[_R]:
+        return await asyncio.to_thread(
+            self.collective_rpc, method, timeout, args, kwargs
+        )
 
 
 @dataclass
