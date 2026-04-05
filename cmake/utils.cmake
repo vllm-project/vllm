@@ -81,6 +81,14 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     BYPRODUCTS ${HIP_SRCS}
     COMMENT "Running hipify on ${NAME} extension source files.")
 
+  # Chain hipify targets so they run sequentially. Parallel hipify
+  # invocations race on shutil.copytree, overwriting .hip files
+  # produced by another target back to .cu originals.
+  if (DEFINED _VLLM_LAST_HIPIFY_TARGET)
+    add_dependencies(hipify${NAME} ${_VLLM_LAST_HIPIFY_TARGET})
+  endif()
+  set(_VLLM_LAST_HIPIFY_TARGET "hipify${NAME}" PARENT_SCOPE)
+
   # Swap out original extension sources with hipified sources.
   list(APPEND HIP_SRCS ${CXX_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)

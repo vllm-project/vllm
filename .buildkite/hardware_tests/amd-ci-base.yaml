@@ -1,0 +1,43 @@
+# Scheduled pipeline: build and push the ROCm CI base image (Tier 1).
+#
+# This image contains all slow, stable CI dependencies (RIXL+UCX, DeepEP+rocshmem,
+# torchcodec, RDMA libs, hf_transfer, pytest-shard, MIOPEN env vars) and is used
+# as the base for every per-PR test image build via CI_BASE_IMAGE in amd.yaml.
+#
+# Rebuild triggers (configure in Buildkite UI -> Pipelines -> Schedules):
+#   - Weekly cron (e.g. Sunday 00:00 UTC) on a mainline ROCm branch
+#   - Manual trigger when RIXL_BRANCH, DEEPEP_BRANCH, or ROCSHMEM_BRANCH changes
+#
+# Produces:
+#   rocm/vllm-dev:ci_base              <- stable tag, always points to most recent build
+#   rocm/vllm-dev:ci_base-YYYYMMDD    <- dated snapshot for rollback
+group: Hardware - AMD CI Base Build
+steps:
+  - label: "AMD: :docker: build ci_base image"
+    key: image-build-amd-ci-base
+    depends_on: []
+    device: amd_cpu
+    no_plugin: true
+    commands:
+    - export DATED_TAG="rocm/vllm-dev:ci_base-$(date +%Y%m%d)"
+    - export CI_BASE_IMAGE_TAG_DATED="$DATED_TAG"
+    - export CI_HCL_URL="https://raw.githubusercontent.com/vllm-project/ci-infra/${VLLM_CI_BRANCH:-main}/docker/ci-rocm.hcl"
+    - export DOCKERHUB_CACHE_TO="rocm/vllm-ci-cache:rocm-latest"
+    - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci
+    env:
+      DOCKER_BUILDKIT: "1"
+      CI_BASE_CONTENT_FILES: "requirements/common.txt requirements/rocm.txt requirements/rocm-test.in requirements/rocm-test.txt docker/Dockerfile.rocm docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh"
+      IMAGE_TAG: "rocm/vllm-dev:ci_base"
+      CI_BASE_IMAGE_TAG: "rocm/vllm-dev:ci_base"
+      VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+      REMOTE_VLLM: "1"
+      VLLM_BRANCH: "$BUILDKITE_COMMIT"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+        - exit_status: 1  # Machine occasionally fail
+          limit: 1

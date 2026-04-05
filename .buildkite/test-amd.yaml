@@ -14,11 +14,12 @@
 # soft_fail(bool): allow this step to fail without failing the entire pipeline (useful for flaky or experimental tests).
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for the test. incompatible with command.
-# mirror_hardwares(list): the list of hardware to run the test on as well. currently only supports [amdexperimental]
+# mirror_hardwares(list): the list of hardware tags to run the test on as well,
+#     e.g. [amdexperimental], [amdproduction], [amdmultinode].
 # num_gpus(int): override the number of GPUs for the test. defaults to 1 GPU. currently supports 2,4.
-# num_nodes(int): whether to simulate multi-node setup by launching multiple containers on one host,
-#     in this case, commands must be specified. the first command runs on the first host, the second
-#     command runs on the second host.
+# num_nodes(int): whether to simulate multi-node setup by launching multiple AMD containers on one host.
+#     For AMD multi-node steps, `commands` must contain exactly one command per node in node order.
+#     Example: with `num_nodes: 2`, `commands[0]` runs on node0 and `commands[1]` runs on node1.
 # timeout_in_minutes(int): sets a timeout for the step in minutes. if not specified, uses the default timeout.
 # parallelism(int): number of parallel jobs to run for this step. enables test sharding using $$BUILDKITE_PARALLEL_JOB
 #     and $$BUILDKITE_PARALLEL_JOB_COUNT environment variables.
@@ -186,11 +187,11 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - tests/standalone_tests/python_only_compile.sh
+  - tests/standalone_tests/python_only_compile_rocm.sh
   - setup.py
   - vllm/platforms/rocm.py
   commands:
-  - bash standalone_tests/python_only_compile.sh
+  - bash standalone_tests/python_only_compile_rocm.sh
 
 
 - label: Basic Correctness # TBD
@@ -208,7 +209,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
-  - pytest -v -s basic_correctness/test_basic_correctness.py
+  - VLLM_TARGET_TEST_SUITE=MI250 pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
 
@@ -624,7 +625,7 @@ steps:
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
 
-- label: Platform Tests (CUDA) # TBD
+- label: Platform Tests (Accelerator) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -1241,7 +1242,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - VLLM_TARGET_TEST_SUITE=MI250 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
@@ -2005,7 +2006,7 @@ steps:
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
 
-- label: Platform Tests (CUDA) # 5.0m
+- label: Platform Tests (Accelerator) # 5.0m
   timeout_in_minutes: 9
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
@@ -2513,7 +2514,7 @@ steps:
   - tests/model_executor/model_loader/test_sharded_state_loader.py
   - tests/models/
   commands:
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - VLLM_TARGET_TEST_SUITE=MI325 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
@@ -2628,7 +2629,7 @@ steps:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - VLLM_TARGET_TEST_SUITE=MI325 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
 
