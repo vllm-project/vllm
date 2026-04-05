@@ -976,3 +976,146 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
 
     # Legitimate content preserved
     assert "compare" in full_content.lower() or len(all_content) > 0
+
+
+def test_tool_end_and_next_begin_same_delta(kimi_k2_tool_parser):
+    """
+    CRITICAL BUG REPRODUCTION: When <|tool_call_end|> of tool N and
+    <|tool_call_begin|> of tool N+1 arrive in the SAME delta (common with
+    speculative decoding or multi-step scheduling), the parser's "starting
+    a new tool" branch fires and overwrites tool_call_portion with the new
+    tool's data, skipping finalization of tool N's arguments.
+
+    Result: tool N's streamed arguments are truncated/incomplete.
+
+    This test streams two tool calls where the boundary tokens land together,
+    then verifies BOTH tools have complete, valid JSON arguments.
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    tokenizer = kimi_k2_tool_parser.model_tokenizer
+
+    # Two tool calls with realistic JSON arguments
+    tool0_args = '{"city": "San Francisco", "units": "fahrenheit"}'
+    tool1_args = '{"city": "Tokyo", "units": "celsius"}'
+
+    full_text = (
+        "I'll check both cities. "
+        "<|tool_calls_section_begin|>"
+        "<|tool_call_begin|>functions.get_weather:0"
+        f" <|tool_call_argument_begin|> {tool0_args} "
+        "<|tool_call_end|>"
+        "<|tool_call_begin|>functions.get_weather:1"
+        f" <|tool_call_argument_begin|> {tool1_args} "
+        "<|tool_call_end|>"
+        "<|tool_calls_section_end|>"
+    )
+
+    # Encode the full text to get real token IDs
+    all_ids = tokenizer.encode(full_text, add_special_tokens=False)
+
+    # Decode incrementally to get per-token text fragments
+    fragments = []
+    for i in range(len(all_ids)):
+        prefix_prev = tokenizer.decode(all_ids[:i])
+        prefix_cur = tokenizer.decode(all_ids[: i + 1])
+        fragments.append((prefix_cur[len(prefix_prev):], all_ids[i]))
+
+    # Find the token positions for tool_call_end (tool 0) and
+    # tool_call_begin (tool 1). These are the tokens we want in
+    # the same delta.
+    tool_call_end_id = kimi_k2_tool_parser.tool_call_end_token_id
+    tool_call_begin_id = kimi_k2_tool_parser.tool_call_start_token_id
+
+    # Locate first tool_call_end and the tool_call_begin that follows it
+    end0_pos = None
+    begin1_pos = None
+    for i, (_, tid) in enumerate(fragments):
+        if tid == tool_call_end_id and end0_pos is None:
+            end0_pos = i
+        elif tid == tool_call_begin_id and end0_pos is not None:
+            begin1_pos = i
+            break
+
+    assert end0_pos is not None, "Could not find tool_call_end token"
+    assert begin1_pos is not None, "Could not find tool_call_begin after end"
+
+    # Simulate speculative decoding: the last N argument tokens of tool 0
+    # are accepted together with tool_call_end + tool_call_begin in one
+    # delta. We merge 4 tokens before end0 into the same delta.
+    merge_start = max(0, end0_pos - 4)
+
+    # Build deltas: stream token-by-token EXCEPT merge the critical
+    # boundary (merge_start through begin1_pos) into a single delta.
+    deltas = []
+    i = 0
+    while i < len(fragments):
+        if i == merge_start:
+            # Merge tokens: last args of tool0 + end + begin of tool1
+            merged_text = "".join(
+                f[0] for f in fragments[merge_start:begin1_pos + 1]
+            )
+            merged_ids = [
+                f[1] for f in fragments[merge_start:begin1_pos + 1]
+            ]
+            deltas.append((merged_text, merged_ids))
+            i = begin1_pos + 1
+        else:
+            text, tid = fragments[i]
+            deltas.append((text, [tid]))
+            i += 1
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    # Collect all streamed argument fragments per tool index
+    tool_args = {}  # tool_index -> concatenated argument fragments
+    for res in results:
+        if res is None:
+            continue
+        if not hasattr(res, "tool_calls") or not res.tool_calls:
+            continue
+        for tc in res.tool_calls:
+            idx = tc.index
+            func = tc.function
+            if func is None:
+                continue
+            args = func.arguments
+            if args:
+                tool_args.setdefault(idx, "")
+                tool_args[idx] += args
+
+    # CRITICAL ASSERTIONS: Both tools must have complete, valid JSON
+    assert 0 in tool_args, (
+        f"Tool 0 arguments never streamed. Collected: {tool_args}"
+    )
+    assert 1 in tool_args, (
+        f"Tool 1 arguments never streamed. Collected: {tool_args}"
+    )
+
+    # Verify tool 0's arguments are complete (not truncated)
+    try:
+        parsed0 = json.loads(tool_args[0])
+    except json.JSONDecodeError:
+        pytest.fail(
+            f"Tool 0 arguments are truncated/invalid JSON: {repr(tool_args[0])}"
+        )
+    assert parsed0.get("city") == "San Francisco", (
+        f"Tool 0 'city' wrong or missing: {parsed0}"
+    )
+    assert parsed0.get("units") == "fahrenheit", (
+        f"Tool 0 'units' wrong or missing: {parsed0}"
+    )
+
+    # Verify tool 1's arguments are complete
+    try:
+        parsed1 = json.loads(tool_args[1])
+    except json.JSONDecodeError:
+        pytest.fail(
+            f"Tool 1 arguments are truncated/invalid JSON: {repr(tool_args[1])}"
+        )
+    assert parsed1.get("city") == "Tokyo", (
+        f"Tool 1 'city' wrong or missing: {parsed1}"
+    )
+    assert parsed1.get("units") == "celsius", (
+        f"Tool 1 'units' wrong or missing: {parsed1}"
+    )

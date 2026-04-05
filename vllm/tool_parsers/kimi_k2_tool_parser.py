@@ -198,6 +198,47 @@ class KimiK2ToolParser(ToolParser):
                     tools_called=False, tool_calls=[], content=model_output
                 )
 
+    def _finalize_prev_tool_args(
+        self, current_text: str
+    ) -> DeltaMessage | None:
+        """Emit remaining args for the closing tool when end+begin land
+        in one delta (speculative decoding / multi-step scheduling)."""
+        # Walk to the (current_tool_id+1)th tool_call_start marker
+        marker = self.tool_call_start_token
+        pos = 0
+        for _ in range(self.current_tool_id + 1):
+            pos = current_text.find(marker, pos)
+            if pos == -1:
+                return None
+            pos += len(marker)
+        end = current_text.find(self.tool_call_end_token, pos)
+        if end == -1:
+            return None
+        raw = current_text[pos:end].rstrip()
+        m = self.stream_tool_call_portion_regex.match(raw)
+        if not m:
+            return None
+        args = m.group("function_arguments")
+        prev = self.prev_tool_call_arr[self.current_tool_id].get(
+            "arguments", "")
+        if not (args and prev
+                and args.startswith(prev)
+                and len(args) > len(prev)):
+            return None
+        diff = args[len(prev):]
+        self.streamed_args_for_tool[self.current_tool_id] += diff
+        self.current_tool_id += 1
+        self.current_tool_name_sent = False
+        self.streamed_args_for_tool.append("")
+        return DeltaMessage(tool_calls=[
+            DeltaToolCall(
+                index=self.current_tool_id - 1,
+                function=DeltaFunctionCall(
+                    arguments=diff,
+                ).model_dump(exclude_none=True),
+            )
+        ])
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -353,6 +394,16 @@ class KimiK2ToolParser(ToolParser):
                 cur_tool_start_count > cur_tool_end_count
                 and cur_tool_start_count > prev_tool_start_count
             ):
+                # If tool_call_end is also in this delta, finalize the
+                # previous tool's args before switching (speculative
+                # decoding can bundle end+begin in one delta).
+                if (self.tool_call_end_token_id in delta_token_ids
+                        and self.current_tool_id >= 0
+                        and self.prev_tool_call_arr):
+                    result = self._finalize_prev_tool_args(current_text)
+                    if result is not None:
+                        return result
+
                 if len(delta_token_ids) > 1:
                     tool_call_portion = current_text.split(self.tool_call_start_token)[
                         -1
