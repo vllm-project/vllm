@@ -1614,6 +1614,28 @@ def get_kv_cache_configs(
         if len(kv_cache_config.kv_cache_groups) > 0:
             _report_kv_cache_config(vllm_config, kv_cache_config)
 
+    # When num_gpu_blocks_override is set, validate that max_model_len
+    # still fits in the actual (overridden) block count.  Without this
+    # check the scheduler will loop forever on requests that can never
+    # be allocated.
+    if (vllm_config.cache_config.num_gpu_blocks_override is not None
+            and global_kv_cache_groups):
+        block_size = global_kv_cache_groups[0].kv_cache_spec.block_size
+        # One block is reserved as the null block.
+        usable_blocks = min_num_blocks - 1
+        max_tokens = usable_blocks * block_size
+        max_model_len = vllm_config.model_config.max_model_len
+        if max_model_len > max_tokens:
+            raise ValueError(
+                f"num_gpu_blocks_override="
+                f"{vllm_config.cache_config.num_gpu_blocks_override} "
+                f"provides {usable_blocks} usable blocks "
+                f"({max_tokens} tokens with block_size={block_size}), "
+                f"which cannot serve a request of max_model_len="
+                f"{max_model_len}. Decrease max_model_len to at most "
+                f"{max_tokens}, or increase num_gpu_blocks_override to "
+                f"at least {cdiv(max_model_len, block_size) + 1}.")
+
     return kv_cache_configs
 
 
