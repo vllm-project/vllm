@@ -628,7 +628,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Feature flag to enable/disable bytecode in
     # TorchCompileWithNoGuardsWrapper.
     "VLLM_USE_BYTECODE_HOOK": lambda: bool(
-        int(os.environ.get("VLLM_USE_BYTECODE_HOOK", "1"))
+        int(os.environ.get("VLLM_USE_BYTECODE_HOOK", "0"))
     ),
     # Force vllm to always load AOT compiled models from disk. Failure
     # to load will result in a hard error when this is enabled.
