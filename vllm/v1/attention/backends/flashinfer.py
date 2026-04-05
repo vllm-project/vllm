@@ -213,9 +213,7 @@ class BatchDCPPrefillWrapper:
         self._context = BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, get_kv_cache_layout()
         )
-        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
-            workspace_buffer, get_kv_cache_layout()
-        )
+        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
 
     def plan(
         self,
