@@ -74,8 +74,11 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_gen_workspace_buffer = None
+flashinfer_workspace_buffer = None
 
 
+# Must be zero-initialized and only used for the trtllm kernels as they properly reset
+# the workspace to zero after use; see: https://github.com/vllm-project/vllm/pull/25520
 def _get_trtllm_gen_workspace_buffer():
     global trtllm_gen_workspace_buffer
     if trtllm_gen_workspace_buffer is None:
@@ -83,6 +86,19 @@ def _get_trtllm_gen_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_gen_workspace_buffer
+
+
+def _get_workspace_buffer():
+    global flashinfer_workspace_buffer
+    if flashinfer_workspace_buffer is None:
+        buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+        if envs.VLLM_BATCH_INVARIANT:
+            buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+        flashinfer_workspace_buffer = torch.zeros(
+            buffer_size, dtype=torch.uint8, device="cuda"
+        )
+
+    return flashinfer_workspace_buffer
 
 
 @triton.jit
@@ -535,7 +551,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
-        self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
@@ -713,31 +728,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    def _get_workspace_buffer(self):
-        if self._workspace_buffer is None:
-            buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if envs.VLLM_BATCH_INVARIANT:
-                buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-            self._workspace_buffer = torch.zeros(
-                buffer_size, dtype=torch.uint8, device=self.device
-            )
-        return self._workspace_buffer
-
-    def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
-        self._workspace_buffer = workspace_buffer
-
     def _get_prefill_wrapper(
         self,
     ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
         if self._prefill_wrapper is None:
             if self.use_dcp:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
-                    workspace_buffer=self._get_workspace_buffer(),
+                    workspace_buffer=_get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
                 )
             else:
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(), get_kv_cache_layout()
+                    _get_workspace_buffer(), get_kv_cache_layout()
                 )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
@@ -758,7 +760,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indices = None
                 paged_kv_last_page_len = None
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(),
+                _get_workspace_buffer(),
                 get_kv_cache_layout(),
                 use_cuda_graph=use_cudagraph,
                 paged_kv_indptr_buffer=paged_kv_indptr,
@@ -781,7 +783,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), get_kv_cache_layout()
+                2, _get_workspace_buffer(), get_kv_cache_layout()
             )
         return self._cascade_wrapper
 
