@@ -2685,7 +2685,7 @@ class GPUModelRunner(
     ) -> tuple[
         list[str],
         list[tuple[str, MultiModalKwargsItem]],
-        list[tuple[str, PlaceholderRange]],
+        list[tuple[str, str, PlaceholderRange]],
     ]:
         """Batch multimodal inputs from scheduled encoder inputs.
 
@@ -2697,7 +2697,8 @@ class GPUModelRunner(
             A tuple of (mm_hashes, mm_kwargs, mm_lora_refs) where:
             - mm_hashes: List of multimodal hashes for each item
             - mm_kwargs: List of multimodal kwargs for each item
-            - mm_lora_refs: List of (req_id, placeholder_range) for each item
+            - mm_lora_refs: List of (req_id, modality, placeholder_range)
+                for each item
         """
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
@@ -2707,7 +2708,7 @@ class GPUModelRunner(
         mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         # Multimodal LoRA reference info to map each multimodal item
         # back to its request & position
-        mm_lora_refs = list[tuple[str, PlaceholderRange]]()
+        mm_lora_refs = list[tuple[str, str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
 
@@ -2718,7 +2719,9 @@ class GPUModelRunner(
 
                 mm_hashes.append(mm_feature.identifier)
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
-                mm_lora_refs.append((req_id, mm_feature.mm_position))
+                mm_lora_refs.append(
+                    (req_id, mm_feature.modality, mm_feature.mm_position)
+                )
 
         return mm_hashes, mm_kwargs, mm_lora_refs
 
@@ -2755,13 +2758,14 @@ class GPUModelRunner(
             lora_requests = set()
             encoder_token_counts = []
 
-            for req_id, pos_info in mm_lora_refs:
+            for req_id, modality, pos_info in mm_lora_refs:
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
                 # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
                 num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds()
+                    pos_info.get_num_embeds(),
+                    modality=modality,
                 )
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
@@ -2783,7 +2787,7 @@ class GPUModelRunner(
 
             if hasattr(self.model, "get_num_mm_connector_tokens"):
                 post_op_counts = [
-                    self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
+                    self.model.get_num_mm_connector_tokens(num_tokens, modality)  # type: ignore[attr-defined]
                     for num_tokens in encoder_token_counts
                 ]
 
@@ -7001,7 +7005,7 @@ class GPUModelRunner(
     def timed_encoder_operation(
         self,
         should_time: bool,
-        group_lora_refs: list[tuple[str, Any]],
+        group_lora_refs: list[tuple[str, Any, Any]],
         current_item_idx: int,
         num_items: int,
     ):
@@ -7010,7 +7014,7 @@ class GPUModelRunner(
 
         Args:
             should_time: Whether timing is enabled
-            group_lora_refs: Full list of (request_id, pos_info) tuples
+            group_lora_refs: Full list of (request_id, modality, pos_info) tuples
             current_item_idx: Starting index for this group
             num_items: Number of items in this group
         """
@@ -7019,7 +7023,7 @@ class GPUModelRunner(
             return
 
         group_refs = group_lora_refs[current_item_idx : current_item_idx + num_items]
-        group_request_ids = {req_id for req_id, _ in group_refs}
+        group_request_ids = {req_id for req_id, _, _ in group_refs}
 
         torch.accelerator.synchronize()
         start_time = time.perf_counter()
