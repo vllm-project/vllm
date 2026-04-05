@@ -73,6 +73,8 @@ class SimpleCPUOffloadScheduler:
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
         lazy_offload: bool = False,
+        disk_path: str | None = None,
+        disk_capacity_bytes: int = 0,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -153,6 +155,44 @@ class SimpleCPUOffloadScheduler:
         self._expected_worker_count = vllm_config.parallel_config.world_size
         self._store_event_pending_counts: dict[int, int] = {}
 
+        # --- Disk tier (write-back from CPU eviction) ---
+        self._disk_path = disk_path
+        self._disk_index: "DiskBlockIndex | None" = None
+        self._disk_enabled = False
+        # Pending disk write-back pairs captured during CPU eviction
+        self._pending_disk_writes_cpu: list[int] = []
+        self._pending_disk_writes_disk: list[int] = []
+        # Pending disk read pairs for prefetch
+        self._pending_disk_reads_cpu: list[int] = []
+        self._pending_disk_reads_disk: list[int] = []
+        # Periodic save counter
+        self._disk_stores_since_save = 0
+        self._disk_save_interval = 1000
+
+        if disk_path and disk_capacity_bytes > 0 and kv_cache_config:
+            from vllm.v1.simple_kv_offload.disk import DiskBlockIndex
+            gpu_total_bytes = sum(t.size for t in kv_cache_config.kv_cache_tensors)
+            total_bytes_per_block = gpu_total_bytes // kv_cache_config.num_blocks
+            num_disk_blocks = max(1, disk_capacity_bytes // total_bytes_per_block)
+
+            # Try loading persisted index
+            import os
+            index_path = os.path.join(disk_path, "disk_index.pkl")
+            loaded = DiskBlockIndex.load(index_path, num_disk_blocks)
+            self._disk_index = (
+                loaded if loaded is not None
+                else DiskBlockIndex(num_disk_blocks)
+            )
+            self._disk_enabled = True
+            logger.info(
+                "Disk tier enabled: %d blocks (%.2f GB), "
+                "index=%d entries, path=%s",
+                num_disk_blocks,
+                disk_capacity_bytes / (1024**3),
+                self._disk_index.size,
+                disk_path,
+            )
+
     @staticmethod
     def _derive_cpu_config(
         gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
@@ -182,6 +222,88 @@ class SimpleCPUOffloadScheduler:
             kv_cache_tensors=cpu_tensors,
             kv_cache_groups=gpu_config.kv_cache_groups,
         )
+
+    def _capture_eviction_candidates(self, n: int) -> None:
+        """Peek at the first n blocks about to be evicted from CPU.
+
+        Walks the CPU free queue and captures (block_hash, cpu_block_id)
+        pairs for blocks that will be evicted by the next get_new_blocks(n).
+        Queues them for background disk write-back.
+        """
+        if not self._disk_enabled or self._disk_index is None:
+            return
+
+        free_queue = self.cpu_block_pool.free_block_queue
+        node = free_queue.fake_free_list_head.next_free_block
+        tail = free_queue.fake_free_list_tail
+        captured = 0
+
+        while node is not None and node is not tail and captured < n:
+            bhash = node.block_hash
+            if bhash is not None and not node.is_null:
+                disk_bid, is_new = self._disk_index.allocate(bhash)
+                if disk_bid is not None and is_new:
+                    # Only queue write for NEW allocations (dedup)
+                    # Existing entries are already on disk — skip I/O
+                    self._pending_disk_writes_cpu.append(node.block_id)
+                    self._pending_disk_writes_disk.append(disk_bid)
+                    self._disk_stores_since_save += 1
+            captured += 1
+            node = node.next_free_block
+
+        # Periodic index persistence
+        if self._disk_stores_since_save >= self._disk_save_interval:
+            self._disk_stores_since_save = 0
+            self._save_disk_index()
+
+    def _schedule_disk_prefetch(
+        self,
+        request: "Request",
+        skipped: int,
+        num_disk_hits: int,
+        remaining_hashes: list,
+    ) -> None:
+        """Schedule disk→CPU prefetch for blocks found on disk.
+
+        Allocates fresh CPU blocks, records disk read pairs in pending
+        lists. The actual I/O happens on the worker side.
+        """
+        if self._disk_index is None:
+            return
+
+        # Cap prefetch to available CPU free blocks
+        num_cpu_free = self.cpu_block_pool.get_num_free_blocks()
+        num_to_prefetch = min(num_disk_hits, num_cpu_free)
+        if num_to_prefetch <= 0:
+            return
+
+        hashes_to_prefetch = remaining_hashes[:num_to_prefetch]
+
+        # Capture eviction candidates before allocating CPU blocks
+        self._capture_eviction_candidates(num_to_prefetch)
+
+        # Allocate CPU blocks
+        cpu_blocks = self.cpu_block_pool.get_new_blocks(num_to_prefetch)
+
+        for i, (cpu_blk, bh) in enumerate(zip(cpu_blocks, hashes_to_prefetch)):
+            disk_bid = self._disk_index.get_block_id(bh)
+            if disk_bid is None:
+                continue
+            cpu_blk._block_hash = bh  # type: ignore[assignment]
+            self._pending_disk_reads_cpu.append(cpu_blk.block_id)
+            self._pending_disk_reads_disk.append(disk_bid)
+
+        logger.debug(
+            "Scheduled disk prefetch: %d blocks for request %s",
+            len(self._pending_disk_reads_cpu), request.request_id,
+        )
+
+    def _save_disk_index(self) -> None:
+        """Persist disk block index for cross-restart cache."""
+        if self._disk_index and self._disk_path:
+            import os
+            index_path = os.path.join(self._disk_path, "disk_index.pkl")
+            self._disk_index.save(index_path)
 
     @staticmethod
     def _estimate_lazy_target_blocks(
@@ -225,6 +347,33 @@ class SimpleCPUOffloadScheduler:
 
         if hit_length > 0:
             return hit_length, True
+
+        # CPU miss — check disk tier for consecutive hits
+        if self._disk_enabled and self._disk_index is not None:
+            disk_hits = 0
+            disk_block_ids: list[int] = []
+            for bh in remaining_hashes:
+                dbid = self._disk_index.get_block_id(bh)
+                if dbid is not None:
+                    disk_hits += 1
+                    disk_block_ids.append(dbid)
+                else:
+                    break
+            disk_hit_tokens = disk_hits * self.block_size
+            # Only prefetch if enough blocks to be worthwhile
+            if disk_hit_tokens >= self.block_size * 4:
+                # Issue fadvise WILLNEED hint — triggers kernel async
+                # readahead NOW so data is in page cache when we
+                # actually pread it next step. Hides disk latency.
+                if disk_block_ids and hasattr(self, '_prefetch_hint_fn'):
+                    self._prefetch_hint_fn(disk_block_ids)
+
+                disk_hit_tokens = min(disk_hit_tokens, max_hit_len)
+                self._schedule_disk_prefetch(
+                    request, skipped, disk_hits, remaining_hashes
+                )
+                return None, False
+
         return 0, False
 
     # TODO(yifan): this API now only matches the suffix part of the prefix cache. A more
@@ -351,6 +500,16 @@ class SimpleCPUOffloadScheduler:
                 self._reqs_to_load[req_id].load_event = load_event
             self._load_event_to_reqs[load_event] = load_req_ids
 
+        # --- Disk write-back and reads ---
+        disk_write_cpu = self._pending_disk_writes_cpu
+        disk_write_disk = self._pending_disk_writes_disk
+        disk_read_cpu = self._pending_disk_reads_cpu
+        disk_read_disk = self._pending_disk_reads_disk
+        self._pending_disk_writes_cpu = []
+        self._pending_disk_writes_disk = []
+        self._pending_disk_reads_cpu = []
+        self._pending_disk_reads_disk = []
+
         result = SimpleCPUOffloadMetadata(
             load_event=load_event,
             load_gpu_blocks=load_gpu,
@@ -360,6 +519,10 @@ class SimpleCPUOffloadScheduler:
             store_gpu_blocks=store_gpu,
             store_cpu_blocks=store_cpu,
             need_flush=bool(scheduler_output.preempted_req_ids),
+            disk_write_cpu_blocks=disk_write_cpu,
+            disk_write_disk_blocks=disk_write_disk,
+            disk_read_cpu_blocks=disk_read_cpu,
+            disk_read_disk_blocks=disk_read_disk,
         )
         return result
 
@@ -429,6 +592,8 @@ class SimpleCPUOffloadScheduler:
 
         # Batch-allocate CPU blocks and stamp hashes.
         if gpu_ids:
+            # Capture blocks about to be evicted for disk write-back
+            self._capture_eviction_candidates(len(gpu_ids))
             cpu_blocks = cpu_pool.get_new_blocks(len(gpu_ids))
             cpu_ids = [blk.block_id for blk in cpu_blocks]
             for cpu_blk, bhash in zip(cpu_blocks, block_hashes):  # type: ignore[assignment]
@@ -547,6 +712,8 @@ class SimpleCPUOffloadScheduler:
             # --- Phase 2: Batch allocate CPU blocks and stamp hashes ---
             n_to_alloc = len(gpu_block_ids)
             if n_to_alloc > 0:
+                # Capture blocks about to be evicted for disk write-back
+                self._capture_eviction_candidates(n_to_alloc)
                 cpu_blocks_alloc = cpu_block_pool.get_new_blocks(n_to_alloc)
                 cpu_block_ids = [blk.block_id for blk in cpu_blocks_alloc]
                 for cpu_blk, bhash in zip(cpu_blocks_alloc, block_hashes_to_store):

@@ -37,6 +37,14 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
     # Whether any requests were preempted this step and need flush pending transfers.
     need_flush: bool = False
 
+    # Disk write-back: CPU blocks being evicted → write to NVMe
+    disk_write_cpu_blocks: list[int] = field(default_factory=list)
+    disk_write_disk_blocks: list[int] = field(default_factory=list)
+
+    # Disk read (prefetch): NVMe blocks → read into CPU before CPU→GPU load
+    disk_read_cpu_blocks: list[int] = field(default_factory=list)
+    disk_read_disk_blocks: list[int] = field(default_factory=list)
+
 
 @dataclass
 class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
