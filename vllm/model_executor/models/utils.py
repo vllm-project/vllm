@@ -884,3 +884,40 @@ def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
     return feature_layer_index
+
+
+def get_rotation_path(target_model_path, quant_config):
+    """
+    Gets the path of the rotation matrix, returns None if the target model is not a quarot model.
+    """
+    try:
+        rotation_relative_path = quant_config.quant_description["optional"]["quarot"]["rotation_map"][
+            "global_rotation"
+        ]
+    except KeyError:
+        return None
+
+    return Path(target_model_path) / rotation_relative_path
+
+
+def get_rotataion_matrix(rotation_path):
+    """
+    Anti-rotate maxtrix.
+    """
+    try:
+        safetensor_data = load_file(rotation_path)
+        Q = safetensor_data["global_rotation"]
+
+        return Q
+    except Exception as e:
+        logger.error(
+            f"Failed to load rotation weight from '{rotation_path}'. "
+            "If you want to use quarot model with eagle3, take a check."
+        )
+        raise e
+
+def compute_rotataion_matrix3(Q):
+    """
+    Anti-rotate matrix for 3 layers of hidden_states.
+    """
+    return torch.block_diag(Q, Q, Q)

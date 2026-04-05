@@ -30,6 +30,9 @@ from .utils import (
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
+    get_rotation_path,
+    get_rotataion_matrix,
+    compute_rotataion_matrix3,
 )
 
 logger = init_logger(__name__)
@@ -274,6 +277,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
+
+        self.target_model_config = self.vllm_config.speculative_config.target_model_config
+        self.target_quant_config = self.vllm_config.quant_config
+
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
@@ -372,6 +379,19 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        # TODO maybe extract a function
+        rotation_path = get_rotation_path(self.target_model_config.model, self.target_quant_config)
+
+        use_quarot = rotation_path is not None
+
+        if use_quarot:
+            Q = get_rotataion_matrix(rotation_path)
+            Q3 = compute_rotataion_matrix3(Q)
+            if isinstance(self.config.dtype, str):
+                embed_dtype = getattr(torch, self.config.dtype)
+            else:
+                embed_dtype = self.config.dtype
+
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
@@ -396,9 +416,22 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 continue
             elif "lm_head" not in name:
                 name = "model." + name
+            if "fc." in name and use_quarot:
+                # anti-rotate fc
+                dtype = loaded_weight.dtype
+                loaded_weight = loaded_weight @ Q3.to(dtype)
             if "embed_tokens" in name:
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
+            process_eagle_weight(self, name)
+
+        # process embedding if drafter does not have embedding
+        if use_quarot and not includes_embed_tokens:
+            name = "model.embed_tokens.weight"
+            loaded_weight = get_embedding_tensor(target_model_path).to(dtype) @ Q.T.to(dtype)
+            model_weights[name] = loaded_weight
+
+            includes_embed_tokens = True
             process_eagle_weight(self, name)
 
         if not includes_mask_hidden and self.use_parallel_drafting:
