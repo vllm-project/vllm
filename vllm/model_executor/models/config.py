@@ -347,25 +347,40 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
+    def mamba_ssm_cache_dtype(vllm_config: "VllmConfig") -> str:
+        """Resolve mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
-        float16 if not specified.
+        float32 if not specified.
         """
         cache_config = vllm_config.cache_config
         if cache_config.mamba_ssm_cache_dtype == "auto":
             hf_config = vllm_config.model_config.hf_config
             mamba_ssm_cache_dtype = getattr(
-                hf_config, "mamba_ssm_cache_dtype", "float16"
+                hf_config, "mamba_ssm_cache_dtype", "float32"
             )
             logger.info(
-                "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
+                "Resolved mamba_ssm_cache_dtype='%s' for NemotronH model",
                 mamba_ssm_cache_dtype,
             )
-            cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+            return mamba_ssm_cache_dtype
+        return cache_config.mamba_ssm_cache_dtype
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        resolved = cls.mamba_ssm_cache_dtype(vllm_config)
+        vllm_config.cache_config.mamba_ssm_cache_dtype = resolved
 
 
 class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Use `text_config.mamba_ssm_cache_dtype` as config override when
+        `cache_config.mamba_ssm_cache_dtype == 'auto'`"""
+        text_config = vllm_config.model_config.hf_config.text_config
+        temp_vllm_config = vllm_config.with_hf_config(text_config)
+        resolved = NemotronHForCausalLMConfig.mamba_ssm_cache_dtype(temp_vllm_config)
+        vllm_config.cache_config.mamba_ssm_cache_dtype = resolved
+
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         mm_config = model_config.multimodal_config
