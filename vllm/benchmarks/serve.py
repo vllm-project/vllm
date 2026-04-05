@@ -506,34 +506,62 @@ def calculate_metrics(
             output.start_time + output.latency for output in successful_outputs
         )
 
-        # Create second buckets (ceiling to ensure we capture all time)
-        duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
+        # Create second buckets covering the full active time window.
+        duration_seconds = max(1, int(np.ceil(max_end_time - min_start_time)))
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
-        for i, output in enumerate(successful_outputs):
-            # Calculate token generation timestamp using
-            # start_time, ttft, and itl
-            token_times = [output.start_time + output.ttft]
-            current_time = token_times[0]
-            for itl_value in output.itl:
-                current_time += itl_value
-                token_times.append(current_time)
+        for i, output in enumerate(outputs):
+            if not output.success:
+                continue
 
-            # Add tokens to second buckets
-            for token_time in token_times:
-                second_bucket = int(token_time - min_start_time)
+            output_len = actual_output_lens[i]
+            request_start = output.start_time
+            request_end = output.start_time + output.latency
+
+            # Track concurrent requests by overlap with each 1-second bucket.
+            request_start_second = max(
+                0, int(np.floor(request_start - min_start_time))
+            )
+            request_end_second = min(
+                duration_seconds - 1,
+                int(np.ceil(request_end - min_start_time)) - 1,
+            )
+            for second in range(request_start_second, request_end_second + 1):
+                bucket_start = min_start_time + second
+                bucket_end = bucket_start + 1.0
+                if min(request_end, bucket_end) > max(request_start, bucket_start):
+                    concurrent_requests_per_second[second] += 1
+
+            if output_len <= 0:
+                continue
+
+            # Estimate per-second output-token rate from observed decode window.
+            # `itl` can be chunk-level rather than token-level, so counting
+            # events underestimates token throughput when chunks contain
+            # multiple tokens.
+            decode_start = output.start_time + output.ttft
+            decode_end = request_end
+
+            if decode_end <= decode_start:
+                second_bucket = int(np.floor(decode_start - min_start_time))
                 if 0 <= second_bucket < duration_seconds:
-                    tokens_per_second[second_bucket] += 1
+                    tokens_per_second[second_bucket] += output_len
+                continue
 
-            # Track concurrent requests for each second this request was active
-            request_start_second = int(output.start_time - min_start_time)
-            request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
+            token_rate = output_len / (decode_end - decode_start)
+            decode_start_second = max(0, int(np.floor(decode_start - min_start_time)))
+            decode_end_second = min(
+                duration_seconds - 1,
+                int(np.ceil(decode_end - min_start_time)) - 1,
             )
 
-            for second in range(request_start_second, request_end_second + 1):
-                concurrent_requests_per_second[second] += 1
+            for second in range(decode_start_second, decode_end_second + 1):
+                bucket_start = min_start_time + second
+                bucket_end = bucket_start + 1.0
+                overlap = min(decode_end, bucket_end) - max(decode_start, bucket_start)
+                if overlap > 0:
+                    tokens_per_second[second] += token_rate * overlap
 
         # Find the maximum tokens per second and corresponding
         # concurrent requests
