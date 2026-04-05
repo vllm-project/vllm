@@ -103,7 +103,11 @@ def _dequant_mxfp4(
             "amd-quark`."
         ) from err
 
-    return mx.dq_mxfp4(x, scale, float_dtype)
+    # Quark HIP kernel only supports fp16 output; dequant to fp16 then cast.
+    result = mx.dq_mxfp4(x, scale, torch.float16)
+    if float_dtype != torch.float16:
+        result = result.to(float_dtype)
+    return result
 
 
 def _dequant_mxfp4_fake(
