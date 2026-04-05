@@ -100,6 +100,7 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
                     unsigned long long* chunk_sizes, size_t num_chunks) {
 #endif
   ensure_context(device);
+  error_code = no_error;
   // Define memory allocation properties
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -203,6 +204,7 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   // std::cout << "unmap_and_release: device=" << device << ", size=" << size <<
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
+  error_code = no_error;
 #ifndef USE_ROCM
   CUDA_CHECK(cuMemUnmap(d_mem, size));
   if (error_code != 0) {
@@ -450,6 +452,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
+  error_code = no_error;
   // get memory handle from the pointer
   if (!g_python_free_callback) {
     std::cerr << "ERROR: g_python_free_callback not set.\n";
@@ -541,13 +544,25 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   Py_DECREF(py_result);
   PyGILState_Release(gstate);
 
+  // sleeping block already freed by sleep(), skip CUDA ops
+  if (recv_d_mem == 0) {
+    return;
+  }
+
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
-  unmap_and_release(device, size, d_mem, p_memHandle);
+  unmap_and_release(device, recv_size, d_mem, p_memHandle);
 #endif
 
   // free address and the handle
-  CUDA_CHECK(cuMemAddressFree(d_mem, size));
+  if (error_code == no_error) {
+    CUDA_CHECK(cuMemAddressFree(d_mem, recv_size));
+  } else {
+    std::cerr << "WARNING: unmap_and_release failed, leaking virtual address "
+                 "range at "
+              << d_mem << " (" << recv_size << " bytes)." << std::endl;
+    error_code = no_error;
+  }
 #ifndef USE_ROCM
   free(p_memHandle);
 #else
