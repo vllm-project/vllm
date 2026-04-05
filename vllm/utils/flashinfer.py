@@ -11,6 +11,7 @@ import importlib
 import importlib.util
 import os
 import shutil
+import time
 from collections.abc import Callable
 from typing import Any, NoReturn
 
@@ -22,6 +23,42 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _install_jit_build_logging() -> None:
+    """Patch flashinfer.jit.JitSpec.build to emit progress logs.
+
+    Hooking at the JitSpec level covers every FlashInfer JIT compilation
+    (attention, sampling, MLA, …) in one place rather than scattering
+    log calls across individual call-sites.
+    """
+    try:
+        from flashinfer.jit.core import JitSpec
+    except ImportError:
+        return
+
+    original_build = JitSpec.build
+
+    def _build_with_logging(
+        self, verbose: bool, need_lock: bool = True
+    ) -> None:
+        logger.info(
+            "FlashInfer is JIT-compiling CUDA kernels (%s). "
+            "This may take several minutes...",
+            self.name,
+        )
+        t0 = time.perf_counter()
+        original_build(self, verbose, need_lock)
+        logger.info(
+            "FlashInfer JIT compilation complete (%s, took %.1f s).",
+            self.name,
+            time.perf_counter() - t0,
+        )
+
+    JitSpec.build = _build_with_logging
+
+
+_install_jit_build_logging()
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
