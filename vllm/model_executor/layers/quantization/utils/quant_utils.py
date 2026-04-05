@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 MXFP_SCALE_DTYPE = torch.uint8
+INT4_DTYPE = scalar_types.int4
+INT8_DTYPE = scalar_types.int8
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -169,6 +171,16 @@ kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=Tru
 
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
+
+# TODO: we use torch.float16 for the scale dtype only currently, fp32/bf16 may
+# be needed for some cases, need to verify and change the dtype here. Besides,
+# we may need specify concrete GroupShape(32/64/128) and Symmetric/Asymmetric
+# setting, for kernel impl to decide whether it's supported.
+kInt4StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
+kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
+
+kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
+kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
