@@ -2937,7 +2937,10 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for transfer performance metrics.
+    Timestamps are kept separate from `data` and converted to a span before
+    aggregation because each process has a different perf_counter() base.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -2955,13 +2958,20 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_failed_notifications": [],
             "num_kv_expired_reqs": [],
         }
+        self._transfer_starts: list[float] = []
+        self._transfer_ends: list[float] = []
+        self._computed_span: float = 0.0
 
     def record_transfer(self, res: nixlXferTelemetry):
-        # Keep metrics units consistent with rest of the code: time us->s
-        self.data["transfer_duration"].append(res.xferDuration / 1e6)
+        duration_seconds = res.xferDuration / 1e6
+        self.data["transfer_duration"].append(duration_seconds)
         self.data["post_duration"].append(res.postDuration / 1e6)
         self.data["bytes_transferred"].append(res.totalBytes)
         self.data["num_descriptors"].append(res.descCount)
+        end_time = time.perf_counter()
+        start_time = end_time - duration_seconds
+        self._transfer_starts.append(start_time)
+        self._transfer_ends.append(end_time)
 
     def record_failed_transfer(self):
         """Record a failed NIXL transfer operation."""
@@ -2976,6 +2986,8 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data["num_kv_expired_reqs"].append(1)
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
+        if self._transfer_starts:
+            self._computed_span = max(self._transfer_ends) - min(self._transfer_starts)
         old = copy.copy(self)
         self.reset()
         return old
@@ -2995,6 +3007,8 @@ class NixlKVConnectorStats(KVConnectorStats):
                 accumulator = self.data[k]
                 assert isinstance(accumulator, list)
                 accumulator.extend(v)
+            assert isinstance(other, NixlKVConnectorStats)
+            self._computed_span = max(self._computed_span, other._computed_span)
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -3024,8 +3038,12 @@ class NixlKVConnectorStats(KVConnectorStats):
         total_mb = mb.sum()
         avg_mb = total_mb / n
 
-        total_time_seconds = xfer_time.sum()
-        throughput_mb_s = total_mb / total_time_seconds
+        if self._computed_span > 0:
+            wall_clock_span = self._computed_span
+        else:
+            assert self._transfer_starts, "No timestamps for throughput calculation"
+            wall_clock_span = max(self._transfer_ends) - min(self._transfer_starts)
+        throughput_mb_s = total_mb / wall_clock_span if wall_clock_span > 0 else 0.0
 
         return {
             "Num successful transfers": n,

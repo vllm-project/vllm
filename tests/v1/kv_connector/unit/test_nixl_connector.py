@@ -1177,6 +1177,121 @@ def test_kv_connector_stats_aggregation():
     assert cli_stats["Avg number of descriptors"] == 1.5
 
 
+def test_kv_connector_stats_throughput_parallel_transfers():
+    """Test throughput for parallel transfers: 400 MB / 1.03s = 388 MB/s."""
+    stats = NixlKVConnectorStats()
+
+    bytes_per_transfer = 100 * (2**20)  # 100 MB
+    duration_seconds = 1.0
+
+    # 4 transfers ending 0.01s apart, each with 1s duration
+    mock_times = iter([1.00, 1.01, 1.02, 1.03])
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.time.perf_counter",
+        lambda: next(mock_times),
+    ):
+        for _ in range(4):
+            telemetry = get_default_xfer_telemetry(
+                xferDurationS=duration_seconds,
+                postDurationS=0.1,
+                totalBytes=bytes_per_transfer,
+                descCount=1,
+            )
+            stats.record_transfer(telemetry)
+
+    cli_stats = stats.reduce()
+
+    assert stats.num_successful_transfers == 4
+    # span = 1.03 - 0.00 = 1.03s, throughput = 400 MB / 1.03s
+    expected_throughput = 400.0 / 1.03
+    assert abs(cli_stats["Throughput (MB/s)"] - expected_throughput) < 0.1
+
+
+def test_kv_connector_stats_throughput_sequential_transfers():
+    """Test throughput for sequential transfers: 400 MB / 4.0s = 100 MB/s."""
+    stats = NixlKVConnectorStats()
+
+    bytes_per_transfer = 100 * (2**20)  # 100 MB
+    duration_seconds = 1.0
+
+    # 4 transfers ending 1.0s apart (non-overlapping)
+    mock_times = iter([1.0, 2.0, 3.0, 4.0])
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.time.perf_counter",
+        lambda: next(mock_times),
+    ):
+        for _ in range(4):
+            telemetry = get_default_xfer_telemetry(
+                xferDurationS=duration_seconds,
+                postDurationS=0.1,
+                totalBytes=bytes_per_transfer,
+                descCount=1,
+            )
+            stats.record_transfer(telemetry)
+
+    cli_stats = stats.reduce()
+
+    # span = 4.0 - 0.0 = 4.0s, throughput = 400 MB / 4.0s
+    expected_throughput = 400.0 / 4.0
+    assert abs(cli_stats["Throughput (MB/s)"] - expected_throughput) < 0.1
+
+
+def test_kv_connector_stats_throughput_single_transfer():
+    """Test throughput for single transfer: 500 MB / 2.0s = 250 MB/s."""
+    stats = NixlKVConnectorStats()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.time.perf_counter",
+        return_value=2.0,
+    ):
+        telemetry = get_default_xfer_telemetry(
+            xferDurationS=2.0,
+            postDurationS=0.1,
+            totalBytes=500 * (2**20),  # 500 MB
+            descCount=1,
+        )
+        stats.record_transfer(telemetry)
+
+    cli_stats = stats.reduce()
+
+    expected_throughput = 500.0 / 2.0
+    assert abs(cli_stats["Throughput (MB/s)"] - expected_throughput) < 0.1
+
+
+def test_kv_connector_stats_cross_worker_aggregation():
+    """Test aggregation with different perf_counter() bases: 400 MB / 1.5s."""
+    # Worker 1: perf_counter base ~1000s
+    worker1 = NixlKVConnectorStats()
+    worker1._transfer_starts = [999.0, 999.5]
+    worker1._transfer_ends = [1000.0, 1000.5]
+    worker1.data["transfer_duration"] = [1.0, 1.0]
+    worker1.data["post_duration"] = [0.1, 0.1]
+    worker1.data["bytes_transferred"] = [100 * 2**20, 100 * 2**20]  # 200 MB
+    worker1.data["num_descriptors"] = [1, 1]
+
+    # Worker 2: perf_counter base ~5000s (different process)
+    worker2 = NixlKVConnectorStats()
+    worker2._transfer_starts = [4999.0, 4999.5]
+    worker2._transfer_ends = [5000.0, 5000.5]
+    worker2.data["transfer_duration"] = [1.0, 1.0]
+    worker2.data["post_duration"] = [0.1, 0.1]
+    worker2.data["bytes_transferred"] = [100 * 2**20, 100 * 2**20]  # 200 MB
+    worker2.data["num_descriptors"] = [1, 1]
+
+    worker1_cloned = worker1.clone_and_reset()
+    worker2_cloned = worker2.clone_and_reset()
+
+    assert worker1_cloned._computed_span == 1.5
+    assert worker2_cloned._computed_span == 1.5
+
+    aggregated = worker1_cloned.aggregate(worker2_cloned)
+    assert aggregated._computed_span == 1.5
+
+    cli_stats = aggregated.reduce()
+    expected_throughput = 400.0 / 1.5
+    assert abs(cli_stats["Throughput (MB/s)"] - expected_throughput) < 0.1
+
+
 def test_multi_kv_connector_stats_aggregation():
     """
     Test MultiKVConnectorStats aggregation across TP ranks using
