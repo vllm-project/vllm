@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.fused_moe.config import (
-        FusedMoEConfig,
         FusedMoEQuantConfig,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
@@ -19,14 +18,14 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEMethodBase,
-)
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
+)
+from vllm.model_executor.layers.quantization.online_moe import (
+    OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -49,7 +48,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported, per_block_cast_to_fp8
 
@@ -248,21 +247,16 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
 # ---------------------------------------------------------------------------
 
 
-class _Fp8OnlineMoEBase(FusedMoEMethodBase):
-    """Shared base for online FP8 MoE methods. Loads fp16/bf16 checkpoint
-    weights onto meta device and materializes them just-in-time."""
-
-    uses_meta_device: bool = True
+class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
+    """Shared base for online FP8 MoE methods. Adds FP8-specific backend
+    selection, kernel format conversion, and dispatch on top of
+    :class:`OnlineMoEMethodBase`."""
 
     # Declared here for mypy; actual values are set in __init__.
     fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
     weight_scale_name: str
     weight_block_size: list[int] | None
-    moe: "FusedMoEConfig"
-    is_monolithic: bool
-    moe_quant_config: "FusedMoEQuantConfig | None"
-    moe_kernel: "mk.FusedMoEKernel | None"
 
     def __init__(
         self,
@@ -292,77 +286,6 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
             activation_key=activation_key,
             allow_vllm_cutlass=False,
         )
-
-    def create_weights(
-        self,
-        layer: Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        layer.num_experts = num_experts
-        layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
-
-        # WEIGHTS
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                device="meta",
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                device="meta",  # materialized and processed during loading
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # BIASES (for models like GPT-OSS that have biased MoE)
-        if self.moe.has_bias:
-            w13_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts,
-                    2 * intermediate_size_per_partition,
-                    device="meta",  # materialized and processed during loading
-                    dtype=layer.orig_dtype,
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_bias", w13_bias)
-            set_weight_attrs(w13_bias, extra_weight_attrs)
-
-            w2_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts,
-                    hidden_size,
-                    device="meta",  # materialized and processed during loading
-                    dtype=layer.orig_dtype,
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w2_bias", w2_bias)
-            set_weight_attrs(w2_bias, extra_weight_attrs)
-
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
-
-        initialize_online_processing(layer)
 
     def _setup_kernel(
         self,
