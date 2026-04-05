@@ -1189,6 +1189,9 @@ class OpenAIServingChat(OpenAIServing):
                         created=created_time,
                         choices=[choice_data],
                         model=model_name,
+                        kv_transfer_params=(
+                            res.kv_transfer_params if finish_reason_sent[i] else None
+                        ),
                     )
 
                     # handle usage stats if requested & if continuous

@@ -400,6 +400,11 @@ class OpenAIServingCompletion(OpenAIServing):
                                 ),
                             )
                         ],
+                        kv_transfer_params=(
+                            res.kv_transfer_params
+                            if finish_reason is not None
+                            else None
+                        ),
                     )
                     if include_continuous_usage:
                         prompt_tokens = num_prompt_tokens[prompt_idx]
