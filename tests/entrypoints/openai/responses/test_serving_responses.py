@@ -62,7 +62,7 @@ class MockConversationContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         return False
 
-    def render_for_completion(self):
+    async def render_for_completion(self):
         return []
 
     async def init_tool_sessions(self, tool_server, exit_stack, request_id, mcp_tools):

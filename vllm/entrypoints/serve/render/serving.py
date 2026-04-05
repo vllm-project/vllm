@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_system_message,
     parse_chat_inputs_to_harmony_messages,
-    render_for_completion,
+    render_for_completion_async,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.disagg.protocol import (
@@ -249,7 +249,7 @@ class OpenAIServingRender:
         else:
             # For GPT-OSS.
             should_include_tools = tool_dicts is not None
-            conversation, engine_inputs = self._make_request_with_harmony(
+            conversation, engine_inputs = await self._make_request_with_harmony(
                 request, should_include_tools
             )
 
@@ -366,7 +366,7 @@ class OpenAIServingRender:
             mm_placeholders=mm_placeholders,
         )
 
-    def _make_request_with_harmony(
+    async def _make_request_with_harmony(
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
@@ -405,7 +405,7 @@ class OpenAIServingRender:
         messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
 
         # Render prompt token ids.
-        prompt_token_ids = render_for_completion(messages)
+        prompt_token_ids = await render_for_completion_async(messages)
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
         return messages, [engine_input]

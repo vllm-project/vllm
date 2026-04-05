@@ -83,7 +83,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         for messages in request.messages:
             single_request = request.to_chat_completion_request(messages)
             if render.use_harmony:
-                conversation, engine_prompts = render._make_request_with_harmony(
+                conversation, engine_prompts = await render._make_request_with_harmony(
                     single_request, should_include_tools=tool_dicts is not None
                 )
             else:

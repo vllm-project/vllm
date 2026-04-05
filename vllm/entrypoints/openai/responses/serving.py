@@ -66,7 +66,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_system_message,
     get_user_message,
     has_custom_tools,
-    render_for_completion,
+    render_for_completion_async,
 )
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
@@ -369,7 +369,7 @@ class OpenAIServingResponses(OpenAIServing):
         model_name = self.models.model_name(lora_request)
 
         if self.use_harmony:
-            messages, engine_inputs = self._make_request_with_harmony(
+            messages, engine_inputs = await self._make_request_with_harmony(
                 request, prev_response
             )
         else:
@@ -674,7 +674,7 @@ class OpenAIServingResponses(OpenAIServing):
             # Create inputs for the next turn.
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
-                token_ids = context.render_for_completion()
+                token_ids = await context.render_for_completion()
                 engine_input = tokens_input(token_ids)
 
                 sampling_params.max_tokens = max_model_len - len(token_ids)
@@ -700,7 +700,7 @@ class OpenAIServingResponses(OpenAIServing):
             priority = orig_priority - 1
             sub_request += 1
 
-    def _make_request_with_harmony(
+    async def _make_request_with_harmony(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
@@ -712,7 +712,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
-        prompt_token_ids = render_for_completion(messages)
+        prompt_token_ids = await render_for_completion_async(messages)
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
         engine_input["arrival_time"] = arrival_time
 
