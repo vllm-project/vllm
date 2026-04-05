@@ -466,8 +466,8 @@ ARG PYTORCH_NIGHTLY
 
 # Install development dependencies
 COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.in requirements/test.in
-COPY requirements/test.txt requirements/test.txt
+COPY requirements/test/cuda.in requirements/test/cuda.in
+COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
@@ -475,8 +475,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 use_existing_torch.py --prefix \
-        && cat torch_lib_versions.txt >> requirements/test.in \
-        && uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match \
+        && cat torch_lib_versions.txt >> requirements/test/cuda.in \
+        && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
         -r requirements/dev.txt \
@@ -746,8 +746,8 @@ ARG PYTORCH_NIGHTLY
 
 # Install development dependencies (for testing)
 COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.in requirements/test.in
-COPY requirements/test.txt requirements/test.txt
+COPY requirements/test/cuda.in requirements/test/cuda.in
+COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
@@ -757,8 +757,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
             echo "Installing dev requirements plus torch nightly..." \
             && python3 use_existing_torch.py --prefix \
-            && cat torch_lib_versions.txt >> requirements/test.in \
-            && uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match \
+            && cat torch_lib_versions.txt >> requirements/test/cuda.in \
+            && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
             -r requirements/dev.txt \

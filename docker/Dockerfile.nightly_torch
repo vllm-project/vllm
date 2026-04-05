@@ -261,7 +261,7 @@ FROM vllm-base as test
 COPY tests/ tests/
 
 # install build and runtime dependencies without stable torch version
-COPY requirements/nightly_torch_test.txt requirements/nightly_torch_test.txt
+COPY requirements/test/nightly-torch.txt requirements/test/nightly-torch.txt
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -277,7 +277,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/nightly_torch_test.txt
+    uv pip install --system -r requirements/test/nightly-torch.txt
 
 # Logging to confirm the torch versions
 RUN pip freeze | grep -E 'torch|vllm|flashinfer'

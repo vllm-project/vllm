@@ -62,6 +62,6 @@ steps:
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
   soft_fail: true
   source_file_dependencies:
-  - requirements/nightly_torch_test.txt
+  - requirements/test/nightly-torch.txt
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh

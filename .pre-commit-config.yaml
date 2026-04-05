@@ -39,13 +39,20 @@ repos:
   rev: 0.11.1
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -c, requirements/common.txt, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu129, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
-      files: ^requirements/test\.(in|txt)$
+      args: [
+        requirements/test/cuda.in, -c, requirements/common.txt,
+        -o, requirements/test/cuda.txt,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cu129,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/test/cuda\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
-        requirements/rocm-test.in, -o, requirements/rocm-test.txt,
+        requirements/test/rocm.in, -o, requirements/test/rocm.txt,
         --index-strategy, unsafe-best-match,
         -c, requirements/rocm.txt,
         --python-platform, x86_64-manylinux_2_28,
@@ -75,14 +82,25 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx,
       ]
-      files: ^requirements/rocm-test\.(in|txt)$
+      files: ^requirements/test/rocm\.(in|txt)$
+    - id: pip-compile
+      alias: pip-compile-xpu
+      name: pip-compile-xpu
+      args: [
+        requirements/test/xpu.in, -o, requirements/test/xpu.txt,
+        --index-strategy, unsafe-best-match,
+        -c, requirements/xpu.txt,
+        --torch-backend, xpu,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/test/xpu\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
-    name: reformat nightly_torch_test.txt to be in sync with test.in
+    name: reformat test/nightly-torch.txt to be in sync with tests/cuda.in
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
-    files: ^requirements/test\.(in|txt)$
+    files: ^requirements/test/cuda\.(in|txt)$
   - id: mypy-local
     name: Run mypy locally for lowest supported Python version
     entry: python tools/pre_commit/mypy.py 0 "3.10"

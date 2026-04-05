@@ -9,7 +9,7 @@ run_all_patterns:
   - "requirements/common.txt"
   - "requirements/cuda.txt"
   - "requirements/build.txt"
-  - "requirements/test.txt"
+  - "requirements/test/cuda.txt"
   - "setup.py"
   - "csrc/"
   - "cmake/"
