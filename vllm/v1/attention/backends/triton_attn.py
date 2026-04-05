@@ -85,16 +85,36 @@ class TritonAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+    _mm_prefix_range_tensor_cache: torch.Tensor | None = None
+
+    def __setattr__(self, name: str, value) -> None:
+        """Override __setattr__ to invalidate cached tensor when mm_prefix_range changes.
+        
+        NOTE: This ensures cache consistency when metadata objects are reused
+        across scheduler steps (e.g., via update_block_table), where mm_prefix_range
+        may change due to requests being added/removed in the batch.
+        """
+        if name == "mm_prefix_range" and hasattr(self, "_mm_prefix_range_tensor_cache"):
+            # Invalidate the cached tensor to force recomputation on next access.
+            object.__setattr__(self, "_mm_prefix_range_tensor_cache", None)
+        object.__setattr__(self, name, value)
 
     @property
     def mm_prefix_range_tensor(self) -> torch.Tensor | None:
         """Convert mm_prefix_range dict to padded tensor for Triton kernel.
 
-        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
-        Empty ranges have start==end==0, which kernel skips via is_valid check.
+        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty
+        ranges. Cached after first call so that repeated access across layers
+        does not trigger redundant H2D / D2D copies.
         """
-        # TODO(Isotr0py): Move to model runner's attention metadata
-        # preparation to avoid duplicate computation.
+        if self._mm_prefix_range_tensor_cache is not None:
+            return self._mm_prefix_range_tensor_cache
+
+        result = self._compute_mm_prefix_range_tensor()
+        self._mm_prefix_range_tensor_cache = result
+        return result
+
+    def _compute_mm_prefix_range_tensor(self) -> torch.Tensor | None:
         if self.mm_prefix_range is None:
             return None
 
@@ -110,15 +130,18 @@ class TritonAttentionMetadata:
         if all(r == [(0, 0)] for r in range_lists):
             return None
 
-        # Create 2D tensors with shape (num_ranges, 2) for each sequence
-        range_tensors = [
-            torch.tensor(r, dtype=torch.int32, device=device).view(-1, 2)
-            for r in range_lists
-        ]
-
-        return torch.nested.nested_tensor(
-            range_tensors, layout=torch.jagged
-        ).to_padded_tensor(0)
+        # Build on CPU first (pinned would be better, but this is only once)
+        # then move to GPU in a single H2D transfer
+        max_ranges = max(len(r) for r in range_lists)
+        # Pad all sequences to the same number of ranges
+        padded = []
+        for r in range_lists:
+            padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
+            padded.append(padded_r)
+        # Create a single CPU tensor for efficient H2D transfer, avoiding multiple transfers and nested padding operations
+        return torch.tensor(
+            padded, dtype=torch.int32, device=device
+        ).view(num_seqs, max_ranges, 2)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
