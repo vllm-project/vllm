@@ -1530,7 +1530,7 @@ def test_register_kv_caches(
         head_size = 16
 
         # TODO (NickLucche) the fact that connector depends on kv_cache_config for init
-        # but cross-layer preference cant be inferred prior to creating kv_cache_config
+        # but cross-layer preference can't be inferred prior to creating kv_cache_config
         # is a bit awkward.
         dummy_connector = NixlConnector(
             vllm_config,
