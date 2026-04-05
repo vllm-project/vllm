@@ -32,6 +32,8 @@ from openai_harmony import Author, Message, Role, StreamableParser, TextContent
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
     flatten_chat_text_content,
+    sanitize_harmony_name,
+    sanitize_harmony_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -93,7 +95,7 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         msgs: list[Message] = []
         for call in tool_calls:
             func = call.get("function", {})
-            name = func.get("name", "")
+            name = sanitize_harmony_name(func.get("name", ""))
             arguments = func.get("arguments", "") or ""
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
             msg = msg.with_channel("commentary")
@@ -186,7 +188,8 @@ def response_input_to_harmony(
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
-        msg = msg.with_recipient(f"functions.{response_msg['name']}")
+        sanitized_name = sanitize_harmony_name(response_msg["name"])
+        msg = msg.with_recipient(f"functions.{sanitized_name}")
         msg = msg.with_content_type("json")
     else:
         raise ValueError(f"Unknown input type: {response_msg['type']}")
@@ -292,7 +295,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
 
 def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
-    function_name = recipient.split(".")[-1]
+    function_name = sanitize_harmony_name(recipient.split(".")[-1])
     output_items = []
     for content in message.content:
         random_id = random_uuid()
@@ -421,6 +424,10 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
 
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
+    if recipient is not None:
+        recipient = sanitize_harmony_recipient(recipient)
+        if not recipient:
+            recipient = None
 
     if recipient is not None:
         # Browser tool calls (browser.search, browser.open, browser.find)
