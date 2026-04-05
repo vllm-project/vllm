@@ -1234,6 +1234,23 @@ class VllmBackend:
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
         )
 
+        from vllm.compilation.codegen import (
+            compile_execution_fn,
+            generate_execution_code,
+        )
+
+        execution_code, submod_names = generate_execution_code(self.split_gm)
+        # Use getattr to get correct callables: __dict__ has PiecewiseBackend
+        # instances (from PiecewiseCompileInterpreter), _modules has originals.
+        # getattr checks __dict__ first, then falls back to _modules.
+        submod_callables = {
+            name: getattr(self.split_gm, name)
+            for name, _ in self.split_gm.named_children()
+        }
+        runtime_callable = compile_execution_fn(
+            execution_code, submod_callables, submod_names
+        )
+
         if (
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
@@ -1242,9 +1259,11 @@ class VllmBackend:
                 graph_to_serialize,
                 example_inputs,
                 self.prefix,
-                self.split_gm,
+                runtime_callable,
                 is_encoder=self.is_encoder,
                 vllm_backend=self,
+                execution_code=execution_code,
+                submod_names=submod_names,
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -1265,7 +1284,7 @@ class VllmBackend:
         copy_and_call = make_copy_and_call(
             sym_tensor_indices,
             [example_inputs[x].clone() for x in sym_tensor_indices],
-            self.split_gm,
+            runtime_callable,
         )
 
         return VllmSerializableFunction(
@@ -1276,4 +1295,6 @@ class VllmBackend:
             is_encoder=self.is_encoder,
             vllm_backend=self,
             sym_tensor_indices=sym_tensor_indices,
+            execution_code=execution_code,
+            submod_names=submod_names,
         )
