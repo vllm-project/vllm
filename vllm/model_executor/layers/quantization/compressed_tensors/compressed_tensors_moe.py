@@ -533,7 +533,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
 
-        # Shuffle weights into the NvFp4 kernel format.
+        # compressed-tensors checkpoints store inverse global scales,
+        # compared to modelopt checkpoints.
+        w13_weight_global_scale = 1.0 / w13_weight_global_scale
+        w2_weight_global_scale = 1.0 / layer.w2_weight_global_scale
+        w13_input_global_scale = 1.0 / layer.w13_input_global_scale
+        w2_input_global_scale = 1.0 / layer.w2_input_global_scale
+
         (
             w13,
             w13_scale,
@@ -548,12 +554,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             layer=layer,
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
-            w13_scale_2=(1.0 / w13_weight_global_scale),
-            a13_scale=(1.0 / layer.w13_input_global_scale),
+            w13_scale_2=w13_weight_global_scale,
+            a13_scale=w13_input_global_scale,
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
-            w2_scale_2=(1.0 / layer.w2_weight_global_scale),
-            a2_scale=(1.0 / layer.w2_input_global_scale),
+            w2_scale_2=w2_weight_global_scale,
+            a2_scale=w2_input_global_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
         )
 

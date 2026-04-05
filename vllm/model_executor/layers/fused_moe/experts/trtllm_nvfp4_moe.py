@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import flashinfer
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -181,6 +181,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        import flashinfer
+
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
@@ -299,6 +301,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        import flashinfer
+
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
