@@ -119,7 +119,7 @@ def model_runner():
         num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
         head_size = model_config.get_head_size()
         vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
-            num_heads, head_size, 0.1
+            num_heads, head_size, 0.1, model_config=model_config
         )
         runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
         initialize_kv_cache(runner)
@@ -1080,7 +1080,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = model_config.get_head_size()
     vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
-        num_heads, head_size, 0.1
+        num_heads, head_size, 0.1, model_config=model_config
     )
 
     runner = GPUModelRunner(vllm_config, DEVICE_TYPE)

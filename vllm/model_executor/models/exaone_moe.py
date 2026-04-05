@@ -24,7 +24,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -179,6 +179,7 @@ class ExaoneMoeDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         mtp_layer: bool = None,
         prefix: str = "",
     ) -> None:
@@ -204,6 +205,7 @@ class ExaoneMoeDecoderLayer(nn.Module):
             bias=attention_bias,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
+            model_config=model_config,
         )
 
         if config.is_moe_layer[layer_idx] and not mtp_layer:
@@ -254,7 +256,8 @@ class ExaoneMoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -287,6 +290,7 @@ class ExaoneMoeModel(nn.Module):
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

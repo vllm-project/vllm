@@ -101,6 +101,7 @@ class Lfm2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -157,6 +158,7 @@ class Lfm2Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             prefix=f"{prefix}.attn",
         )
@@ -207,6 +209,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position_embeddings=max_position_embeddings,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",

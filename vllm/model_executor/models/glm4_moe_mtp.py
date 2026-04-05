@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -79,6 +79,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -92,6 +93,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=prefix,
             enable_eplb=self.enable_eplb,
         )
@@ -136,6 +138,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
                     cache_config=vllm_config.cache_config,
                     quant_config=vllm_config.quant_config,
                     parallel_config=vllm_config.parallel_config,
+                    model_config=vllm_config.model_config,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,

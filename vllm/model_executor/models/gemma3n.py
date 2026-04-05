@@ -22,7 +22,7 @@ from torch import nn
 from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -287,6 +287,7 @@ class Gemma3nAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -399,6 +400,7 @@ class Gemma3nAttention(nn.Module):
             per_layer_sliding_window=self.sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(
@@ -434,6 +436,7 @@ class Gemma3nDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         assert isinstance(config, Gemma3nTextConfig)
@@ -459,6 +462,7 @@ class Gemma3nDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            model_config=model_config,
         )
         self.mlp = Gemma3nMLP(
             hidden_size=config.hidden_size,
@@ -812,10 +816,15 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         )
 
         # Allocate config.num_kv_shared_layers layers for self-decoder
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Gemma3nDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

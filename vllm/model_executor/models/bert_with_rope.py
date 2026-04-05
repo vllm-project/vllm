@@ -7,7 +7,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -94,6 +94,7 @@ class BertWithRopeAttention(nn.Module):
         num_attention_heads: int,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         bias: bool = True,
         rotary_kwargs: dict | None = None,
         prefix: str = "",
@@ -136,6 +137,7 @@ class BertWithRopeAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -347,6 +349,7 @@ class BertWithRopeBlock(nn.Module):
         config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         moe: bool = False,
         bias: bool = True,
         rotary_kwargs: dict | None = None,
@@ -358,6 +361,7 @@ class BertWithRopeBlock(nn.Module):
             num_attention_heads=config.num_attention_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             bias=bias,
             rotary_kwargs=rotary_kwargs,
             prefix=f"{prefix}.attention",
@@ -411,7 +415,8 @@ class BertWithRopeEncoder(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         every_n = getattr(config, "moe_every_n_layers", 0)
@@ -421,6 +426,7 @@ class BertWithRopeEncoder(nn.Module):
                     config=config,
                     cache_config=cache_config,
                     quant_config=quant_config,
+                    model_config=model_config,
                     bias=bias,
                     moe=every_n > 0 and (layer_idx % every_n == 1),
                     rotary_kwargs=rotary_kwargs,

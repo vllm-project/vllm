@@ -5,7 +5,7 @@ from copy import copy
 
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
@@ -59,6 +59,7 @@ class EncoderOnlyAttention(Attention):
         head_size: int,
         scale: float,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         attn_type: str | None = None,
         **kwargs,
     ):
@@ -88,6 +89,7 @@ class EncoderOnlyAttention(Attention):
             head_size=head_size,
             scale=scale,
             cache_config=cache_config,
+            model_config=model_config,
             attn_backend=attn_backend,
             attn_type=AttentionType.ENCODER_ONLY,
             **kwargs,

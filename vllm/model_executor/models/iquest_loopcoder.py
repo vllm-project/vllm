@@ -25,7 +25,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -66,6 +66,7 @@ class LoopCoderAttention(nn.Module):
         num_kv_heads: int,
         max_position: int = 4096 * 32,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
@@ -159,6 +160,7 @@ class LoopCoderAttention(nn.Module):
                     self.scaling,
                     num_kv_heads=self.num_kv_heads,
                     cache_config=loop_cache_config,
+                    model_config=model_config,
                     quant_config=quant_config,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",

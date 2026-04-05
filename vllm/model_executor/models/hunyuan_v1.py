@@ -34,7 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -150,6 +150,7 @@ class HunYuanAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         cache_config: CacheConfig | None = None,
@@ -215,6 +216,7 @@ class HunYuanAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -257,6 +259,7 @@ class HunYuanCrossAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         cache_config: CacheConfig | None = None,
@@ -320,6 +323,7 @@ class HunYuanCrossAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -477,6 +481,7 @@ class HunYuanDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -511,6 +516,7 @@ class HunYuanDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 max_position_embeddings=max_position_embeddings,
+                model_config=model_config,
                 quant_config=quant_config,
                 bias=attention_bias,
                 cache_config=cache_config,
@@ -526,6 +532,7 @@ class HunYuanDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 max_position_embeddings=max_position_embeddings,
+                model_config=model_config,
                 quant_config=quant_config,
                 bias=attention_bias,
                 cache_config=cache_config,
@@ -620,10 +627,12 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: HunYuanDecoderLayer(
                 config=config,
+                model_config=model_config,
                 layer_id=int(prefix.split(".")[-1]),
                 cache_config=cache_config,
                 quant_config=quant_config,

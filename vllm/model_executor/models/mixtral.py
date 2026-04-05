@@ -33,7 +33,7 @@ from torch import nn
 from transformers import MixtralConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -163,6 +163,7 @@ class MixtralAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -218,6 +219,7 @@ class MixtralAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(
@@ -241,6 +243,7 @@ class MixtralDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -253,6 +256,7 @@ class MixtralDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            model_config=model_config,
         )
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
@@ -316,6 +320,7 @@ class MixtralModel(nn.Module):
         self.enable_eplb = parallel_config.enable_eplb
         self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
 
+        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MixtralDecoderLayer(
@@ -324,6 +329,7 @@ class MixtralModel(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=self.enable_eplb,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

@@ -113,6 +113,7 @@ class BailingMoeV25MLAAttention(nn.Module):
         layer_id: int = 0,
         prefix: str = "attention",
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -819,6 +820,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
                 layer_id=layer_id,
                 prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
+                model_config=model_config,
             )
 
         # MLP/MoE

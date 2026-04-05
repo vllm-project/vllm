@@ -32,7 +32,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -310,6 +310,7 @@ class PhiMoEAttention(nn.Module):
         max_position: int = 4096 * 32,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -364,6 +365,7 @@ class PhiMoEAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -386,6 +388,7 @@ class PhiMoEDecoderLayer(nn.Module):
         config: PhiMoEConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -401,6 +404,7 @@ class PhiMoEDecoderLayer(nn.Module):
             ),
             cache_config=cache_config,
             quant_config=quant_config,
+            model_config=model_config,
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
@@ -453,6 +457,7 @@ class PhiMoEModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        model_config = vllm_config.model_config
 
         self.vocab_size = config.vocab_size
 
@@ -466,7 +471,11 @@ class PhiMoEModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: PhiMoEDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                model_config,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )

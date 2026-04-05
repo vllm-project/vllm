@@ -10,7 +10,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -88,6 +88,7 @@ class StepAttention(nn.Module):
     def __init__(
         self,
         config,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -144,6 +145,7 @@ class StepAttention(nn.Module):
             self.head_dim,
             self.scale,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             alibi_slopes=alibi_slopes,
@@ -200,12 +202,14 @@ class StepDecoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
         self.self_attn = StepAttention(
             config=config,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",

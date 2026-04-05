@@ -4,7 +4,7 @@ import functools
 
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -121,6 +121,7 @@ class StaticSinkAttention(Attention, CustomOp):
         sink_len: int,
         attn_backend: type[AttentionBackend] | None = None,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
@@ -144,6 +145,7 @@ class StaticSinkAttention(Attention, CustomOp):
             head_size=head_size,
             scale=scale,
             cache_config=cache_config,
+            model_config=model_config,
             attn_backend=attn_backend,
             **kwargs,
         )

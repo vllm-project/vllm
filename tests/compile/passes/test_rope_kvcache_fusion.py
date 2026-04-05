@@ -84,6 +84,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             scale=1.0 / head_size**0.5,
             num_kv_heads=num_kv_heads,
             cache_config=vllm_config.cache_config,
+            model_config=vllm_config.model_config,
             quant_config=vllm_config.quant_config,
             prefix=prefix,
             attn_backend=attn_backend.get_class(),

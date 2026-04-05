@@ -195,6 +195,7 @@ class KimiMLAAttention(nn.Module):
         use_nope: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
         **kwargs,
     ) -> None:

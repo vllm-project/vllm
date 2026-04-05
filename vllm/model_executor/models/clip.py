@@ -14,7 +14,7 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
@@ -356,6 +356,7 @@ class CLIPAttention(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
@@ -409,6 +410,7 @@ class CLIPAttention(nn.Module):
                 self.num_heads_per_partition,
                 self.head_dim,
                 self.scale,
+                model_config=model_config,
                 prefix=f"{prefix}.attn",
             )
 
@@ -469,6 +471,7 @@ class CLIPEncoderLayer(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
@@ -478,6 +481,7 @@ class CLIPEncoderLayer(nn.Module):
         self.self_attn = CLIPAttention(
             config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
@@ -517,6 +521,7 @@ class CLIPEncoder(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
@@ -536,6 +541,7 @@ class CLIPEncoder(nn.Module):
                 CLIPEncoderLayer(
                     config=config,
                     quant_config=quant_config,
+                    model_config=model_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -567,6 +573,7 @@ class CLIPTextTransformer(nn.Module):
         self,
         config: CLIPTextConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -580,6 +587,7 @@ class CLIPTextTransformer(nn.Module):
         self.encoder = CLIPEncoder(
             config=config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.encoder",
             attn_cls=Attention,
         )
@@ -824,6 +832,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         super().__init__()
 
         config: CLIPConfig = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
@@ -840,6 +849,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             self.text_model = CLIPTextTransformer(
                 text_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=maybe_prefix(prefix, "text_model"),
             )
             self.text_projection = nn.Linear(

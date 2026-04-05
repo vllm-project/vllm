@@ -31,7 +31,7 @@ from torch import nn
 from transformers import Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.encoder_only_attention import (
@@ -68,6 +68,7 @@ class Qwen3Attention(nn.Module):
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
@@ -129,6 +130,7 @@ class Qwen3Attention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
@@ -167,6 +169,7 @@ class Qwen3DecoderLayer(nn.Module):
         self,
         config: Qwen3Config,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -195,6 +198,7 @@ class Qwen3DecoderLayer(nn.Module):
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",

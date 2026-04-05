@@ -215,6 +215,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -280,6 +281,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -340,6 +342,7 @@ class FalconH1ParallelHybrid(nn.Module):
         # Instantiate the attention branch
         self.self_attn = FalconH1AttentionDecoderLayer(
             config=config,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,

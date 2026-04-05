@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -277,6 +277,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
@@ -312,6 +313,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             num_kv_heads=num_kv_heads,
             alibi_slopes=alibi_slopes,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             logits_soft_cap=logits_soft_cap,
             per_layer_sliding_window=per_layer_sliding_window,
@@ -344,6 +346,7 @@ class WhisperCausalAttention(nn.Module):
         per_layer_sliding_window: int | None = None,
         block_pool_size: int = 1,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -386,6 +389,7 @@ class WhisperCausalAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=AttentionType.DECODER,
@@ -444,11 +448,11 @@ class WhisperCausalAttention(nn.Module):
 class WhisperCausalEncoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
         sliding_window = getattr(config, "sliding_window", None)
         block_pool_size = config.block_pool_size
         assert block_pool_size > 1
-
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -462,6 +466,7 @@ class WhisperCausalEncoderLayer(nn.Module):
             block_pool_size=block_pool_size,
             per_layer_sliding_window=sliding_window,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )

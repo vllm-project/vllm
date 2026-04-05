@@ -22,7 +22,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -119,12 +119,20 @@ class OlmoeMoE(nn.Module):
 
 
 class OlmoeAttention(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig | None = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        if model_config is None:
+            model_config = vllm_config.model_config
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 4096)
@@ -187,6 +195,7 @@ class OlmoeAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def _apply_qk_norm(
@@ -225,8 +234,10 @@ class OlmoeDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
 
+        model_config = vllm_config.model_config
         self.self_attn = OlmoeAttention(
             vllm_config=vllm_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
         )
 

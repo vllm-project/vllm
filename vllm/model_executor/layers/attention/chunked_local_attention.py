@@ -4,7 +4,7 @@ import functools
 
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -88,6 +88,7 @@ class ChunkedLocalAttention(Attention):
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         kv_sharing_target_layer_name: str | None = None,
         prefix: str = "",
@@ -111,6 +112,7 @@ class ChunkedLocalAttention(Attention):
             num_kv_heads=num_kv_heads,
             alibi_slopes=alibi_slopes,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             prefix=prefix,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,

@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -24,6 +24,7 @@ class InternLM2VEDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -37,6 +38,7 @@ class InternLM2VEDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
+            model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attention",

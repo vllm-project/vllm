@@ -15,7 +15,7 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
@@ -360,6 +360,7 @@ class SiglipAttention(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
@@ -414,6 +415,7 @@ class SiglipAttention(nn.Module):
                 self.num_heads_per_partition,
                 self.head_dim,
                 self.scale,
+                model_config=model_config,
                 prefix=f"{prefix}.attn",
             )
 
@@ -480,6 +482,7 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
@@ -491,6 +494,7 @@ class SiglipEncoderLayer(nn.Module):
         self.self_attn = SiglipAttention(
             config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
@@ -525,6 +529,7 @@ class SiglipEncoder(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
@@ -544,6 +549,7 @@ class SiglipEncoder(nn.Module):
                 SiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
+                    model_config=model_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -575,6 +581,7 @@ class SiglipTextTransformer(nn.Module):
         self,
         config: SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -588,6 +595,7 @@ class SiglipTextTransformer(nn.Module):
         self.encoder = SiglipEncoder(
             config=config,
             quant_config=quant_config,
+            model_config=model_config,
             prefix=f"{prefix}.encoder",
             attn_cls=EncoderOnlyAttention,
         )
@@ -1042,6 +1050,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         super().__init__()
 
         config: SiglipConfig = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         quant_config = vllm_config.quant_config
         self.config = config
 
@@ -1059,6 +1068,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             self.text_model = SiglipTextTransformer(
                 text_config,
                 quant_config=quant_config,
+                model_config=model_config,
                 prefix=maybe_prefix(prefix, "text_model"),
             )
 

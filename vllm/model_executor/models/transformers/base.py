@@ -581,6 +581,7 @@ class Base(
                 scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
+                model_config=self.model_config,
                 quant_config=self.quant_config,
                 logits_soft_cap=logits_soft_cap,
                 per_layer_sliding_window=per_layer_sliding_window,

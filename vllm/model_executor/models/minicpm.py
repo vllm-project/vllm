@@ -34,7 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -243,6 +243,7 @@ class MiniCPMAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -297,6 +298,7 @@ class MiniCPMAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            model_config=model_config,
         )
 
     def forward(
@@ -319,11 +321,13 @@ class MiniCPMDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.cache_config = cache_config
         self.quant_config = quant_config
+        self.model_config = model_config
         self.hidden_size = config.hidden_size
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
@@ -343,6 +347,7 @@ class MiniCPMDecoderLayer(nn.Module):
             cache_config=self.cache_config,
             quant_config=self.quant_config,
             prefix=f"{self.prefix}.self_attn",
+            model_config=self.model_config,
         )
 
     def _init_ffn_block(self):
@@ -416,7 +421,10 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
             config.hidden_size,
         )
         self.num_experts = getattr(self.config, "num_experts", 0)
-        self._init_layers(prefix, config, cache_config, quant_config)
+        model_config = vllm_config.model_config
+        self._init_layers(
+            prefix, config, cache_config, quant_config, model_config=model_config
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -429,11 +437,16 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
         config: PretrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
+        model_config: ModelConfig | None = None,
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniCPMDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

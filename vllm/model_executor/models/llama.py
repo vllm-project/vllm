@@ -32,7 +32,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
@@ -133,6 +133,7 @@ class LlamaAttention(nn.Module):
         bias: bool = False,
         bias_o_proj: bool = False,
         cache_config: CacheConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -214,6 +215,7 @@ class LlamaAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            model_config=model_config,
             quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
@@ -260,7 +262,8 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
 
-        config = config or vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = config or model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = self.get_quant_config(vllm_config)
 
@@ -297,6 +300,7 @@ class LlamaDecoderLayer(nn.Module):
             bias=attention_bias,
             bias_o_proj=bias_o_proj,
             cache_config=cache_config,
+            model_config=model_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
