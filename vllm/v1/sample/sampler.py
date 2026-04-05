@@ -289,7 +289,7 @@ class Sampler(nn.Module):
 
     @staticmethod
     def compute_logprobs(logits: torch.Tensor) -> torch.Tensor:
-        return logits.log_softmax(dim=-1, dtype=torch.float32)
+        return logits.float().log_softmax(dim=-1)
 
     @staticmethod
     def gather_logprobs(
@@ -334,6 +334,41 @@ class Sampler(nn.Module):
         indices = indices.to(torch.int32)
 
         return LogprobsTensors(indices, logprobs, token_ranks)
+
+    @staticmethod
+    def gather_target_logprobs(
+        logprobs: torch.Tensor,
+        target_token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        """
+        Gather logprobs for specific target tokens only (score mode).
+
+        This method extracts only the logprobs for specified target tokens on GPU,
+        avoiding the overhead of transferring full vocabulary logprobs to CPU.
+        Used for efficient perplexity calculation.
+
+        Args:
+          logprobs: (num tokens) x (vocab) tensor
+          target_token_ids: 1D token ID tensor with (num tokens) elements.
+                           Must be int64.
+
+        Returns:
+          Target token int indices tensor, (num tokens) x 1
+          Target token float logprobs tensor, (num tokens) x 1
+          Target token rank tensor, (num tokens)
+        """
+        assert target_token_ids.dtype == torch.int64
+        # Get the logprob of the target token.
+        target_token_ids = target_token_ids.unsqueeze(-1)
+        token_logprobs = logprobs.gather(-1, target_token_ids)
+
+        # Compute the ranks of the target token.
+        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
+
+        # Use int32 to reduce the tensor size.
+        indices = target_token_ids.to(torch.int32)
+
+        return LogprobsTensors(indices, token_logprobs, token_ranks)
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(

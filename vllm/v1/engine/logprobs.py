@@ -5,6 +5,8 @@ import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+import torch
+
 from vllm.logger import init_logger
 from vllm.logprobs import (
     PromptLogprobs,
@@ -37,6 +39,15 @@ class LogprobsProcessor:
     cumulative_logprob: float | None
     num_logprobs: int | None
     num_prompt_logprobs: int | None
+    target_token_ids: list[int] | None = None
+    """Target token IDs for score mode perplexity calculation.
+    When provided, enables fast path processing of [N, 1] logprobs tensors."""
+
+    prompt_logits: torch.Tensor | None = None
+    """Raw logits for prompt positions when return_prompt_logits."""
+
+    kld_result: tuple[float, int] | None = None
+    """(kld_sum, kld_count) when kld_mode."""
 
     @classmethod
     def from_new_request(
@@ -63,6 +74,7 @@ class LogprobsProcessor:
             ),
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
+            target_token_ids=request.target_token_ids,
         )
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
@@ -177,6 +189,84 @@ class LogprobsProcessor:
                 self.num_prompt_logprobs,
             )
 
+    def _update_prompt_logprobs_fast_path(
+        self,
+        prompt_logprobs_tensors: LogprobsTensors,
+        target_token_ids: list[int],
+    ) -> None:
+        """Fast path for updating prompt logprobs in score mode.
+
+        This method processes [N, 1] tensors directly without creating
+        Python objects for all vocabulary tokens, significantly improving
+        performance for perplexity calculation.
+
+        Args:
+          prompt_logprobs_tensors: tuple containing the prompt logprobs
+                                   tensors with shape [N, 1]
+          target_token_ids: list of target token IDs corresponding to
+                           each position in the prompt
+        """
+        # Prompt logprobs are enabled.
+        assert self.num_prompt_logprobs is not None
+        assert self.prompt_logprobs is not None
+
+        token_ids, logprobs, ranks, _ = prompt_logprobs_tensors
+
+        # Recover shapes - should be [N, 1] for score mode
+        num_positions, num_logprobs_cols = logprobs.shape
+        assert num_logprobs_cols == 1, (
+            f"Fast path expects [N, 1] tensors, got [N, {num_logprobs_cols}]"
+        )
+        assert len(target_token_ids) == num_positions, (
+            f"target_token_ids length ({len(target_token_ids)}) "
+            f"must match num_positions ({num_positions})"
+        )
+
+        # Extract logprobs directly - they're already filtered to target tokens
+        prompt_logprobs_list = logprobs.squeeze(-1).tolist()
+        prompt_token_ranks = ranks.tolist()
+        token_ids_list = token_ids.squeeze(-1).tolist()
+
+        # Verify that token_ids match target_token_ids
+        for pos, (token_id, target_id) in enumerate(
+            zip(token_ids_list, target_token_ids)
+        ):
+            if token_id != target_id:
+                raise ValueError(
+                    f"Token ID mismatch at position {pos}: "
+                    f"expected {target_id}, got {token_id}"
+                )
+
+        # Detokenize only the target tokens (non-incrementally)
+        all_decoded_tokens: list[str] | None = (
+            None
+            if self.tokenizer is None
+            else convert_ids_list_to_tokens(self.tokenizer, target_token_ids)
+        )
+
+        # Update with the Logprob container for each position
+        for pos in range(num_positions):
+            decoded_tokens_for_pos: list[str] | Iterable[None]
+            if all_decoded_tokens is None:
+                decoded_tokens_for_pos = NONES
+            else:
+                # For fast path, we only have one token per position
+                decoded_tokens_slice = [all_decoded_tokens[pos]]
+                decoded_tokens_for_pos = self._verify_tokens(
+                    decoded_tokens_list=decoded_tokens_slice,
+                    tokens=[target_token_ids[pos]],
+                )
+
+            # Update with the Logprob container for this pos
+            append_logprobs_for_next_position(
+                self.prompt_logprobs,
+                [target_token_ids[pos]],
+                [prompt_logprobs_list[pos]],
+                decoded_tokens_for_pos,
+                prompt_token_ranks[pos],
+                self.num_prompt_logprobs,
+            )
+
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
         """Pop and return all request prompt logprobs
 
@@ -242,4 +332,14 @@ class LogprobsProcessor:
         if output.new_logprobs is not None:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:
-            self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+            # Use fast path if target_token_ids are available
+            if self.target_token_ids is not None:
+                self._update_prompt_logprobs_fast_path(
+                    output.new_prompt_logprobs_tensors, self.target_token_ids
+                )
+            else:
+                self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+        if output.new_prompt_logits is not None:
+            self.prompt_logits = output.new_prompt_logits
+        if output.kld_result is not None:
+            self.kld_result = output.kld_result

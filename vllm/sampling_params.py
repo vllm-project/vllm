@@ -302,6 +302,19 @@ class SamplingParams(
     '\\emoji \\emoji \\emoji ...'). This feature can detect such behavior
     and terminate early, saving time and tokens."""
 
+    score_mode: bool = False
+    """When True, enables score mode for perplexity calculation. In this mode,
+    only target token logprobs are extracted on GPU, avoiding the overhead of
+    transferring full vocabulary logprobs to CPU."""
+
+    return_prompt_logits: bool = False
+    """When True, returns raw logits for prompt positions instead of logprobs.
+    Used for KLD computation; logits shape [num_positions, vocab_size]."""
+
+    kld_mode: bool = False
+    """When True, enables KLD (Kullback-Leibler divergence) computation.
+    Requires reference_logits_path in the prompt. All KL math is done on GPU."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -522,6 +535,12 @@ class SamplingParams(
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
+            )
+        if self.score_mode and self.prompt_logprobs is None:
+            raise ValueError("score_mode requires prompt_logprobs to be set.")
+        if self.return_prompt_logits and self.kld_mode:
+            raise ValueError(
+                "return_prompt_logits and kld_mode are mutually exclusive."
             )
 
     def _verify_greedy_sampling(self) -> None:

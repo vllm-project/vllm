@@ -188,6 +188,12 @@ class ModelRunnerOutput:
         default_factory=dict
     )
 
+    # req_id -> logits tensor [num_positions, vocab_size] when return_prompt_logits
+    prompt_logits_dict: dict[str, torch.Tensor | None] = field(default_factory=dict)
+
+    # req_id -> (kld_sum, kld_count) when kld_mode
+    kld_result_dict: dict[str, tuple[float, int] | None] = field(default_factory=dict)
+
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
 

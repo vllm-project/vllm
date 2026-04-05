@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 import vllm.envs as envs
@@ -1155,16 +1156,27 @@ class GPUModelRunner(
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                reference_logits_path=new_req_data.reference_logits_path,
+                reference_logits_key=new_req_data.reference_logits_key,
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
-            if sampling_params and sampling_params.prompt_logprobs is not None:
-                self.num_prompt_logprobs[req_id] = (
-                    self.input_batch.vocab_size
-                    if sampling_params.prompt_logprobs == -1
-                    else sampling_params.prompt_logprobs
-                )
+            needs_prompt_output = sampling_params and (
+                sampling_params.prompt_logprobs is not None
+                or sampling_params.return_prompt_logits
+                or sampling_params.kld_mode
+            )
+            if needs_prompt_output:
+                assert sampling_params is not None
+                if sampling_params.prompt_logprobs is not None:
+                    self.num_prompt_logprobs[req_id] = (
+                        self.input_batch.vocab_size
+                        if sampling_params.prompt_logprobs == -1
+                        else sampling_params.prompt_logprobs
+                    )
+                else:
+                    self.num_prompt_logprobs[req_id] = 1
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -3348,6 +3360,8 @@ class GPUModelRunner(
         LogprobsLists | None,
         list[list[int]],
         dict[str, LogprobsTensors | None],
+        dict[str, torch.Tensor | None],
+        dict[str, tuple[float, int] | None],
         list[str],
         dict[str, int],
         list[int],
@@ -3446,8 +3460,12 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        # Compute prompt logprobs if needed.
-        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+        # Compute prompt logprobs/logits/KLD if needed.
+        (
+            prompt_logprobs_dict,
+            prompt_logits_dict,
+            kld_result_dict,
+        ) = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
             scheduler_output.num_scheduled_tokens,
         )
@@ -3457,6 +3475,8 @@ class GPUModelRunner(
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
+            prompt_logits_dict,
+            kld_result_dict,
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
@@ -4270,6 +4290,8 @@ class GPUModelRunner(
                 logprobs_lists,
                 valid_sampled_token_ids,
                 prompt_logprobs_dict,
+                prompt_logits_dict,
+                kld_result_dict,
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
                 invalid_req_indices,
@@ -4314,6 +4336,8 @@ class GPUModelRunner(
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
+                prompt_logits_dict=prompt_logits_dict,
+                kld_result_dict=kld_result_dict,
                 kv_connector_output=kv_connector_output,
                 ec_connector_output=ec_connector_output
                 if self.supports_mm_inputs
@@ -4997,10 +5021,16 @@ class GPUModelRunner(
         self,
         hidden_states: torch.Tensor,
         num_scheduled_tokens: dict[str, int],
-    ) -> dict[str, LogprobsTensors | None]:
+    ) -> tuple[
+        dict[str, LogprobsTensors | None],
+        dict[str, torch.Tensor | None],
+        dict[str, tuple[float, int] | None],
+    ]:
         num_prompt_logprobs_dict = self.num_prompt_logprobs
+        prompt_logits_dict: dict[str, torch.Tensor | None] = {}
+        kld_result_dict: dict[str, tuple[float, int] | None] = {}
         if not num_prompt_logprobs_dict:
-            return {}
+            return {}, prompt_logits_dict, kld_result_dict
 
         in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
@@ -5025,58 +5055,113 @@ class GPUModelRunner(
                 self.device, non_blocking=True
             )
 
-            # Set up target LogprobsTensors object.
-            logprobs_tensors = in_progress_dict.get(req_id)
-            if not logprobs_tensors:
-                # Create empty logprobs CPU tensors for the entire prompt.
-                # If chunked, we'll copy in slice by slice.
-                logprobs_tensors = LogprobsTensors.empty_cpu(
-                    num_prompt_tokens - 1, num_prompt_logprobs + 1
-                )
-                in_progress_dict[req_id] = logprobs_tensors
+            sampling_params = request.sampling_params
+            is_score_mode = sampling_params is not None and sampling_params.score_mode
+            is_return_prompt_logits = (
+                sampling_params is not None and sampling_params.return_prompt_logits
+            )
+            is_kld_mode = (
+                sampling_params is not None
+                and sampling_params.kld_mode
+                and request.reference_logits_path is not None
+                and request.reference_logits_key is not None
+            )
 
             # Determine number of logits to retrieve.
             start_idx = request.num_computed_tokens
             start_tok = start_idx + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
             if num_tokens <= num_remaining_tokens:
-                # This is a chunk, more tokens remain.
-                # In the == case, there are no more prompt logprobs to produce
-                # but we want to defer returning them to the next step where we
-                # have new generated tokens to return.
                 num_logits = num_tokens
             else:
-                # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
-                prompt_logprobs_dict[req_id] = logprobs_tensors
 
             if num_logits <= 0:
-                # This can happen for the final chunk if we prefilled exactly
-                # (num_prompt_tokens - 1) tokens for this request in the prior
-                # step. There are no more prompt logprobs to produce.
                 continue
 
-            # Get the logits corresponding to this req's prompt tokens.
-            # If this is a partial request (i.e. chunked prefill),
-            # then there is prompt logprob generated for each index.
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
             prompt_hidden_states = hidden_states[offset : offset + num_logits]
             logits = self.model.compute_logits(prompt_hidden_states)
 
-            # Get the "target" tokens for each index. For prompt at index i,
-            # the token at prompt index i+1 is the "sampled" token we want
-            # to gather the logprob for.
+            if is_kld_mode:
+                from safetensors.torch import safe_open
+
+                with safe_open(
+                    request.reference_logits_path,
+                    framework="pt",
+                    device=str(self.device),
+                ) as f:
+                    ref_logits_full = f.get_tensor(request.reference_logits_key).to(
+                        self.device
+                    )
+                # Slice ref_logits for this chunk (chunked prefill)
+                ref_logits = ref_logits_full[start_idx : start_idx + num_logits]
+                vs = min(logits.shape[-1], ref_logits.shape[-1])
+                log_probs_model = F.log_softmax(logits[..., :vs].float(), dim=-1)
+                log_probs_ref = F.log_softmax(ref_logits[..., :vs].float(), dim=-1)
+                kld_per_pos = F.kl_div(
+                    log_probs_model,
+                    log_probs_ref,
+                    reduction="none",
+                    log_target=True,
+                ).sum(dim=-1)
+                kld_sum = kld_per_pos.sum().item()
+                kld_count = kld_per_pos.numel()
+                if req_id in kld_result_dict:
+                    prev = kld_result_dict[req_id]
+                    if prev is not None:
+                        prev_sum, prev_count = prev
+                        kld_result_dict[req_id] = (
+                            prev_sum + kld_sum,
+                            prev_count + kld_count,
+                        )
+                    else:
+                        kld_result_dict[req_id] = (kld_sum, kld_count)
+                else:
+                    kld_result_dict[req_id] = (kld_sum, kld_count)
+                continue
+
+            # return_prompt_logits: return raw logits (positions 0..N-2 predict 1..N-1)
+            if is_return_prompt_logits:
+                logits_cpu = logits.float().cpu()
+                in_progress_logits = self.input_batch.in_progress_prompt_logits
+                if req_id not in in_progress_logits:
+                    in_progress_logits[req_id] = []
+                in_progress_logits[req_id].append(logits_cpu)
+                if req_id in completed_prefill_reqs:
+                    prompt_logits_dict[req_id] = torch.cat(
+                        in_progress_logits[req_id], dim=0
+                    )
+                    del in_progress_logits[req_id]
+                continue
+
+            # Standard logprobs path (including score_mode for PPL)
+            logprobs_tensors = in_progress_dict.get(req_id)
+            if not logprobs_tensors:
+                num_logprobs_cols = 1 if is_score_mode else num_prompt_logprobs + 1
+                logprobs_tensors = LogprobsTensors.empty_cpu(
+                    num_prompt_tokens - 1, num_logprobs_cols
+                )
+                in_progress_dict[req_id] = logprobs_tensors
+
+            if req_id in completed_prefill_reqs:
+                prompt_logprobs_dict[req_id] = logprobs_tensors
+
             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
-
-            # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
-            )
 
-            # Transfer GPU->CPU async.
+            if is_score_mode:
+                tgt_token_ids_int64 = tgt_token_ids.to(torch.int64)
+                token_ids, logprobs, ranks, _ = self.sampler.gather_target_logprobs(
+                    logprobs, tgt_token_ids_int64
+                )
+            else:
+                token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
+                    logprobs, num_prompt_logprobs, tgt_token_ids
+                )
+
             chunk_slice = slice(start_idx, start_idx + num_logits)
             logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
                 token_ids, non_blocking=True
@@ -5086,17 +5171,15 @@ class GPUModelRunner(
                 ranks, non_blocking=True
             )
 
-        # Remove requests that have completed prefill from the batch
-        # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
-            del in_progress_dict[req_id]
+            if req_id in in_progress_dict:
+                del in_progress_dict[req_id]
 
-        # Must synchronize the non-blocking GPU->CPU transfers.
-        if prompt_logprobs_dict:
+        if prompt_logprobs_dict or prompt_logits_dict or kld_result_dict:
             self._sync_device()
 
-        return prompt_logprobs_dict
+        return prompt_logprobs_dict, prompt_logits_dict, kld_result_dict
 
     def _get_nans_in_logits(
         self,
