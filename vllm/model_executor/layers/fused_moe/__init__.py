@@ -90,6 +90,10 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+        TritonExperts,
+        TritonWNA16Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExperts,
         XPUExpertsFp8,
@@ -98,8 +102,6 @@ if HAS_TRITON:
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        TritonExperts,
-        TritonWNA16Experts,
         fused_experts,
         get_config_file_name,
     )
