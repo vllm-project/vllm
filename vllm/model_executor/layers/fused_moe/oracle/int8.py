@@ -39,7 +39,6 @@ def backend_to_kernel_cls(
 def select_int8_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
-    """Select INT8 W8A16 MoE backend."""
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -49,7 +48,6 @@ def select_int8_moe_backend(
     backend = Int8MoeBackend.TRITON
     experts_cls = backend_to_kernel_cls(backend)
 
-    # INT8 passes (None, None) for quant keys — TritonExperts accepts this.
     supported, reason = experts_cls.is_supported_config(
         experts_cls, config, None, None, activation_format
     )
