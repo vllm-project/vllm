@@ -945,7 +945,28 @@ def unify_kv_cache_spec_page_size(
                 )
             ratio = max_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
-            new_spec = replace(layer_spec, block_size=new_block_size)
+
+            # Handle MambaSpec specially
+            from vllm.v1.kv_cache_interface import MambaSpec
+            if isinstance(layer_spec, MambaSpec):
+                # For MambaSpec, page_size_bytes is independent of block_size
+                # (it only depends on shapes and dtypes).
+                # We can only unify by setting page_size_padded to max_page_size.
+                new_spec = replace(
+                    layer_spec,
+                    page_size_padded=max_page_size,
+                )
+            else:
+                # For other specs (AttentionSpec, etc.), use copy_with_new_block_size
+                new_spec = layer_spec.copy_with_new_block_size(new_block_size)
+                
+                # For specs with page_size_padded, we need to adjust it
+                page_size_padded = getattr(layer_spec, "page_size_padded", None)
+                if page_size_padded is not None:
+                    # When page_size_padded is set, ensure the new page_size_bytes
+                    # equals max_page_size by setting page_size_padded to max_page_size
+                    new_spec = replace(new_spec, page_size_padded=max_page_size)
+
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec

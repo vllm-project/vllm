@@ -12,11 +12,16 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
+from vllm.v1.worker.block_table import (
+    BlockTable,
+    MultiGroupBlockTable,
+    _compute_slot_mapping_cpu,
+)
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 VOCAB_SIZE = 1024
@@ -483,3 +488,84 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+def test_compute_slot_mapping_fallback_matches_expected():
+    query_start_loc = torch.tensor([0, 3], dtype=torch.int32, device="cpu")
+    positions = torch.tensor([0, 1, 2], dtype=torch.int64, device="cpu")
+    block_table = torch.zeros((1, 4), dtype=torch.int32, device="cpu")
+    block_table[0, 0] = 7
+    slot_mapping = torch.full((6,), fill_value=-1, dtype=torch.int64, device="cpu")
+
+    _compute_slot_mapping_cpu(
+        num_tokens=positions.shape[0],
+        max_num_tokens=slot_mapping.shape[0],
+        query_start_loc=query_start_loc,
+        positions=positions,
+        block_table=block_table,
+        block_table_stride=block_table.stride(0),
+        block_size=4,
+        slot_mapping=slot_mapping,
+        total_cp_world_size=1,
+        total_cp_rank=0,
+        cp_kv_cache_interleave_size=1,
+        pad_id=PAD_SLOT_ID,
+    )
+
+    expected = torch.tensor([28, 29, 30, PAD_SLOT_ID, PAD_SLOT_ID, PAD_SLOT_ID])
+    assert torch.equal(slot_mapping, expected)
+
+
+def test_compute_slot_mapping_fallback_handles_cp_sharding():
+    query_start_loc = torch.tensor([0, 4], dtype=torch.int32, device="cpu")
+    positions = torch.tensor([0, 1, 2, 3], dtype=torch.int64, device="cpu")
+    block_table = torch.zeros((1, 4), dtype=torch.int32, device="cpu")
+    block_table[0, 0] = 5
+    slot_mapping = torch.full((6,), fill_value=-1, dtype=torch.int64, device="cpu")
+
+    _compute_slot_mapping_cpu(
+        num_tokens=positions.shape[0],
+        max_num_tokens=slot_mapping.shape[0],
+        query_start_loc=query_start_loc,
+        positions=positions,
+        block_table=block_table,
+        block_table_stride=block_table.stride(0),
+        block_size=2,
+        slot_mapping=slot_mapping,
+        total_cp_world_size=2,
+        total_cp_rank=0,
+        cp_kv_cache_interleave_size=1,
+        pad_id=PAD_SLOT_ID,
+    )
+
+    expected = torch.tensor(
+        [10, PAD_SLOT_ID, 11, PAD_SLOT_ID, PAD_SLOT_ID, PAD_SLOT_ID]
+    )
+    assert torch.equal(slot_mapping, expected)
+
+
+def test_compute_slot_mapping_fallback_multiple_requests():
+    query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32, device="cpu")
+    positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int64, device="cpu")
+    block_table = torch.zeros((2, 4), dtype=torch.int32, device="cpu")
+    block_table[0, 0] = 3
+    block_table[1, 0] = 4
+    slot_mapping = torch.full((7,), fill_value=-1, dtype=torch.int64, device="cpu")
+
+    _compute_slot_mapping_cpu(
+        num_tokens=positions.shape[0],
+        max_num_tokens=slot_mapping.shape[0],
+        query_start_loc=query_start_loc,
+        positions=positions,
+        block_table=block_table,
+        block_table_stride=block_table.stride(0),
+        block_size=4,
+        slot_mapping=slot_mapping,
+        total_cp_world_size=1,
+        total_cp_rank=0,
+        cp_kv_cache_interleave_size=1,
+        pad_id=PAD_SLOT_ID,
+    )
+
+    expected = torch.tensor([12, 13, 16, 17, 18, PAD_SLOT_ID, PAD_SLOT_ID])
+    assert torch.equal(slot_mapping, expected)

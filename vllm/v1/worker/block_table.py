@@ -6,7 +6,7 @@ import torch
 
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
@@ -147,21 +147,39 @@ class BlockTable:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        _compute_slot_mapping_kernel[(num_reqs + 1,)](
-            num_tokens,
-            self.max_num_batched_tokens,
-            query_start_loc,
-            positions,
-            self.block_table.gpu,
-            self.block_table.gpu.stride(0),
-            self.block_size,
-            self.slot_mapping.gpu,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
-            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
-            PAD_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=1024,
-        )
+
+        if not HAS_TRITON:
+            # Use CPU fallback when Triton is not available
+            _compute_slot_mapping_cpu(
+                num_tokens,
+                self.max_num_batched_tokens,
+                query_start_loc,
+                positions,
+                self.block_table.gpu,
+                self.block_table.gpu.stride(0),
+                self.block_size,
+                self.slot_mapping.gpu,
+                total_cp_world_size,
+                total_cp_rank,
+                self.cp_kv_cache_interleave_size,
+                PAD_SLOT_ID,
+            )
+        else:
+            _compute_slot_mapping_kernel[(num_reqs + 1,)](
+                num_tokens,
+                self.max_num_batched_tokens,
+                query_start_loc,
+                positions,
+                self.block_table.gpu,
+                self.block_table.gpu.stride(0),
+                self.block_size,
+                self.slot_mapping.gpu,
+                TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+                TOTAL_CP_RANK=total_cp_rank,
+                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+                PAD_ID=PAD_SLOT_ID,
+                BLOCK_SIZE=1024,
+            )
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
@@ -313,6 +331,61 @@ class MultiGroupBlockTable:
     def __getitem__(self, idx: int) -> "BlockTable":
         """Returns the BlockTable for the i-th KV cache group."""
         return self.block_tables[idx]
+
+
+def _compute_slot_mapping_cpu(
+    num_tokens,
+    max_num_tokens,
+    query_start_loc,  # [num_reqs + 1], int32
+    positions,  # [num_tokens], int64
+    block_table,  # [max_num_reqs, max_num_blocks_per_req], int32
+    block_table_stride,  # max_num_blocks_per_req (in elements, not bytes)
+    block_size,
+    slot_mapping,  # [max_num_tokens], int64
+    total_cp_world_size,
+    total_cp_rank,
+    cp_kv_cache_interleave_size,
+    pad_id,
+):
+    """Fallback for computing slot mapping without Triton."""
+    # Keep everything on the current tensor device to avoid expensive
+    # host-device round-trips in non-Triton environments.
+    slot_mapping.fill_(pad_id)
+    if num_tokens == 0:
+        return
+
+    virtual_block_size = block_size * total_cp_world_size
+    cp_round_size = total_cp_world_size * cp_kv_cache_interleave_size
+
+    token_indices = torch.arange(num_tokens, device=query_start_loc.device)
+    req_indices = torch.searchsorted(query_start_loc[1:], token_indices, right=True)
+
+    req_positions = positions[:num_tokens]
+    block_indices = torch.div(req_positions, virtual_block_size, rounding_mode="floor")
+    block_numbers = block_table[req_indices, block_indices]
+
+    virtual_block_offsets = req_positions - block_indices * virtual_block_size
+    is_local = (
+        torch.div(
+            virtual_block_offsets,
+            cp_kv_cache_interleave_size,
+            rounding_mode="floor",
+        )
+        % total_cp_world_size
+        == total_cp_rank
+    )
+    local_block_offsets = torch.div(
+        virtual_block_offsets, cp_round_size, rounding_mode="floor"
+    ) * cp_kv_cache_interleave_size + (
+        virtual_block_offsets % cp_kv_cache_interleave_size
+    )
+
+    slot_ids = block_numbers.to(torch.int64) * block_size + local_block_offsets
+    slot_mapping[:num_tokens] = torch.where(
+        is_local,
+        slot_ids,
+        torch.full_like(slot_ids, pad_id),
+    )
 
 
 @triton.jit
