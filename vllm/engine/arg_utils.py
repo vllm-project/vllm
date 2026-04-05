@@ -239,11 +239,18 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-NEEDS_HELP = (
-    any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
-    or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
-    or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
-)
+def needs_help() -> bool:
+    """Check if help is being requested via CLI flags or mkdocs."""
+    return (
+        any(
+            arg == "-h" or arg.startswith("--help") for arg in sys.argv
+        )  # vllm SUBCOMMAND --help/-h/--help=X
+        or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
+        or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
+    )
+
+
+NEEDS_HELP = needs_help()
 
 
 def _maybe_add_docs_url(cls: Any) -> str:
@@ -2314,7 +2321,8 @@ class AsyncEngineArgs(EngineArgs):
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
             "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
         )
-        current_platform.pre_register_and_update(parser)
+        if not NEEDS_HELP:
+            current_platform.pre_register_and_update(parser)
         return parser
 
 
