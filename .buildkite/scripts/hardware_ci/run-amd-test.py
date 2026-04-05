@@ -136,9 +136,6 @@ ENABLE_JUNIT_OVERRIDE = os.environ.get("VLLM_ROCM_CI_JUNIT_OVERRIDE", "1") == "1
 # Docker image resolution:
 #   1. Use DOCKER_IMAGE_NAME when the pipeline sets it explicitly.
 #   2. Otherwise fall back to the shared commit-tagged AMD image.
-#
-# ROCm CI now builds a single multi-arch image per commit, so there is no
-# separate per-arch image mode to validate or fall back between here.
 DEFAULT_IMAGE_REPO = "rocm/vllm-ci"
 
 # --------------------------------------------------------------------------
@@ -638,9 +635,64 @@ CI_BASE_IMAGE = os.environ.get(
 # Prevents fork-bomb scenarios from killing the K8s node.
 CONTAINER_PIDS_LIMIT = 4096
 
-# Shared-memory size passed to ``docker run --shm-size``.
-# PyTorch DataLoader workers communicate via /dev/shm.
-CONTAINER_SHM_SIZE = "16gb"
+# Docker IPC/shm configuration for the single-node test container.
+#
+# Docker documents these knobs separately:
+#   - ``--shm-size`` sets the size of the container's ``/dev/shm`` tmpfs.
+#   - ``--ipc=host`` makes the container use the host system's IPC namespace.
+#     In that mode, the host's shared memory namespace is used instead of a
+#     private container ``/dev/shm`` mount.
+#   - Docker's daemon default IPC mode may be ``private`` or ``shareable``
+#     depending on daemon version/configuration, so this runner sets an
+#     explicit mode for deterministic CI behavior.
+#
+# Official docs:
+#   https://docs.docker.com/engine/containers/run/
+#   https://docs.docker.com/reference/cli/docker/container/run/
+#
+# For single-node jobs the test workload runs entirely inside ONE container,
+# so the default should be ``private``: all worker processes inside that
+# container already share the same IPC namespace, and ``--shm-size`` then
+# governs the container's private ``/dev/shm`` as intended.
+#
+# Override env vars:
+#   VLLM_CI_DOCKER_IPC_MODE   One of: private, shareable, host
+#   VLLM_CI_DOCKER_SHM_SIZE   ``/dev/shm`` size when IPC mode is private/shareable
+_VALID_CONTAINER_IPC_MODES = frozenset({"private", "shareable", "host"})
+CONTAINER_IPC_MODE = (
+    os.environ.get("VLLM_CI_DOCKER_IPC_MODE", "private").strip().lower()
+)
+CONTAINER_SHM_SIZE = os.environ.get("VLLM_CI_DOCKER_SHM_SIZE", "16gb").strip().lower()
+
+# Buildkite Test Engine configuration for pytest-based AMD CI jobs.
+#
+# Buildkite's Python collector docs say that installing
+# ``buildkite-test-collector`` is sufficient for pytest jobs, as long as the
+# tests run with access to the Test Engine token and the CI metadata. Their CI
+# environment docs further note that containerized jobs must explicitly pass
+# the token plus the Buildkite build/job variables into the container.
+#
+# Official docs:
+#   https://buildkite.com/docs/test-engine/python-collectors
+#   https://buildkite.com/docs/test-engine/test-collection/ci-environments
+#
+# Runner policy:
+#   - Enable Test Engine only on nightly builds (``NIGHTLY=1``).
+#   - Require the Test Suite token (``BUILDKITE_ANALYTICS_TOKEN``).
+#   - Forward the standard Buildkite build metadata when present.
+_TEST_ENGINE_TOKEN_ENV_VAR = "BUILDKITE_ANALYTICS_TOKEN"
+_TEST_ENGINE_METADATA_ENV_VARS = (
+    "BUILDKITE_BUILD_ID",
+    "BUILDKITE_JOB_ID",
+    "BUILDKITE_BUILD_NUMBER",
+    "BUILDKITE_BRANCH",
+    "BUILDKITE_COMMIT",
+    "BUILDKITE_MESSAGE",
+    "BUILDKITE_BUILD_URL",
+)
+_TEST_ENGINE_BUILDKITE_ENV_VARS = (
+    _TEST_ENGINE_TOKEN_ENV_VAR,
+) + _TEST_ENGINE_METADATA_ENV_VARS
 
 # Maximum wall-clock time (seconds) the test container may run.
 #
@@ -861,6 +913,114 @@ def best_effort(label):
 # ==========================================================================
 
 
+def _container_uses_private_shm(ipc_mode):
+    # type: (str) -> bool
+    """Return True when Docker gives the container its own ``/dev/shm``.
+
+    Docker's ``private`` and ``shareable`` IPC modes both create a private IPC
+    namespace for the container. In those modes, ``--shm-size`` controls the
+    container's ``/dev/shm`` tmpfs. ``host`` is different: it joins the Docker
+    host's IPC namespace, so host-side ``/dev/shm`` capacity governs.
+    """
+    return ipc_mode in {"private", "shareable"}
+
+
+def validate_container_ipc_config():
+    # type: () -> None
+    """Validate the single-node Docker IPC/shared-memory configuration."""
+    if CONTAINER_IPC_MODE not in _VALID_CONTAINER_IPC_MODES:
+        error(
+            f"Unsupported VLLM_CI_DOCKER_IPC_MODE='{CONTAINER_IPC_MODE}'. "
+            f"Expected one of: {', '.join(sorted(_VALID_CONTAINER_IPC_MODES))}"
+        )
+        sys.exit(1)
+
+    if _container_uses_private_shm(CONTAINER_IPC_MODE) and not CONTAINER_SHM_SIZE:
+        error(
+            "VLLM_CI_DOCKER_SHM_SIZE must be non-empty when "
+            f"VLLM_CI_DOCKER_IPC_MODE={CONTAINER_IPC_MODE}"
+        )
+        sys.exit(1)
+
+
+def _is_nightly_build():
+    # type: () -> bool
+    """Return True when the current Buildkite run is a nightly build."""
+    return os.environ.get("NIGHTLY", "0").strip() == "1"
+
+
+def get_test_engine_config():
+    # type: () -> dict[str, object]
+    """Resolve the effective Buildkite Test Engine configuration.
+
+    The pytest collector itself runs inside the test container. This helper
+    decides whether the runner should forward the required Buildkite metadata
+    into that container.
+    """
+    token = os.environ.get(_TEST_ENGINE_TOKEN_ENV_VAR, "").strip()
+    missing_metadata = [
+        name
+        for name in _TEST_ENGINE_METADATA_ENV_VARS
+        if not os.environ.get(name, "").strip()
+    ]
+
+    if not _is_nightly_build():
+        return {
+            "enabled": False,
+            "reason": "disabled because NIGHTLY!=1",
+            "missing_metadata": missing_metadata,
+        }
+
+    if not token:
+        return {
+            "enabled": False,
+            "reason": f"disabled because {_TEST_ENGINE_TOKEN_ENV_VAR} is not set",
+            "missing_metadata": missing_metadata,
+        }
+
+    return {
+        "enabled": True,
+        "reason": "enabled for nightly build",
+        "missing_metadata": missing_metadata,
+    }
+
+
+def build_test_engine_docker_env_args():
+    # type: () -> list[str]
+    """Return ``docker run -e`` args for Buildkite Test Engine collection."""
+    config = get_test_engine_config()
+    if not config["enabled"]:
+        return []
+
+    docker_env = []  # type: list[str]
+    for name in _TEST_ENGINE_BUILDKITE_ENV_VARS:
+        if os.environ.get(name, "").strip():
+            docker_env += ["-e", name]
+
+    # Some collectors use ``CI`` as an additional hint that they are running
+    # under automation. Preserve the agent value when present; otherwise set
+    # a conservative default.
+    docker_env += ["-e", f"CI={os.environ.get('CI', 'true')}"]
+    return docker_env
+
+
+def build_test_engine_shell_exports():
+    # type: () -> str
+    """Return shell exports for in-container pytest Test Engine collection."""
+    config = get_test_engine_config()
+    if not config["enabled"]:
+        return ""
+
+    assignments = []  # type: list[str]
+    for name in _TEST_ENGINE_BUILDKITE_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            assignments.append(f"{name}={shlex.quote(value)}")
+
+    assignments.append(f"CI={shlex.quote(os.environ.get('CI', 'true'))}")
+    return "export {} && ".format(" ".join(assignments)) if assignments else ""
+
+
 def execute_hard_resets():
     # type: () -> None
     """Execute any hard-reset operations requested via env vars.
@@ -977,6 +1137,8 @@ def log_effective_config():
     info(f"    JUNIT_OVERRIDE:          {_on_off(ENABLE_JUNIT_OVERRIDE)}")
     docker_image_override = os.environ.get("DOCKER_IMAGE_NAME", "").strip() or "(unset)"
     info(f"    DOCKER_IMAGE_NAME:       {docker_image_override}")
+    test_engine = get_test_engine_config()
+    info(f"    TEST_ENGINE:             {_on_off(test_engine['enabled'])}")
 
     any_off = not all(
         [
@@ -993,6 +1155,13 @@ def log_effective_config():
         warn(
             "One or more features are DISABLED via env vars. "
             "This may hide failures or skip cleanup."
+        )
+    info(f"  Test Engine:               {test_engine['reason']}")
+    if test_engine["missing_metadata"]:
+        warn(
+            "Buildkite Test Engine is missing Buildkite metadata env vars: "
+            f"{', '.join(test_engine['missing_metadata'])}. "
+            "Uploads can still work, but branch/commit/build links may be incomplete."
         )
 
     # Hard resets.
@@ -1029,7 +1198,19 @@ def log_effective_config():
         f"({CONTAINER_TIMEOUT_S // 60}min)"
     )
     info(f"  CONTAINER_PIDS_LIMIT:      {CONTAINER_PIDS_LIMIT}")
-    info(f"  CONTAINER_SHM_SIZE:        {CONTAINER_SHM_SIZE}")
+    info(f"  CONTAINER_IPC_MODE:        {CONTAINER_IPC_MODE}")
+    if _container_uses_private_shm(CONTAINER_IPC_MODE):
+        info(f"  CONTAINER_SHM_SIZE:        {CONTAINER_SHM_SIZE}")
+    else:
+        info(
+            "  CONTAINER_SHM_SIZE:        "
+            f"{CONTAINER_SHM_SIZE} (ignored with --ipc={CONTAINER_IPC_MODE})"
+        )
+        warn(
+            "Single-node Docker jobs are using --ipc=host, so /dev/shm comes "
+            "from the Docker host IPC namespace and is not sized by "
+            "VLLM_CI_DOCKER_SHM_SIZE."
+        )
     info(f"  DOCKER_PULL_RETRIES:       {DOCKER_PULL_RETRIES}")
     info(f"  DOCKER_HEALTH_TIMEOUT_S:   {DOCKER_HEALTH_TIMEOUT_S}")
     info(f"  DISK_EVICTION_POLICY:      {DISK_EVICTION_POLICY}")
@@ -1065,6 +1246,8 @@ def log_effective_config():
         "VLLM_ROCM_CI_DOCKER_EVICTION",
         "VLLM_ROCM_CI_DIAGNOSTICS",
         "VLLM_ROCM_CI_JUNIT_OVERRIDE",
+        "VLLM_CI_DOCKER_IPC_MODE",
+        "VLLM_CI_DOCKER_SHM_SIZE",
         "VLLM_ROCM_CI_RESET_CACHE_COUNTS",
         "VLLM_ROCM_CI_RESET_CACHE_L1",
         "VLLM_ROCM_CI_RESET_CACHE_L2",
@@ -1258,7 +1441,8 @@ def diagnose_container_exit(container_name, log_file=None):
     Returns:
         Dict with keys:
           "oom_killed" (bool), "exit_code" (int), "error" (str),
-          "pids_exhausted" (bool), "pytest_ran" (bool),
+          "pids_exhausted" (bool), "shm_exhausted" (bool),
+          "shm_error" (str), "pytest_ran" (bool),
           "pre_pytest_traceback" (bool),
           "pre_pytest_crash" (str).
     """
@@ -1267,6 +1451,8 @@ def diagnose_container_exit(container_name, log_file=None):
         "exit_code": -1,
         "error": "",
         "pids_exhausted": False,
+        "shm_exhausted": False,
+        "shm_error": "",
         "pytest_ran": True,
         "pre_pytest_traceback": False,
         "pre_pytest_crash": "",
@@ -1391,6 +1577,26 @@ def diagnose_container_exit(container_name, log_file=None):
                 diag["pids_exhausted"] = True
                 break
 
+        # Shared-memory exhaustion patterns. Keep this narrower than the PID
+        # checks so we only fire when the log clearly points at /dev/shm or
+        # shared-memory segment creation, not on unrelated ENOSPC failures.
+        shm_patterns = [
+            "Error while creating shared memory segment",
+            "/dev/shm/",
+            "/dev/shm ",
+            "shared memory segment",
+        ]
+        if "No space left on device" in tail and any(p in tail for p in shm_patterns):
+            diag["shm_exhausted"] = True
+            for line in reversed(tail.splitlines()):
+                if (
+                    "No space left on device" in line
+                    or "/dev/shm" in line
+                    or "shared memory segment" in line
+                ):
+                    diag["shm_error"] = line.strip()
+                    break
+
     # -- Emit clear, actionable diagnostics --
     code = diag["exit_code"]
 
@@ -1402,10 +1608,11 @@ def diagnose_container_exit(container_name, log_file=None):
             f"  Container:     {container_name}\n"
             f"  Exit code:     {code}\n"
             f"  How to fix:\n"
-            f"    - Increase --shm-size (currently {CONTAINER_SHM_SIZE})\n"
             f"    - Increase the K8s pod memory limit\n"
             f"    - Reduce batch size or model size in the test\n"
-            f"    - Check for memory leaks (compare pre/post VRAM snapshots above)"
+            f"    - Check for memory leaks (compare pre/post VRAM snapshots above)\n"
+            f"    - If /dev/shm growth is suspected, look for the separate\n"
+            f"      SHARED MEMORY EXHAUSTED diagnostic below"
         )
 
     if diag["pids_exhausted"]:
@@ -1422,6 +1629,36 @@ def diagnose_container_exit(container_name, log_file=None):
             f"      (currently {CONTAINER_PIDS_LIMIT})\n"
             f"    - Check if test spawns too many workers\n"
             f"    - Check for process leaks (zombie processes accumulating)"
+        )
+
+    if diag["shm_exhausted"]:
+        shm_excerpt = diag["shm_error"] or "(no matching log line captured)"
+        fix_lines = [
+            "    - Prefer VLLM_CI_DOCKER_IPC_MODE=private for single-node jobs so",
+            "      the container gets its own /dev/shm and --shm-size applies",
+        ]
+        if _container_uses_private_shm(CONTAINER_IPC_MODE):
+            fix_lines += [
+                "    - Increase VLLM_CI_DOCKER_SHM_SIZE "
+                f"(currently {CONTAINER_SHM_SIZE})",
+            ]
+        else:
+            fix_lines += [
+                "    - Increase /dev/shm capacity on the Docker host / outer pod;",
+                "      VLLM_CI_DOCKER_SHM_SIZE does not apply with --ipc=host",
+            ]
+        fix_lines.append(
+            "    - Check for leaked /dev/shm/nccl-* segments from prior crashes"
+        )
+        error(
+            f"{_DIAG_PREFIX} SHARED MEMORY EXHAUSTED\n"
+            f"  What happened: The workload could not allocate a /dev/shm segment\n"
+            f"                 inside the Docker IPC namespace.\n"
+            f"  Container:     {container_name}\n"
+            f"  Exit code:     {code}\n"
+            f"  IPC mode:      {CONTAINER_IPC_MODE}\n"
+            f"  Log excerpt:   {shm_excerpt}\n"
+            f"  How to fix:\n" + "\n".join(fix_lines)
         )
 
     if isinstance(code, int) and code > 128:
@@ -5161,6 +5398,153 @@ class _HealthWatchdog:
             self._sync_in_progress = False
 
 
+def build_single_node_docker_cmd(
+    *,
+    image,  # type: str
+    name,  # type: str
+    commands,  # type: str
+    render_gid,  # type: str
+    results_dir,  # type: Path
+    render_devices,  # type: str
+    rdma,  # type: bool
+):
+    # type: (...) -> list[str]
+    """Build the ``docker run`` command for a single-node AMD test job."""
+    docker_cmd = [
+        "docker",
+        "run",
+        "--detach",
+        "--device",
+        "/dev/kfd",
+    ]  # type: list[str]
+
+    # Render devices are passed as a space-separated string of --device flags
+    # from the Buildkite agent's metadata (set by the node's agent config).
+    # Validate each token: must start with --device or be a /dev/ path.
+    if render_devices:
+        tokens = render_devices.split()
+        safe_tokens = []  # type: list[str]
+        for token in tokens:
+            if (
+                token == "--device"
+                or token.startswith("--device=")
+                or token.startswith("/dev/")
+            ):
+                safe_tokens.append(token)
+            else:
+                warn(
+                    f"Dropping unexpected render_devices token: '{token}' "
+                    f"(expected --device or /dev/ path)"
+                )
+        docker_cmd.extend(safe_tokens)
+
+    # RDMA passthrough for ibverbs-based tests (e.g., test_moriio_connector).
+    if rdma:
+        docker_cmd += ["--device", "/dev/infiniband", "--cap-add=IPC_LOCK"]
+
+    docker_cmd += [
+        "--network=host",
+        "--group-add",
+        render_gid,
+        f"--pids-limit={CONTAINER_PIDS_LIMIT}",
+    ]
+
+    # Docker documents ``--shm-size`` as the size of the container's /dev/shm
+    # tmpfs, while ``--ipc=host`` switches the container to the Docker host's
+    # IPC namespace. Only private/shareable IPC modes should therefore use the
+    # container-scoped ``--shm-size`` setting.
+    if _container_uses_private_shm(CONTAINER_IPC_MODE):
+        docker_cmd.append(f"--shm-size={CONTAINER_SHM_SIZE}")
+    docker_cmd.append(f"--ipc={CONTAINER_IPC_MODE}")
+
+    docker_cmd += build_test_engine_docker_env_args()
+
+    docker_cmd += [
+        # Pass-through env vars (values come from the Buildkite agent env).
+        "-e",
+        "HF_TOKEN",
+        "-e",
+        "AWS_ACCESS_KEY_ID",
+        "-e",
+        "AWS_SECRET_ACCESS_KEY",
+        "-e",
+        "BUILDKITE_PARALLEL_JOB",
+        "-e",
+        "BUILDKITE_PARALLEL_JOB_COUNT",
+        # Results mount (JUnit XML, container logs).
+        "-v",
+        f"{results_dir}:{RESULTS_MOUNT}",
+        # Container-only env vars.
+        "-e",
+        "PYTHONPATH=..",
+        # NCCL tuning for ROCm multi-GPU tests.
+        # NCCL_DEBUG=WARN: log NCCL warnings (INFO is too noisy for CI).
+        "-e",
+        "NCCL_DEBUG=WARN",
+        # Tell pytest to write JUnit XML to the bind-mounted results dir.
+        # This is the KEY to the exit-code fix: the XML is written BEFORE
+        # Python's atexit handlers run, and it persists on the host.
+        # Append to any existing PYTEST_ADDOPTS to avoid silently dropping
+        # upstream settings (e.g., --timeout from the pipeline).
+        "-e",
+        "PYTEST_ADDOPTS={}--junitxml={}/results.xml".format(
+            _v + " " if (_v := os.environ.get("PYTEST_ADDOPTS", "").strip()) else "",
+            RESULTS_MOUNT,
+        ),
+    ]
+
+    # Persistent cache mounts -- all caches defined in the CACHES registry.
+    docker_cmd += build_cache_docker_args()
+
+    # Unset PYTORCH_ROCM_ARCH inside the container so PyTorch
+    # auto-detects the GPU arch at runtime. The image is pre-compiled;
+    # a stale value from the host/build env can cause PyTorch to skip
+    # the right kernels or attempt recompilation.
+    # See: https://github.com/vllm-project/vllm/pull/38272
+    container_commands = f"unset PYTORCH_ROCM_ARCH && {commands}"
+
+    docker_cmd += [
+        "--name",
+        name,
+        image,
+        "/bin/bash",
+        "-euo",
+        "pipefail",
+        "-c",
+        container_commands,
+    ]
+
+    return docker_cmd
+
+
+def log_container_ipc_runtime(container_name):
+    # type: (str) -> None
+    """Log the effective Docker IPC mode and visible ``/dev/shm`` size."""
+    r = sh(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "IpcMode={{.HostConfig.IpcMode}} ShmSize={{.HostConfig.ShmSize}}",
+            container_name,
+        ],
+        capture=True,
+        timeout=10,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        info(f"Container IPC config: {r.stdout.strip()}")
+
+    r = sh(
+        ["docker", "exec", container_name, "df", "-h", "/dev/shm"],
+        capture=True,
+        timeout=10,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        info("Container /dev/shm:")
+        for line in r.stdout.strip().splitlines():
+            info(f"  {line}")
+
+
 def run_container(
     *,
     image,  # type: str
@@ -5219,103 +5603,15 @@ def run_container(
     Returns:
         Validated exit code (0 = pass, non-zero = fail).
     """
-    docker_cmd = [
-        "docker",
-        "run",
-        "--detach",
-        "--device",
-        "/dev/kfd",
-    ]  # type: list[str]
-
-    # Render devices are passed as a space-separated string of --device flags
-    # from the Buildkite agent's metadata (set by the node's agent config).
-    # Validate each token: must start with --device or be a /dev/ path.
-    if render_devices:
-        tokens = render_devices.split()
-        safe_tokens = []  # type: list[str]
-        for token in tokens:
-            if (
-                token == "--device"
-                or token.startswith("--device=")
-                or token.startswith("/dev/")
-            ):
-                safe_tokens.append(token)
-            else:
-                warn(
-                    f"Dropping unexpected render_devices token: '{token}' "
-                    f"(expected --device or /dev/ path)"
-                )
-        docker_cmd.extend(safe_tokens)
-
-    # RDMA passthrough for ibverbs-based tests (e.g., test_moriio_connector).
-    if rdma:
-        docker_cmd += ["--device", "/dev/infiniband", "--cap-add=IPC_LOCK"]
-
-    docker_cmd += [
-        "--network=host",
-        f"--shm-size={CONTAINER_SHM_SIZE}",
-        "--group-add",
-        render_gid,
-        f"--pids-limit={CONTAINER_PIDS_LIMIT}",
-        # IPC namespace: share the host's IPC namespace so that PyTorch
-        # multiprocessing workers (torchrun, torch.distributed.launch) can
-        # communicate via shared memory. Without this, multi-GPU tests that
-        # use NCCL or Gloo backends fail with "Bus error" or "Connection
-        # refused" when workers try to open /dev/shm segments from siblings.
-        "--ipc=host",
-        # Pass-through env vars (values come from the Buildkite agent env).
-        "-e",
-        "HF_TOKEN",
-        "-e",
-        "AWS_ACCESS_KEY_ID",
-        "-e",
-        "AWS_SECRET_ACCESS_KEY",
-        "-e",
-        "BUILDKITE_PARALLEL_JOB",
-        "-e",
-        "BUILDKITE_PARALLEL_JOB_COUNT",
-        # Results mount (JUnit XML, container logs).
-        "-v",
-        f"{results_dir}:{RESULTS_MOUNT}",
-        # Container-only env vars.
-        "-e",
-        "PYTHONPATH=..",
-        # NCCL tuning for ROCm multi-GPU tests.
-        # NCCL_DEBUG=WARN: log NCCL warnings (INFO is too noisy for CI).
-        "-e",
-        "NCCL_DEBUG=WARN",
-        # Tell pytest to write JUnit XML to the bind-mounted results dir.
-        # This is the KEY to the exit-code fix: the XML is written BEFORE
-        # Python's atexit handlers run, and it persists on the host.
-        # Append to any existing PYTEST_ADDOPTS to avoid silently dropping
-        # upstream settings (e.g., --timeout from the pipeline).
-        "-e",
-        "PYTEST_ADDOPTS={}--junitxml={}/results.xml".format(
-            _v + " " if (_v := os.environ.get("PYTEST_ADDOPTS", "").strip()) else "",
-            RESULTS_MOUNT,
-        ),
-    ]
-
-    # Persistent cache mounts -- all caches defined in the CACHES registry.
-    docker_cmd += build_cache_docker_args()
-
-    # Unset PYTORCH_ROCM_ARCH inside the container so PyTorch
-    # auto-detects the GPU arch at runtime. The image is pre-compiled;
-    # a stale value from the host/build env can cause PyTorch to skip
-    # the right kernels or attempt recompilation.
-    # See: https://github.com/vllm-project/vllm/pull/38272
-    container_commands = f"unset PYTORCH_ROCM_ARCH && {commands}"
-
-    docker_cmd += [
-        "--name",
-        name,
-        image,
-        "/bin/bash",
-        "-euo",
-        "pipefail",
-        "-c",
-        container_commands,
-    ]
+    docker_cmd = build_single_node_docker_cmd(
+        image=image,
+        name=name,
+        commands=commands,
+        render_gid=render_gid,
+        results_dir=results_dir,
+        render_devices=render_devices,
+        rdma=rdma,
+    )
 
     # -- Step 0: Pre-test baselines --
     snapshot_gpu_vram("pre-test")
@@ -5349,6 +5645,8 @@ def run_container(
         return 1
     container_id = r.stdout.strip()
     info(f"Container started: {container_id[:12]} (full ID: {container_id})")
+    with best_effort("container IPC runtime logging"):
+        log_container_ipc_runtime(name)
 
     # -- Step 2: Stream logs to stdout (Buildkite) AND a file (artifact) --
     log_file = results_dir / "container.log"
@@ -5448,6 +5746,8 @@ def run_container(
             "exit_code": exit_code,
             "error": "",
             "pids_exhausted": False,
+            "shm_exhausted": False,
+            "shm_error": "",
             "pytest_ran": True,
             "pre_pytest_traceback": False,
             "pre_pytest_crash": "",
@@ -5472,6 +5772,18 @@ def run_container(
             "See `[run-amd-test.py diagnostics]` in the build log for details.",
             style="error",
             context="pids-exhausted",
+        )
+        if exit_code == 0:
+            exit_code = 1
+
+    if diag["shm_exhausted"]:
+        annotate_build(
+            "### :file_cabinet: Shared Memory Exhausted\n\n"
+            "The workload could not allocate a `/dev/shm` segment.\n"
+            "See `[run-amd-test.py diagnostics]` in the build log for the "
+            "effective IPC mode and fix guidance.",
+            style="error",
+            context="shm-exhausted",
         )
         if exit_code == 0:
             exit_code = 1
@@ -6148,6 +6460,11 @@ def _inject_junit_into_multi_node_cmd(cmd, node_idx, pair_idx, results_host_dir)
     problem as ``docker run``. We inject PYTEST_ADDOPTS to produce JUnit
     XML inside the container, then copy it out after the test completes.
 
+    When nightly Test Engine collection is enabled, this wrapper also exports
+    the Buildkite analytics environment variables into the shell that launches
+    pytest inside each node container. That keeps the implementation AMD-local
+    to this runner without modifying the shared multi-node shell helper.
+
     Each (node, pair) combination gets a unique XML filename to avoid
     collisions when multiple command pairs are executed:
       node0, pair0 -> results_node0_pair0.xml
@@ -6166,10 +6483,12 @@ def _inject_junit_into_multi_node_cmd(cmd, node_idx, pair_idx, results_host_dir)
     # The XML path is inside the container. We'll copy it out after the
     # test using ``docker cp``.
     xml_path = f"/tmp/results_node{node_idx}_pair{pair_idx}.xml"
+    test_engine_exports = build_test_engine_shell_exports()
     # Inject PYTEST_ADDOPTS before the command. If the command already
     # sets PYTEST_ADDOPTS, this prepends (pytest merges them).
     return (
-        f'export PYTEST_ADDOPTS="${{PYTEST_ADDOPTS:-}} --junitxml={xml_path}" && {cmd}'
+        f'{test_engine_exports}export PYTEST_ADDOPTS="${{PYTEST_ADDOPTS:-}} '
+        f'--junitxml={xml_path}" && {cmd}'
     )
 
 
@@ -6189,6 +6508,8 @@ def run_multi_node(commands, image, results_dir):
 
     To handle this, we:
       - Inject PYTEST_ADDOPTS with --junitxml into each per-node command.
+      - Inject Buildkite Test Engine env exports into each per-node command
+        when ``NIGHTLY=1`` and ``BUILDKITE_ANALYTICS_TOKEN`` is present.
       - After execution, ``docker cp`` the JUnit XMLs from each node
         container to the host results directory.
       - Parse all XMLs and override the exit code if any report failures.
@@ -6244,6 +6565,8 @@ def run_multi_node(commands, image, results_dir):
 
     num_nodes = int(os.environ.get("NUM_NODES", "2"))
     info(f"NUM_NODES: {num_nodes}")
+    test_engine = get_test_engine_config()
+    info(f"Buildkite Test Engine: {test_engine['reason']}")
 
     # VRAM snapshot before multi-node tests.
     snapshot_gpu_vram("multi-node-pre-test")
@@ -6637,6 +6960,7 @@ def main():
     # -- Phase 1: Environment + config --
     section("Environment")
     normalize_cache_root()
+    validate_container_ipc_config()
     with best_effort("K8s context logging"):
         log_k8s_context()
     with best_effort("config logging"):
