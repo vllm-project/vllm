@@ -120,8 +120,10 @@ def _sync_hip_cuda_env_vars():
         os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
 
 
-# Sync at import time - catches misconfigurations from process start.
-_sync_hip_cuda_env_vars()
+# Sync at import time: catches misconfigurations from process start
+# Ensure this runs only on ROCm
+if torch.version.hip is not None:
+    _sync_hip_cuda_env_vars()
 
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
@@ -192,6 +194,11 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     HIP derives hipDeviceProp_t.major / .minor.
 
     Format: gfx<MAJOR><MINOR><STEPPING>
+
+    Note: gfx identifiers are not purely numeric. The stepping
+    component may be alphabetic (e.g. 'a' in gfx90a). Only the
+    leading numeric digits are used for major/minor derivation.
+
       - 1-digit major  (gfx9xx):  "gfx" + M + m + stepping
       - 2-digit major  (gfx1xxx): "gfx" + MM + m + stepping
 
@@ -203,7 +210,9 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     (i.e. not a ROCm arch string). Raises on any string that looks
     like a GCN arch but does not match a known layout.
     """
-    m = re.match(r"gfx(\d+)", gcn_arch)
+    # Stepping may be a hex letter (e.g. gfx90a), so we match the
+    # leading digit run and allow an optional trailing alpha character.
+    m = re.match(r"gfx(\d+)([a-fA-F]?)", gcn_arch)
     if not m:
         # Not a gfx string at all — caller should fall back to torch.cuda
         return None
@@ -212,16 +221,18 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     n = len(digits)
 
     if n < 2:
+        # With an alpha stepping like gfx9a we still only have 1 digit,
+        # which is not enough to derive both major and minor.
         raise ValueError(
-            f"GCN arch '{gcn_arch}' has too few digits ({n}) after 'gfx' "
-            f"to derive a (major, minor) capability. "
+            f"GCN arch '{gcn_arch}' has too few numeric digits ({n}) after "
+            f"'gfx' to derive a (major, minor) capability. "
             f"Please file a vLLM issue with your GPU model."
         )
 
     if n in (2, 3):
         # 1-digit major: gfx9 family
-        # len 2: major + minor          (e.g. gfx90 from gfx90a)
-        # len 3: major + minor + step   (e.g. gfx942)
+        # len 2: major + minor              (e.g. "90" from gfx90a)
+        # len 3: major + minor + num-step   (e.g. "942" from gfx942)
         major = int(digits[0])
         minor = int(digits[1])
     elif n == 4:
