@@ -17,10 +17,15 @@ import soundfile as sf
 from tests.entrypoints.openai.conftest import add_attention_backend
 from tests.utils import RemoteOpenAIServer
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+SEED = 42
+TEMPERATURE = 0.0
 SERVER_ARGS = ["--enforce-eager"]
+if current_platform.is_rocm():
+    SERVER_ARGS.append("--no-enable-prefix-caching")
 
 
 def _get_rocm_attention_config(model_name):
@@ -61,20 +66,23 @@ def _get_server_args(attention_config):
 @pytest.fixture(
     scope="module", params=["openai/whisper-small", "google/gemma-3n-E2B-it"]
 )
-def server(request):
-    # Parametrize over model name
-    attention_config = _get_rocm_attention_config(request.param)
+def model_name(request):
+    return request.param
+
+
+@pytest.fixture(scope="module")
+def server(model_name):
+    attention_config = _get_rocm_attention_config(model_name)
     with RemoteOpenAIServer(
-        request.param, _get_server_args(attention_config)
+        model_name, _get_server_args(attention_config)
     ) as remote_server:
-        yield remote_server, request.param
+        yield remote_server
 
 
 @pytest_asyncio.fixture
-async def client_and_model(server):
-    server, model_name = server
+async def client(server):
     async with server.get_async_client() as async_client:
-        yield async_client, model_name
+        yield async_client
 
 
 @pytest.mark.asyncio
@@ -89,7 +97,10 @@ async def test_non_asr_model(foscolo):
 
         with pytest.raises(openai.NotFoundError):
             await client.audio.translations.create(
-                model=model_name, file=foscolo, temperature=0.0
+                model=model_name,
+                file=foscolo,
+                temperature=TEMPERATURE,
+                extra_body={"seed": SEED},
             )
 
 
@@ -126,62 +137,78 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         translation = await client.audio.translations.create(
             model=lora_model_name,
             file=mary_had_lamb,
-            extra_body=dict(language="en", to_language="es"),
+            extra_body={"seed": SEED, "language": "en", "to_language": "es"},
             response_format="text",
-            temperature=0.0,
+            temperature=TEMPERATURE,
         )
-    out = json.loads(translation)["text"].strip().lower()
-    assert "pequeño" in out.split(" ")
+
+    out = json.loads(translation)["text"].strip()
+    assert len(out) > 0, "LoRA translation returned empty text"
+    out_lower = out.lower()
+    assert "pequeño" in out_lower, (
+        f"Expected 'pequeño' in Spanish translation, got: {out!r}"
+    )
+    assert "mary" in out_lower, f"Expected 'mary' in Spanish translation, got: {out!r}"
 
 
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
 @pytest.mark.asyncio
-async def test_basic_audio(foscolo, client_and_model):
-    client, model_name = client_and_model
+async def test_basic_audio(foscolo, client, model_name):
     translation = await client.audio.translations.create(
         model=model_name,
         file=foscolo,
         response_format="text",
         # TODO remove `language="it"` once language detection is implemented
-        extra_body=dict(language="it", to_language="en"),
-        temperature=0.0,
+        extra_body={"seed": SEED, "language": "it", "to_language": "en"},
+        temperature=TEMPERATURE,
     )
-    out = json.loads(translation)["text"].strip().lower()
-    assert "greek sea" in out
+    out = json.loads(translation)["text"].strip()
+    assert len(out) > 0, "Translation returned empty text"
+    out_lower = out.lower()
+    assert "greek sea" in out_lower, (
+        f"Expected 'greek sea' in translation, got: {out!r}"
+    )
+    assert "exile" in out_lower, f"Expected 'exile' in translation, got: {out!r}"
 
 
 @pytest.mark.asyncio
-async def test_audio_prompt(foscolo, client_and_model):
-    client, model_name = client_and_model
+async def test_audio_prompt(foscolo, client, model_name):
     # Condition whisper on starting text
     prompt = "Nor have I ever"
-    transcription = await client.audio.translations.create(
+    translation = await client.audio.translations.create(
         model=model_name,
         file=foscolo,
         prompt=prompt,
-        extra_body=dict(language="it", to_language="en"),
+        extra_body={"seed": SEED, "language": "it", "to_language": "en"},
         response_format="text",
-        temperature=0.0,
+        temperature=TEMPERATURE,
     )
-    out = json.loads(transcription)["text"]
-    assert "Nor will I ever touch the sacred" not in out
-    assert prompt not in out
+    out = json.loads(translation)["text"].strip()
+    assert len(out) > 0, "Prompted translation returned empty text"
+    if model_name == "openai/whisper-small":
+        assert "Nor will I ever touch the sacred" not in out, (
+            f"Prompt conditioning failed; unprompted text leaked: {out!r}"
+        )
+        assert prompt not in out, f"Prompt text echoed back in output: {out!r}"
+    out_lower = out.lower()
+    assert "greek sea" in out_lower, (
+        f"Expected 'greek sea' in prompted translation, got: {out!r}"
+    )
 
 
 @pytest.mark.asyncio
-async def test_streaming_response(foscolo, client_and_model, server):
-    client, model_name = client_and_model
-    translation = ""
+async def test_streaming_response(foscolo, client, model_name, server):
+    """Streaming output must match non-streaming output."""
     res_no_stream = await client.audio.translations.create(
         model=model_name,
         file=foscolo,
         response_format="json",
-        extra_body=dict(language="it", to_language="en", seed=42),
-        temperature=0.0,
+        extra_body={"seed": SEED, "language": "it", "to_language": "en"},
+        temperature=TEMPERATURE,
     )
+    expected_text = res_no_stream.text
 
     # Stream via HTTPX since OpenAI translation client doesn't expose streaming
-    server, model_name = server
     url = server.url_for("v1/audio/translations")
     headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
     data = {
@@ -189,39 +216,45 @@ async def test_streaming_response(foscolo, client_and_model, server):
         "language": "it",
         "to_language": "en",
         "stream": True,
-        "temperature": 0.0,
-        "seed": 42,
+        "temperature": str(TEMPERATURE),
+        "seed": str(SEED),
     }
     foscolo.seek(0)
-    async with httpx.AsyncClient() as http_client:
-        files = {"file": foscolo}
-        async with http_client.stream(
-            "POST", url, headers=headers, data=data, files=files
-        ) as response:
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                if line.startswith("data: "):
-                    line = line[len("data: ") :]
-                if line.strip() == "[DONE]":
-                    break
-                chunk = json.loads(line)
-                text = chunk["choices"][0].get("delta", {}).get("content")
-                translation += text or ""
+    streamed_text = ""
+    async with (
+        httpx.AsyncClient() as http_client,
+        http_client.stream(
+            "POST",
+            url,
+            headers=headers,
+            data=data,
+            files={"file": foscolo},
+        ) as response,
+    ):
+        async for line in response.aiter_lines():
+            if not line:
+                continue
 
-    res_stream = translation.split()
-    # NOTE There's a small non-deterministic issue here, likely in the attn
-    # computation, which will cause a few tokens to be different, while still
-    # being very close semantically.
-    assert (
-        sum([x == y for x, y in zip(res_stream, res_no_stream.text.split())])
-        >= len(res_stream) * 0.87
+            if line.startswith("data: "):
+                data = line[len("data: ") :]
+                if data.strip() == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                content = chunk["choices"][0].get("delta", {}).get("content")
+                streamed_text += content or ""
+            elif line.strip() == "[DONE]":
+                break
+    # NOTE Run is expected to be deterministic with temperature set to 0.0
+    assert streamed_text == expected_text, (
+        f"Streaming/non-streaming mismatch.\n"
+        f"  Non-stream: {expected_text!r}\n"
+        f"  Streamed:   {streamed_text!r}"
     )
 
 
 @pytest.mark.asyncio
-async def test_stream_options(foscolo, server):
-    server, model_name = server
+async def test_stream_options(foscolo, model_name, server):
+    """stream_include_usage and stream_continuous_usage_stats must work."""
     url = server.url_for("v1/audio/translations")
     headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
     data = {
@@ -231,36 +264,53 @@ async def test_stream_options(foscolo, server):
         "stream": True,
         "stream_include_usage": True,
         "stream_continuous_usage_stats": True,
-        "temperature": 0.0,
+        "temperature": str(TEMPERATURE),
+        "seed": str(SEED),
     }
     foscolo.seek(0)
-    final = False
-    continuous = True
-    async with httpx.AsyncClient() as http_client:
-        files = {"file": foscolo}
-        async with http_client.stream(
-            "POST", url, headers=headers, data=data, files=files
-        ) as response:
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                if line.startswith("data: "):
-                    line = line[len("data: ") :]
-                if line.strip() == "[DONE]":
+    got_final_usage = False
+    chunks_with_choices = 0
+    chunks_missing_usage = 0
+    async with (
+        httpx.AsyncClient() as http_client,
+        http_client.stream(
+            "POST",
+            url,
+            headers=headers,
+            data=data,
+            files={"file": foscolo},
+        ) as response,
+    ):
+        async for line in response.aiter_lines():
+            if not line:
+                continue
+
+            if line.startswith("data: "):
+                data = line[len("data: ") :]
+                if data.strip() == "[DONE]":
                     break
-                chunk = json.loads(line)
+                chunk = json.loads(data)
                 choices = chunk.get("choices", [])
                 if not choices:
-                    # final usage sent
-                    final = True
+                    assert "usage" in chunk
+                    got_final_usage = True
                 else:
-                    continuous = continuous and ("usage" in chunk)
-    assert final and continuous
+                    chunks_with_choices += 1
+                    if "usage" not in chunk:
+                        chunks_missing_usage += 1
+            elif line.strip() == "[DONE]":
+                break
+
+    assert got_final_usage, "Never received final usage-only chunk"
+    assert chunks_with_choices > 0, "No content chunks received"
+    assert chunks_missing_usage == 0, (
+        f"{chunks_missing_usage}/{chunks_with_choices} content chunks "
+        f"missing continuous usage stats"
+    )
 
 
 @pytest.mark.asyncio
-async def test_long_audio_request(foscolo, client_and_model):
-    client, model_name = client_and_model
+async def test_long_audio_request(foscolo, client, model_name):
     if model_name == "google/gemma-3n-E2B-it":
         pytest.skip("Gemma3n does not support long audio requests")
     foscolo.seek(0)
@@ -273,46 +323,54 @@ async def test_long_audio_request(foscolo, client_and_model):
     translation = await client.audio.translations.create(
         model=model_name,
         file=buffer,
-        extra_body=dict(language="it", to_language="en"),
+        extra_body={"seed": SEED, "language": "it", "to_language": "en"},
         response_format="text",
-        temperature=0.0,
+        temperature=TEMPERATURE,
     )
-    out = json.loads(translation)["text"].strip().lower()
-    assert out.count("greek sea") == 2
+    out = json.loads(translation)["text"].strip()
+    assert len(out) > 0, "Long audio translation returned empty text"
+    out_lower = out.lower()
+    assert out_lower.count("greek sea") == 2, (
+        f"Expected 'greek sea' exactly twice in repeated audio translation, "
+        f"found {out_lower.count('greek sea')}: {out!r}"
+    )
 
 
 @pytest.mark.asyncio
-async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
-    client, model_name = client_and_model
+async def test_audio_with_max_tokens(mary_had_lamb, client, model_name):
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model_name)
     transcription = await client.audio.translations.create(
         model=model_name,
         file=mary_had_lamb,
         response_format="text",
-        temperature=0.0,
-        extra_body={"max_completion_tokens": 1},
+        temperature=TEMPERATURE,
+        extra_body={"seed": SEED, "max_completion_tokens": 1},
     )
     out = json.loads(transcription)
-    out_text = out["text"]
-    print(out_text)
-    from transformers import AutoTokenizer
+    out_tokens = tok(out["text"], add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) == 1, (
+        f"Expected exactly 1 token, got {len(out_tokens)}: {out_tokens}"
+    )
 
-    tok = AutoTokenizer.from_pretrained(model_name)
-    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
-    assert len(out_tokens) == 1
-    # max_completion_tokens > max_model_len
+    # max_completion_tokens >> max_model_len should not crash
     # max_model_len=32768 for Gemma-3n-E2B-it
+    mary_had_lamb.seek(0)
     transcription = await client.audio.transcriptions.create(
         model=model_name,
         file=mary_had_lamb,
         response_format="text",
-        temperature=0.0,
+        temperature=TEMPERATURE,
         extra_body={
+            "seed": SEED,
             "max_completion_tokens": int(1e6),
             "repetition_penalty": 1.3,
         },
     )
     out = json.loads(transcription)
-    out_text = out["text"]
-    print(out_text)
-    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
-    assert len(out_tokens) < 450  # ~Whisper max output len
+    out_tokens = tok(out["text"], add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) > 0, "Unconstrained transcription returned no tokens"
+    assert len(out_tokens) < 450, (
+        f"Unexpectedly long output: {len(out_tokens)} tokens"
+    )  # ~Whisper max output len
