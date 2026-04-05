@@ -15,8 +15,8 @@ from ...utils import check_embeddings_close
 
 # BC for method that was deleted in Transformers v5.
 # Only needed for generating the HF reference.
-transformers.utils.is_flash_attn_greater_or_equal_2_10 = (
-    lambda: transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
+transformers.utils.is_flash_attn_greater_or_equal_2_10 = lambda: (
+    transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
 )
 
 HF_TEXT_PROMPTS = [
