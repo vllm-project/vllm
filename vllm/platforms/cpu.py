@@ -381,7 +381,12 @@ class CpuPlatform(Platform):
     def get_global_cpu_mask(cls) -> set[int]:
         # get global cpu mask
         if cls.global_cpu_mask is None:
-            cls.global_cpu_mask = os.sched_getaffinity(0)
+            if hasattr(os, "sched_getaffinity"):
+                cls.global_cpu_mask = os.sched_getaffinity(0)
+            else:
+                # macOS does not support sched_getaffinity
+                cpu_count = os.cpu_count() or 1
+                cls.global_cpu_mask = set(range(cpu_count))
         return cls.global_cpu_mask
 
     @classmethod

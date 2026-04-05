@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: Platform Tests (Accelerator)
   timeout_in_minutes: 15
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/cuda

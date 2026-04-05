@@ -16,7 +16,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.model_executor.models.vision import get_load_balance_assignment
-from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
 )
 
