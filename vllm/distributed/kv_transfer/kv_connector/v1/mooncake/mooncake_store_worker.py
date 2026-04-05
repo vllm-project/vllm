@@ -55,11 +55,15 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    enable_offload: bool = False
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
+        enable_offload = config.get("enable_offload", False) or os.getenv(
+            "MOONCAKE_ENABLE_OFFLOAD", ""
+        ).lower() in ("1", "true")
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server", ""),
             global_segment_size=_parse_size(
@@ -71,6 +75,7 @@ class MooncakeStoreConfig:
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address", ""),
+            enable_offload=enable_offload,
         )
 
     @staticmethod
@@ -485,15 +490,18 @@ class MooncakeStoreWorker:
         self.store = MooncakeDistributedStore()
 
         local_seg = get_ip()
-        ret = self.store.setup(
-            local_seg,
-            store_config.metadata_server,
-            store_config.global_segment_size,
-            store_config.local_buffer_size,
-            store_config.protocol,
-            store_config.device_name,
-            store_config.master_server_address,
-        )
+        config_dict = {
+            "local_hostname": local_seg,
+            "metadata_server": store_config.metadata_server,
+            "global_segment_size": str(store_config.global_segment_size),
+            "local_buffer_size": str(store_config.local_buffer_size),
+            "protocol": store_config.protocol,
+            "rdma_devices": store_config.device_name,
+            "master_server_addr": store_config.master_server_address,
+        }
+        if store_config.enable_offload:
+            config_dict["enable_offload"] = "true"
+        ret = self.store.setup(config_dict)
         if ret != 0:
             msg = "Initialize MooncakeDistributedStore failed."
             logger.error(msg)

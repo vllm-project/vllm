@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Benchmark CPU KV cache offloading overhead.
-# Launches a vllm server, runs `vllm-bench` against it, then
-# repeats with offloading enabled. Uses random (unique) prompts so
-# no offloaded prefix is ever hit — isolating the pure store overhead.
+# Benchmark multi-turn chat with/without CPU KV cache offloading.
+# Launches a vllm server, runs `vllm-bench` with multi-turn options,
+# then repeats with offloading enabled.
 #
 # Usage:
-#   bash benchmark_cpu_offloading.sh [MODEL] [INPUT_LEN] [OUTPUT_LEN] [NUM_PROMPTS]
+#   bash benchmark_multi_turn.sh [MODEL] [INPUT_LEN] [OUTPUT_LEN] [NUM_PROMPTS]
 #
 # Supported backends (comma-separated in BACKENDS):
 #   baseline        - No offloading
@@ -15,28 +14,36 @@
 #
 # Environment variables:
 #   CPU_OFFLOAD_GIB       - CPU offload buffer in GiB   (default: 80)
-#   DISK_OFFLOAD_GIB      - Disk offload quota in GiB   (default: unset = disabled)
-#   REQUEST_RATE          - Requests/s to the server     (default: 1)
+#   DISK_OFFLOAD_GIB      - Disk offload quota in GiB   (default: 400)
 #   PORT                  - Server port                  (default: 8192)
 #   RESULT_DIR            - Output directory             (default: ./bench_results)
-#   BACKENDS              - Comma-separated backends     (default: baseline,native,simple,mooncake)
+#   BACKENDS              - Comma-separated backends     (default: baseline,mooncake)
 #   MOONCAKE_CONFIG_PATH  - Path to mooncake config JSON (required for mooncake, auto-skipped if unset)
+#   MULTI_TURN_NUM_TURNS  - Number of turns per conversation  (default: 4)
+#   MULTI_TURN_CONCURRENCY - Concurrent conversations         (default: 8)
+#   MULTI_TURN_DELAY_MS   - Delay between turns in ms         (default: 500)
+#   GLOBAL_PREFIX_RATIO   - Fraction of input as global prefix  (default: 0.1)
+#   CONV_PREFIX_RATIO     - Fraction of input as conversation prefix (default: 0.8)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODEL="${1:-meta-llama/Llama-3.1-8B-Instruct}"
-# MODEL="${1:-nvidia/Qwen3.5-397B-A17B-NVFP4}"
-INPUT_LEN="${2:-8192}"
-OUTPUT_LEN="${3:-1024}"
-NUM_PROMPTS="${4:-200}"
-CPU_OFFLOAD_GIB="${CPU_OFFLOAD_GIB:-80}"
-DISK_OFFLOAD_GIB="${DISK_OFFLOAD_GIB:-400}"
-REQUEST_RATE="${REQUEST_RATE:-1}"
+INPUT_LEN="${2:-70000}"
+OUTPUT_LEN="${3:-200}"
+NUM_PROMPTS="${4:-50}"
+CPU_OFFLOAD_GIB="${CPU_OFFLOAD_GIB:-600}"
+DISK_OFFLOAD_GIB="${DISK_OFFLOAD_GIB:-1000}"
 PORT="${PORT:-8192}"
 RESULT_DIR="${RESULT_DIR:-./bench_results}"
 BACKENDS="${BACKENDS:-baseline,mooncake}"
+
+MULTI_TURN_NUM_TURNS="${MULTI_TURN_NUM_TURNS:-3}"
+MULTI_TURN_CONCURRENCY="${MULTI_TURN_CONCURRENCY:-10}"
+MULTI_TURN_DELAY_MS="${MULTI_TURN_DELAY_MS:-500}"
+GLOBAL_PREFIX_RATIO="${GLOBAL_PREFIX_RATIO:-0.1}"
+CONV_PREFIX_RATIO="${CONV_PREFIX_RATIO:-0.8}"
 
 mkdir -p "$RESULT_DIR"
 
@@ -64,14 +71,20 @@ if [[ "$MODEL" == "nvidia/Qwen3.5-397B-A17B-NVFP4" ]]; then
 fi
 
 BENCH_COMMON=(
+    --backend openai-chat
     --model "$MODEL"
     --base-url "http://127.0.0.1:${PORT}"
     --dataset-name random
     --random-input-len "$INPUT_LEN"
     --random-output-len "$OUTPUT_LEN"
     --num-prompts "$NUM_PROMPTS"
-    --request-rate "$REQUEST_RATE"
-    --seed 42
+    --multi-turn
+    --multi-turn-num-turns "$MULTI_TURN_NUM_TURNS"
+    --multi-turn-concurrency "$MULTI_TURN_CONCURRENCY"
+    --multi-turn-delay-ms "$MULTI_TURN_DELAY_MS"
+    --multi-turn-prefix-global-ratio "$GLOBAL_PREFIX_RATIO"
+    --multi-turn-prefix-conversation-ratio "$CONV_PREFIX_RATIO"
+    --percentile-metrics "ttft,tpot,itl,e2el"
     --save-result
     --result-dir "$RESULT_DIR"
 )
@@ -124,13 +137,17 @@ run_one() {
 }
 
 echo "============================================"
-echo "  CPU Offloading Overhead Benchmark"
+echo "  Multi-Turn Offloading Benchmark"
 echo "============================================"
 echo "  Model:         $MODEL"
 echo "  Input len:     $INPUT_LEN"
 echo "  Output len:    $OUTPUT_LEN"
 echo "  Num prompts:   $NUM_PROMPTS"
-echo "  Request rate:  $REQUEST_RATE req/s"
+echo "  Turns:         $MULTI_TURN_NUM_TURNS"
+echo "  Concurrency:   $MULTI_TURN_CONCURRENCY"
+echo "  Turn delay:    ${MULTI_TURN_DELAY_MS} ms"
+echo "  Global prefix: $GLOBAL_PREFIX_RATIO"
+echo "  Conv prefix:   $CONV_PREFIX_RATIO"
 echo "  Backends:      $BACKENDS"
 echo "  CPU offload:   ${CPU_OFFLOAD_GIB} GiB"
 if [[ -n "$DISK_OFFLOAD_GIB" ]]; then
@@ -144,17 +161,17 @@ IFS=',' read -ra BACKEND_LIST <<< "$BACKENDS"
 for backend in "${BACKEND_LIST[@]}"; do
     case "$backend" in
         baseline)
-            run_one "Baseline (no offloading)" "baseline.json"
+            run_one "Baseline (no offloading)" "mt_baseline.json"
             ;;
         native)
             export VLLM_USE_SIMPLE_KV_OFFLOAD=0
-            run_one "With CPU offloading (native)" "native.json" \
+            run_one "With CPU offloading (native)" "mt_native.json" \
                 --kv-offloading-size "$CPU_OFFLOAD_GIB" \
                 --kv-offloading-backend "native"
             ;;
         simple)
             export VLLM_USE_SIMPLE_KV_OFFLOAD=1
-            run_one "With CPU offloading (simple)" "simple.json" \
+            run_one "With CPU offloading (simple)" "mt_simple.json" \
                 --kv-offloading-size "$CPU_OFFLOAD_GIB" \
                 --kv-offloading-backend "native"
             ;;
@@ -165,7 +182,7 @@ for backend in "${BACKEND_LIST[@]}"; do
                 SETUP_ARGS+=(--disk-size "$DISK_OFFLOAD_GIB")
             fi
             source "${SCRIPT_DIR}/setup_vllm_env.sh" "${SETUP_ARGS[@]}"
-            run_one "With CPU offloading (mooncake)" "mooncake.json" \
+            run_one "With CPU offloading (mooncake)" "mt_mooncake.json" \
                 --kv-transfer-config "{\"kv_connector\":\"MooncakeStoreConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"load_async\":true}}"
             ;;
         *)
@@ -176,4 +193,4 @@ for backend in "${BACKEND_LIST[@]}"; do
 done
 
 # ── Compare all available results ───────────────────────────────
-python3 "${SCRIPT_DIR}/compare_results.py" "$RESULT_DIR"
+python3 "${SCRIPT_DIR}/compare_results.py" "$RESULT_DIR" --prefix mt_

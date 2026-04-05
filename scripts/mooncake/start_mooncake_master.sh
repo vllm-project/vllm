@@ -6,18 +6,22 @@
 #   - HTTP metadata (port 8080): transfer engine peer discovery
 #
 # Usage:
-#   bash start_mooncake_master.sh          # foreground
-#   bash start_mooncake_master.sh --bg     # background (PID written to mooncake_master.pid)
-#   bash start_mooncake_master.sh --stop   # kill backgrounded master
+#   bash start_mooncake_master.sh                          # foreground
+#   bash start_mooncake_master.sh --bg                     # background (PID → mooncake_master.pid)
+#   bash start_mooncake_master.sh --enable-offload --bg    # background with disk offloading
+#   bash start_mooncake_master.sh --stop                   # kill backgrounded master
+#
+# Flags can appear in any order; --stop is processed first and ignores others.
 #
 # Environment variables (all optional):
-#   MC_RPC_PORT       - Master RPC port          (default: 50051)
-#   MC_HTTP_PORT      - HTTP metadata port        (default: 8080)
-#   MC_METRICS_PORT   - Prometheus metrics port   (default: 9003)
-#   MC_RPC_THREADS    - RPC worker threads        (default: 4)
-#   MC_LEASE_TTL      - KV lease TTL in ms        (default: 30000)
-#   MC_EVICT_HI       - Eviction high watermark   (default: 0.95)
+#   MC_RPC_PORT       - Master RPC port           (default: 50051)
+#   MC_HTTP_PORT      - HTTP metadata port         (default: 8080)
+#   MC_METRICS_PORT   - Prometheus metrics port    (default: 9003)
+#   MC_RPC_THREADS    - RPC worker threads         (default: 4)
+#   MC_LEASE_TTL      - KV lease TTL in ms         (default: 30000)
+#   MC_EVICT_HI       - Eviction high watermark    (default: 0.95)
 #   MC_EVICT_RATIO    - Fraction to evict per pass (default: 0.1)
+
 
 set -euo pipefail
 
@@ -25,6 +29,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$SCRIPT_DIR/mooncake_master.pid"
 LOG_FILE="$SCRIPT_DIR/mooncake_master.log"
 
+# --- Parse flags -----------------------------------------------------------
+OPT_BG=false
+OPT_STOP=false
+OPT_OFFLOAD=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --bg)              OPT_BG=true ;;
+        --stop)            OPT_STOP=true ;;
+        --enable-offload)  OPT_OFFLOAD=true ;;
+        *)
+            echo "Unknown flag: $arg" >&2
+            echo "Usage: $0 [--bg] [--enable-offload] [--stop]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# --- Master settings -------------------------------------------------------
 MC_RPC_PORT="${MC_RPC_PORT:-50051}"
 MC_HTTP_PORT="${MC_HTTP_PORT:-8080}"
 MC_METRICS_PORT="${MC_METRICS_PORT:-9003}"
@@ -33,24 +56,32 @@ MC_LEASE_TTL="${MC_LEASE_TTL:-30000}"
 MC_EVICT_HI="${MC_EVICT_HI:-0.95}"
 MC_EVICT_RATIO="${MC_EVICT_RATIO:-0.1}"
 
-stop_master() {
-    if [[ -f "$PID_FILE" ]]; then
-        local pid
-        pid=$(<"$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "Stopping mooncake_master (PID $pid)"
-            kill "$pid"
-            wait "$pid" 2>/dev/null || true
-        else
-            echo "mooncake_master (PID $pid) is not running"
-        fi
-        rm -f "$PID_FILE"
-    else
-        echo "No PID file found at $PID_FILE"
-    fi
+
+# --- Helper: stop a previously backgrounded master -------------------------
+is_our_master() {
+    local pid=$1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [[ "$(ps -o comm= -p "$pid" 2>/dev/null)" == mooncake_maste* ]] || return 1
+    [[ "$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')" == "$(id -u)" ]]
 }
 
-if [[ "${1:-}" == "--stop" ]]; then
+stop_master() {
+    [[ -f "$PID_FILE" ]] || return 0
+    local pid=$(<"$PID_FILE")
+
+    if ! is_our_master "$pid"; then
+        rm -f "$PID_FILE"
+        return 0
+    fi
+
+    echo "Stopping mooncake_master (PID $pid) ..."
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 5); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null; sleep 1; fi
+    rm -f "$PID_FILE"
+}
+
+if $OPT_STOP; then
     stop_master
     exit 0
 fi
@@ -58,6 +89,7 @@ fi
 # Ensure no stale instance
 stop_master 2>/dev/null || true
 
+# --- Build command ----------------------------------------------------------
 CMD=(
     mooncake_master
     -rpc_port="$MC_RPC_PORT"
@@ -75,14 +107,36 @@ CMD=(
     -logtostderr
 )
 
+if $OPT_OFFLOAD; then
+    CMD+=( -enable_offload=true )
+    # Note: do NOT pass -root_fs_dir here. That enables direct disk writes
+    # during put, which segfaults on GPU-resident data. Disk offload for
+    # vLLM works via the client-side FileStorage heartbeat path instead:
+    # CPU memory -> SSD (background), not GPU -> SSD (inline).
+fi
+
+# --- Start ------------------------------------------------------------------
 echo "Starting mooncake_master"
 echo "  RPC:      0.0.0.0:${MC_RPC_PORT}"
 echo "  HTTP:     0.0.0.0:${MC_HTTP_PORT}/metadata"
 echo "  Metrics:  0.0.0.0:${MC_METRICS_PORT}"
+if $OPT_OFFLOAD; then
+    echo "  Offload:  ON"
+else
+    echo "  Offload:  OFF (pass --enable-offload to enable)"
+fi
 
-if [[ "${1:-}" == "--bg" ]]; then
-    "${CMD[@]}" > "$LOG_FILE" 2>&1 &
+if $OPT_BG; then
+    : > "$LOG_FILE"
+    nohup "${CMD[@]}" > "$LOG_FILE" 2>&1 < /dev/null &
     echo $! > "$PID_FILE"
+    sleep 1
+    if ! is_our_master "$(cat "$PID_FILE")"; then
+        echo "  ERROR: mooncake_master failed to stay running" >&2
+        tail -n 50 "$LOG_FILE" >&2 || true
+        rm -f "$PID_FILE"
+        exit 1
+    fi
     echo "  PID:      $(<"$PID_FILE") (written to $PID_FILE)"
     echo "  Log:      $LOG_FILE"
     echo ""
