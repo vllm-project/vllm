@@ -709,6 +709,7 @@ class FireRedASR2ForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        response_prefix: str = "",
     ) -> PromptType:
         if language is None:
             raise ValueError(

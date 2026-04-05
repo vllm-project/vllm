@@ -2193,6 +2193,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        response_prefix: str = "",
     ) -> PromptType:
         """
         Construct a transcription/translation prompt for Qwen3-Omni.

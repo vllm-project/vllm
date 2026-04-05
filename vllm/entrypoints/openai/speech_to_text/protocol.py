@@ -79,6 +79,15 @@ class TranscriptionRequest(OpenAIBaseModel):
     should match the audio language.
     """
 
+    response_prefix: str = Field(default="")
+    """Optional text to prepend to the model's response, as if it had already
+    been generated. For models that support it (e.g. Qwen3-ASR), this is
+    injected into the assistant turn so the model continues from the given
+    text. Useful for implementing streaming transcription on the caller side:
+    pass the stable output from the previous segment (with rollback) so the
+    model picks up where it left off.
+    """
+
     response_format: AudioResponseFormat = Field(default="json")
     """
     The format of the output, in one of these options: `json`, `text`, `srt`,
@@ -402,6 +411,15 @@ class TranslationRequest(OpenAIBaseModel):
 
     The [prompt](https://platform.openai.com/docs/guides/speech-to-text#prompting)
     should match the audio language.
+    """
+
+    response_prefix: str = Field(default="")
+    """Optional text to prepend to the model's response, as if it had already
+    been generated. For models that support it (e.g. Qwen3-ASR), this is
+    injected into the assistant turn so the model continues from the given
+    text. Useful for implementing streaming transcription on the caller side:
+    pass the stable output from the previous segment (with rollback) so the
+    model picks up where it left off.
     """
 
     response_format: AudioResponseFormat = Field(default="json")

@@ -534,6 +534,7 @@ class Qwen3ASRForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        response_prefix: str = "",
     ) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
         tokenizer = cached_tokenizer_from_config(model_config)
@@ -544,16 +545,34 @@ class Qwen3ASRForConditionalGeneration(
                 f"Unsupported task_type '{task_type}'. "
                 "Supported task types are 'transcribe' and 'translate'."
             )
+
+        def _sanitize_chatml(text: str) -> str:
+            """Strip ChatML control tokens to prevent prompt injection."""
+            return (
+                text.replace("<|im_start|>", "")
+                .replace("<|im_end|>", "")
+                .replace(_ASR_TEXT_TAG, "")
+            )
+
+        system_turn = ""
+        if request_prompt:
+            safe_prompt = _sanitize_chatml(request_prompt)
+            system_turn = f"<|im_start|>system\n{safe_prompt}<|im_end|>\n"
+
+        safe_prefix = _sanitize_chatml(response_prefix)
         full_lang_name_to = cls.supported_languages.get(to_language, to_language)
         if to_language is None:
             prompt = (
+                f"{system_turn}"
                 f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
+                f"<|im_start|>assistant\n{safe_prefix}"
             )
         else:
             prompt = (
+                f"{system_turn}"
                 f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\nlanguage {full_lang_name_to}{_ASR_TEXT_TAG}"
+                f"<|im_start|>assistant\n"
+                f"language {full_lang_name_to}{_ASR_TEXT_TAG}{safe_prefix}"
             )
 
         prompt_token_ids = tokenizer.encode(prompt)
