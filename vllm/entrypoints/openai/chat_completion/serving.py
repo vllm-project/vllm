@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -13,6 +14,7 @@ import partial_json_parser
 import regex as re
 from fastapi import Request
 from partial_json_parser.core.options import Allow
+from pydantic import TypeAdapter, ValidationError
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
@@ -45,6 +47,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
     ErrorResponse,
     FunctionCall,
+    FunctionDefinition,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -80,6 +83,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+    from vllm.parser import Parser
 
 logger = init_logger(__name__)
 
@@ -126,6 +130,12 @@ class OpenAIServingChat(OpenAIServing):
         # set up reasoning parser
         self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
             reasoning_parser_name=reasoning_parser
+        )
+        self.parser_cls = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
         )
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
@@ -216,17 +226,24 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
+        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+            request.chat_template_kwargs,
+            self.default_chat_template_kwargs,
+        )
         reasoning_parser: ReasoningParser | None = None
         if self.reasoning_parser_cls:
-            # Pass the same chat template kwargs as used in tokenization
-            chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-                request.chat_template_kwargs,
-                self.default_chat_template_kwargs,
-            )
             reasoning_parser = self.reasoning_parser_cls(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
             )
+        parser = (
+            self.parser_cls(
+                tokenizer,
+                chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+            )
+            if self.parser_cls
+            else None
+        )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -349,6 +366,7 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer,
             request_metadata,
             reasoning_parser,
+            parser,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -1275,6 +1293,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
+        parser: "Parser | None" = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -1372,28 +1391,51 @@ class OpenAIServingChat(OpenAIServing):
                 choices.append(choice_data)
                 continue
 
-            if reasoning_parser:
-                # If the reasoning parser is enabled,
-                # tool calls are extracted exclusively from the content.
-                reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+            if parser is not None:
+                reasoning, tool_calls, content = parser.extract_chat_completion_parts(
+                    model_output=output.text,
+                    request=request,
+                    enable_auto_tools=self.enable_auto_tools,
                 )
                 if not request.include_reasoning:
                     reasoning = None
             else:
                 reasoning = None
                 content = output.text
+                tool_calls = []
+
+                # Preserve pre-parser forced tool-call handling when chat
+                # completions are valid without a unified parser configured.
+                if request.tool_choice and isinstance(
+                    request.tool_choice, ChatCompletionNamedToolChoiceParam
+                ):
+                    assert content is not None
+                    tool_calls = [
+                        FunctionCall(
+                            name=request.tool_choice.function.name,
+                            arguments=content,
+                        )
+                    ]
+                    content = None
+                elif request.tool_choice == "required":
+                    parsed_tool_calls = []
+                    with contextlib.suppress(ValidationError):
+                        content = content or ""
+                        parsed_tool_calls = TypeAdapter(
+                            list[FunctionDefinition]
+                        ).validate_json(content)
+                    for parsed_tool_call in parsed_tool_calls:
+                        tool_calls.append(
+                            FunctionCall(
+                                name=parsed_tool_call.name,
+                                arguments=json.dumps(
+                                    parsed_tool_call.parameters, ensure_ascii=False
+                                ),
+                            )
+                        )
+                    content = None
 
             auto_tools_called = False
-            # if auto tools are not enabled, and a named tool choice using
-            #   outlines is not being used
-            tool_calls, content = self._parse_tool_calls_from_content(
-                request=request,
-                tokenizer=tokenizer,
-                content=content,
-                enable_auto_tools=self.enable_auto_tools,
-                tool_parser_cls=self.tool_parser,
-            )
             tool_call_class = (
                 MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
@@ -1403,9 +1445,8 @@ class OpenAIServingChat(OpenAIServing):
             ):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
-            elif (
-                request.tool_choice
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+            elif request.tool_choice and isinstance(
+                request.tool_choice, ChatCompletionNamedToolChoiceParam
             ):
                 assert tool_calls is not None and len(tool_calls) > 0
                 tool_call_class_items = []

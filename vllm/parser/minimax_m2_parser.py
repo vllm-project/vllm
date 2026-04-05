@@ -40,11 +40,11 @@ class MiniMaxM2Parser(DelegatingParser):
     reasoning_parser_cls = MiniMaxM2ReasoningParser
     tool_parser_cls = MinimaxM2ToolParser
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
 
         # Initialize the underlying parsers
-        self._reasoning_parser = MiniMaxM2ReasoningParser(tokenizer)
+        self._reasoning_parser = MiniMaxM2ReasoningParser(tokenizer, *args, **kwargs)
         self._tool_parser = MinimaxM2ToolParser(tokenizer)
 
         logger.debug(
