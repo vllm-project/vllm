@@ -1294,16 +1294,11 @@ def _report_kv_cache_config(
         vllm_config: The global VllmConfig
         kv_cache_config: The resolved KV cache configuration
     """
-    min_block_size = min(
-        [group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups]
-    )
-
     # Log the KV cache size and maximum concurrency.
-    num_tokens = (
-        kv_cache_config.num_blocks
-        // len(kv_cache_config.kv_cache_groups)
-        * min_block_size
+    max_concurrency = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config
     )
+    num_tokens = int(vllm_config.model_config.max_model_len * max_concurrency)
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     if pcp_size * dcp_size > 1:
@@ -1316,11 +1311,8 @@ def _report_kv_cache_config(
             dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
-    max_concurrency = get_max_concurrency_for_kv_cache_config(
-        vllm_config, kv_cache_config
-    )
+    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
     logger.info_once(
         "Maximum concurrency for %s tokens per request: %.2fx",
         max_model_len_str,
