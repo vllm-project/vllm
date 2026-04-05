@@ -234,6 +234,13 @@ def build_app(
 
         register_speech_to_text_api_router(app)
 
+    if args.enable_file_uploads:
+        from vllm.entrypoints.openai.files.api_router import (
+            attach_router as register_files_api_router,
+        )
+
+        register_files_api_router(app)
+
     if "realtime" in supported_tasks:
         from vllm.entrypoints.openai.realtime.api_router import (
             attach_router as register_realtime_api_router,
@@ -409,6 +416,11 @@ async def init_app_state(
         init_transcription_state(
             engine_client, state, args, request_logger, supported_tasks
         )
+
+    if args.enable_file_uploads:
+        from vllm.entrypoints.openai.files.api_router import init_files_state
+
+        await init_files_state(state, args)
 
     if "realtime" in supported_tasks:
         from vllm.entrypoints.openai.realtime.api_router import init_realtime_state

@@ -15,6 +15,7 @@ from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
+import regex as re
 import torch
 from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
@@ -39,6 +40,12 @@ global_thread_pool = ThreadPoolExecutor(
 atexit.register(global_thread_pool.shutdown)
 
 MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
+
+# Matches file IDs produced by FileUploadStore.new_file_id(): the literal
+# prefix "file-" followed by exactly 32 lowercase hex characters
+# (secrets.token_hex(16) = 128 bits). Validated on vllm-file:// URL
+# parsing so malformed URLs raise a clear error before hitting the store.
+_VLLM_FILE_ID_RE = re.compile(r"file-[0-9a-f]{32}")
 
 MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
     "audio": AudioMediaIO,
@@ -272,6 +279,82 @@ class MediaConnector:
 
         return media_io.load_file(filepath)
 
+    @staticmethod
+    def _resolve_vllm_file_id(url_spec: Url) -> tuple[str, object]:
+        """Extract the file id from a `vllm-file://<id>` URL and look up
+        the process-wide upload store.
+
+        Returns:
+            A `(file_id, store)` tuple.
+
+        Raises:
+            RuntimeError: If no upload store is registered on this
+                server (i.e. `--enable-file-uploads` was not set).
+        """
+        # Lazy import — the files package is only loaded when the
+        # upload subsystem is enabled, and we don't want to pay for
+        # it on every media load otherwise.
+        from vllm.entrypoints.openai.files.store import get_store
+
+        store = get_store()
+        if store is None:
+            raise RuntimeError(
+                "vllm-file:// URLs require --enable-file-uploads on the server."
+            )
+
+        # Prefer `url_spec.host` over `netloc` because netloc includes
+        # `:port` and `user@` segments. `vllm-file://file-abc:80` should
+        # resolve to `file-abc`, not `file-abc:80`. Fall through to
+        # `path` if the parser put the id there instead of netloc.
+        file_id = (url_spec.host or "").strip()
+        if not file_id and url_spec.path:
+            file_id = url_spec.path.lstrip("/")
+        # Validate the `file-<32 hex>` shape before the store lookup so
+        # malformed URLs produce a clear error instead of a generic
+        # "Unknown vllm-file id" log line with the garbage value.
+        if not _VLLM_FILE_ID_RE.fullmatch(file_id):
+            raise ValueError(
+                f"Invalid vllm-file:// id: expected 'file-' followed by "
+                f"32 lowercase hex characters, got {file_id!r}"
+            )
+        return file_id, store
+
+    def _load_vllm_file_url(
+        self,
+        url_spec: Url,
+        media_io: MediaIO[_M],
+    ) -> _M:  # type: ignore[type-var]
+        """Sync-path resolver for `vllm-file://<id>` URLs. Use the async
+        variant below when running on the event loop to avoid blocking
+        on the disk read."""
+        file_id, store = self._resolve_vllm_file_id(url_spec)
+        data = store.read_bytes_by_id(file_id)  # type: ignore[attr-defined]
+        if data is None:
+            raise ValueError(f"Unknown vllm-file id: {file_id!r}")
+        return media_io.load_bytes(data)
+
+    async def _load_vllm_file_url_async(
+        self,
+        url_spec: Url,
+        media_io: MediaIO[_M],
+    ) -> _M:  # type: ignore[type-var]
+        """Event-loop-safe resolver for `vllm-file://<id>` URLs.
+
+        Runs the store metadata lookup on the event loop thread (so the
+        store's single-writer invariants hold) and dispatches the
+        blocking disk read (inside the store) AND the media decode
+        (via media_io.load_bytes) to the thread pool. Video decoders
+        in particular can block the loop for hundreds of ms to seconds
+        on large clips, matching the pattern used by the http/data/
+        file branches of `load_from_url_async`.
+        """
+        file_id, store = self._resolve_vllm_file_id(url_spec)
+        data = await store.read_bytes_by_id_async(file_id)  # type: ignore[attr-defined]
+        if data is None:
+            raise ValueError(f"Unknown vllm-file id: {file_id!r}")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
+
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
             self.allowed_media_domains
@@ -315,7 +398,10 @@ class MediaConnector:
         if url_spec.scheme == "file":
             return self._load_file_url(url_spec, media_io)
 
-        msg = "The URL must be either a HTTP, data or file URL."
+        if url_spec.scheme == "vllm-file":
+            return self._load_vllm_file_url(url_spec, media_io)
+
+        msg = "The URL must be a HTTP, data, file, or vllm-file URL."
         raise ValueError(msg)
 
     async def load_from_url_async(
@@ -364,7 +450,13 @@ class MediaConnector:
                 global_thread_pool, self._load_file_url, url_spec, media_io
             )
             return await future
-        msg = "The URL must be either a HTTP, data or file URL."
+        if url_spec.scheme == "vllm-file":
+            # Run on the event loop — the store's metadata structures
+            # assume single-threaded access and the async resolver
+            # dispatches the blocking disk read to an executor
+            # internally.
+            return await self._load_vllm_file_url_async(url_spec, media_io)
+        msg = "The URL must be a HTTP, data, file, or vllm-file URL."
         raise ValueError(msg)
 
     def fetch_audio(

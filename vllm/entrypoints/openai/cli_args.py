@@ -14,7 +14,7 @@ from dataclasses import field
 from typing import Any, Literal
 
 import vllm.envs as envs
-from vllm.config import config
+from vllm.config import FileUploadConfig, config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -281,6 +281,44 @@ class FrontendArgs(BaseFrontendArgs):
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
+
+    # ------------------------------------------------------------------
+    # /v1/files upload endpoint (issue #38531). All fields off/conservative
+    # by default; the endpoint is not attached unless enable_file_uploads
+    # is set. See vllm/config/file_upload.py for full semantics.
+    # ------------------------------------------------------------------
+    enable_file_uploads: bool = FileUploadConfig.enabled
+    """Enable the `/v1/files` OpenAI-compatible file upload endpoint. Off by
+    default; when set, clients can POST media files once and reference them
+    in chat-completion requests via the `vllm-file://<id>` URL scheme."""
+    file_upload_dir: str = FileUploadConfig.dir
+    """Directory for uploaded file bytes. Empty = $TMPDIR/vllm-uploads-<pid>,
+    cleared on server startup (non-persistent is a security invariant)."""
+    file_upload_ttl_seconds: int = FileUploadConfig.ttl_seconds
+    """Time-to-live for uploaded files, measured from last access. Default
+    1h. Set to -1 to disable time-based expiry (quota LRU eviction still
+    applies; `expires_at` is omitted from responses)."""
+    file_upload_max_size_mb: int = FileUploadConfig.max_size_mb
+    """Maximum size of a single uploaded file (MB). Enforced during the
+    streaming write so oversized uploads never spike server memory."""
+    file_upload_max_total_gb: int = FileUploadConfig.max_total_gb
+    """Total on-disk quota across all uploaded files (GB). LRU evicts
+    oldest files when a new upload would exceed the quota."""
+    file_upload_max_concurrent: int = FileUploadConfig.max_concurrent
+    """Maximum number of in-flight POST /v1/files operations. Prevents
+    disk-fill DoS via many concurrent max-size uploads."""
+    file_upload_scope_header: str = FileUploadConfig.scope_header
+    """Name of a request header whose value scopes uploaded files. When
+    set, files are tagged by this header's value at upload and filtered
+    on every subsequent operation. Common choices for gateway-fronted
+    deployments: `OpenAI-Project` (OpenAI SDK native), `X-Consumer-ID`
+    (Kong), `X-Auth-Request-User` (oauth2-proxy from JWT sub claim). When
+    empty, files are server-global — the 128-bit file ID is the sole
+    access control."""
+    file_upload_disable_listing: bool = FileUploadConfig.disable_listing
+    """When True, `GET /v1/files` (list) returns 404. Individual file
+    operations via known ID still work. Removes the enumeration surface
+    for capability-only deployments."""
 
     @classmethod
     def _customize_cli_kwargs(

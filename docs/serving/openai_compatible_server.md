@@ -61,6 +61,9 @@ We currently support the following OpenAI APIs:
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Realtime API](#realtime-api) (`/v1/realtime`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
+- [Files API](#files-api) (`/v1/files`)
+    - Opt-in (requires `--enable-file-uploads`).
+    - Lets clients upload multimodal files once and reference them in chat completions via the `vllm-file://<id>` URL scheme.
 
 In addition, we have the following custom APIs:
 
@@ -458,6 +461,87 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 
 - [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_client.py) - Upload and transcribe an audio file
 - [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+
+### Files API
+
+The Files API is opt-in and lets clients upload multimodal files once
+via multipart form and reference them in subsequent chat completions via
+the `vllm-file://<id>` URL scheme — an alternative to inline base64
+data URLs (which inflate payloads and can exceed shell `ARG_MAX` for
+videos) and to `file://` (which requires the file to live on the
+server machine).
+
+Launch the server with `--enable-file-uploads` to expose the endpoint.
+When disabled (the default), all `/v1/files*` paths return 404.
+
+#### Endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/v1/files` | Upload one file (`multipart/form-data`: `file`, `purpose`). Returns a `File` object. |
+| `GET` | `/v1/files` | List files. Returns 404 if `--file-upload-disable-listing` is set. |
+| `GET` | `/v1/files/{file_id}` | Retrieve one file's metadata. |
+| `GET` | `/v1/files/{file_id}/content` | Stream the raw bytes (`StreamingResponse`). |
+| `DELETE` | `/v1/files/{file_id}` | Remove metadata and on-disk bytes. |
+
+The response shape matches OpenAI's Files API:
+
+```json
+{
+  "id": "file-<32 hex>",
+  "object": "file",
+  "bytes": 18432100,
+  "created_at": 1743800000,
+  "expires_at": 1743803600,
+  "filename": "clip.mp4",
+  "purpose": "vision",
+  "status": "processed"
+}
+```
+
+Supported `purpose` values: `"vision"` and `"user_data"`. Other values
+(including the OpenAI-specific `"assistants"`, `"batch"`,
+`"fine-tune"`) are rejected with 400.
+
+#### Configuration
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--enable-file-uploads` | `false` | Master on/off switch. |
+| `--file-upload-dir` | `$TMPDIR/vllm-uploads-<pid>` | Where bytes live on disk (cleared on startup). |
+| `--file-upload-ttl-seconds` | `3600` | Expiry after last access. `-1` disables time-based expiry. |
+| `--file-upload-max-size-mb` | `512` | Per-file size cap. Enforced mid-stream. |
+| `--file-upload-max-total-gb` | `5` | Total disk quota. LRU evicts oldest. |
+| `--file-upload-max-concurrent` | `4` | Max in-flight upload operations. |
+| `--file-upload-scope-header` | `""` | If set, a request header whose value scopes uploaded files. |
+| `--file-upload-disable-listing` | `false` | Remove `GET /v1/files` (capability-only deployments). |
+
+#### Deployment Patterns for Gateway-Fronted Servers
+
+When vLLM sits behind an auth proxy that serves multiple callers, set
+`--file-upload-scope-header <NAME>` to the header your gateway already
+populates. Uploaded files are tagged with the header value and scope
+mismatches return 404 (capability non-disclosure). Missing scope
+header → 400.
+
+| Deployment | Header | Notes |
+| --- | --- | --- |
+| Direct OpenAI SDK client | `OpenAI-Project` | SDK auto-sends from `OPENAI_PROJECT_ID` env or `project=...` client param. |
+| Apigee gateway | `OpenAI-Project` (via AssignMessage policy) or custom `X-Consumer-ID` | One-line policy, no client changes. |
+| Kong gateway | `X-Consumer-ID` | Kong populates natively on authenticated routes. |
+| Envoy / oauth2-proxy | `X-Auth-Request-User` | JWT `sub` claim extracted by oauth2-proxy, forwarded via ext_authz. |
+
+#### Security
+
+- **Off by default.** No behavior change unless `--enable-file-uploads` is set.
+- **128-bit capability handles.** File IDs are `file-<32 hex>` (128 bits of `os.urandom`). Possession implies authority.
+- **MIME allowlist via magic-byte sniffing.** Uploads are classified from the file head; only `video/*`, `image/*`, `audio/*` pass. The client `Content-Type` is advisory.
+- **Path confinement.** On-disk filenames are `sha256(random)`. The client `filename` is stripped of path components and control chars, capped at 255 bytes, and used only as metadata.
+- **Streaming size enforcement.** Uploads exceeding `--file-upload-max-size-mb` are rejected mid-stream — no memory spike.
+- **Audit log.** Every file operation emits one INFO-level JSON line with `op`, `file_id`, `bytes`, `scope`, `client_host`, `request_id`, `ts` (plus `reason` on rejection). Suitable for Splunk/Datadog ingestion.
+- **Non-persistent across restarts.** The upload directory is cleared on server startup.
+
+See the [user guide](../features/multimodal_inputs.md#uploading-local-media-files) for end-to-end examples.
 
 ### Tokenizer API
 
