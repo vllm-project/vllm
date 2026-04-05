@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
@@ -29,8 +30,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kFp8StaticTokenSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -56,7 +57,7 @@ activation_quant_key_mapping = {
     DYNAMIC_QUANT: kFp8DynamicTokenSym,
 }
 weight_quant_key_mapping = {
-    QuantizationStrategy.CHANNEL: kFp8StaticTokenSym,
+    QuantizationStrategy.CHANNEL: kFp8StaticChannelSym,
     QuantizationStrategy.TENSOR: kFp8StaticTensorSym,
 }
 logger = init_logger(__name__)
@@ -69,27 +70,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
-
-        if self.weight_block_size is not None:
-            self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
-            assert not self.is_static_input_scheme
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-                weight_group_shape=GroupShape(*self.weight_block_size),
-                act_quant_group_shape=self.act_q_group_shape,
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-            )
-        else:
-            activation_quant_key = activation_quant_key_mapping[is_static_input_scheme]
-            weight_quant_key = weight_quant_key_mapping[self.strategy]
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=activation_quant_key,
-                weight_quant_key=weight_quant_key,
-                out_dtype=self.out_dtype,
-                module_name=self.__class__.__name__,
-            )
+        self.fp8_linear: Any = None
+        self.w8a8_block_fp8_linear: Any = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -145,6 +127,30 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if self.is_static_input_scheme:
             input_scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             layer.register_parameter("input_scale", input_scale)
+
+        if self.weight_block_size is not None:
+            self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
+            assert not self.is_static_input_scheme
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
+            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                weight_group_shape=GroupShape(*self.weight_block_size),
+                act_quant_group_shape=self.act_q_group_shape,
+                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+            )
+        else:
+            activation_quant_key = activation_quant_key_mapping[
+                self.is_static_input_scheme
+            ]
+            weight_quant_key = weight_quant_key_mapping[self.strategy]
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=activation_quant_key,
+                weight_quant_key=weight_quant_key,
+                out_dtype=self.out_dtype,
+                weight_shape=(output_size_per_partition, input_size_per_partition),
+                module_name=self.__class__.__name__,
+            )
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:

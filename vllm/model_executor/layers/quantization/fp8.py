@@ -8,7 +8,6 @@ from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -319,6 +318,24 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
                 use_deep_gemm=self.use_deep_gemm,
             )
+        else:
+            # Use per-token quantization for better perf if dynamic and cutlass
+            if self.act_q_static:
+                activation_quant_key = kFp8StaticTensorSym
+            elif cutlass_fp8_supported():
+                activation_quant_key = kFp8DynamicTokenSym
+            else:
+                activation_quant_key = kFp8DynamicTensorSym
+
+            self.current_act_quant_key = activation_quant_key
+            self.current_weight_quant_key = kFp8StaticTensorSym
+
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.current_act_quant_key,
+                weight_quant_key=self.current_weight_quant_key,
+                out_dtype=torch.get_default_dtype(),
+                module_name=self.__class__.__name__,
+            )
 
     def create_weights(
         self,
@@ -348,6 +365,16 @@ class Fp8LinearMethod(LinearMethodBase):
                 input_size_per_partition,
                 output_partition_sizes,
                 self.weight_block_size,
+            )
+
+        if not self.block_quant and self.use_aiter_and_is_supported:
+            output_size_per_partition = sum(output_partition_sizes)
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.current_act_quant_key,
+                weight_quant_key=self.current_weight_quant_key,
+                out_dtype=self.out_dtype,
+                weight_shape=(output_size_per_partition, input_size_per_partition),
+                module_name=self.__class__.__name__,
             )
 
         weight = create_fp8_weight_parameter(
@@ -437,6 +464,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant and self.use_deep_gemm:
             maybe_post_process_fp8_weight_block(layer)
+
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -837,7 +866,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
+    ) -> Any:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
