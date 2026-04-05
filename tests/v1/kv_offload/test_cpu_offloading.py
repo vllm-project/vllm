@@ -85,11 +85,11 @@ class MockSubscriber:
 
 
 def _wait_for_prefix_cache_reset(llm: LLM) -> None:
-    """Wait for async offload transfers to finish so prefix cache can reset.
+    """Reset the prefix cache, flushing any in-flight async offload transfers.
 
-    The GPU-to-CPU offload runs on a CUDA stream asynchronously.  While blocks
-    are still held by the offload worker, ``reset_prefix_cache`` returns
-    ``False``.  Retry with a short sleep until it succeeds or we time out.
+    ``reset_prefix_cache`` now synchronously flushes pending GPU-to-CPU
+    store transfers before attempting to reset, so it should normally
+    succeed on the first call.  The retry loop is kept as a safety net.
     """
     deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
     while not llm.reset_prefix_cache():

@@ -198,7 +198,10 @@ class SchedulerInterface(ABC):
 
     @abstractmethod
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        flushed_sending_req_ids: set[str] | None = None,
     ) -> bool:
         """Reset the prefix cache for KV cache.
 
@@ -209,6 +212,10 @@ class SchedulerInterface(ABC):
                 preempted and moved to the waiting queue. Otherwise, this method
                 will only reset the KV prefix cache when there is no running request
                 taking KV cache.
+            flushed_sending_req_ids: Request IDs whose async KV store
+                transfers have been synchronously flushed by the worker.
+                The scheduler will free their deferred GPU blocks before
+                attempting to reset the prefix cache.
         """
         raise NotImplementedError
 

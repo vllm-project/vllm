@@ -398,6 +398,19 @@ class KVConnectorBase_V1(ABC):
         """
         return set()
 
+    def flush_pending_store(self) -> set[str]:
+        """Wait for all in-flight store transfers and return finished req IDs.
+
+        Called (via collective_rpc) before reset_prefix_cache so the scheduler
+        can free GPU blocks that were deferred while async stores were in
+        progress.
+
+        Returns:
+            Set of request IDs whose stores completed and whose GPU blocks
+            can now be freed.
+        """
+        return set()
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process
