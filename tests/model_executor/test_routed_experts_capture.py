@@ -159,3 +159,59 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
     assert callable(dummy_module.router.capture_fn)
     dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
     assert len(capturer.calls) == 1
+
+
+def test_gpu_model_runner_binds_real_fused_moe_capture_callback(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.routed_experts_capturer as rec
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.v1.worker import gpu_model_runner as gmr
+
+    monkeypatch.setattr(rec, "_global_experts_capturer", None)
+    monkeypatch.setattr(rec, "get_tensor_model_parallel_rank", lambda: 1)
+
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        moe = FusedMoE(
+            num_experts=4,
+            top_k=2,
+            hidden_size=8,
+            intermediate_size=8,
+            use_grouped_topk=False,
+            renormalize=True,
+            prefix="model.layers.3.mlp.experts",
+            tp_size=1,
+            dp_size=1,
+            pcp_size=1,
+        )
+
+        capturer = rec.RoutedExpertsCapturer.create()
+        capturer.init_buffer(
+            max_num_batched_tokens=4,
+            max_num_kv_tokens=4,
+            vllm_config=types.SimpleNamespace(
+                model_config=types.SimpleNamespace(
+                    hf_text_config=types.SimpleNamespace(
+                        num_hidden_layers=8, num_experts_per_tok=2
+                    )
+                ),
+                parallel_config=types.SimpleNamespace(data_parallel_rank=0),
+                instance_id="x",
+            ),
+        )
+
+        dummy_self = types.SimpleNamespace(
+            compilation_config=types.SimpleNamespace(
+                static_forward_context={"dummy": moe}
+            )
+        )
+        gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
+
+        assert callable(moe.router.capture_fn)
+        with set_forward_context(None, vllm_config, num_tokens=2):
+            moe.router.capture_fn(torch.tensor([[2, 1], [0, 3]], dtype=torch.int32))
+
+        captured = capturer._device_buffer[:2, moe.layer_id, :]
+        assert torch.equal(captured, torch.tensor([[2, 1], [0, 3]], dtype=torch.int32))
+        capturer.cleanup()

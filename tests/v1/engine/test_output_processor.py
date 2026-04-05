@@ -4,6 +4,7 @@
 import math
 import time
 
+import numpy as np
 import pytest
 
 from tests.v1.engine.utils import (
@@ -22,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -1216,6 +1218,115 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
+
+
+@pytest.mark.asyncio
+async def test_request_output_collector_keeps_routed_experts_from_final_delta():
+    output_processor = OutputProcessor(None, log_stats=False)
+    sampling_params = SamplingParams(
+        max_tokens=2,
+        detokenize=False,
+        output_kind=RequestOutputKind.DELTA,
+        stop=[],
+        skip_special_tokens=False,
+        spaces_between_special_tokens=False,
+    )
+    request = EngineCoreRequest(
+        request_id="my-request-id-int",
+        external_req_id="my-request-id",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    collector = RequestOutputCollector(
+        RequestOutputKind.DELTA, request_id=request.request_id
+    )
+    output_processor.add_request(request, None, queue=collector)
+
+    first_cumulative = np.array([[[10, 11]], [[12, 13]], [[14, 15]]], dtype=np.int32)
+    second_cumulative = np.array(
+        [[[10, 11]], [[12, 13]], [[14, 15]], [[16, 17]]], dtype=np.int32
+    )
+
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[10],
+                routed_experts=first_cumulative,
+            )
+        ]
+    )
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[11],
+                finish_reason=FinishReason.LENGTH,
+                routed_experts=second_cumulative,
+            )
+        ]
+    )
+
+    output = await collector.get()
+
+    assert output.finished
+    assert output.outputs[0].token_ids == [10, 11]
+    assert np.array_equal(
+        output.outputs[0].routed_experts,
+        np.array([[[14, 15]], [[16, 17]]], dtype=np.int32),
+    )
+
+
+def test_output_processor_slices_routed_experts_to_generated_tokens():
+    output_processor = OutputProcessor(None, log_stats=False)
+    sampling_params = SamplingParams(
+        max_tokens=2,
+        detokenize=False,
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        stop=[],
+        skip_special_tokens=False,
+        spaces_between_special_tokens=False,
+    )
+    request = EngineCoreRequest(
+        request_id="my-request-id-int",
+        external_req_id="my-request-id",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    output_processor.add_request(request, None)
+
+    routed_experts = np.array(
+        [[[10, 11]], [[12, 13]], [[14, 15]], [[16, 17]]], dtype=np.int32
+    )
+    result = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[10, 11],
+                finish_reason=FinishReason.LENGTH,
+                routed_experts=routed_experts,
+            )
+        ]
+    )
+
+    output = result.request_outputs[0]
+    assert output.outputs[0].token_ids == [10, 11]
+    assert np.array_equal(
+        output.outputs[0].routed_experts,
+        np.array([[[14, 15]], [[16, 17]]], dtype=np.int32),
+    )
 
 
 @pytest.mark.asyncio
