@@ -84,9 +84,15 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         """
         The maximum possible memory usage of this KV cache in bytes.
+
+        Args:
+            vllm_config: The global VllmConfig.
+            max_model_len: The maximum sequence length to compute usage for.
 
         Returns:
             The KV cache size in bytes
@@ -167,8 +173,9 @@ class FullAttentionSpec(AttentionSpec):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         # Note(hc): each dcp rank only need save
@@ -288,8 +295,9 @@ class MLAAttentionSpec(FullAttentionSpec):
 class ChunkedLocalAttentionSpec(AttentionSpec):
     attention_chunk_size: int
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         # During chunked prefill, we allocate KV cache for at most
@@ -307,11 +315,12 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
             "DCP not support sliding window."
         )
-        max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         # During chunked prefill, we allocate KV cache for the last
@@ -349,9 +358,10 @@ class MambaSpec(KVCacheSpec):
             return self.page_size_padded
         return page_size
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
-            max_model_len = vllm_config.model_config.max_model_len
             return cdiv(max_model_len, self.block_size) * self.page_size_bytes
         elif vllm_config.cache_config.mamba_cache_mode == "align":
             return self.page_size_bytes * (2 + self.num_speculative_blocks)
@@ -361,7 +371,9 @@ class MambaSpec(KVCacheSpec):
 
 @dataclass(frozen=True)
 class EncoderOnlyAttentionSpec(AttentionSpec):
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         # Encoder-only layers do not need KV cache
         return 0
 
@@ -372,7 +384,9 @@ class CrossAttentionSpec(AttentionSpec):
     KV cache spec for cross-attention layers in encoder-decoder models.
     """
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         # For cross-attention, we need to cache encoder states
         # Get encoder length (e.g., 1500 for Whisper).
         max_encoder_len = vllm_config.scheduler_config.max_num_encoder_input_tokens
@@ -446,9 +460,14 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+    def max_memory_usage_bytes(
+        self, vllm_config: VllmConfig, max_model_len: int
+    ) -> int:
         max_num_pages = max(
-            cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+            cdiv(
+                spec.max_memory_usage_bytes(vllm_config, max_model_len),
+                spec.page_size_bytes,
+            )
             for spec in self.kv_cache_specs.values()
         )
         return max_num_pages * self.page_size_bytes
