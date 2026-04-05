@@ -17,6 +17,9 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
@@ -103,6 +106,149 @@ def make_fused_moe_layer(
     fml.maybe_init_modular_kernel()
 
     return fml
+
+
+def make_cpu_nvfp4_fused_moe(test_config: TestConfig) -> FusedMoE:
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+
+    fml = FusedMoE(
+        num_experts=test_config.num_experts,
+        top_k=test_config.num_topk,
+        hidden_size=test_config.hidden_size,
+        intermediate_size=test_config.intermediate_size,
+        prefix="dummy_layer_cpu",
+        activation="silu",
+        is_act_and_mul=True,
+        params_dtype=torch.bfloat16,
+        quant_config=quant_config,
+    )
+
+    ModelOptNvFp4FusedMoE(quant_config, fml).create_weights(
+        fml,
+        test_config.num_local_experts,
+        test_config.hidden_size,
+        test_config.intermediate_size,
+        params_dtype=torch.uint8,
+        global_num_experts=test_config.num_experts,
+    )
+    return fml
+
+
+def test_nvfp4_moe_weight_loader_accepts_consistently_unquantized_weights():
+    test_config = TestConfig(
+        num_layers=1,
+        num_experts=2,
+        num_local_experts=2,
+        num_topk=1,
+        hidden_size=16,
+        intermediate_size=8,
+        num_tokens=4,
+    )
+    fml = make_cpu_nvfp4_fused_moe(test_config)
+
+    param = fml.w2_weight
+    packed_shape = tuple(param.data.shape)
+    unpacked_shape = list(param.data[0].shape)
+    unpacked_shape[-1] *= 2
+
+    expert_0 = torch.randn(unpacked_shape, dtype=torch.bfloat16)
+    expert_1 = torch.randn(unpacked_shape, dtype=torch.bfloat16)
+
+    fml.weight_loader(param, expert_0, "dummy_layer_cpu.w2_weight", "w2", 0)
+    fml.weight_loader(param, expert_1, "dummy_layer_cpu.w2_weight", "w2", 1)
+
+    assert isinstance(fml.quant_method, UnquantizedFusedMoEMethod)
+    assert isinstance(fml.base_quant_method, UnquantizedFusedMoEMethod)
+    assert param.data.dtype == torch.bfloat16
+    assert tuple(param.data.shape) == packed_shape[:-1] + (packed_shape[-1] * 2,)
+    torch.testing.assert_close(param.data[0], expert_0)
+    torch.testing.assert_close(param.data[1], expert_1)
+
+
+def test_nvfp4_moe_weight_loader_switches_to_unquantized_post_load_path():
+    test_config = TestConfig(
+        num_layers=1,
+        num_experts=2,
+        num_local_experts=2,
+        num_topk=1,
+        hidden_size=16,
+        intermediate_size=8,
+        num_tokens=4,
+    )
+    fml = make_cpu_nvfp4_fused_moe(test_config)
+
+    w13_shape = list(fml.w13_weight.data[0].shape)
+    w13_shape[-1] *= 2
+    w2_shape = list(fml.w2_weight.data[0].shape)
+    w2_shape[-1] *= 2
+
+    fml.weight_loader(
+        fml.w13_weight,
+        torch.randn(w13_shape, dtype=torch.bfloat16),
+        "dummy_layer_cpu.w13_weight",
+        "w13",
+        0,
+    )
+
+    for expert_id in range(test_config.num_local_experts):
+        if expert_id != 0:
+            fml.weight_loader(
+                fml.w13_weight,
+                torch.randn(w13_shape, dtype=torch.bfloat16),
+                "dummy_layer_cpu.w13_weight",
+                "w13",
+                expert_id,
+            )
+        fml.weight_loader(
+            fml.w2_weight,
+            torch.randn(w2_shape, dtype=torch.bfloat16),
+            "dummy_layer_cpu.w2_weight",
+            "w2",
+            expert_id,
+        )
+
+    assert isinstance(fml.quant_method, UnquantizedFusedMoEMethod)
+    assert isinstance(fml.base_quant_method, UnquantizedFusedMoEMethod)
+    assert fml.runner.quant_method is fml.quant_method
+
+    fml.quant_method.process_weights_after_loading(fml)
+
+    assert fml.w13_weight.dtype == torch.bfloat16
+    assert fml.w2_weight.dtype == torch.bfloat16
+
+
+def test_nvfp4_moe_weight_loader_rejects_mixed_packed_and_unpacked_weights():
+    test_config = TestConfig(
+        num_layers=1,
+        num_experts=2,
+        num_local_experts=2,
+        num_topk=1,
+        hidden_size=16,
+        intermediate_size=8,
+        num_tokens=4,
+    )
+    fml = make_cpu_nvfp4_fused_moe(test_config)
+
+    param = fml.w2_weight
+    packed_expert = torch.randint(0, 16, tuple(param.data[0].shape), dtype=torch.uint8)
+    unpacked_shape = list(param.data[0].shape)
+    unpacked_shape[-1] *= 2
+    unpacked_expert = torch.randn(unpacked_shape, dtype=torch.bfloat16)
+
+    fml.weight_loader(param, packed_expert, "dummy_layer_cpu.w2_weight", "w2", 0)
+
+    with pytest.raises(ValueError, match="consistent format per parameter"):
+        fml.weight_loader(
+            param,
+            unpacked_expert,
+            "dummy_layer_cpu.w2_weight",
+            "w2",
+            1,
+        )
 
 
 def _test_eplb_fml(env, world_size: int, test_config: TestConfig):

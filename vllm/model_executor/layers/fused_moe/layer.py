@@ -568,6 +568,13 @@ class FusedMoE(CustomOp):
 
         # TODO(bnell): this is un-needed and removed in a follow up PR.
         self.base_quant_method = self.quant_method
+        self._weight_loader_quant_method_name = self.quant_method.__class__.__name__
+        self._weight_loader_use_global_sf = getattr(
+            self.quant_method, "use_global_sf", False
+        )
+        self._weight_loader_uses_weight_scale_2 = (
+            self.quant_method.uses_weight_scale_2_pattern()
+        )
 
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
@@ -1074,13 +1081,12 @@ class FusedMoE(CustomOp):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        quant_method_name = self.quant_method.__class__.__name__
+        quant_method_name = self._weight_loader_quant_method_name
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
-            getattr(self.quant_method, "use_global_sf", False)
-            and "input_scale" in weight_name
+            self._weight_loader_use_global_sf and "input_scale" in weight_name
         )
 
         if expert_id == -1 and not use_global_sf:
@@ -1215,9 +1221,63 @@ class FusedMoE(CustomOp):
 
         # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
         if "ModelOpt" in quant_method_name:
+            if (
+                "NvFp4" in quant_method_name
+                and "weight" in weight_name
+                and "scale" not in weight_name
+            ):
+                format_attr = "_modelopt_nvfp4_moe_weight_format"
+                loaded_is_unquantized = loaded_weight.dtype in (
+                    torch.bfloat16,
+                    torch.float16,
+                    torch.float32,
+                )
+                loaded_format = "unpacked" if loaded_is_unquantized else "packed"
+                param_format = getattr(param, format_attr, None)
+
+                if param_format is not None and param_format != loaded_format:
+                    raise ValueError(
+                        "ModelOpt NVFP4 MoE checkpoints must use a consistent "
+                        f"format per parameter. Found {loaded_format} weights "
+                        f"for {weight_name} after loading {param_format} experts."
+                    )
+
+                if loaded_is_unquantized and param.data.dtype == torch.uint8:
+                    logger.warning_once(
+                        f"NVFP4 MoE checkpoint has unquantized weights "
+                        f"(found {loaded_weight.dtype}, expected uint8). "
+                        f"Falling back to unquantized loading for MoE experts."
+                    )
+                    if not isinstance(self.quant_method, UnquantizedFusedMoEMethod):
+                        unquantized_method = UnquantizedFusedMoEMethod(self.moe_config)
+                        self._replace_quant_method(unquantized_method)
+                        self.base_quant_method = unquantized_method
+                    # The param was created for packed FP4 (half-sized last dim),
+                    # but the checkpoint stores full-width expert weights.
+                    new_shape = list(param.data.shape)
+                    new_shape[-1] *= 2
+                    param.data = torch.zeros(
+                        new_shape,
+                        dtype=loaded_weight.dtype,
+                        device=param.data.device,
+                    )
+                    expert_data = param.data if full_load else param.data[expert_id]
+
+                setattr(param, format_attr, loaded_format)
+
+                if loaded_is_unquantized:
+                    self._load_model_weight_or_group_weight_scale(
+                        shard_id=shard_id,
+                        shard_dim=shard_dim,
+                        loaded_weight=loaded_weight,
+                        expert_data=expert_data,
+                        tp_rank=self.tp_rank,
+                    )
+                    return True if return_success else None
+
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
-            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
+            uses_weight_scale_2 = self._weight_loader_uses_weight_scale_2
             quant_method = getattr(param, "quant_method", None)
 
             # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
