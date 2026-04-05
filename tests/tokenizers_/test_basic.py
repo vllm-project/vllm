@@ -75,3 +75,20 @@ def test_special_tokens(tokenizer_name: str, n_tokens: int):
     prompts = "[UNK]" * n_tokens
     prompt_token_ids = tokenizer.encode(prompts)
     assert len(prompt_token_ids) == n_tokens + 2
+
+
+def test_grok2_apply_chat_template_renders_prompt():
+    tokenizer = object.__new__(Grok2Tokenizer)
+    tokenizer._chat_template = (
+        "{% for message in messages %}"
+        "{{ message['role'] }}: {{ message['content'] }}"
+        "{% endfor %}"
+    )
+
+    prompt = tokenizer.apply_chat_template(
+        messages=[{"role": "user", "content": "hi"}],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    assert prompt == "user: hi"
