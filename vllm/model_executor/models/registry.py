@@ -594,6 +594,10 @@ _MULTIMODAL_MODELS = {
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",
     ),
+    "OmniAsrForConditionalGeneration": (
+        "omniasr",
+        "OmniAsrForConditionalGeneration",
+    ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
 }
 
