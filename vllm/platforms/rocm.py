@@ -404,6 +404,7 @@ class RocmPlatform(Platform):
         "mxfp4",
         "torchao",
         "bitsandbytes",
+        "experts_int8",
     ]
 
     @classmethod
