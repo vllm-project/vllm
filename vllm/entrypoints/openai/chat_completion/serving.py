@@ -280,6 +280,15 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if self.reasoning_parser_cls is not None:
+                    tokenizer = self.renderer.get_tokenizer()
+                    self.reasoning_parser_cls(
+                        tokenizer
+                    ).adjust_structured_outputs_for_reasoning(
+                        sampling_params,
+                        request=request,
+                        model_architecture=self._model_architecture(),
+                    )
 
             self._log_inputs(
                 sub_request_id,
@@ -355,6 +364,16 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
+
+    def _model_architecture(self) -> str | None:
+        """Return model architecture (e.g. for Cohere structural tag style lookup)."""
+        try:
+            architectures = getattr(self.model_config, "architectures", None)
+            if architectures and len(architectures) > 0:
+                return architectures[0]
+        except (IndexError, TypeError):
+            pass
+        return None
 
     @staticmethod
     def _bracket_level(s: str, opening="{", closing="}") -> int:

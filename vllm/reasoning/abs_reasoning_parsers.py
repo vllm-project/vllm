@@ -5,18 +5,23 @@ import importlib
 import os
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
     from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -116,7 +121,7 @@ class ReasoningParser:
     def extract_reasoning(
         self,
         model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -152,14 +157,112 @@ class ReasoningParser:
 
     def prepare_structured_tag(
         self,
-        original_tag: str | None,
+        original_tag: str | StructuredOutputsParams | None,
         tool_server: ToolServer | None,
+        sampling_params: SamplingParams | None = None,
+        tools: list["ChatCompletionToolsParam"] | None = None,
+        model_architecture: str | None = None,
     ) -> str | None:
         """
-        Instance method that is implemented for preparing the structured tag
-        Otherwise, None is returned
+        Prepare the structured tag for decoding.
+        Called when structured_outputs is set. original_tag may be:
+        - str | None: existing structural_tag (or None for default reasoning tag).
+        - StructuredOutputsParams: user-provided JSON schema / grammar / json_object
+          to be converted to a structural tag (e.g. via
+          convert_schema_to_structural_tags).
+        model_architecture: optional architecture name (e.g. from
+        model_config.architectures[0]) for parsers that need it to build tags
+        Returns the structural tag string, or None to leave constraints unchanged.
         """
         return None
+
+    @staticmethod
+    def _adjust_sampling_params_reasoning_structural_tag(
+        sampling_params: SamplingParams,
+        struct_out_before: StructuredOutputsParams | None,
+        prepared: str | None,
+    ) -> None:
+        if prepared is None:
+            return
+        if isinstance(struct_out_before, StructuredOutputsParams):
+            sampling_params.structured_outputs = replace(
+                struct_out_before,
+                json=None,
+                regex=None,
+                choice=None,
+                grammar=None,
+                json_object=None,
+                structural_tag=prepared,
+            )
+        else:
+            sampling_params.structured_outputs = StructuredOutputsParams(
+                structural_tag=prepared
+            )
+
+    def adjust_structured_outputs_for_reasoning(
+        self,
+        sampling_params: SamplingParams,
+        *,
+        request: ChatCompletionRequest | ResponsesRequest,
+        tool_server: ToolServer | None = None,
+        model_architecture: str | None = None,
+    ) -> None:
+        """Merge reasoning structural tags into ``sampling_params.structured_outputs``.
+
+        For ``ChatCompletionRequest``: runs when structured outputs are set or tools
+        are present; clears non-tag constraints when applying a prepared tag.
+
+        For ``ResponsesRequest``: runs only when constraints are structural-tag-only;
+        always sets ``structural_tag`` from ``prepare_structured_tag`` (may be None).
+        """
+        struct_out = sampling_params.structured_outputs
+
+        if isinstance(request, ChatCompletionRequest):
+            has_tools = len(request.tools or []) > 0
+            if not (isinstance(struct_out, StructuredOutputsParams) or has_tools):
+                return
+
+            original = (
+                struct_out if isinstance(struct_out, StructuredOutputsParams) else None
+            )
+            prepared = self.prepare_structured_tag(
+                original,
+                None,
+                sampling_params=sampling_params,
+                tools=request.tools if request.tools else None,
+                model_architecture=model_architecture,
+            )
+            self._adjust_sampling_params_reasoning_structural_tag(
+                sampling_params,
+                struct_out if isinstance(struct_out, StructuredOutputsParams) else None,
+                prepared,
+            )
+            return
+
+        if isinstance(request, ResponsesRequest):
+            if not (
+                isinstance(struct_out, StructuredOutputsParams)
+                and struct_out.all_non_structural_tag_constraints_none()
+            ):
+                return
+
+            prepared = self.prepare_structured_tag(
+                struct_out.structural_tag,
+                tool_server,
+                sampling_params=sampling_params,
+                tools=None,
+                model_architecture=None,
+            )
+            sampling_params.structured_outputs = replace(
+                struct_out,
+                structural_tag=prepared,
+            )
+            return
+
+        raise TypeError(
+            "request must be ChatCompletionRequest or ResponsesRequest, "
+            f"got {type(request).__name__}"
+        )
 
 
 class ReasoningParserManager:
@@ -297,7 +400,7 @@ class ReasoningParserManager:
 
             if isinstance(name, str):
                 names = [name]
-            elif is_list_of(name, str):
+            elif name is not None and is_list_of(name, str):
                 names = name
             else:
                 names = [class_name]
