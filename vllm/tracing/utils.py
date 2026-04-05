@@ -56,7 +56,7 @@ class LoadingSpanAttributes:
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
     """Check if the provided headers dictionary contains trace context."""
-    return any(h in headers for h in TRACE_HEADERS)
+    return any(_get_trace_header(headers, h) is not None for h in TRACE_HEADERS)
 
 
 def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
@@ -64,7 +64,24 @@ def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
     Extract only trace-related headers from a larger header dictionary.
     Useful for logging or passing context to a non-OTel client.
     """
-    return {h: headers[h] for h in TRACE_HEADERS if h in headers}
+    return {
+        h: value
+        for h in TRACE_HEADERS
+        if (value := _get_trace_header(headers, h)) is not None
+    }
+
+
+def _get_trace_header(headers: Mapping[str, str], header: str) -> str | None:
+    """Look up a trace header without assuming a particular key casing."""
+    if header in headers:
+        return headers[header]
+
+    header_lower = header.lower()
+    for key, value in headers.items():
+        if key.lower() == header_lower:
+            return value
+
+    return None
 
 
 @run_once

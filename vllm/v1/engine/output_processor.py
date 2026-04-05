@@ -758,6 +758,7 @@ class OutputProcessor:
             attributes=attributes,
             context=trace_context,
             kind=SpanKind.SERVER,
+            use_environment_context=False,
         )
 
     def _update_stats_from_output(

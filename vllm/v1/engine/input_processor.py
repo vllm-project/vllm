@@ -26,6 +26,7 @@ from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
+from vllm.tracing import extract_trace_headers
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
@@ -280,6 +281,10 @@ class InputProcessor:
         else:
             pooling_params = params.clone()
 
+        normalized_trace_headers = None
+        if trace_headers is not None:
+            normalized_trace_headers = extract_trace_headers(trace_headers) or None
+
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None
 
@@ -330,7 +335,7 @@ class InputProcessor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
-            trace_headers=trace_headers,
+            trace_headers=normalized_trace_headers,
             resumable=resumable,
         )
 
