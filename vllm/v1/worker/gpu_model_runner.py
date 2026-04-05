@@ -465,13 +465,17 @@ class GPUModelRunner(
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
-
-        if self.model_config.is_encoder_decoder:
-            # Maximum length of the encoder input, only for encoder-decoder
-            # models.
-            self.max_encoder_len = scheduler_config.max_num_encoder_input_tokens
-        else:
-            self.max_encoder_len = 0
+        self.mm_budget = mm_budget = (
+            MultiModalBudget(self.vllm_config, self.mm_registry)
+            if self.supports_mm_inputs
+            else None
+        )
+        # For encoder-decoder models, allocate the maximum number of tokens for Cross
+        # Attn blocks, as for Whisper its input is always padded to the maximum length.
+        # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
+        self.max_encoder_len = (
+            max(mm_budget.mm_max_toks_per_item.values(), default=0) if mm_budget else 0
+        )
 
         # Async scheduling
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -608,16 +612,23 @@ class GPUModelRunner(
         custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (
             tuple(logits_processors) if logits_processors is not None else ()
         )
+
         placeholder_block_size = (
             self.cache_config.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
         )
         self._init_block_sizes = [placeholder_block_size]
         self._init_kernel_block_sizes = [placeholder_block_size]
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
+
+        if model_config.is_encoder_decoder:
             # We need to use the encoder length for encoder-decoder
             # because of KV cache for cross-attention.
-            max_model_len=max(self.max_model_len, self.max_encoder_len),
+            input_max_model_len = max(self.max_model_len, self.max_encoder_len)
+        else:
+            input_max_model_len = self.max_model_len
+
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=input_max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -771,12 +782,6 @@ class GPUModelRunner(
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
-
-        self.mm_budget = (
-            MultiModalBudget(self.vllm_config, self.mm_registry)
-            if self.supports_mm_inputs
-            else None
-        )
 
         self.reorder_batch_threshold: int | None = None
 
@@ -5738,15 +5743,16 @@ class GPUModelRunner(
                 mm_budget = self.mm_budget
                 assert mm_budget is not None
 
-                if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
-                    if not mm_budget.mm_max_toks_per_item:
-                        # All modality limits are 0 — embedding-only mode.
-                        # Budget is non-zero for embedding storage, but
-                        # there's no encoder to profile.
-                        logger.info(
-                            "Skipping encoder profiling for embedding-only "
-                            "mode (all modality limits=0 with "
-                            "enable_mm_embeds=True).",
+                if mm_budget.get_encoder_budget() > 0:
+                    if not mm_budget.mm_max_items_per_batch:
+                        # All modality limits are zero
+                        # but embedding inputs are still enabled
+                        # This skips the multimodal encoder but we still store
+                        # embedding inputs in the encoder cache
+                        logger.info_once(
+                            "Skipping memory profiling for multimodal encoder "
+                            "under embedding-only mode.",
+                            scope="local",
                         )
                     else:
                         # NOTE: Currently model is profiled with a single
@@ -5758,12 +5764,12 @@ class GPUModelRunner(
                         ]
 
                         logger.info_once(
-                            "Encoder cache will be initialized with a "
-                            "budget of %s tokens, and profiled with "
-                            "%s %s items of the maximum feature size.",
-                            encoder_budget,
+                            "Multimodal encoder will be profiled with %d %s %s "
+                            "of the maximum feature size (%d embeds/item).",
                             max_mm_items_per_batch,
                             dummy_modality,
+                            "item" if max_mm_items_per_batch == 1 else "items",
+                            mm_budget.mm_max_toks_per_item[dummy_modality],
                             scope="local",
                         )
 
@@ -5778,12 +5784,56 @@ class GPUModelRunner(
                             **batched_dummy_mm_inputs
                         )
 
+                        dummy_num_embeds = sum(
+                            len(out) for out in dummy_encoder_outputs
+                        )
+                        if dummy_num_embeds >= (
+                            mm_budget.mm_max_toks_per_item[dummy_modality]
+                            * max_mm_items_per_batch
+                        ):
+                            logger.warning_once(
+                                "Expected maximum feature size to be %d (x %d %s) "
+                                "embeddings, but found %s embeddings. This likely "
+                                "results from an inaccurate implementation of "
+                                "`BaseProcessingInfo.get_mm_max_tokens_per_item` and "
+                                "may result in some requests getting rejected during "
+                                "inference.",
+                                mm_budget.mm_max_toks_per_item[dummy_modality],
+                                max_mm_items_per_batch,
+                                dummy_modality,
+                                dummy_num_embeds,
+                                scope="local",
+                            )
+
                         sanity_check_mm_encoder_outputs(
                             dummy_encoder_outputs,
                             expected_num_items=max_mm_items_per_batch,
                         )
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
+
+                    # Fill up the encoder cache to its maximum capacity
+                    num_embeds_in_cache = sum(
+                        len(emb) for emb in self.encoder_cache.values()
+                    )
+                    num_embeds_to_pad = (
+                        mm_budget.encoder_cache_size - num_embeds_in_cache
+                    )
+                    if num_embeds_to_pad > 0:
+                        self.encoder_cache["tmp_pad"] = torch.empty(
+                            (num_embeds_to_pad, self.inputs_embeds_size),
+                            dtype=self.dtype,
+                            device=self.device,
+                        )
+
+                    logger.info_once(
+                        "Encoder cache contains up to %d embeddings (%s GiB). ",
+                        mm_budget.encoder_cache_size,
+                        format_gib(
+                            sum(emb.nbytes for emb in self.encoder_cache.values())
+                        ),
+                        scope="local",
+                    )
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(

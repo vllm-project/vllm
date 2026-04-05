@@ -222,49 +222,44 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
     to avoid CPU resource exhaustion.
 
 !!! note
-    API server scale-out disables [multi-modal IPC caching](#ipc-caching)
+    API server scale-out disables most forms of [multi-modal input caching](#multi-modal-input-caching)
     because it requires a one-to-one correspondence between API and engine core processes.
 
-    This does not impact [multi-modal processor caching](#processor-caching).
+## Multi-Modal Input Caching
 
-## Multi-Modal Caching
+Multi-modal input caching avoids repeated processing or transfer of multi-modal inputs, which commonly occurs in multi-turn conversations.
 
-Multi-modal caching avoids repeated transfer or processing of the same multi-modal data,
-which commonly occurs in multi-turn conversations.
+There are several levels of caches for multi-modal inputs:
 
-### Processor Caching
-
-Multi-modal processor caching is automatically enabled
-to avoid repeatedly processing the same multi-modal inputs in `BaseMultiModalProcessor`.
-
-### IPC Caching
-
-Multi-modal IPC caching is automatically enabled when
-there is a one-to-one correspondence between API (`P0`) and engine core (`P1`) processes,
-to avoid repeatedly transferring the same multi-modal inputs between them.
-
-#### Key-Replicated Cache
-
-By default, IPC caching uses a **key-replicated cache**, where cache keys exist
-in both the API (`P0`) and engine core (`P1`) processes, but the actual cache
-data resides only in `P1`.
-
-#### Shared Memory Cache
-
-When multiple worker processes are involved (e.g., when TP > 1), a
-**shared-memory cache** is more efficient. This can be enabled by setting
-`mm_processor_cache_type="shm"`. In this mode, cache keys are stored
-on `P0`, while the cache data itself lives in shared memory accessible by all
-processes.
+- Processor cache: Located in `BaseMultiModalProcessor`, this caches the result of applying HF processor to the multi-modal inputs.
+- IPC cache: Located in the engine core (`P1` processes), this caches the data transferred from the API server (`P0` processes).
 
 ### Configuration
 
+#### Cache Type
+
+You can set the type of cache that is being used via `mm_processor_cache_type`. A summary of each cache type is provided below:
+
+| Name | `mm_processor_cache_type` | Conditions | Levels | Max. Memory |
+| ---- | ------------------------- | ---------- | ------ | ----------- |
+| Key-Replicated LRU Cache | `"lru"` (default) | 1:1 relation between `P0` and `P1` | Processor, IPC | `mm_processor_cache_gb * api_server_count` |
+| Shared Memory Cache | `"shm"` | 1:1 relation between `P0` and `P1` | Processor, IPC | `mm_processor_cache_gb` |
+| Processor-Only Cache | (Fallback) | None | Processor | `mm_processor_cache_gb * data_parallel_size` |
+
+More information about each cache type below:
+
+- Key-Replicated LRU Cache (`mm_processor_cache_type="lru"`): Cache keys exist
+in both `P0` and `P1`, but the actual cache data resides only in `P1`. In order for the caches to remain mirrored, there must be a one-to-one correspondence between `P0` and `P1` processes so that they can be updated in the same order.
+- Shared Memory Cache (`mm_processor_cache_type="shm"`): Cache keys are stored on `P0`, while the cache data itself lives in shared memory accessible by all processes. The cache data is evicted according to FIFO policy. To avoid race conditions, only one process can write to the shared memory.
+- Processor-only Cache: If the conditions for the selected cache type are not met, the IPC cache is disabled and only the processor cache will be used. In that case, both cache keys and cache data will reside on `P0`.
+
+#### Cache Size
+
 You can adjust the size of the cache by setting the value of `mm_processor_cache_gb` (default 4 GiB).
 
-If you do not benefit much from the cache, you can disable both IPC
-and processor caching completely via `mm_processor_cache_gb=0`.
+If you do not benefit much from the cache, you can disable both processor and IPC caching completely via `mm_processor_cache_gb=0`.
 
-Examples:
+#### Examples
 
 ```python
 # Use a larger cache
@@ -288,19 +283,25 @@ llm = LLM(
 )
 ```
 
-### Cache Placement
+## Multi-Modal Encoder Cache
 
-Based on the configuration, the content of the multi-modal caches on `P0` and `P1` are as follows:
+The multi-modal encoder cache stores the embeddings outputted by the modality encoders (after projection) and associates them with the corresponding inputs in order to avoid repeated computation when the same multi-modal item is requested by the language backbone, most often during chunked prefill.
 
-| mm_processor_cache_type | Cache Type | `P0` Cache | `P1` Engine Cache | `P1` Worker Cache | Max. Memory |
-| ----------------- | ----------- | ---------- | ---------- | ----------- | ----------- |
-| lru | Processor Caching | K + V | N/A | N/A | `mm_processor_cache_gb * data_parallel_size` |
-| lru | Key-Replicated Caching | K | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
-| shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
-| N/A | Disabled | N/A | N/A | N/A | `0` |
+This supplements prefix caching since there are some situations where prefix caching doesn't apply, e.g.:
 
-K: Stores the hashes of multi-modal items
-V: Stores the processed tensor data of multi-modal items
+- The system message is different, causing the prefix to be different even though the multi-modal inputs are the same.
+- The user places different text instructions before passing multi-modal inputs.
+- The multi-modal inputs have different ordering or subsets.
+
+The size of the multi-modal encoder cache is expressed in terms of number of embedding tokens. In order to facilitate chunked prefill, the minimum size is the maximum number of embeddings per multi-modal item. This is also the default cache size.
+
+### Configuration
+
+#### Cache Size
+
+If your workload involves many repeating multi-modal inputs that cannot be optimized via prefix caching, you can further increase the cache size by setting `encoder_cache_size`, at the cost of reserving more GPU memory which in turn reduces the memory available for the KV cache.
+
+For [encoder disaggregation](../examples/online_serving/disaggregated_encoder.md), you can allocate more memory to the encoder cache since you do not have to worry about the KV cache, which is allocated separately.
 
 ## CPU Resources for GPU Deployments
 
