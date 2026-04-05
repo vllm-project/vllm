@@ -4824,6 +4824,11 @@ class GPUModelRunner(
             scope="local",
         )
         if not load_dummy_weights:
+            # Register tensor dump hooks if enabled via env var.
+            from vllm.debug.tensor_dump import maybe_setup_tensor_dump
+
+            maybe_setup_tensor_dump(self.model, self.vllm_config, self.parallel_config)
+
             prepare_communication_buffer_for_model(self.model)
             if (drafter := getattr(self, "drafter", None)) and (
                 drafter_model := getattr(drafter, "model", None)
