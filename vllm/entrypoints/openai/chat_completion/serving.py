@@ -306,8 +306,17 @@ class OpenAIServingChat(OpenAIServing):
                 if not request.include_reasoning:
                     reasoning_ended = True
                 elif reasoning_parser:
-                    reasoning_ended = reasoning_parser.is_reasoning_end(
-                        prompt_token_ids or []
+                    # Only check the tail of the prompt to avoid false
+                    # positives from tool defs or prior-turn </think>.
+                    # Use fast single-token check when available, else
+                    # fall back to the parser's own method on the tail.
+                    reasoning_ended = (
+                        (reasoning_parser.end_token_id
+                         in (prompt_token_ids or [])[-10:])
+                        if hasattr(reasoning_parser, 'end_token_id')
+                        else reasoning_parser.is_reasoning_end(
+                            (prompt_token_ids or [])[-20:]
+                        )
                     )
                 else:
                     reasoning_ended = None
@@ -943,6 +952,17 @@ class OpenAIServingChat(OpenAIServing):
                                     )
                                     if delta_message and delta_message.content:
                                         current_text = delta_message.content
+                                        # If the model emitted <function=
+                                        # directly (no <tool_call> wrapper),
+                                        # inject the wrapper so the tool
+                                        # parser can detect it.
+                                        ct = current_text.lstrip()
+                                        if (ct.startswith("<function=")
+                                                and "<tool_call>"
+                                                not in current_text):
+                                            current_text = (
+                                                "<tool_call>\n" + ct
+                                            )
                                         delta_message.content = None
                                     else:
                                         current_text = ""
@@ -960,6 +980,16 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_text = current_text
                                 delta_token_ids = current_token_ids
 
+                            # Preserve reasoning from the transition batch
+                            # (when </think> and content appear in the same
+                            # stream-interval chunk) before the tool parser
+                            # overwrites delta_message.
+                            _saved_reasoning = (
+                                delta_message.reasoning
+                                if delta_message is not None
+                                else None
+                            )
+
                             delta_message = tool_parser.extract_tool_calls_streaming(
                                 previous_text=previous_text,
                                 current_text=current_text,
@@ -971,6 +1001,16 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             if delta_message and delta_message.tool_calls:
                                 tools_streamed[i] = True
+
+                            # Merge saved reasoning back so it reaches the
+                            # client as delta.reasoning (not discarded).
+                            if _saved_reasoning:
+                                if delta_message is None:
+                                    delta_message = DeltaMessage(
+                                        reasoning=_saved_reasoning
+                                    )
+                                else:
+                                    delta_message.reasoning = _saved_reasoning
                     # when only tool calls
                     elif tool_choice_auto:
                         assert tool_parser is not None
