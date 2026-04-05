@@ -144,6 +144,7 @@ class AsyncLLM(EngineClient):
 
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
+            self.vllm_config,
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,

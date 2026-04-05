@@ -101,7 +101,8 @@ class LLMEngine:
 
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
-            renderer.tokenizer,
+            vllm_config=vllm_config,
+            tokenizer=renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
