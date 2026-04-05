@@ -16,12 +16,11 @@
 
 #pragma once
 
-
 namespace vllm {
 namespace cuda_async {
 
-__device__ __forceinline__ void cp_async_shared_global_16_cg(void* smem_ptr,
-                                                             const void* glob_ptr) {
+__device__ __forceinline__ void cp_async_shared_global_16_cg(
+    void* smem_ptr, const void* glob_ptr) {
 #if defined(USE_ROCM)
   *reinterpret_cast<int4*>(smem_ptr) = *reinterpret_cast<const int4*>(glob_ptr);
 #elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
