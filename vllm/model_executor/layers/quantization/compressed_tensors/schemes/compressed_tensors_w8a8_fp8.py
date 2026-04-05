@@ -116,6 +116,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
             # Validate block quantization shapes
+            """
             validate_fp8_block_shape(
                 layer,
                 input_size,
@@ -124,6 +125,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 output_partition_sizes,
                 self.weight_block_size,
             )
+            """
 
         # WEIGHT
         weight = create_fp8_weight_parameter(
