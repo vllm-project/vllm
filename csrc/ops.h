@@ -192,19 +192,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
 
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
-#ifndef USE_ROCM
-
-torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
-                       torch::Tensor _scaling_factors, torch::Tensor _zeros,
-                       int64_t split_k_iters);
-
-torch::Tensor awq_dequantize(torch::Tensor _kernel,
-                             torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int64_t split_k_iters,
-                             int64_t thx, int64_t thy);
-
-#endif
-
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n,
                               std::optional<at::ScalarType> const& dtype);
@@ -294,8 +281,6 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
 
-torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace);
-
 #ifdef USE_ROCM
 fptr_t init_custom_qr(int64_t rank, int64_t world_size,
                       std::optional<int64_t> qr_max_size = std::nullopt);
@@ -305,9 +290,4 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
-#endif
-
-#ifndef USE_ROCM
-void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
-                       torch::Tensor const& mat_b);
 #endif

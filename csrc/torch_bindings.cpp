@@ -244,22 +244,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_scale_transposed=False) -> ()");
   ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
            &silu_and_mul_per_block_quant);
-  // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
-  ops.def(
-      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
-
-  // Quantized GEMM for AWQ.
-  ops.def(
-      "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, SymInt split_k_iters) -> Tensor");
-  ops.impl("awq_gemm", torch::kCUDA, &awq_gemm);
-
-  // Dequantization for AWQ.
-  ops.def(
-      "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
-  ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -389,22 +373,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " -> ()");
   // conditionally compiled so impl registration is in source file
 
-  // SM100 CUTLASS MLA decode
-  ops.def(
-      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
-      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
-      "                         Tensor seq_lens, Tensor page_table,"
-      "                         Tensor workspace, float scale,"
-      "                         int num_kv_splits) -> ()");
-  // conditionally compiled so impl in source file
-
-  // SM100 CUTLASS MLA workspace
-  ops.def(
-      "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"
-      "                                     int sm_count, int num_kv_splits) "
-      "-> int");
-  // conditionally compiled so impl in source file
-
 #endif
 
   // Quantized GEMM for GPTQ.
@@ -476,28 +444,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cu_chunk_seqlen,"
       "Tensor? last_chunk_indices) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
-
-  // Hadamard transforms
-  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
-
-#ifndef USE_ROCM
-  // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
-  ops.def(
-      "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
-      "Tensor? b_zeros, "
-      "bool has_zp, Tensor! b_qweight_reorder, Tensor! b_scales_reorder, "
-      "Tensor!? b_zeros_reorder, "
-      "int K, int N, int N_32align) -> ()");
-  //  conditionally compiled so impl in source file
-
-  // AllSpark quantization ops
-  ops.def(
-      "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
-      "Tensor? b_qzeros, "
-      "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
-      "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
-  //  conditionally compiled so impl in source file
-#endif
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

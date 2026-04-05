@@ -199,7 +199,54 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
       "Tensor)");
+
+  // SM100 CUTLASS MLA decode
+  // conditionally compiled so impl registrations are in source file
+  ops.def(
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
+      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
+      "                         Tensor seq_lens, Tensor page_table,"
+      "                         Tensor workspace, float scale,"
+      "                         int num_kv_splits) -> ()");
+
+  ops.def(
+      "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"
+      "                                     int sm_count, int num_kv_splits) "
+      "-> int");
+  // Quantized GEMM for AWQ.
+  ops.def(
+      "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
+      "Tensor _zeros, SymInt split_k_iters) -> Tensor");
+
+  // Dequantization for AWQ.
+  ops.def(
+      "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
+      "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
+
+  // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+  // conditionally compiled so impl registration is in source file
+  ops.def(
+      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+
+  // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
+  ops.def(
+      "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
+      "Tensor? b_zeros, "
+      "bool has_zp, Tensor! b_qweight_reorder, Tensor! b_scales_reorder, "
+      "Tensor!? b_zeros_reorder, "
+      "int K, int N, int N_32align) -> ()");
+
+  // AllSpark quantization ops
+  ops.def(
+      "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
+      "Tensor? b_qzeros, "
+      "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
+      "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
 #endif
+
+  // Hadamard transforms
+  // conditionally compiled so impl registration is in source file
+  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -236,6 +283,16 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // W4A8 ops: impl registrations are in the source files
   // (w4a8_mm_entry.cu and w4a8_grouped_mm_entry.cu)
+
+  // AWQ ops
+  ops.impl("awq_gemm", TORCH_BOX(&awq_gemm));
+  ops.impl("awq_dequantize", TORCH_BOX(&awq_dequantize));
+
+  // DSV3 fused A GEMM: conditionally compiled so impl registration is in
+  // source file (dsv3_fused_a_gemm.cu)
+
+  // AllSpark ops: conditionally compiled so impl registrations are in source
+  // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
 }
 
