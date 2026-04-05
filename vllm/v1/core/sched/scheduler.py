@@ -178,6 +178,10 @@ class Scheduler(SchedulerInterface):
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
 
+        # Map to keep track of approximate uncached and raw tokens for requests in waiting state
+        # req_id -> (approximate_uncached_tokens, raw_num_prompt_tokens)
+        self.waiting_reqs_uncached_tokens_map: dict[str, tuple[int, int]] = {}
+
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
@@ -972,6 +976,12 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
+        # Update approximate uncached tokens when preempted back to waiting
+        if request.request_id not in self.waiting_reqs_uncached_tokens_map:
+            _, hit_tokens = self.kv_cache_manager.get_computed_blocks(request)
+            uncached_tokens = max(0, request.num_tokens - hit_tokens)
+            self.waiting_reqs_uncached_tokens_map[request.request_id] = (uncached_tokens, request.num_prompt_tokens)
+
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
 
@@ -1564,6 +1574,11 @@ class Scheduler(SchedulerInterface):
         )
 
     def _enqueue_waiting_request(self, request: Request) -> None:
+        if request.request_id not in self.waiting_reqs_uncached_tokens_map:
+            _, hit_tokens = self.kv_cache_manager.get_computed_blocks(request)
+            uncached_tokens = max(0, request.num_prompt_tokens - hit_tokens)
+            self.waiting_reqs_uncached_tokens_map[request.request_id] = (uncached_tokens, request.num_prompt_tokens)
+
         if self._is_blocked_waiting_status(request.status):
             self.skipped_waiting.add_request(request)
         else:
@@ -1952,9 +1967,20 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+
+        current_waiting = set(req.request_id for req in itertools.chain(self.waiting, self.skipped_waiting))
+        for req_id in list(self.waiting_reqs_uncached_tokens_map.keys()):
+            if req_id not in current_waiting:
+                self.waiting_reqs_uncached_tokens_map.pop(req_id)
+                
+        approximate_uncached_tokens_waiting = sum(t[0] for t in self.waiting_reqs_uncached_tokens_map.values())
+        num_tokens_waiting = sum(t[1] for t in self.waiting_reqs_uncached_tokens_map.values())
+
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting) + len(self.skipped_waiting),
+            approximate_uncached_tokens_waiting=approximate_uncached_tokens_waiting,
+            num_tokens_waiting=num_tokens_waiting,
             kv_cache_usage=self.kv_cache_manager.usage,
             encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
