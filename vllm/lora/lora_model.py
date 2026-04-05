@@ -174,10 +174,17 @@ class LoRAModel:
                 ):
                     continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
-                # Case for expert lora weights
+                # Case for expert lora weights.
+                # For standard MoE models the name ends in "...experts",
+                # so expert_idx+1 yields "experts" which is in
+                # expected_lora_modules.
+                # For Qwen 3.5 MoE (and similar models) the expert index
+                # is embedded: "...experts.N.down_proj".  Taking everything
+                # after ".experts" gives "experts.N.down_proj" which is
+                # never in the expected set even though "down_proj" is.
+                # Fix: always compare just the last component of the path.
                 if ".experts" in module_name:
-                    expert_idx = module_name.find(".experts")
-                    expert_suffix = module_name[expert_idx + 1 :]
+                    expert_suffix = module_name.split(".")[-1]
                     if expert_suffix not in expected_lora_modules:
                         unexpected_modules.append(module_name)
 
