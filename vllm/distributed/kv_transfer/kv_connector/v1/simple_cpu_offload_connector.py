@@ -186,10 +186,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ) -> None:
         if self.scheduler_manager is not None:
             self.scheduler_manager.update_state_after_alloc(
-                request, blocks, num_external_tokens
+                request, blocks, num_external_tokens, num_computed_tokens
             )
 
     def build_connector_meta(

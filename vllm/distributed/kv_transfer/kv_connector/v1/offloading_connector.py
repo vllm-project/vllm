@@ -114,11 +114,15 @@ class OffloadingConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens
+            request, blocks, num_external_tokens, num_computed_tokens
         )
 
     def build_connector_meta(

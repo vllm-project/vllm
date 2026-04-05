@@ -364,7 +364,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return num_external_tokens, False
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         """
         Update KVConnector state after block allocation.

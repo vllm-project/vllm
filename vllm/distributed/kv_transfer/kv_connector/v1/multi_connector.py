@@ -369,17 +369,26 @@ class MultiConnector(KVConnectorBase_V1):
         return to_return
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
-                c.update_state_after_alloc(request, blocks, num_external_tokens)
+                c.update_state_after_alloc(
+                    request,
+                    blocks,
+                    num_external_tokens,
+                    num_computed_tokens,
+                )
             else:
                 # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+                c.update_state_after_alloc(request, empty_blocks, 0, None)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -427,7 +436,7 @@ class MultiConnector(KVConnectorBase_V1):
         return None
 
     def set_xfer_handshake_metadata(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+        self, metadata: dict[Any, KVConnectorHandshakeMetadata]
     ) -> None:
         """
         Set the KV connector handshake metadata for all sub-connectors.

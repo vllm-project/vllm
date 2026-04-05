@@ -142,7 +142,11 @@ class OffloadingConnectorScheduler:
         return num_hit_tokens, True
 
     def update_state_after_alloc(
-        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         self._requests[request.request_id] = request
         # the block ids are updated in _get_reqs_to_store
