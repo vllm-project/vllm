@@ -46,7 +46,7 @@ from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import is_quantized_kv_cache, set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -197,7 +197,7 @@ class Worker(WorkerBase):
         # especially the FP8 scaling factor.
         if (
             (tags is None or "kv_cache" in tags)
-            and self.cache_config.cache_dtype.startswith("fp8")
+            and is_quantized_kv_cache(self.cache_config.cache_dtype)
             and hasattr(self.model_runner, "init_fp8_kv_scales")
         ):
             self.model_runner.init_fp8_kv_scales()
@@ -239,11 +239,11 @@ class Worker(WorkerBase):
 
                 # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
                 self.local_rank += dp_local_rank * tp_pp_world_size
-                assert self.local_rank < torch.cuda.device_count(), (
+                assert self.local_rank < torch.accelerator.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
                 visible_device_count = (
-                    torch.cuda.device_count() if torch.cuda.is_available() else 0
+                    torch.accelerator.device_count() if torch.cuda.is_available() else 0
                 )
                 assert self.parallel_config.local_world_size <= visible_device_count, (
                     f"local_world_size ({self.parallel_config.local_world_size}) must "
@@ -252,7 +252,7 @@ class Worker(WorkerBase):
                 )
 
             self.device = torch.device(f"cuda:{self.local_rank}")
-            current_platform.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
@@ -315,30 +315,12 @@ class Worker(WorkerBase):
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
-    def load_model(self) -> None:
-        dummy_weights = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        if dummy_weights:
-            (
-                expanded_physical_to_logical,
-                num_logical_experts,
-                old_num_physical_experts,
-            ) = self.elastic_ep_executor.receive_expert_mapping()
-            num_physical_experts = expanded_physical_to_logical.shape[1]
-            self.parallel_config.eplb_config.num_redundant_experts = (
-                num_physical_experts - num_logical_experts
-            )
-
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
         ):
-            self.model_runner.load_model(load_dummy_weights=dummy_weights)
-
-        if dummy_weights:
-            self.model_runner.setup_eplb_from_mapping(
-                expanded_physical_to_logical, old_num_physical_experts
-            )
-            self.model_runner.eep_eplb_suppressed = True
+            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -387,13 +369,15 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            profile_torch_peak = current_platform.memory_stats(self.device).get(
+            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
                 "allocated_bytes.all.peak", 0
             )
 
             # Profile CUDA graph memory if graphs will be captured.
+            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
+            # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager:
+            if not self.model_config.enforce_eager and not current_platform.is_rocm():
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
@@ -406,6 +390,8 @@ class Worker(WorkerBase):
             + profile_result.weights_memory
         )
 
+        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
+        # On CUDA, respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
             cudagraph_memory_estimate
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
@@ -413,9 +399,7 @@ class Worker(WorkerBase):
         )
 
         self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = (
-            profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
-        )
+        self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -517,7 +501,6 @@ class Worker(WorkerBase):
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to GPU memory.
-
         This is called when max_model_len=-1 is used and the engine
         automatically determines the maximum context length that fits
         in GPU memory. Workers need to update their cached max_model_len
@@ -635,6 +618,7 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
+
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
@@ -718,6 +702,11 @@ class Worker(WorkerBase):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
+
+    def get_compilation_match_table(self) -> dict[str, int]:
+        from vllm.compilation.passes.vllm_inductor_pass import get_match_table
+
+        return get_match_table()
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         """Get encoder timing stats from model runner."""
@@ -903,7 +892,8 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

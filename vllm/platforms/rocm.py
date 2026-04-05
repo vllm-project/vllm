@@ -13,13 +13,13 @@ from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -28,6 +28,7 @@ try:
     from amdsmi import (
         AmdSmiException,
         amdsmi_get_gpu_asic_info,
+        amdsmi_get_gpu_device_uuid,
         amdsmi_get_processor_handles,
         amdsmi_init,
         amdsmi_shut_down,
@@ -63,7 +64,40 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
     "0x744c": "AMD_Radeon_RX7900XTX",
+    "0x7551": "AMD_Radeon_R9700",
 }
+
+
+@lru_cache(maxsize=8)
+def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
+    """Get number of ROCm devices, caching based on the value of CUDA_VISIBLE_DEVICES
+    at the time of call.
+
+    This should be used instead of torch.accelerator.device_count() unless
+    CUDA_VISIBLE_DEVICES has already been set to the desired value.
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+
+    if not torch.cuda._is_compiled():
+        return 0
+    # ROCm uses amdsmi instead of nvml for stateless device count
+    # This requires a sufficiently modern version of Torch 2.4.0
+    raw_count = (
+        torch.cuda._device_count_amdsmi()
+        if (hasattr(torch.cuda, "_device_count_amdsmi"))
+        else -1
+    )
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    return r
 
 
 def _sync_hip_cuda_env_vars():
@@ -145,6 +179,7 @@ def _get_gcn_arch() -> str:
 _GCN_ARCH = _get_gcn_arch()
 
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+_ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX942 = "gfx942" in _GCN_ARCH
@@ -226,6 +261,10 @@ def on_gfx1x() -> bool:
     return _ON_GFX1X
 
 
+def on_gfx12x() -> bool:
+    return _ON_GFX12X
+
+
 def on_mi3xx() -> bool:
     return _ON_MI3XX
 
@@ -264,7 +303,6 @@ def use_rocm_custom_paged_attention(
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
-            and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
             and sinks is None
         )
 
@@ -279,7 +317,6 @@ def use_rocm_custom_paged_attention(
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
             and kv_cache_dtype == "auto"
-            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN
             and sinks is None
         )
 
@@ -310,7 +347,7 @@ def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
 ) -> list[AttentionBackendEnum]:
-    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
     if use_sparse:
         return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
@@ -327,28 +364,15 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
             ]
 
-    backends = []
-
-    # Priority 1: Check for AITER Unified Attention (must check before MHA)
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
-        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-
-    # Priority 2: Check for AITER MHA (Flash Attention)
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA:
+    backends = [
+        AttentionBackendEnum.ROCM_ATTN,
+    ]
+    if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
-
-    # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-    from vllm.config import get_current_vllm_config_or_none
-
-    vllm_config = get_current_vllm_config_or_none()
-    if (
-        vllm_config is not None
-        and vllm_config.attention_config.use_prefill_decode_attention
-    ):
-        backends.append(AttentionBackendEnum.ROCM_ATTN)
-
-    # Default: Triton Unified Attention
+    if is_aiter_found_and_supported():
+        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+
     return backends
 
 
@@ -377,9 +401,7 @@ class RocmPlatform(Platform):
         "fbgemm_fp8",
         "gguf",
         "quark",
-        "ptpc_fp8",
         "mxfp4",
-        "petit_nvfp4",
         "torchao",
         "bitsandbytes",
     ]
@@ -438,8 +460,6 @@ class RocmPlatform(Platform):
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
-        attn_selector_config = attn_selector_config._replace(block_size=None)
-
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
@@ -456,7 +476,10 @@ class RocmPlatform(Platform):
                     f"this configuration. Reason: {invalid_reasons}"
                 )
             else:
-                logger.info("Using %s backend.", selected_backend)
+                logger.info_once(
+                    "Using %s backend (selected via --attention-backend).",
+                    selected_backend.name,
+                )
                 return selected_backend.get_path()
 
         # No selected backend or the selected backend is invalid,
@@ -493,12 +516,25 @@ class RocmPlatform(Platform):
         )
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
-        logger.info_once(
-            "Using %s attention backend out of potential backends: %s.",
-            selected_backend.name,
-            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
+        valid_str = (
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]"
         )
+        if invalid_reasons:
+            rejected_str = ", ".join(b.name for b in invalid_reasons)
+            logger.info(
+                "Found incompatible backend(s) [%s] with %s. "
+                "Overriding with %s out of potential backends: %s.",
+                rejected_str,
+                attn_selector_config.attn_type,
+                selected_backend.name,
+                valid_str,
+            )
+        else:
+            logger.info_once(
+                "Using %s backend out of potential backends: %s.",
+                selected_backend.name,
+                valid_str,
+            )
 
         return selected_backend.get_path()
 
@@ -605,10 +641,24 @@ class RocmPlatform(Platform):
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
-        device_name: str = asic_info["device_id"]
-        if device_name in _ROCM_DEVICE_ID_NAME_MAP:
-            return _ROCM_DEVICE_ID_NAME_MAP[device_name]
+        asic_info_device_id: str = asic_info["device_id"]
+        if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
+            return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
         return asic_info["market_name"]
+
+    @classmethod
+    @with_amdsmi_context
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        try:
+            device = amdsmi_get_processor_handles()[device_id]
+        except AmdSmiException as error:
+            logger.error("amdsmi device query failed ", exc_info=error)
+            return ""
+        try:
+            device_uuid = amdsmi_get_gpu_device_uuid(device)
+        except AmdSmiException as error:
+            logger.error("amdsmi device uuid query failed ", exc_info=error)
+        return device_uuid
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -652,13 +702,6 @@ class RocmPlatform(Platform):
             and "-grouped_topk" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+grouped_topk")
-        # Enable rotary embedding customop when using AITER if not disabled by user
-        if (
-            rocm_aiter_ops.is_enabled()
-            and "+rotary_embedding" not in compilation_config.custom_ops
-            and "-rotary_embedding" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rotary_embedding")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
@@ -667,7 +710,6 @@ class RocmPlatform(Platform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm.config.compilation import CUDAGraphMode
 
-        cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
@@ -689,31 +731,8 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        if cache_config and not cache_config.user_specified_block_size:
-            if (
-                envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION and envs.VLLM_ROCM_USE_AITER
-                # NOTE: This block has been deprecated
-                # or get_env_variable_attn_backend()
-                # == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-                # TODO: monitor https://github.com/vllm-project/vllm/pull/30396
-                # to see how we can transition to the new way of selecting
-                # attention backends
-            ):
-                cache_config.block_size = 64
-                logger.warning(
-                    "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
-                )
-            else:
-                cache_config.block_size = 16
-
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-
-    @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: ROCm still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -828,7 +847,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def device_count(cls) -> int:
-        return cuda_device_count_stateless()
+        return _rocm_device_count_stateless(getattr(envs, cls.device_control_env_var))
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -852,6 +871,30 @@ class RocmPlatform(Platform):
                 )
 
     @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on GPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from GPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+
+    @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
 
@@ -866,3 +909,32 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        # TODO(luka/TJ) use aiter, vllm_c, native by default on ROCm
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # This (mostly) preserves previous CustomOp behavior
+        # Necessary on ROCm because it's common that users
+        # enable rms_norm to use the aiter kernel.
+        # TODO(luka/TJ) remove env vars completely
+        if (
+            cc.is_custom_op_enabled("rms_norm")
+            and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        ):
+            rms_norm = ["aiter"] + default
+        else:
+            rms_norm = default
+
+        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)

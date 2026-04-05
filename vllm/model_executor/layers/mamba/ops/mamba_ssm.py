@@ -10,7 +10,7 @@ from packaging import version
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
 
@@ -26,6 +26,21 @@ else:
     def softplus(dt):
         dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
         return dt
+
+
+@triton.jit
+def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+    y = tl.inline_asm_elementwise(
+        asm="""{
+cvt.rs.f16x2.f32 $0, $2, $1, $3;
+}""",
+        constraints="=r,r,r,r,r",
+        args=(x, rand),
+        dtype=tl.float16,
+        is_pure=True,
+        pack=2,
+    )
+    return y
 
 
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
@@ -48,6 +63,7 @@ else:
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
+    rand_seed_ptr,
     x_ptr,
     dt_ptr,
     dt_bias_ptr,
@@ -59,7 +75,7 @@ def _selective_scan_update_kernel(
     out_ptr,
     state_batch_indices_ptr,
     dst_state_batch_indices_ptr,
-    pad_slot_id,
+    null_block_id,
     num_accepted_tokens_ptr,
     cu_seqlens_ptr,
     # Matrix dimensions
@@ -113,6 +129,8 @@ def _selective_scan_update_kernel(
     IS_SPEC_DECODING: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
+    USE_RS_ROUNDING: tl.constexpr,
+    PHILOX_ROUNDS: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -185,7 +203,7 @@ def _selective_scan_update_kernel(
 
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
-        mask &= state_batch_idx != pad_slot_id
+        mask &= state_batch_idx != null_block_id
     state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
 
     if HAS_DT_BIAS:
@@ -239,7 +257,7 @@ def _selective_scan_update_kernel(
         if IS_SPEC_DECODING:
             dst_idx_ptr = dst_state_batch_indices_ptr + i_t * stride_dst_state_indices_T
             token_dst_idx = tl.load(dst_idx_ptr).to(tl.int64)
-            if token_dst_idx != pad_slot_id:
+            if token_dst_idx != null_block_id:
                 token_dst_ptrs = (
                     state_ptr_base
                     + token_dst_idx * stride_state_batch
@@ -267,7 +285,35 @@ def _selective_scan_update_kernel(
             z_ptr += stride_z_batch
 
     if not IS_SPEC_DECODING:
-        tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
+        if USE_RS_ROUNDING:
+            # Load random seed
+            rand_seed = tl.load(rand_seed_ptr)
+            # Generate random offsets for each element in state
+            if HAS_STATE_BATCH_INDICES:
+                rand_offsets = (
+                    state_batch_idx * stride_state_batch + pid_h * stride_state_head
+                )
+            else:
+                rand_offsets = pid_b * stride_state_batch + pid_h * stride_state_head
+            rand_offsets += (
+                offs_m[:, None] * stride_state_dim
+                + offs_n[None, :] * stride_state_dstate
+            )
+            # Generate random 32-bits for each element in state
+            if PHILOX_ROUNDS > 0:
+                rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
+            else:
+                rand = tl.randint(rand_seed, rand_offsets)
+            # Convert state to fp16 with RS rounding
+            state = convert_rs_fp16x2(state, rand)
+            tl.static_assert(state.dtype == tl.float16, "state must be fp16")
+            tl.static_assert(
+                dst_state_ptrs.dtype.element_ty == tl.float16,
+                "dst_state_ptrs must be fp16",
+            )
+        else:
+            state = state.to(dst_state_ptrs.dtype.element_ty)
+        tl.store(dst_state_ptrs, state, mask=mask)
 
 
 def selective_state_update(
@@ -283,11 +329,13 @@ def selective_state_update(
     dt_softplus=False,
     state_batch_indices=None,
     dst_state_batch_indices=None,
-    pad_slot_id=PAD_SLOT_ID,
+    null_block_id=NULL_BLOCK_ID,
     out=None,
     num_accepted_tokens=None,
     cu_seqlens=None,
     is_blackwell=False,
+    enable_stochastic_rounding=False,
+    cache_philox_rounds=0,
 ):
     """
     Argument:
@@ -300,12 +348,12 @@ def selective_state_update(
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
-        pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
+        null_block_id: int
+            if state_batch_indices is passed, lets the kernel identify
+            padded entries that will not be processed,
+            for example: state_batch_indices = [null_block_id, 1, 20,
+            null_block_id] in this case, the kernel will not process
+            entries at indices 0 and 3
         out: Preallocated ssm output tensor. Assume same shape as x.
              In-place updated.
         num_accepted_tokens: (batch,)
@@ -334,13 +382,13 @@ def selective_state_update(
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
         out = out.unsqueeze(1)
-    if num_accepted_tokens is not None:
-        assert state_batch_indices is not None and state_batch_indices.dim() == 2
-        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
     if state_batch_indices is not None and state_batch_indices.dim() == 1:
         state_batch_indices = state_batch_indices.unsqueeze(1)
     if dst_state_batch_indices is not None and dst_state_batch_indices.dim() == 1:
         dst_state_batch_indices = dst_state_batch_indices.unsqueeze(1)
+    if num_accepted_tokens is not None:
+        assert state_batch_indices is not None and state_batch_indices.dim() == 2
+        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
 
     _, nheads, dim, dstate = state.shape
     batch = x.shape[0]
@@ -419,9 +467,16 @@ def selective_state_update(
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
-    with torch.cuda.device(x.device.index):
+    rand_seed = (
+        torch.randint(0, 2**32, (1,), device=state.device)
+        if enable_stochastic_rounding
+        else None
+    )
+
+    with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](
             state,
+            rand_seed,
             x,
             dt,
             dt_bias,
@@ -433,7 +488,7 @@ def selective_state_update(
             out,
             state_batch_indices,
             dst_state_batch_indices,
-            pad_slot_id,
+            null_block_id,
             num_accepted_tokens,
             cu_seqlens,
             N,
@@ -476,6 +531,8 @@ def selective_state_update(
             tie_hdim,
             BLOCK_SIZE_M,
             num_warps=num_warps,
+            USE_RS_ROUNDING=enable_stochastic_rounding,
+            PHILOX_ROUNDS=cache_philox_rounds,
         )
 
 
@@ -493,7 +550,7 @@ def selective_scan_fn(
     query_start_loc=None,
     cache_indices=None,
     has_initial_state=None,
-    pad_slot_id=PAD_SLOT_ID,
+    null_block_id=NULL_BLOCK_ID,
     block_size=1024,
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
@@ -531,10 +588,10 @@ def selective_scan_fn(
         indicate if the ssm_state at the corresponding index should be
         used as initial state. Not providing argument assumes
         there's no initial state
-    pad_slot_id: int
+    null_block_id: int
         if cache_indices is passed, lets the kernel identify padding entries
         that will not be processed,
-        for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
+        for example: cache_indices = [null_block_id, 1 ,20 ,null_block_id]
         in this case, the kernel will not process entries at indices 0 and 3
     block_size: int
         The block size to align the cached states to
@@ -586,7 +643,7 @@ def selective_scan_fn(
         cache_indices,
         has_initial_state,
         ssm_states,
-        pad_slot_id,
+        null_block_id,
         block_size,
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,

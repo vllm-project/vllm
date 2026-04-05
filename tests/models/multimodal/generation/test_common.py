@@ -206,9 +206,7 @@ VLM_TEST_SETTINGS = {
             "model_impl": "transformers",
             "default_torch_num_threads": 1,
         },
-        # FIXME: Investigate why the test hangs
-        # when processing the 3rd prompt in vLLM
-        marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
+        marks=[pytest.mark.core_model],
     ),
     # Gemma3 has bidirectional mask on images
     "gemma3-transformers": VLMTestInfo(
@@ -222,7 +220,10 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        marks=[pytest.mark.core_model],
+        marks=[
+            pytest.mark.core_model,
+            *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
+        ],
     ),
     "idefics3-transformers": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
@@ -393,6 +394,22 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
     ),
+    "gemma4": VLMTestInfo(
+        models=["google/gemma-4-E2B-it"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "What's the content in the center of the image?",
+                "cherry_blossom": "What is the season?",
+            }
+        ),
+        multi_image_prompt="Describe the two images in detail.",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_runner_kwargs={"limit_mm_per_prompt": {"image": 4}},
+    ),
     "granite_vision": VLMTestInfo(
         models=["ibm-granite/granite-vision-3.3-2b"],
         test_type=(VLMTestType.IMAGE),
@@ -544,8 +561,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
     ),
     "isaac": VLMTestInfo(
+        # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF
+        # repo has a stale model.safetensors.index.json that references
+        # shard files which no longer exist (consolidated into a single
+        # model.safetensors on 2026-03-20). Re-add once upstream fixes
+        # the index file.
         models=[
-            "PerceptronAI/Isaac-0.1",
             "PerceptronAI/Isaac-0.2-2B-Preview",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -779,6 +800,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForCausalLM,
+        patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
         marks=[
             pytest.mark.skipif(
