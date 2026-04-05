@@ -221,7 +221,16 @@ def get_json_schema_from_tools(
         return tool_map[tool_name].function.parameters
     # tool_choice: "required"
     if tool_choice == "required":
-        return _get_json_schema_from_tools(tools)
+        # Filter to only function-style tools (FunctionTool for Responses API,
+        # ChatCompletionToolsParam for Chat Completions).  Built-in tool types
+        # such as WebSearchTool do not have a JSON schema and would crash
+        # _get_json_schema_from_tools.
+        func_tools = [
+            t for t in tools if isinstance(t, (FunctionTool, ChatCompletionToolsParam))
+        ]
+        if not func_tools:
+            return None
+        return _get_json_schema_from_tools(func_tools)
     # tool_choice: "auto"
     return None
 
