@@ -86,6 +86,76 @@ class FixFunctionalizationPass(VllmInductorPass):
                     self.insert_defunctionalized(graph, node)
                     self._remove(node)
 
+                elif (
+                    is_func(query, torch.ops.aten.slice.Tensor)
+                    and is_func(query.args[0], torch.ops.aten.reshape.default)
+                    and is_func(key, torch.ops.aten.unsqueeze.default)
+                ):
+                    # For MLA, q_pe is a slice of q, while k_pe is unsqueezed
+                    # to add head_dim=1 before passing into the rotary embedding.
+                    # We may need to add more conditions to make sure this only
+                    # happens for MLA.
+
+                    # Handle extra nodes added for functionalized query and q_pe
+                    query_view_orig = query.args[0]
+                    q_pe_orig = query
+                    q_pe_getitem = getitem_nodes[1]
+                    query_slice_scatter_temp = next(iter(q_pe_getitem.users))
+                    query_view_temp = query_slice_scatter_temp.args[0]
+                    for user in query_slice_scatter_temp.users:
+                        if is_func(user, torch.ops.aten.slice.Tensor):
+                            q_pe_slice_temp = user
+
+                    # Replace query slice_scatter inputs with original/inplace tensors
+                    # (query_slice_scatter_temp, q_pe_slice_temp) ->
+                    # (query_view_orig, q_pe_orig)
+                    query_slice_scatter_temp.replace_all_uses_with(query_view_orig)
+                    q_pe_slice_temp.replace_all_uses_with(q_pe_orig)
+
+                    # Delete all unused nodes in reverse order
+                    self._remove(q_pe_slice_temp)
+                    self._remove(query_slice_scatter_temp)
+                    self._remove(query_view_temp)
+                    self._remove(q_pe_getitem)
+
+                    # Handle extra nodes added for functionalized k_pe
+                    k_pe_unsqueeze_orig = key
+                    k_pe_getitem = getitem_nodes[2]
+                    k_pe_squeeze_temp = next(iter(k_pe_getitem.users))
+                    kv_lora_pe_slice_scatter_temp = next(iter(k_pe_squeeze_temp.users))
+                    kv_lora_getitem_temp = kv_lora_pe_slice_scatter_temp.args[0]
+                    qkv_lora_split_temp = kv_lora_getitem_temp.args[0]
+                    qkv_lora_pe_slice_scatter_temp = next(
+                        iter(kv_lora_pe_slice_scatter_temp.users)
+                    )
+                    qkv_lora_pe_split_temp = next(
+                        iter(qkv_lora_pe_slice_scatter_temp.users)
+                    )
+                    kv_lora_pe_getitem_temp = next(iter(qkv_lora_pe_split_temp.users))
+                    kv_lora_pe_split_temp = next(iter(kv_lora_pe_getitem_temp.users))
+                    k_pe_getitem_temp = next(iter(kv_lora_pe_split_temp.users))
+                    k_pe_unsqueeze_temp = next(iter(k_pe_getitem_temp.users))
+
+                    # Replace k_pe_unsqueeze_temp -> k_pe_unsqueeze_orig
+                    k_pe_unsqueeze_temp.replace_all_uses_with(k_pe_unsqueeze_orig)
+
+                    # Delete all unused nodes in reverse order
+                    self._remove(k_pe_unsqueeze_temp)
+                    self._remove(k_pe_getitem_temp)
+                    self._remove(kv_lora_pe_split_temp)
+                    self._remove(kv_lora_pe_getitem_temp)
+                    self._remove(qkv_lora_pe_split_temp)
+                    self._remove(qkv_lora_pe_slice_scatter_temp)
+                    self._remove(kv_lora_pe_slice_scatter_temp)
+                    self._remove(kv_lora_getitem_temp)
+                    self._remove(qkv_lora_split_temp)
+                    self._remove(k_pe_squeeze_temp)
+                    self._remove(k_pe_getitem)
+
+                    # Defunctionalize and remove rotary_embedding
+                    self.insert_defunctionalized(graph, node)
+                    self._remove(node)
+
                 else:
                     # Directly replace the auto_functionalize(rotary_embedding)
                     # with the inplace rotary_embedding. In theory, we shouldn't
