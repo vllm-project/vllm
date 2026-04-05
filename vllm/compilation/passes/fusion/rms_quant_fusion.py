@@ -610,11 +610,11 @@ class RMSNormNvfp4QuantPattern:
             rms_out = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
             at = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
-                output=quant_result,
                 input=rms_out,
-                output_scale=output_scale,
                 input_scale=input_scale,
                 is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
             )
             return at[1], at[2]
 
@@ -677,11 +677,11 @@ class FusedAddRMSNormNvfp4QuantPattern:
             rms_out, residual = self.rmsnorm_matcher(input, weight, residual)
             at = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
-                output=quant_result,
                 input=rms_out,
-                output_scale=output_scale,
                 input_scale=input_scale,
                 is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
             )
             return at[1], at[2], residual
 

@@ -55,6 +55,7 @@ from vllm.utils.deep_gemm import (
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
 # Kernel and group_shape combinations: (kernel, group_shape)
@@ -318,10 +319,8 @@ class TestNvfp4Model(torch.nn.Module):
         ]
 
     def ops_in_model_before_partial(self):
-        return (
-            [RMS_OP, RMS_ADD_OP]
-            if self.enable_rms_norm_custom_op
-            else [torch.ops.aten.rsqrt]
+        return [torch.ops.vllm_ir.rms_norm] + (
+            [RMS_ADD_OP] if self.enable_rms_norm_custom_op else [torch.ops.aten.rsqrt]
         )
 
 
@@ -488,7 +487,10 @@ def test_fusion_rmsnorm_nvfp4_quant(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config):
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
         torch.set_default_device("cuda")
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
