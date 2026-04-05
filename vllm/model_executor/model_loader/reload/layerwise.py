@@ -208,19 +208,15 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         # Attention/MLA layers are processed after all other layers
         if isinstance(layer, (Attention, MLAAttention)):
-            if info.load_numel > 0:
-                raise NotImplementedError(
-                    "Layerwise reloading of Q/K/V scale weights is not implemented yet"
-                )
-
-            elif info.kernel_tensors is None:
-                raise NotImplementedError(
-                    "Layerwise loading of Q/K/V scale weights is not implemented yet"
-                )
-
+            if info.load_numel > 0 and info.kernel_tensors is not None:
+                # Reload with new scale weights from checkpoint
+                _place_kernel_tensors(layer, info)
+                _reload_attention_scales(layer, info)
+            elif info.load_numel > 0 or info.kernel_tensors is None:
+                _layerwise_process(layer, info)
             else:
                 _place_kernel_tensors(layer, info)
-                layer.process_weights_after_loading(model_config.dtype)
+            layer.process_weights_after_loading(model_config.dtype)
 
         # No weights were loaded
         elif info.load_numel <= 0:
@@ -247,6 +243,35 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
 def finalize_layerwise_reload(*args, **kwargs):
     finalize_layerwise_processing(*args, **kwargs)
+
+
+def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    """Load and process attention scale weights (k_scale, v_scale, etc.)
+    during reload."""
+    quant_method = getattr(layer, "quant_method", None)
+    if quant_method is None:
+        return
+
+    # Re-create scale Parameters with sentinel values so unloaded scales
+    # are correctly detected by process_weights_after_loading
+    quant_method.create_weights(layer)
+
+    for name, args in info.loaded_weights:
+        param = getattr(layer, name)
+        args.arguments["param"] = param
+        _get_weight_loader(param)(*args.args, **args.kwargs)
+
+    quant_method.process_weights_after_loading(layer)
+
+    # Some quant methods replace buffers via assignment, leaving them on CPU
+    target_device = info.restore_device
+    for name, tensor in get_layer_tensors(layer).items():
+        if tensor.device != target_device:
+            data = tensor.data.to(target_device)
+            if isinstance(tensor, torch.nn.Parameter):
+                tensor.data = data
+            else:
+                setattr(layer, name, data)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -278,7 +303,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param.weight_loader(*args.args, **args.kwargs)
 
     # Process weights (quantization, repacking, etc.)
-    # Attention/MLA are processed in `finalize_layerwise_reload`
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
