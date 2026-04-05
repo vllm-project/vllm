@@ -1212,3 +1212,72 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         )
 
         engine_core_proc.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_health_ping_success():
+    """Test that health_ping returns successfully on a healthy engine."""
+    engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+    vllm_config = engine_args.create_engine_config(
+        usage_context=UsageContext.UNKNOWN_CONTEXT
+    )
+    executor_class = Executor.get_class(vllm_config)
+
+    with set_default_torch_num_threads(1):
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=True,
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
+
+    try:
+        # health_ping should succeed on a healthy engine.
+        await client.check_health_async()
+    finally:
+        client.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_health_ping_timeout(monkeypatch: pytest.MonkeyPatch):
+    """Test that health_ping raises EngineDeadError on timeout."""
+    import vllm.envs as envs
+    from vllm.v1.engine.core_client import AsyncMPClient
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+    vllm_config = engine_args.create_engine_config(
+        usage_context=UsageContext.UNKNOWN_CONTEXT
+    )
+    executor_class = Executor.get_class(vllm_config)
+
+    with set_default_torch_num_threads(1):
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=True,
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
+
+    try:
+        core_client: AsyncMPClient = client
+
+        # Freeze the engine core process to simulate a hung state.
+        procs = core_client.resources.engine_manager.processes
+        for proc in procs:
+            os.kill(proc.pid, signal.SIGSTOP)
+
+        try:
+            # Monkeypatch the env to a small value.
+            monkeypatch.setattr(envs, "VLLM_HEALTH_CHECK_TIMEOUT", 1)
+
+            with pytest.raises(EngineDeadError, match="not respond"):
+                await core_client.check_health_async()
+        finally:
+            # Resume the engine core process.
+            for proc in procs:
+                os.kill(proc.pid, signal.SIGCONT)
+    finally:
+        client.shutdown()

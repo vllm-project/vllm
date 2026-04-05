@@ -696,6 +696,14 @@ class EngineCore:
         # Resume scheduling (applies to all levels)
         self.resume_scheduler()
 
+    def health_ping(self) -> bool:
+        """Health check ping, called via UTILITY mechanism.
+
+        If this method executes and returns, it proves that the EngineCore
+        subprocess is alive, the busy loop is running, and IPC is working.
+        """
+        return True
+
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping

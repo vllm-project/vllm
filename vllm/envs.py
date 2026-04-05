@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
+    VLLM_HEALTH_CHECK_TIMEOUT: int = 60  # seconds
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_PLUGINS: list[str] | None = None
@@ -906,6 +907,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
     "VLLM_RPC_TIMEOUT": lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
+    # Timeout in seconds for the health check ping to EngineCore.
+    # If the engine does not respond within this time, it is considered hung.
+    # Set higher for large models with long forward passes. Set to 0 to disable.
+    "VLLM_HEALTH_CHECK_TIMEOUT": lambda: int(
+        os.getenv("VLLM_HEALTH_CHECK_TIMEOUT", "60")
+    ),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
