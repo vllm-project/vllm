@@ -315,12 +315,29 @@ class P2pNcclEngine:
             with self.recv_store_cv:
                 while tensor_id not in self.recv_store:
                     self.recv_store_cv.wait()
-                tensor = self.recv_store[tensor_id]
+                # Pop immediately so the slot is freed as soon as the
+                # tensor is handed to the caller.  Keeping it around until
+                # request completion (the old behaviour) caused all
+                # in-flight KV caches to accumulate in VRAM / pinned RAM,
+                # leading to OOM under high QPS with long outputs.
+                tensor = self.recv_store.pop(tensor_id)
 
             if tensor is not None:
                 if isinstance(tensor, tuple):
                     addr, dtype, shape = tensor
-                    tensor = self.pool.load_tensor(addr, dtype, shape, self.device)
+                    # Use try/finally so the pinned-memory slot is always
+                    # returned to the pool even if load_tensor raises.
+                    # Without this, a raise would leave the addr permanently
+                    # allocated (the entry is already popped from recv_store
+                    # so the straggler path in get_finished cannot reclaim it).
+                    try:
+                        tensor = self.pool.load_tensor(
+                            addr, dtype, shape, self.device
+                        )
+                    finally:
+                        # Release the pinned-memory slot immediately after the
+                        # tensor has been copied back to device.
+                        self.pool.free(addr)
                 else:
                     self.buffer_size -= tensor.element_size() * tensor.numel()
             else:
@@ -538,7 +555,7 @@ class P2pNcclEngine:
         return True
 
     def get_finished(
-        self, finished_req_ids: set[str], no_compile_layers
+        self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
@@ -552,17 +569,31 @@ class P2pNcclEngine:
         """
 
         # Clear the buffer upon request completion.
+        # Under normal operation recv_tensor already pops each tensor
+        # immediately after injecting it into the KV cache blocks, so this
+        # loop is a safety net for any tensors that were received but never
+        # consumed (e.g. if start_load_kv was skipped or errored out).
         for request_id in finished_req_ids:
-            for layer_name in no_compile_layers:
-                tensor_id = request_id + "#" + layer_name
-                if tensor_id in self.recv_store:
-                    with self.recv_store_cv:
-                        tensor = self.recv_store.pop(tensor_id, None)
-                        self.send_request_id_to_tensor_ids.pop(request_id, None)
-                        self.recv_request_id_to_tensor_ids.pop(request_id, None)
-                    if isinstance(tensor, tuple):
-                        addr, _, _ = tensor
-                        self.pool.free(addr)
+            # Both recv_request_id_to_tensor_ids and recv_store are written
+            # by the listener thread under recv_store_cv; hold the lock for
+            # all reads and mutations to keep the protocol consistent.
+            with self.recv_store_cv:
+                tensor_ids = self.recv_request_id_to_tensor_ids.pop(
+                    request_id, set()
+                )
+                for tensor_id in tensor_ids:
+                    tensor = self.recv_store.pop(tensor_id, None)
+                    if tensor is not None:
+                        if isinstance(tensor, tuple):
+                            addr, _, _ = tensor
+                            self.pool.free(addr)
+                        else:
+                            # Reclaim buffer quota for non-pool tensors
+                            # that were never consumed.
+                            self.buffer_size -= (
+                                tensor.element_size() * tensor.numel()
+                            )
+            self.send_request_id_to_tensor_ids.pop(request_id, None)
 
         # TODO:Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
