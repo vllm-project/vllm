@@ -272,7 +272,6 @@ def kv_postprocess_layout_on_receive(cache, indices):
     target_shape[0] = -1
     inv_order = [0, 2, 1, 3]
     src_shape = tuple(target_shape[i] for i in inv_order)
-    blocks_to_update = cache.index_select(0, indices)
     permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
     cache.index_copy_(0, indices, permuted_blocks)
 
@@ -339,54 +338,70 @@ class TpKVTopology:
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
+
+        if self.is_mamba:
+            # Hybrid SSM models forces a single blocks_first layout
+            # Cross layer is currently not supported for hybrid SSM models.
+            self._cross_layers_blocks = False
+            self._is_kv_layout_blocks_first = True
+            self._split_k_and_v = False
+            return
+
         attn_backend = self.attn_backends[0]
-        if not self.is_mamba:
-            _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
-                num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
-            )
-            logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
-        # we just mock num_blocks to 1 for the dimension check below.
-        # Hybrid SSM models assume a single blocks_first layout
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+        _MOCK_NUM_BLOCKS = 4
+        _MOCK_BLOCK_SIZE = 16
+        kv_cache_shape = attn_backend.get_kv_cache_shape(
+            num_blocks=_MOCK_NUM_BLOCKS,
+            block_size=_MOCK_BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=1,
         )
+        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
 
         self._cross_layers_blocks = False
-        if self.tensor_shape is not None:
-            self._cross_layers_blocks = (
-                len(self.tensor_shape) == len(kv_cache_shape) + 1
-            )
-            self.tensor_shape: torch.Size
-
-        if self._cross_layers_blocks:
+        if (
+            self.tensor_shape is not None
+            and len(self.tensor_shape) == len(kv_cache_shape) + 1
+        ):
             logger.debug("Using cross-layer KV cache")
-            # prepend layers dimension
-            _MOCK_NUM_LAYERS = 80
-            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
+            _DUMMY_NUM_LAYERS = 80
+            kv_cache_shape = (_DUMMY_NUM_LAYERS,) + kv_cache_shape
             try:
                 kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=self._cross_layers_blocks
+                    include_num_layers_dimension=True
                 )
             except (AttributeError, NotImplementedError):
-                assert self.tensor_shape is not None
-                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
-
-            # In case of cross layers permute kv_cache_shape according to
-            # stride_order to retrieve physical position of block_size
+                kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
             kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+            logger.debug("Cross-layer KV cache stride order: %s", kv_cache_stride_order)
+            self._cross_layers_blocks = True
+
+        # TODO: Check all attention backends have compatible KV cache shapes.
+
+        if kv_cache_shape[0] == _MOCK_NUM_BLOCKS:
+            self._split_k_and_v = False
+            self._is_kv_layout_blocks_first = kv_cache_shape[1] == 2
+        elif kv_cache_shape[0] == 2 and kv_cache_shape[1] == _MOCK_NUM_BLOCKS:
+            self._split_k_and_v = True
+            self._is_kv_layout_blocks_first = False
+        else:
+            raise NotImplementedError(
+                f"Attention backend {attn_backend.full_cls_name()} has incompatible KV "
+                f"cache shape. Got {kv_cache_shape}. Supported shapes are "
+                f"({_MOCK_NUM_BLOCKS}, ...) or (2, {_MOCK_NUM_BLOCKS}, ...). Choose a "
+                "different attention backend or disable cross-layer KV cache."
+            )
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
+        # Whether the first axis after the num_blocks axis is the KV axis.
         return self._is_kv_layout_blocks_first
 
     @property
     def split_k_and_v(self) -> bool:
-        # Whether to register regions for K and V separately (when present).
-        return not (
-            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
-        )
+        # Whether the first axis of this tensor is the KV axis (when present).
+        # If it is, register regions for K and V separately.
+        return self._split_k_and_v
 
     @property
     def tp_size(self) -> int:
