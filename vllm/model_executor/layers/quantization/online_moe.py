@@ -6,6 +6,7 @@ from abc import abstractmethod
 import torch
 
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
@@ -94,6 +95,21 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
+
+    def _maybe_inject_biases(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        layer: torch.nn.Module,
+    ) -> None:
+        """Inject biases into the quant config if the model has them
+        (e.g. GPT-OSS biased MoE)."""
+        if self.moe.has_bias:
+            w13_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
+            if w13_bias is not None:
+                quant_config._w1.bias = w13_bias
+            if w2_bias is not None:
+                quant_config._w2.bias = w2_bias
 
     @property
     def supports_eplb(self) -> bool:

@@ -353,16 +353,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             block_shape=self.weight_block_size,
         )
 
-        # Inject biases into the quant config if the model has them
-        # (e.g. GPT-OSS biased MoE)
-        if quant_config is not None and self.moe.has_bias:
-            w13_bias = getattr(layer, "w13_bias", None)
-            w2_bias = getattr(layer, "w2_bias", None)
-            if w13_bias is not None:
-                quant_config._w1.bias = w13_bias
-            if w2_bias is not None:
-                quant_config._w2.bias = w2_bias
-
+        self._maybe_inject_biases(quant_config, layer)
         return quant_config
 
 

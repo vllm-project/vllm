@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.online_moe import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.utils import replace_parameter
 
 
 class ExpertsInt8Config(QuantizationConfig):
@@ -127,11 +128,10 @@ class ExpertsInt8MoEMethod(OnlineMoEMethodBase):
             w2[expert, :, :] = q.to(torch.int8)
             w2_scale[expert, :] = scales
 
-        # Replace full-precision weights with quantized versions
-        layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
-        layer.w13_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
-        layer.w2_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_scale", w13_scale)
+        replace_parameter(layer, "w2_scale", w2_scale)
 
     def _setup_kernel(self, layer: FusedMoE) -> None:
         self.moe_quant_config = make_int8_moe_quant_config(
@@ -151,7 +151,9 @@ class ExpertsInt8MoEMethod(OnlineMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        return make_int8_moe_quant_config(
+        quant_config = make_int8_moe_quant_config(
             w1_scale=layer.w13_scale,
             w2_scale=layer.w2_scale,
         )
+        self._maybe_inject_biases(quant_config, layer)
+        return quant_config
