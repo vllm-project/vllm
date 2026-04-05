@@ -6,10 +6,15 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from xgrammar import StructuralTag
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -18,6 +23,43 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 
 MODEL = "moonshotai/Kimi-K2-Instruct"
+
+
+@pytest.fixture
+def sample_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get the current weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "The city name"},
+                        "state": {"type": "string", "description": "The state code"},
+                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
+                    },
+                    "required": ["city", "state"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "calculate_area",
+                "description": "Calculate area of a shape",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "shape": {"type": "string"},
+                        "dimensions": {"type": "object"},
+                        "precision": {"type": "integer"},
+                    },
+                },
+            },
+        ),
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -580,3 +622,56 @@ class TestStreamingIntervals:
         assert len(rec.tool_calls) == 1
         assert rec.tool_calls[0].function.name == "get_weather"
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+
+def test_support_builtin_structural_tag(kimi_k2_tool_parser: KimiK2ToolParser):
+    assert kimi_k2_tool_parser.support_structural_tag() is True
+
+
+def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
+    kimi_k2_tool_parser: KimiK2ToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+    )
+    tag = kimi_k2_tool_parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("include_reasoning", [True, False])
+def test_adjust_request_auto_structural_tag_is_json_string(
+    kimi_k2_tool_parser: KimiK2ToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+    include_reasoning: bool,
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+        include_reasoning=include_reasoning,
+    )
+    out = kimi_k2_tool_parser.adjust_request(req)
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None
+    assert isinstance(out.structured_outputs.structural_tag, str)
+    loaded = json.loads(out.structured_outputs.structural_tag)
+    assert isinstance(loaded, dict)
+
+
+def test_adjust_request_required_uses_json_schema_not_structural_tag(
+    kimi_k2_tool_parser: KimiK2ToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+    out = kimi_k2_tool_parser.adjust_request(req)
+    assert out.structured_outputs.structural_tag is None

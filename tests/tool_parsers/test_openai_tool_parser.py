@@ -13,7 +13,12 @@ from openai_harmony import (
     SystemContent,
     load_harmony_encoding,
 )
+from xgrammar import StructuralTag
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.openai_tool_parser import OpenAIToolParser
@@ -35,6 +40,43 @@ def openai_tool_parser(openai_tokenizer):
 @pytest.fixture(scope="module")
 def harmony_encoding():
     return load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+
+
+@pytest.fixture
+def sample_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get the current weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "The city name"},
+                        "state": {"type": "string", "description": "The state code"},
+                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
+                    },
+                    "required": ["city", "state"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "calculate_area",
+                "description": "Calculate area of a shape",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "shape": {"type": "string"},
+                        "dimensions": {"type": "object"},
+                        "precision": {"type": "integer"},
+                    },
+                },
+            },
+        ),
+    ]
 
 
 def assert_tool_calls(
@@ -261,3 +303,56 @@ def test_extract_tool_calls_with_content(
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
     assert extracted_info.content == final_content
+
+
+def test_support_builtin_structural_tag(openai_tool_parser: OpenAIToolParser):
+    assert openai_tool_parser.support_structural_tag() is True
+
+
+def test_get_xgrammar_builtin_structural_tag_returns_structural_tag(
+    openai_tool_parser: OpenAIToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+    )
+    tag = openai_tool_parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("include_reasoning", [True, False])
+def test_adjust_request_auto_structural_tag_is_json_string(
+    openai_tool_parser: OpenAIToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+    include_reasoning: bool,
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+        include_reasoning=include_reasoning,
+    )
+    out = openai_tool_parser.adjust_request(req)
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None
+    assert isinstance(out.structured_outputs.structural_tag, str)
+    loaded = json.loads(out.structured_outputs.structural_tag)
+    assert isinstance(loaded, dict)
+
+
+def test_adjust_request_required_uses_json_schema_not_structural_tag(
+    openai_tool_parser: OpenAIToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+    out = openai_tool_parser.adjust_request(req)
+    assert out.structured_outputs.structural_tag is None
