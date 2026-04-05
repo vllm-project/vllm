@@ -25,6 +25,7 @@
 """Inference-only PhiMoE model."""
 
 from collections.abc import Iterable
+from functools import partial
 from itertools import islice
 
 import torch
@@ -176,7 +177,7 @@ class mp(torch.autograd.Function):
         )
 
 
-def sparsemixer(scores, jitter_eps=0.01):
+def sparsemixer(scores, jitter_eps=0.0):
     ################ first expert ################
 
     with torch.no_grad():
@@ -233,12 +234,13 @@ def phimoe_routing_function(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    jitter_eps: float = 0.0,
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
     assert topk == 2, "Only top-2 routing is supported"
     assert renormalize is False, "Renormalization is not supported"
 
-    topk_weights, topk_ids = sparsemixer(gating_output)
+    topk_weights, topk_ids = sparsemixer(gating_output, jitter_eps=jitter_eps)
     return topk_weights, topk_ids
 
 
@@ -257,6 +259,7 @@ class PhiMoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
+        router_jitter_noise: float = 0.0,
         params_dtype: torch.dtype | None = None,
         quant_config: QuantizationConfig | None = None,
         tp_size: int | None = None,
@@ -275,6 +278,12 @@ class PhiMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        routing_function = (
+            partial(phimoe_routing_function, jitter_eps=router_jitter_noise)
+            if router_jitter_noise != 0.0
+            else phimoe_routing_function
+        )
+
         self.experts = FusedMoE(
             num_experts=num_experts,
             top_k=top_k,
@@ -285,7 +294,7 @@ class PhiMoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             tp_size=tp_size,
-            custom_routing_function=phimoe_routing_function,
+            custom_routing_function=routing_function,
             prefix=f"{prefix}.experts",
         )
 
@@ -409,6 +418,7 @@ class PhiMoEDecoderLayer(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
+            router_jitter_noise=config.router_jitter_noise,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe",
         )
