@@ -780,6 +780,7 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
+            context._ensure_final_parse()
             output = context.parser.make_response_output_items_from_parsable_context()
 
             if request.enable_response_messages:
@@ -1353,13 +1354,15 @@ class OpenAIServingResponses(OpenAIServing):
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
         async for ctx in result_generator:
-            assert isinstance(ctx, SimpleContext)
+            assert isinstance(ctx, (SimpleContext, ParsableContext))
             if ctx.last_output is None:
                 continue
             if reasoning_parser and prompt_is_reasoning_end is None:
-                prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
-                    ctx.last_output.prompt_token_ids
-                )
+                prompt_ids = ctx.last_output.prompt_token_ids
+                if prompt_ids is not None:
+                    prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
+                        prompt_ids
+                    )
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
