@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8MXFp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
 )
@@ -404,6 +405,34 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
+    def _is_mxfp8(weight_quant: QuantizationArgs, input_quant: QuantizationArgs):
+        if weight_quant is None or input_quant is None:
+            return False
+
+        is_tensor_group_quant = (
+            weight_quant.strategy == QuantizationStrategy.GROUP.value
+            and input_quant.strategy == QuantizationStrategy.GROUP.value
+        )
+        is_group_size_32 = (
+            weight_quant.group_size == 32 and input_quant.group_size == 32
+        )
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_float_type = (
+            weight_quant.type == QuantizationType.FLOAT
+            and input_quant.type == QuantizationType.FLOAT
+        )
+        is_8_bits = weight_quant.num_bits == 8 and input_quant.num_bits == 8
+
+        ret = (
+            is_tensor_group_quant
+            and is_symmetric
+            and is_float_type
+            and is_8_bits
+            and is_group_size_32
+        )
+        return ret
+
+    @staticmethod
     def _is_static_tensor_w8a8(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
@@ -630,6 +659,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             )
 
         act_quant_format = is_activation_quantization_format(format)
+        logger.debug(format)
+        logger.debug(act_quant_format)
         if act_quant_format:
             if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
                 input_quant
@@ -662,6 +693,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                     weight_quant=weight_quant,
                     is_static_input_scheme=is_static_input_scheme,
                 )
+
+            if self._is_mxfp8(weight_quant, input_quant):
+                return CompressedTensorsW8A8MXFp8()
 
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Int8(
