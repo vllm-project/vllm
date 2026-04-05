@@ -1372,7 +1372,10 @@ class OpenAIServingChat(OpenAIServing):
                 choices.append(choice_data)
                 continue
 
-            if reasoning_parser:
+            # When continuing a final message, skip extract_reasoning —
+            # all generated tokens are content.
+            skip_reasoning_parse = request.continue_final_message
+            if reasoning_parser and not skip_reasoning_parse:
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
                 reasoning, content = reasoning_parser.extract_reasoning(
