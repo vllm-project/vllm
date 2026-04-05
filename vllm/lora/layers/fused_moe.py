@@ -60,7 +60,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
 
-    def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
+    def _normalize_keys(
+        self, config: dict[str, int | bool | None]
+    ) -> dict[str, int | bool | None]:
         normalized_config = {}
         for key, value in config.items():
             if key.islower():
