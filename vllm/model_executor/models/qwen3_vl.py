@@ -1733,7 +1733,7 @@ class Qwen3VLForConditionalGeneration(
     # -- SupportsEncoderCudaGraph protocol methods --
 
     def get_encoder_cudagraph_config(self):
-        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
         )
 
@@ -1818,7 +1818,7 @@ class Qwen3VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
     ):
-        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
         )
 
@@ -1872,7 +1872,7 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
     ):
-        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
         )
 
