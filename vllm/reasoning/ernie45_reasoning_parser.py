@@ -87,7 +87,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
 
         # No <think> in previous or delta, also need to check for </think>.
         # Because the model may have generated </think> without <think>
-        if self.end_token_id in delta_token_ids:
+        if self.end_token in delta_text:
             # </think> in delta with more tokens,
             # extract reasoning content and content
             think_end_index = delta_text.find(self.end_token)
@@ -104,6 +104,10 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                 reasoning=reasoning,
                 content=content if content else None,
             )
+        elif self.end_token_id in delta_token_ids:
+            # end token ID arrived but text is still buffered
+            # (output_text_buffer_length delay); wait for text flush
+            return None
         elif self.end_token_id in previous_token_ids:
             # </think> in previous, thinking content ends
             content = delta_text
