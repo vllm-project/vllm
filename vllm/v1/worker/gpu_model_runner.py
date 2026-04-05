@@ -4809,8 +4809,8 @@ class GPUModelRunner(
         except torch.cuda.OutOfMemoryError as e:
             msg = (
                 "Failed to load model - not enough GPU memory. "
-                "Try lowering --gpu-memory-utilization to free memory for weights, "
-                "increasing --tensor-parallel-size, or using --quantization. "
+                "Try increasing --tensor-parallel-size, using --quantization, "
+                "or using a smaller model. "
                 "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
                 "for more tips."
             )
