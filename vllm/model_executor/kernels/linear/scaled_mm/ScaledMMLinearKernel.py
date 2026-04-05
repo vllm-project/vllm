@@ -132,7 +132,7 @@ class FP8ScaledMMLinearKernel(
         #   If dynamic, layer.input_scale is None and x_s computed from x.
         #   If static, layer.input_scale is scalar and x_s is input_scale.
         # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
+        x_2d = x.reshape(-1, x.shape[-1])
         output_shape = [*x.shape[:-1], w.shape[1]]
         out_dtype = x.dtype if maybe_out_dtype is None else maybe_out_dtype
 
