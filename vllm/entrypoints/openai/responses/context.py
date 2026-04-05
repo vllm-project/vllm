@@ -192,6 +192,7 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
+            assert isinstance(output.kv_transfer_params, dict)
             self.kv_transfer_params = output.kv_transfer_params
 
         # Accumulate text, token_ids, and logprobs for streaming mode
@@ -318,6 +319,7 @@ class ParsableContext(ConversationContext):
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
+            assert isinstance(output.kv_transfer_params, dict)
             self.kv_transfer_params = output.kv_transfer_params
         self.parser.process(output.outputs[0])
         output_token_ids = output.outputs[0].token_ids or []
@@ -565,6 +567,7 @@ class HarmonyContext(ConversationContext):
         self._update_prefill_token_usage(output)
         self._update_decode_token_usage(output)
         if output.kv_transfer_params is not None:
+            assert isinstance(output.kv_transfer_params, dict)
             self.kv_transfer_params = output.kv_transfer_params
         # Append current turn to all turn list for next turn's calculations
         self.all_turn_metrics.append(self.current_turn_metrics.copy())
@@ -878,6 +881,7 @@ class StreamingHarmonyContext(HarmonyContext):
             self.last_content_delta = last_delta_text
         self._update_decode_token_usage(output)
         if output.kv_transfer_params is not None:
+            assert isinstance(output.kv_transfer_params, dict)
             self.kv_transfer_params = output.kv_transfer_params
 
         # For streaming, update previous turn when message is complete

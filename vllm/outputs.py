@@ -120,7 +120,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         *,
-        kv_transfer_params: dict[str, Any] | None = None,
+        kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -140,13 +140,25 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
-        self.kv_transfer_params = kv_transfer_params
+        self.kv_transfer_params_list = []
+        if kv_transfer_params:
+            if isinstance(kv_transfer_params, list):
+                self.kv_transfer_params_list = kv_transfer_params
+            else:
+                self.kv_transfer_params_list = [kv_transfer_params]
+
+    @property
+    def kv_transfer_params(self) -> dict[str, Any] | list[dict[str, Any]] | None:
+        if len(self.kv_transfer_params_list) == 1:
+            return self.kv_transfer_params_list[0]
+        if len(self.kv_transfer_params_list):
+            return self.kv_transfer_params_list
+        return None
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
-        self.kv_transfer_params = next_output.kv_transfer_params
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -171,6 +183,7 @@ class RequestOutput:
                     break
             else:
                 self.outputs.append(next_completion)
+                self.kv_transfer_params_list.extend(next_output.kv_transfer_params_list)
 
     def __repr__(self) -> str:
         return (
