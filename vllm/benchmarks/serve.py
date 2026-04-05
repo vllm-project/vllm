@@ -630,6 +630,7 @@ async def benchmark(
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
+    disable_connection_pooling: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -646,7 +647,7 @@ async def benchmark(
         use_dns_cache=True,
         keepalive_timeout=60,
         enable_cleanup_closed=True,
-        force_close=False,
+        force_close=disable_connection_pooling,
         ssl=ssl_setting,
     )
 
@@ -1602,6 +1603,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Disable SSL certificate verification. Use this option when "
         "connecting to servers with self-signed certificates.",
     )
+    parser.add_argument(
+        "--disable-connection-pooling",
+        action="store_true",
+        default=False,
+        help="Disable HTTP connection pooling. Each request opens a new "
+        "TCP connection instead of reusing existing ones. Useful when "
+        "benchmarking behind a load balancer so each request can be "
+        "routed independently.",
+    )
 
     parser.add_argument(
         "--plot-timeline",
@@ -1818,6 +1828,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
+        disable_connection_pooling=args.disable_connection_pooling,
     )
 
     # Save config and results to json
