@@ -6,7 +6,8 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.10.0",
+    "torch == 2.10.0; platform_machine != 'ppc64le'",
+    "torch >= 2.1.0; platform_machine == 'ppc64le'",  # ppc64le: exact version not available
     "wheel",
     "jinja2",
 ]
