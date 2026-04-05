@@ -247,3 +247,9 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+class EngineStatusType(enum.IntEnum):
+    HEALTHY = 0
+    DEAD = 1
+    UNHEALTHY = 2

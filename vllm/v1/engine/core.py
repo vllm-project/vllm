@@ -68,6 +68,10 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import (
+    EngineCoreSentinel,
+    fault_tolerant_wrapper,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -845,6 +849,21 @@ class EngineCoreProc(EngineCore):
                 )
             self._init_data_parallel(vllm_config)
 
+            # Initialize fault tolerance settings.
+            self.enable_fault_tolerance = (
+                vllm_config.parallel_config.enable_fault_tolerance
+            )
+            if self.enable_fault_tolerance:
+                assert addresses.fault_tolerance_addresses is not None
+                ft_addresses = addresses.fault_tolerance_addresses
+                engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
+                self.engine_core_sentinel = EngineCoreSentinel(
+                    parallel_config=vllm_config.parallel_config,
+                    engine_index=self.engine_index,
+                    engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
+                    sentinel_identity=engine_core_sentinel_ids[self.engine_index],
+                )
+
             super().__init__(
                 vllm_config,
                 executor_class,
@@ -1133,6 +1152,7 @@ class EngineCoreProc(EngineCore):
         """Returns true if shutdown has not been requested."""
         return self.shutdown_state == EngineShutdownState.RUNNING
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         while self._handle_shutdown():
@@ -1575,6 +1595,11 @@ class EngineCoreProc(EngineCore):
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
 
+    def shutdown(self):
+        super().shutdown()
+        if self.enable_fault_tolerance:
+            self.engine_core_sentinel.shutdown()
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -1693,6 +1718,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
