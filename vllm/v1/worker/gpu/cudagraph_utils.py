@@ -39,6 +39,7 @@ class BatchExecutionDescriptor:
 
     cg_mode: CUDAGraphMode
     num_tokens: int
+    num_tokens_for_attn: int | None
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
 
@@ -128,27 +129,31 @@ class CudaGraphManager:
                 and decode_mode
                 and self.decode_query_len <= num_tokens <= max_decode_tokens
             ):
+                num_reqs = num_tokens // self.decode_query_len
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
                     num_tokens=num_tokens,
-                    num_reqs=num_tokens // self.decode_query_len,
+                    num_tokens_for_attn=num_reqs * self.decode_query_len,
+                    num_reqs=num_reqs,
                     uniform_token_count=self.decode_query_len,
                 )
                 descs_by_mode[decode_mode].append(desc)
                 descs_by_token_count[num_tokens].append(desc)
 
             if mixed_mode:
-                # for PIECEWISE graphs there is no limit on requests when replaying
-                # i.e. no request padding is needed
-                # so we leave it as None
-                num_reqs = (
-                    min(num_tokens, self.max_num_reqs)
-                    if mixed_mode == CUDAGraphMode.FULL
-                    else None
-                )
+                if mixed_mode == CUDAGraphMode.FULL:
+                    num_reqs = min(num_tokens, self.max_num_reqs)
+                    num_tokens_for_attn = num_tokens
+                else:
+                    # for PIECEWISE graphs there is no limit on requests when replaying
+                    # i.e. no request padding is needed
+                    # so we leave it as None
+                    num_reqs = None
+                    num_tokens_for_attn = None
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
                     num_tokens=num_tokens,
+                    num_tokens_for_attn=num_tokens_for_attn,
                     num_reqs=num_reqs,
                 )
                 descs_by_mode[mixed_mode].append(desc)
@@ -241,7 +246,10 @@ class CudaGraphManager:
                 if _is_compatible(desc, num_reqs, num_tokens, uniform_token_count):
                     return desc
         return BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=num_tokens,
+            num_tokens_for_attn=None,
+            num_reqs=num_reqs,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):

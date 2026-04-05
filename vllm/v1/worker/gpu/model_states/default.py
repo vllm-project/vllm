@@ -166,11 +166,10 @@ class DefaultModelState(ModelState):
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
-            num_tokens = input_batch.num_tokens_after_padding
         else:
             # For piecewise cudagraphs and eager, use unpadded sizes.
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
+        num_tokens = input_batch.num_tokens_for_attn
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         attn_metadata = build_attn_metadata(
