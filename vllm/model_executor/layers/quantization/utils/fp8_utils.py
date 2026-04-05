@@ -482,10 +482,13 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
 
+        m = input_2d.shape[0]
         n, k = weight.shape
 
+        triton_max_m = envs.VLLM_ROCM_W8A8_TRITON_MAX_M
         use_triton = (
             not current_platform.is_fp8_fnuz()
+            and m <= triton_max_m
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
 
