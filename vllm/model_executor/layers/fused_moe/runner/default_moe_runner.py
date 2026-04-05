@@ -186,6 +186,7 @@ class DefaultMoERunner(MoERunner):
         quant_method: FusedMoEMethodBase,
         reduce_results: bool,
         enable_dbo: bool,
+        num_ubatches: int = 1,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -195,6 +196,7 @@ class DefaultMoERunner(MoERunner):
         self.quant_method = quant_method
         self.reduce_results = reduce_results
         self.enable_dbo = enable_dbo
+        self.num_ubatches = num_ubatches
 
         self.shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -208,7 +210,7 @@ class DefaultMoERunner(MoERunner):
                 # flags derived from the quant_method's MK.
                 reduce_results=reduce_results,
                 quant_method=quant_method,
-                enable_dbo=enable_dbo,
+                num_ubatches=num_ubatches,
             )
 
         # Chunked all2all staging tensor
@@ -265,9 +267,9 @@ class DefaultMoERunner(MoERunner):
 
         moe = self.moe_config
 
-        if self.enable_dbo:
-            states_shape = (2, moe.max_num_tokens, self.moe_config.hidden_dim)
-            logits_shape = (2, moe.max_num_tokens, self.moe_config.num_logical_experts)
+        if self.num_ubatches > 1:
+            states_shape = (self.num_ubatches, moe.max_num_tokens, self.moe_config.hidden_dim)
+            logits_shape = (self.num_ubatches, moe.max_num_tokens, self.moe_config.num_logical_experts)
         else:
             states_shape = (moe.max_num_tokens, self.moe_config.hidden_dim)
             logits_shape = (moe.max_num_tokens, self.moe_config.num_logical_experts)
@@ -667,7 +669,7 @@ class DefaultMoERunner(MoERunner):
         assert orig is not None
         slice_size = end - start
         orig_slice = orig[start:end, :]
-        if self.enable_dbo:
+        if self.num_ubatches > 1:
             assert out_slice.dim() == 3
             batch_buffer_idx = dbo_current_ubatch_id()
             out_slice = out_slice[batch_buffer_idx, :]
