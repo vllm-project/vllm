@@ -4,6 +4,7 @@
 from collections.abc import Callable
 
 import torch
+from vllm.platforms import current_platform
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -106,31 +107,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight
-        weight_scale = layer.weight_scale
-        size_k_first = True
-        # TODO(rob): refactor block quant into separate class.
-        if self.strategy == QuantizationStrategy.BLOCK:
-            assert self.is_static_input_scheme is False
-            size_k_first = False
-            weight, weight_scale = process_fp8_weight_block_strategy(
-                weight, weight_scale
-            )
-        else:
-            # Weights must be transposed for marlin
-            weight = weight.t()
-            if self.strategy == QuantizationStrategy.TENSOR:
-                # If we have a fused module (QKV, MLP) with per tensor scales,
-                # we expand each scale to its shard's channels.
-                weight_scale = convert_to_channelwise(
-                    weight_scale, layer.logical_widths
-                )
-
-        # Update layer with new values
-        replace_parameter(layer, "weight", weight.data)
-        replace_parameter(layer, "weight_scale", weight_scale.data)
-
-        prepare_fp8_layer_for_marlin(layer, size_k_first=size_k_first)
+        pass
 
     def apply_weights(
         self,
@@ -138,12 +115,4 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_fp8_marlin_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            bias=bias,
-        )
+        pass

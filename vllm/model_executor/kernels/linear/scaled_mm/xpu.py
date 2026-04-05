@@ -10,6 +10,7 @@ from vllm.model_executor.kernels.linear import (  # noqa: E501
     FP8ScaledMMLinearLayerConfig,
 )
 from vllm.platforms import current_platform
+from vllm.model_executor.utils import replace_parameter
 
 
 class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -34,6 +35,45 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         assert self.is_supported()[0]
         self.config = c
         self.layer_param_names = layer_param_names
+
+    def _requant_weight_per_tensor(self, layer: torch.nn.Module) -> None:
+        device = layer.weight.device
+        # Get the max scale on the weight's device
+        max_scale = torch.max(layer.weight_scale.data.to(device))
+        orig_dtype = layer.weight.dtype
+        start_idx = 0
+        for index, width in enumerate(layer.logical_widths):
+            end_idx = start_idx + width
+            if width == 0:
+                continue
+
+            shard_weight = layer.weight[start_idx:end_idx, :]
+            shard_scale = layer.weight_scale[index].to(device)
+
+            # Dequantize and then requantize with max_scale
+            dequantized_shard = shard_weight.to(torch.float32) * shard_scale
+            requantized_shard = (dequantized_shard / max_scale).to(orig_dtype)
+
+            layer.weight[start_idx:end_idx, :] = requantized_shard
+            start_idx = end_idx
+
+        replace_parameter(layer, "weight_scale", max_scale)
+            
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Give xpu only support to per-tensor strategy for now
+        # So if we have a fused module (QKV, MLP) with per tensor scales,
+        # requantize the weights w/ max scale
+        is_compressed_tensors = hasattr(layer, "scheme") and "CompressedTensors" in type(layer.scheme).__name__
+        is_fused_per_tensor = (
+            hasattr(layer, "logical_widths")
+            and len(layer.logical_widths) > 1
+            and layer.weight_scale.numel() == len(layer.logical_widths)
+            and layer.weight_scale.dim() == 1
+        )
+        if is_compressed_tensors and is_fused_per_tensor:
+            self._requant_weight_per_tensor(layer)
+ 
+        replace_parameter(layer, "weight", layer.weight.t())
 
     def apply_weights(
         self,
