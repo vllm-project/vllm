@@ -3,6 +3,8 @@
 
 from typing import TYPE_CHECKING
 
+import torch
+
 from vllm.logger import init_logger
 from vllm.platforms.cpu import CpuPlatform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -65,3 +67,9 @@ class ZenCpuPlatform(CpuPlatform):
         patched_dumps._zen_patched = True  # type: ignore[attr-defined]
         FxGraphCachePickler.dumps = patched_dumps
         logger.info("[zen_cpu] Patched FxGraphCachePickler.dumps (ValueError fix)")
+
+    # Currently, AMD CPUs do not support float16 compute.
+    # Hence explicitly return bfloat16 and float32.
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.float32]
