@@ -644,36 +644,20 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        if self.is_fp4_ckpt:
-            # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-            # weights_proj does not get quantized,
-            # so we run both with quant_config=None
-            # wk may be upcasted from the default quant;
-            # experiments show fusion is always faster unless WK proj is in FP4,
-            # which is not the case for all known quants.
-            self.wk_weights_proj = MergedColumnParallelLinear(
-                hidden_size,
-                [self.head_dim, self.n_head],
-                bias=False,
-                quant_config=None,
-                disable_tp=True,
-                prefix=f"{prefix}.wk_weights_proj",
-            )
-        else:
-            self.wk = ReplicatedLinear(
-                hidden_size,
-                self.head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.wk",
-            )
-            self.weights_proj = ReplicatedLinear(
-                hidden_size,
-                self.n_head,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.weights_proj",
-            )
+        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
+        # FP4 checkpoints don't quantize weights_proj, so use quant_config=None.
+        # Other quantized checkpoints (e.g. GLM-5-FP8) may quantize the fused
+        # tensor, so pass quant_config to create weight_scale_inv parameters.
+        # Checkpoints with separate wk/weights_proj tensors are handled by the
+        # stacked_params_mapping in load_weights.
+        self.wk_weights_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [self.head_dim, self.n_head],
+            bias=False,
+            quant_config=None if self.is_fp4_ckpt else quant_config,
+            disable_tp=True,
+            prefix=f"{prefix}.wk_weights_proj",
+        )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
@@ -714,14 +698,9 @@ class Indexer(nn.Module):
         q_pe, q_nope = torch.split(
             q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
-        if self.is_fp4_ckpt:
-            # Fused wk + weights_proj: one GEMM, then split
-            kw, _ = self.wk_weights_proj(hidden_states)
-            k = kw[:, : self.head_dim]
-            weights = kw[:, self.head_dim :]
-        else:
-            k, _ = self.wk(hidden_states)
-            weights, _ = self.weights_proj(hidden_states)
+        kw, _ = self.wk_weights_proj(hidden_states)
+        k = kw[:, : self.head_dim]
+        weights = kw[:, self.head_dim :]
 
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(
@@ -1469,8 +1448,13 @@ class DeepseekV2ForCausalLM(
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
-        if self.is_fp4_ckpt:
-            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        if self.is_v32:
+            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj).
+            # For checkpoints with separate wk/weights_proj tensors, this mapping
+            # loads them into the fused MergedColumnParallelLinear shards.
+            # For checkpoints that already have fused wk_weights_proj (e.g.
+            # GLM-5-FP8), the substring match is a false positive and the
+            # fallback check in the loading loop skips it gracefully.
             indexer_fused_mapping = [
                 ("wk_weights_proj", "wk", 0),
                 ("wk_weights_proj", "weights_proj", 1),
@@ -1528,11 +1512,12 @@ class DeepseekV2ForCausalLM(
                     continue
                 name_mapped = name.replace(weight_name, param_name)
 
-                # QKV fusion is optional, fall back to normal
-                # weight loading if it's not enabled
-                # if go with fusion option, then update name
+                # QKV fusion and indexer fusion are optional — fall back to
+                # direct weight loading when the mapped name doesn't exist
+                # (e.g. fused checkpoints where "wk" falsely matches
+                # "wk_weights_proj", or when QKV fusion is disabled).
                 if (
-                    param_name == "fused_qkv_a_proj"
+                    param_name in ("fused_qkv_a_proj", "wk_weights_proj")
                 ) and name_mapped not in params_dict:
                     continue
                 else:

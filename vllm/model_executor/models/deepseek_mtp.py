@@ -248,13 +248,14 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
-        if self.is_fp4_ckpt:
-            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-            indexer_fused_mapping = [
-                ("wk_weights_proj", "wk", 0),
-                ("wk_weights_proj", "weights_proj", 1),
-            ]
-            stacked_params_mapping.extend(indexer_fused_mapping)
+        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj).
+        # Always included; the fallback check in the loading loop handles
+        # checkpoints that already have fused wk_weights_proj tensors.
+        indexer_fused_mapping = [
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
+        ]
+        stacked_params_mapping.extend(indexer_fused_mapping)
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             self,
@@ -297,10 +298,10 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     continue
                 name_mapped = name.replace(weight_name, param_name)
 
-                # QKV fusion is optional, fall back to normal
-                # weight loading if it's not enabled
+                # QKV fusion and indexer fusion are optional — fall back to
+                # direct weight loading when the mapped name doesn't exist.
                 if (
-                    param_name == "fused_qkv_a_proj"
+                    param_name in ("fused_qkv_a_proj", "wk_weights_proj")
                 ) and name_mapped not in params_dict:
                     continue
                 else:
