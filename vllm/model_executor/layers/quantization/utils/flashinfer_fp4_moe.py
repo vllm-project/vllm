@@ -218,6 +218,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     )
 
     assert backend in [
+        NvFp4MoeBackend.B12X,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
@@ -231,6 +232,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         and is_act_and_mul
         and backend
         in [
+            NvFp4MoeBackend.B12X,
             NvFp4MoeBackend.FLASHINFER_CUTLASS,
             NvFp4MoeBackend.FLASHINFER_TRTLLM,
         ]

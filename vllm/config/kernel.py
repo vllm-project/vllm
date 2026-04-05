@@ -107,6 +107,7 @@ class IrOpPriorityConfig:
 
 MoEBackend = Literal[
     "auto",
+    "b12x",
     "triton",
     "deep_gemm",
     "cutlass",
