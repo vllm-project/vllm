@@ -162,6 +162,9 @@ class Request:
         # The number of tokens that have been computed remotely.
         self.num_external_computed_tokens = 0
 
+        # The number of tokens fetched from an external KV cache.
+        self.num_external_cached_tokens = -1
+
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
