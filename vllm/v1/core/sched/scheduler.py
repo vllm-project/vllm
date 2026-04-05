@@ -1419,9 +1419,9 @@ class Scheduler(SchedulerInterface):
                         new_token_ids,
                         req_id,
                     )
-                    request.status = RequestStatus.FINISHED_ABORTED
+                    request.status = RequestStatus.FINISHED_ERROR
+                    request.resumable = False
                     stopped = True
-                    request.fsm_failed_to_advance = True
 
             routed_experts = None
             finish_reason = None
@@ -1589,9 +1589,6 @@ class Scheduler(SchedulerInterface):
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
-            return True
-
-        if request.fsm_failed_to_advance:
             return True
 
         if request.streaming_queue:

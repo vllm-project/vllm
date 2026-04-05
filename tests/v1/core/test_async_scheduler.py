@@ -308,7 +308,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
 
     scheduler.update_from_output(output, model_runner_output)
 
-    assert request.fsm_failed_to_advance is True
-    assert request.status == RequestStatus.FINISHED_ABORTED
+    assert request.resumable is False
+    assert request.status == RequestStatus.FINISHED_ERROR
     assert request.request_id not in scheduler.requests
     assert not scheduler.running
