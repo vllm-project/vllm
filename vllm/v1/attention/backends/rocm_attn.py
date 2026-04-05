@@ -464,8 +464,9 @@ class RocmAttentionImpl(AttentionImpl):
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
 
-        if block_size in (16, 32):
-            # Normal 16, 32, use vLLM native HIP C++ logic
+        is_contiguous_blocks = key_cache.stride(0) == key_cache[0].numel()
+        if block_size in (16, 32) and is_contiguous_blocks:
+            # Normal 16, 32 with contiguous blocks, use vLLM native HIP C++ logic
             PagedAttention.write_to_paged_cache(
                 key,
                 value,
@@ -477,8 +478,11 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
         else:
-            # Case B: Non-standard blocks (e.g., 64, 128, 544 in Qwen3Next or Qwen3.5 ),
-            # force using our modified Triton logic
+            # Non-standard blocks (e.g., 544 in Qwen3Next) or non-contiguous
+            # blocks (e.g., hybrid Mamba models where page size is padded to
+            # align attention and Mamba state pages). The C++ reshape_and_cache
+            # kernel assumes contiguous block layout, so fall back to Triton
+            # which uses explicit strides.
             triton_reshape_and_cache_flash(
                 key,
                 value,
