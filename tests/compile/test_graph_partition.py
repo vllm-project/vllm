@@ -16,6 +16,168 @@ from vllm.compilation.passes.fx_utils import find_op_nodes
 from . import silly_attention  # noqa: F401
 
 
+def test_no_split():
+    """
+    Test that passing an empty split_ops list leaves the graph unsplit.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        x = x * 2
+        x = torch.relu(x)
+        x = x - 3
+        return x
+
+    x = torch.randn(6, 4)
+    gm = make_fx(model_fn)(x)
+    split_gm, split_items = split_graph(gm, splitting_ops=[])
+
+    # Check: no split ops, should not split the graph
+    assert len(split_items) == 1, "Graph should not be split"
+
+    # Check: outputs should match
+    new_x = torch.randn(6, 4)
+    output_original = gm(new_x)
+    output_split = split_gm(new_x)
+    assert torch.allclose(output_original, output_split), (
+        "Output mismatch when no split"
+    )
+
+
+def test_single_split_op():
+    """
+    Test splitting on a single op type, verifying submodule count,
+    per-submodule op targets, and is_splitting_graph flags.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        x = x + 1
+        x = torch.relu(x)
+        x = x + 2
+        return x
+
+    x = torch.randn(5, 3)
+    gm = make_fx(model_fn)(x)
+    split_gm, split_items = split_graph(gm, splitting_ops=["aten::relu"])
+
+    # Check: Split on relu, should create 3 submodules
+    assert len(split_items) == 3, "Graph should be split into 3 submodules"
+
+    # Check: Each submodule details
+    expected_targets = [
+        torch.ops.aten.add.Tensor,
+        torch.ops.aten.relu.default,
+        torch.ops.aten.add.Tensor,
+    ]
+    expected_is_splitting = [False, True, False]
+    for split_item, expected_target, expected_splitting in zip(
+        split_items, expected_targets, expected_is_splitting
+    ):
+        call_func_nodes = [
+            n for n in split_item.graph.graph.nodes if n.op == "call_function"
+        ]
+        assert len(call_func_nodes) == 1
+        assert call_func_nodes[0].target == expected_target
+        assert split_item.is_splitting_graph == expected_splitting, (
+            f"Submodule with {expected_target} should have "
+            f"is_splitting_graph={expected_splitting}"
+        )
+
+    # Check: outputs should match
+    new_x = torch.randn(5, 3)
+    output_original = gm(new_x)
+    output_split = split_gm(new_x)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_split_op_at_boundaries():
+    """
+    Test that split ops at the very start or end of the graph produce correct
+    submodule counts and output values (no empty/degenerate subgraph surprises).
+    """
+
+    def model_leading(x: torch.Tensor) -> torch.Tensor:
+        # relu is the first op — nothing before it
+        x = torch.relu(x)
+        x = x + 1
+        return x
+
+    def model_trailing(x: torch.Tensor) -> torch.Tensor:
+        # relu is the last op — nothing after it
+        x = x + 1
+        x = torch.relu(x)
+        return x
+
+    x = torch.randn(4, 4)
+
+    for model_fn in (model_leading, model_trailing):
+        gm = make_fx(model_fn)(x)
+        split_gm, split_items = split_graph(gm, splitting_ops=["aten::relu"])
+
+        # Check: should split into exactly 2 submodules (one splitting, one not)
+        assert len(split_items) == 2, (
+            f"{model_fn.__name__}: expected 2 submodules, got {len(split_items)}"
+        )
+
+        # Check: exactly one submodule should be the splitting graph containing relu
+        splitting_items = [s for s in split_items if s.is_splitting_graph]
+        assert len(splitting_items) == 1, (
+            f"{model_fn.__name__}: expected exactly 1 splitting subgraph"
+        )
+
+        # Check outputs match
+        new_x = torch.randn(4, 4)
+        output_original = gm(new_x)
+        output_split = split_gm(new_x)
+        assert torch.allclose(output_original, output_split), (
+            f"Output mismatch for {model_fn.__name__}"
+        )
+
+
+def test_repeated_split_op():
+    """
+    Test that each occurrence of the same split op creates its own splitting
+    subgraph, and non-splitting subgraphs in between are correctly identified.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        x = x + 1
+        x = torch.relu(x)  # split point 1
+        x = x + 2
+        x = torch.relu(x)  # split point 2
+        x = x + 3
+        return x
+
+    x = torch.randn(3, 3)
+    gm = make_fx(model_fn)(x)
+    split_gm, split_items = split_graph(gm, splitting_ops=["aten::relu"])
+
+    # Check: should split into 5 submodules: [add, relu, add, relu, add]
+    assert len(split_items) == 5, (
+        f"Expected 5 submodules for two relu splits, got {len(split_items)}"
+    )
+
+    # Check: should have 2 splitting subgraphs, each containing one relu
+    splitting_items = [s for s in split_items if s.is_splitting_graph]
+    assert len(splitting_items) == 2, (
+        f"Expected 2 splitting subgraphs (one per relu), got {len(splitting_items)}"
+    )
+    for item in splitting_items:
+        relu_nodes = [
+            n
+            for n in item.graph.graph.nodes
+            if n.op == "call_function" and n.target == torch.ops.aten.relu.default
+        ]
+        assert len(relu_nodes) == 1, (
+            "Each splitting subgraph should contain exactly one relu"
+        )
+
+    # Check outputs match
+    new_x = torch.randn(3, 3)
+    output_original = gm(new_x)
+    output_split = split_gm(new_x)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
 def test_getitem_moved_to_producer_subgraph():
     """
     Test that getitem operations are moved to the same subgraph as their input,
