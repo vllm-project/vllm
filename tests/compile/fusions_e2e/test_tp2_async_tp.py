@@ -24,7 +24,16 @@ from .models import (
     qwen3_a3b,
 )
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Only test CUDA or XPU",
+)
+
+ATTN_BACKENDS = (
+    [TRITON_ATTN, FLASHINFER_ATTN]
+    if current_platform.is_cuda_alike()
+    else [TRITON_ATTN]
+)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -32,7 +41,7 @@ pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only tes
     "model_name, matches_fn, model_kwargs, hf_overrides",
     [llama3_8b_fp8, llama4_scout_fp8],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
@@ -159,7 +168,7 @@ def test_tp2_async_tp_fusions(
     "model_name, matches_fn, model_kwargs, hf_overrides",
     [llama3_8b_fp8, llama4_scout_fp8],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)

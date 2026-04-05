@@ -299,6 +299,10 @@ class XPUPlatform(Platform):
         return device_name.count("data center gpu") > 0
 
     @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         from vllm.utils.torch_utils import supports_xccl
 

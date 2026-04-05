@@ -396,12 +396,13 @@ class AsyncTPPass(VllmPatternMatcherPass):
                 self.patterns
             )
 
-            CutlassScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
-                self.patterns
-            )
-            AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
-                self.patterns
-            )
+            if current_platform.is_cuda():
+                CutlassScaledMMReduceScatterPattern(
+                    self.model_dtype, self.device
+                ).register(self.patterns)
+                AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
+                    self.patterns
+                )
 
         self.dump_patterns(config, self.patterns)
 
