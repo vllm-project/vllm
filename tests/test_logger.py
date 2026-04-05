@@ -103,6 +103,37 @@ def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypa
     assert log_record.levelno == logging.INFO
 
 
+@pytest.mark.skip_global_cleanup
+def test_opt_in_per_rank_file_logging(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
+    monkeypatch.setenv("VLLM_LOGGING_COLOR", "1")
+    monkeypatch.setenv("VLLM_LOGGING_FILE_DIR", str(tmp_path))
+    monkeypatch.setenv("RANK", "7")
+
+    _configure_vllm_root_logger()
+
+    test_logger = init_logger(f"vllm.test_file_logger.{uuid4()}")
+    test_message = "per-rank file logging test"
+    test_logger.info(test_message)
+
+    for handler in logging.getLogger("vllm").handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
+
+    log_files = list(tmp_path.glob("vllm_*.log"))
+    assert len(log_files) == 1
+    assert log_files[0].name.endswith(f"_rank7_pid{os.getpid()}.log")
+
+    log_content = log_files[0].read_text(encoding="utf-8")
+    assert "[rank7]" in log_content
+    assert test_message in log_content
+    assert "\x1b[" not in log_content
+
+    # Restore the default logger configuration for subsequent tests.
+    monkeypatch.delenv("VLLM_LOGGING_FILE_DIR", raising=False)
+    _configure_vllm_root_logger()
+
+
 def test_logger_configuring_can_be_disabled(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however mocks are used to ensure no changes in behavior or
