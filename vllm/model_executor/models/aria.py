@@ -51,6 +51,9 @@ from .utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
+from vllm.compilation.decorators import support_torch_compile
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
+from vllm.forward_context import set_forward_context
 
 
 class AriaImagePixelInputs(TensorSchema):
@@ -76,6 +79,14 @@ class AriaImagePixelInputs(TensorSchema):
     ]
 
 
+@support_torch_compile(
+    enable_if=should_torch_compile_mm_vit,
+    dynamic_arg_dims={
+        "pixel_values": 0,
+        # "patch_attention_mask": 0,
+        "tgt_sizes": 0,
+    }
+)
 class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -538,14 +549,15 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.config = config
+        self.vllm_config = vllm_config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = AriaVisionTransformer(
-                config.vision_config,
+                config=config.vision_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.vision_tower",
             )
+            # self.vision_tower.compile(fullgraph=True)
             self.multi_modal_projector = AriaProjector(
                 config, prefix=maybe_prefix(prefix, "multi_modal_projector")
             )
@@ -624,7 +636,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
-        multimodal_embeddings = self._process_image_input(image_input)
+        with set_forward_context(None, self.vllm_config):
+            multimodal_embeddings = self._process_image_input(image_input)
         return multimodal_embeddings
 
     def forward(
