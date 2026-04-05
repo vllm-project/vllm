@@ -42,6 +42,12 @@ logger = init_logger(__name__)
 # than the 400 we want.
 _ALLOWED_PURPOSES: frozenset[str] = frozenset({"vision", "user_data"})
 
+# Cap on scope header value length. The scope is retained in memory per
+# FileRecord and included in every audit log line, so an unbounded value
+# is a memory DoS vector. 256 bytes covers realistic gateway-injected
+# identifiers (UUIDs, emails, tenant names) with headroom.
+_SCOPE_MAX_BYTES = 256
+
 
 def _err(status: HTTPStatus, message: str, err_type: str) -> ErrorResponse:
     return ErrorResponse(
@@ -71,27 +77,45 @@ class OpenAIServingFiles:
     ) -> tuple[str | None, ErrorResponse | None]:
         """Read the configured scope header from the request.
 
+        Empty-string and whitespace-only header values are rejected as
+        "missing" — a scope identifier MUST be a non-empty, non-blank
+        string. Scope values are also capped at 256 bytes to prevent
+        memory DoS (every FileRecord and every audit log line retains
+        the scope value).
+
         Returns:
             A `(scope, err)` tuple. `err` is non-None when the scope
-            header is required but absent, in which case the caller
-            should return the error directly. When scoping is disabled
-            server-side, `scope` is always None.
+            header is required but absent/empty/too-long, in which
+            case the caller should return the error directly. When
+            scoping is disabled server-side, `scope` is always None.
         """
         header_name = self._config.scope_header
         if not header_name:
             return None, None
         value = request.headers.get(header_name)
+        if value is not None:
+            value = value.strip()
         if not value:
             return None, _err(
                 HTTPStatus.BAD_REQUEST,
                 f"Scope header {header_name!r} required",
                 "invalid_request_error",
             )
+        if len(value.encode("utf-8")) > _SCOPE_MAX_BYTES:
+            return None, _err(
+                HTTPStatus.BAD_REQUEST,
+                f"Scope header {header_name!r} exceeds {_SCOPE_MAX_BYTES} bytes",
+                "invalid_request_error",
+            )
         return value, None
 
     def _record_to_object(self, record: FileRecord) -> FileObject:
+        # Compute expires_at from created_at (stable per file), matching
+        # OpenAI's Files API semantics. The previous atime-relative
+        # computation made expires_at drift forward on every access,
+        # breaking client caches that assume the value is deterministic.
         if self._ttl_enabled:
-            expires_at = int(record.last_accessed) + self._config.ttl_seconds
+            expires_at = record.created_at + self._config.ttl_seconds
         else:
             expires_at = None
         return FileObject(
@@ -229,22 +253,14 @@ class OpenAIServingFiles:
         scope, err = self._extract_scope(request)
         if err is not None:
             return err
-        record = self._store.get(file_id, scope)
-        if record is None:
-            return _err(
-                HTTPStatus.NOT_FOUND,
-                f"File {file_id!r} not found",
-                "not_found_error",
-            )
         try:
-            stream = await self._store.stream_content(
+            stream, record = await self._store.stream_content(
                 file_id,
                 scope,
                 client_host=self._client_host(request),
                 request_id=self._request_id(request),
             )
         except FileNotFoundError:
-            # Race: file evicted between get() and stream_content().
             return _err(
                 HTTPStatus.NOT_FOUND,
                 f"File {file_id!r} not found",

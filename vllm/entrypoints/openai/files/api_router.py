@@ -3,8 +3,9 @@
 """FastAPI router for /v1/files.
 
 Wired into the app in `api_server.py:build_app` only when
-`FileUploadConfig.enabled` is True. All endpoints return 404 when the
-feature is off, by virtue of the router not being attached at all.
+`FileUploadConfig.enabled` is True. When the feature is off the router
+is still attached, but every handler short-circuits with 501 via
+`_not_configured()` so clients get a clear "not implemented" signal.
 """
 
 from __future__ import annotations

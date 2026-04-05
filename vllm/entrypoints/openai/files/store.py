@@ -355,7 +355,6 @@ class FileUploadStore:
         exception propagates, so no on-disk leak occurs.
         """
         clean_name = sanitize_filename(filename)
-        await self._maybe_sweep()
         # Non-blocking acquire — if we're at max_concurrent, reject with
         # 503 rather than queueing indefinitely (documented contract).
         if self._upload_semaphore.locked():
@@ -363,6 +362,10 @@ class FileUploadStore:
                 f"too many in-flight uploads "
                 f"(max_concurrent={self._config.max_concurrent})"
             )
+        # Run the opportunistic sweep AFTER the concurrency gate so that
+        # rejected callers don't pay the cost of the TTL sweep (which
+        # takes `self._lock` and serialises against concurrent writers).
+        await self._maybe_sweep()
         async with self._upload_semaphore:
             file_id = new_file_id()
             on_disk = self._on_disk_path(file_id)
@@ -531,7 +534,7 @@ class FileUploadStore:
         scope: str | None,
         client_host: str | None = None,
         request_id: str | None = None,
-    ) -> AsyncIterator[bytes]:
+    ) -> tuple[AsyncIterator[bytes], FileRecord]:
         """Async iterator yielding the file's bytes in 64 KiB chunks.
 
         The file handle is opened eagerly (before returning the iterator)
@@ -542,7 +545,10 @@ class FileUploadStore:
         unlinks, so reads after open are safe.
 
         Returns:
-            An async iterator over byte chunks from the on-disk file.
+            A `(stream, record)` tuple. The record is returned so
+            serving-layer callers can read fields like `mime_type`
+            without a second `get()` that would touch `last_accessed`
+            a second time.
 
         Raises:
             FileNotFoundError: If `file_id` does not resolve under
@@ -580,7 +586,7 @@ class FileUploadStore:
                 # on a buffer flush / metadata update on slow filesystems.
                 await loop.run_in_executor(None, fh.close)
 
-        return _stream()
+        return _stream(), record
 
     def read_bytes(self, file_id: str, scope: str | None) -> bytes | None:
         """Synchronous whole-file read, scope-enforced.
@@ -625,14 +631,6 @@ class FileUploadStore:
         if record is None:
             return None
         record.last_accessed = time.time()
-        self._audit(
-            "file.resolve",
-            file_id=file_id,
-            bytes=record.bytes,
-            scope=record.scope,
-            client_host=None,
-            request_id=None,
-        )
         loop = asyncio.get_running_loop()
 
         def _read() -> bytes | None:
@@ -641,7 +639,18 @@ class FileUploadStore:
             except FileNotFoundError:
                 return None
 
-        return await loop.run_in_executor(None, _read)
+        data = await loop.run_in_executor(None, _read)
+        if data is None:
+            return None
+        self._audit(
+            "file.resolve",
+            file_id=file_id,
+            bytes=record.bytes,
+            scope=record.scope,
+            client_host=None,
+            request_id=None,
+        )
+        return data
 
     def read_bytes_by_id(self, file_id: str) -> bytes | None:
         """Scope-bypassing sync read for `MediaConnector` (sync path only).
@@ -659,6 +668,10 @@ class FileUploadStore:
         if record is None:
             return None
         record.last_accessed = time.time()
+        try:
+            data = record.on_disk.read_bytes()
+        except FileNotFoundError:
+            return None
         self._audit(
             "file.resolve",
             file_id=file_id,
@@ -667,10 +680,7 @@ class FileUploadStore:
             client_host=None,
             request_id=None,
         )
-        try:
-            return record.on_disk.read_bytes()
-        except FileNotFoundError:
-            return None
+        return data
 
     # ------------------------------------------------------------------
     # internal

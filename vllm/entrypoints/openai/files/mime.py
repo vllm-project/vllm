@@ -42,6 +42,30 @@ _MP3_FRAME_SYNC_PREFIXES: tuple[bytes, ...] = (
     b"\xff\xfa",
 )
 
+
+def _is_valid_mp3_frame_header(head: bytes) -> bool:
+    """Validate byte 2 of an MPEG audio frame header.
+
+    Byte 2 layout (MSB→LSB): EEEE FFGH
+      E = bitrate index (4 bits) — 0xF is reserved/invalid
+      F = sample rate index (2 bits) — 0x3 is reserved/invalid
+      G = padding bit
+      H = private bit
+
+    A random binary blob (PDF xref stream, compiled object, encrypted
+    blob) that happens to start with `\\xff\\xfb` (or one of the other
+    2-byte sync prefixes) will match by chance ~1/2048. Rejecting the
+    clearly-invalid bitrate/sample-rate bits cuts the false-positive
+    rate substantially without adding a required dependency.
+    """
+    if len(head) < 3:
+        return False
+    byte2 = head[2]
+    # reserved bitrate index (0xF) and reserved sample rate index (0x3)
+    # both indicate corrupt / non-MPEG data
+    return (byte2 & 0xF0) != 0xF0 and (byte2 & 0x0C) != 0x0C
+
+
 # ISO Base Media Format brands. The atom layout is:
 #   [4 bytes atom size][b"ftyp"][4 bytes major brand]...
 # We check bytes [4:8] == "ftyp" then classify by major brand at [8:12].
@@ -81,6 +105,29 @@ _ISO_QUICKTIME_BRANDS: frozenset[bytes] = frozenset(
         b"qt  ",
     }
 )
+# HEIC / HEIF / AVIF use the ISO-BMFF container with `ftyp` but are
+# images, not videos. Return a dedicated image MIME so they don't slip
+# through as video/mp4 and fail later in a video decoder.
+_ISO_HEIC_BRANDS: frozenset[bytes] = frozenset(
+    {
+        b"heic",
+        b"heix",
+        b"hevc",
+        b"hevx",
+        b"heim",
+        b"heis",
+        b"hevm",
+        b"hevs",
+        b"mif1",
+        b"msf1",
+    }
+)
+_ISO_AVIF_BRANDS: frozenset[bytes] = frozenset(
+    {
+        b"avif",
+        b"avis",
+    }
+)
 
 
 def _sniff_riff(head: bytes) -> str | None:
@@ -103,13 +150,14 @@ def _sniff_riff(head: bytes) -> str | None:
 
 
 def _sniff_iso_base_media(head: bytes) -> str | None:
-    """ISO Base Media (mp4, mov, m4a, 3gp). Brand at bytes [8:12].
+    """ISO Base Media (mp4, mov, m4a, 3gp, heic, avif). Brand at bytes [8:12].
 
     Returns:
-        `video/mp4`, `audio/mp4`, or `video/quicktime` for known brands;
-        `video/mp4` as a permissive fallback for unrecognised brands
-        that still have the `ftyp` atom shape; or None when the head
-        isn't an ISO Base Media container at all.
+        `video/mp4`, `audio/mp4`, `video/quicktime`, `image/heic`, or
+        `image/avif` for known brands; `video/mp4` as a permissive
+        fallback for unrecognised brands that still have the `ftyp`
+        atom shape; or None when the head isn't an ISO Base Media
+        container at all.
     """
     if len(head) < 12 or head[4:8] != b"ftyp":
         return None
@@ -120,6 +168,10 @@ def _sniff_iso_base_media(head: bytes) -> str | None:
         return "audio/mp4"
     if brand in _ISO_QUICKTIME_BRANDS:
         return "video/quicktime"
+    if brand in _ISO_HEIC_BRANDS:
+        return "image/heic"
+    if brand in _ISO_AVIF_BRANDS:
+        return "image/avif"
     # Unknown brand but still ftyp-shaped — treat as generic mp4 to avoid
     # rejecting legitimate but rare brands. The allowlist gate below will
     # still accept it (video/mp4 is in the allowed prefixes).
@@ -131,7 +183,7 @@ def _sniff_inline(head: bytes) -> str | None:
         if head[offset : offset + len(signature)] == signature:
             return mime
     for prefix in _MP3_FRAME_SYNC_PREFIXES:
-        if head.startswith(prefix):
+        if head.startswith(prefix) and _is_valid_mp3_frame_header(head):
             return "audio/mpeg"
     if (m := _sniff_riff(head)) is not None:
         return m

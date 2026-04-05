@@ -15,6 +15,7 @@ from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
+import regex as re
 import torch
 from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
@@ -39,6 +40,12 @@ global_thread_pool = ThreadPoolExecutor(
 atexit.register(global_thread_pool.shutdown)
 
 MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
+
+# Matches file IDs produced by FileUploadStore.new_file_id(): the literal
+# prefix "file-" followed by exactly 32 lowercase hex characters
+# (secrets.token_hex(16) = 128 bits). Validated on vllm-file:// URL
+# parsing so malformed URLs raise a clear error before hitting the store.
+_VLLM_FILE_ID_RE = re.compile(r"file-[0-9a-f]{32}")
 
 MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
     "audio": AudioMediaIO,
@@ -295,11 +302,21 @@ class MediaConnector:
                 "vllm-file:// URLs require --enable-file-uploads on the server."
             )
 
-        file_id = url_spec.netloc or ""
+        # Prefer `url_spec.host` over `netloc` because netloc includes
+        # `:port` and `user@` segments. `vllm-file://file-abc:80` should
+        # resolve to `file-abc`, not `file-abc:80`. Fall through to
+        # `path` if the parser put the id there instead of netloc.
+        file_id = (url_spec.host or "").strip()
         if not file_id and url_spec.path:
-            # Some URL parsers may put the netloc into path for custom
-            # schemes. Accept either shape.
             file_id = url_spec.path.lstrip("/")
+        # Validate the `file-<32 hex>` shape before the store lookup so
+        # malformed URLs produce a clear error instead of a generic
+        # "Unknown vllm-file id" log line with the garbage value.
+        if not _VLLM_FILE_ID_RE.fullmatch(file_id):
+            raise ValueError(
+                f"Invalid vllm-file:// id: expected 'file-' followed by "
+                f"32 lowercase hex characters, got {file_id!r}"
+            )
         return file_id, store
 
     def _load_vllm_file_url(
