@@ -496,6 +496,20 @@ class Worker(WorkerBase):
         tp_rank = get_tp_group().rank_in_group
         return {tp_rank: metadata}
 
+    def flush_kv_transfers(self) -> set[str]:
+        """Synchronously flush all pending KV store transfers.
+
+        Called via collective_rpc from EngineCore before reset_prefix_cache
+        so that the scheduler can learn about completed stores and free the
+        GPU blocks that were deferred during async offloading.
+
+        Returns:
+            Set of request IDs whose async stores have completed.
+        """
+        if not has_kv_transfer_group():
+            return set()
+        return get_kv_transfer_group().flush_pending_store()
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
@@ -1009,6 +1023,11 @@ class Worker(WorkerBase):
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
+
+        # Release GPU resources held by the model runner so that memory
+        # can be reclaimed when running in-process
+        if model_runner := getattr(self, "model_runner", None):
+            model_runner.shutdown()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

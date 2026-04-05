@@ -2892,6 +2892,8 @@ class NixlConnectorWorker:
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
             return
+        if self.nixl_wrapper is None:
+            return
         self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:
@@ -2915,6 +2917,11 @@ class NixlConnectorWorker:
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
+        self.device_kv_caches.clear()
+        self.host_xfer_buffers.clear()
+        # Release the native NIXL agent after all handles/descriptors
+        # are freed above. Sets sentinel for the idempotency guard.
+        self.nixl_wrapper = None
 
 
 @contextlib.contextmanager

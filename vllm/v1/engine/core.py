@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 import queue
 import signal
@@ -553,6 +554,12 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
+        # Undo the gc.freeze() from __init__ so that the objects allocated
+        # during engine startup (model weights, KV caches, etc.) become
+        # visible to the garbage collector again. Without this, deleting
+        # the engine in-process (e.g. unit tests) leaks GPU memory.
+        gc.unfreeze()
+
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
 
@@ -574,8 +581,20 @@ class EngineCore:
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        # Synchronously flush any in-flight KV store transfers so the
+        # scheduler can free GPU blocks that were deferred during async
+        # offloading. Without this, blocks remain held forever because
+        # the engine stops stepping after all requests finish and never
+        # polls the worker for completed transfers.
+        flushed_req_ids: set[str] = set()
+        worker_results: list[set[str]] = self.collective_rpc("flush_kv_transfers")
+        for worker_result in worker_results:
+            flushed_req_ids.update(worker_result)
+
         return self.scheduler.reset_prefix_cache(
-            reset_running_requests, reset_connector
+            reset_running_requests,
+            reset_connector,
+            flushed_sending_req_ids=flushed_req_ids or None,
         )
 
     def reset_encoder_cache(self) -> None:
