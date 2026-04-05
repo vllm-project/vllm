@@ -1334,10 +1334,10 @@ def num_gpus_available():
     return current_platform.device_count()
 
 
-temp_dir = tempfile.gettempdir()
-_dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
-_dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
-_dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
+_test_cache_dir = os.environ.get("VLLM_TEST_CACHE", tempfile.gettempdir())
+_dummy_opt_path = os.path.join(_test_cache_dir, "dummy_opt")
+_dummy_llava_path = os.path.join(_test_cache_dir, "dummy_llava")
+_dummy_gemma2_embedding_path = os.path.join(_test_cache_dir, "dummy_gemma2_embedding")
 
 
 @pytest.fixture
