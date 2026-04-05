@@ -171,10 +171,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        assert self.connector_worker is not None
-        metadata = self._get_connector_metadata()
-        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
-        self.connector_worker.start_load_kv(metadata)
+        # No-op: loads are issued in get_finished() for compute overlap.
+        pass
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         # No layerwise support - no-op
@@ -191,12 +189,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         return
 
     def wait_for_save(self):
-        if self.kv_role == "kv_consumer":
-            return
-        assert self.connector_worker is not None
-        metadata = self._get_connector_metadata()
-        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
-        self.connector_worker.wait_for_save(metadata)
+        # No-op: stores are issued in get_finished() for compute overlap.
+        pass
 
     def get_finished(
         self, finished_req_ids: set[str]

@@ -323,9 +323,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         try:
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
-            for value in res:
-                if value < 0:
-                    logger.error("Failed to put key %s, res: %s", keys, res)
+            failed = [i for i, v in enumerate(res) if v < 0]
+            if failed:
+                # Compute total bytes attempted for this batch
+                total_bytes = sum(sum(s) if isinstance(s, list) else s for s in sizes)
+                failed_codes = set(res[i] for i in failed)
+                logger.error(
+                    "batch_put failed: %d/%d keys failed "
+                    "(codes=%s, batch_bytes=%d, num_keys=%d), "
+                    "first_key=%s",
+                    len(failed),
+                    len(keys),
+                    failed_codes,
+                    total_bytes,
+                    len(keys),
+                    keys[0] if keys else "N/A",
+                )
         except Exception as e:
             logger.error("Failed to put key %s, error: %s", keys, e)
 
@@ -396,15 +409,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             res = self.store.batch_get_into_multi_buffers(
                 key_list_c, addr_list_c, size_list_c
             )
-            for value in res:
-                if value < 0:
-                    logger.error(
-                        "Failed to get key %s, res: %s",
-                        key_list_c,
-                        res,
-                    )
+            failed = [
+                (key, value)
+                for key, value in zip(key_list_c, res, strict=False)
+                if value < 0
+            ]
+            if failed:
+                logger.error(
+                    "Failed to get %d Mooncake keys, first failures: %s",
+                    len(failed),
+                    failed[:3],
+                )
         except Exception as e:
-            logger.error("Failed to get key %s, error: %s", key_list_c, e)
+            logger.error("Failed to get key %s, error: %s", key_list_c[:3], e)
 
         self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -443,9 +460,8 @@ class MooncakeStoreWorker:
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", False
-        )
+        # NOTE(yifan): enforce load_async for now for better compute-I/O overlap.
+        self.load_async = True
         self.cache_config = vllm_config.cache_config
         self.original_block_size = self.cache_config.block_size
         self.block_size = self.cache_config.block_size
@@ -608,24 +624,44 @@ class MooncakeStoreWorker:
             )
             self.kv_send_thread.start()
 
-        if self.load_async:
-            ready_event = threading.Event()
-            self.kv_recv_thread = KVCacheStoreRecvingThread(
-                self.store,
-                self.token_database,
-                self.block_size,
-                self.tp_rank,
-                ready_event,
-            )
-            self.kv_recv_thread.start()
-            ready_event.wait()
+        ready_event_recving = threading.Event()
+        self.kv_recv_thread = KVCacheStoreRecvingThread(
+            self.store,
+            self.token_database,
+            self.block_size,
+            self.tp_rank,
+            ready_event_recving,
+        )
+        self.kv_recv_thread.start()
+        ready_event_recving.wait()
 
     def start_load_kv(
         self,
         metadata: MooncakeStoreConnectorMetadata,
     ):
-        """Start loading KV cache from the store."""
-        for request in metadata.requests:
+        """No-op: loads are issued in get_finished() for overlap."""
+        pass
+
+    def wait_for_save(
+        self,
+        metadata: MooncakeStoreConnectorMetadata,
+    ):
+        """No-op: stores are issued in get_finished() for overlap."""
+        pass
+
+    def get_finished(
+        self,
+        finished_req_ids: set[str],
+        meta: MooncakeStoreConnectorMetadata,
+    ) -> tuple[set[str], set[str]]:
+        """Issue all I/O and get completed send/recv request IDs.
+
+        All load and store I/O requests are issued here (after model
+        compute is launched on the compute stream) for better
+        compute-I/O overlap.
+        """
+        # Issue async loads
+        for request in meta.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:
                 continue
@@ -639,74 +675,28 @@ class MooncakeStoreWorker:
                 token_len = load_spec.kvpool_cached_tokens
             load_spec.token_len = token_len
 
-            if self.load_async:
-                assert self.kv_recv_thread is not None
-                self.kv_recv_thread.add_request(request)
-            else:
-                # Synchronous load
-                addr_list = []
-                size_list = []
-                key_list = []
-                mask_num = (
-                    load_spec.vllm_cached_tokens // self.block_size * self.block_size
-                )
-                for start, end, key in self.token_database.process_tokens(
-                    token_len, request.block_hashes, mask_num
-                ):
-                    addr, size, _ = self.token_database.prepare_value(
-                        start, end, request.block_ids
-                    )
-                    key_list.append(key.to_string())
-                    addr_list.append(addr)
-                    size_list.append(size)
+            assert self.kv_recv_thread is not None
+            self.kv_recv_thread.add_request(request)
 
-                # Rotate by tp_rank for load balancing
-                key_list_c = (
-                    key_list[self.tp_rank % len(key_list) :]
-                    + key_list[: self.tp_rank % len(key_list)]
-                )
-                addr_list_c = (
-                    addr_list[self.tp_rank % len(addr_list) :]
-                    + addr_list[: self.tp_rank % len(addr_list)]
-                )
-                size_list_c = (
-                    size_list[self.tp_rank % len(size_list) :]
-                    + size_list[: self.tp_rank % len(size_list)]
-                )
-                try:
-                    self.store.batch_get_into_multi_buffers(
-                        key_list_c, addr_list_c, size_list_c
-                    )
-                except Exception as e:
-                    logger.error("Failed to get: %s", e)
+        assert self.load_async, "load_async must be True for better performance."
+        # Issue stores with CUDA event synchronization
+        if self.kv_role in ["kv_producer", "kv_both"]:
+            current_event = None
+            for request in meta.requests:
+                if request.can_save:
+                    current_event = torch.cuda.Event()
+                    current_event.record()
+                    break
 
-    def wait_for_save(
-        self,
-        metadata: MooncakeStoreConnectorMetadata,
-    ):
-        """Record CUDA event and queue save requests."""
-        current_event = None
-        for request in metadata.requests:
-            if request.can_save:
-                current_event = torch.cuda.Event()
-                current_event.record()
-                break
+            for request in meta.requests:
+                if not request.can_save:
+                    continue
+                request.current_event = current_event
+                assert self.kv_send_thread is not None
+                self.kv_send_thread.add_stored_request(request.req_id)
+                self.kv_send_thread.add_request(request)
 
-        for request in metadata.requests:
-            if not request.can_save:
-                continue
-
-            request.current_event = current_event
-            assert self.kv_send_thread is not None
-            self.kv_send_thread.add_stored_request(request.req_id)
-            self.kv_send_thread.add_request(request)
-
-    def get_finished(
-        self,
-        finished_req_ids: set[str],
-        meta: MooncakeStoreConnectorMetadata,
-    ) -> tuple[set[str], set[str]]:
-        """Get completed send/recv request IDs."""
+        # Check completion of previously queued transfers
         done_sending = (
             self._get_and_clear_finished_sending(finished_req_ids, meta)
             if self.kv_role in ["kv_producer", "kv_both"]
