@@ -27,6 +27,7 @@ logger = init_logger(__name__)
 try:
     from amdsmi import (
         AmdSmiException,
+        AmdSmiInitFlags,
         amdsmi_get_gpu_asic_info,
         amdsmi_get_gpu_device_uuid,
         amdsmi_get_processor_handles,
@@ -132,7 +133,7 @@ _sync_hip_cuda_env_vars()
 def with_amdsmi_context(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        amdsmi_init()
+        amdsmi_init(AmdSmiInitFlags.INIT_ALL_PROCESSORS)
         try:
             return fn(*args, **kwargs)
         finally:
