@@ -34,10 +34,12 @@ from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
+    triton_reshape_and_cache_flash_tq4,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVQuantMode,
     get_kv_quant_mode,
     kv_cache_uses_per_token_head_scales,
 )
@@ -495,6 +497,14 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        self._is_tq4 = self._kv_quant_mode == KVQuantMode.TQ4
+
+        # TQ4: precompute random orthogonal rotation matrix.
+        self._tq4_rotation: torch.Tensor | None = None
+        if self._is_tq4:
+            from vllm.v1.attention.ops.tq4_rotation import get_tq4_rotation
+
+            self._tq4_rotation = get_tq4_rotation(head_size, device="cuda")
 
     def forward(
         self,
@@ -559,7 +569,7 @@ class TritonAttentionImpl(AttentionImpl):
             )
 
         # Per-token-head quantized KV cache: use separate scale caches.
-        if self._is_per_token_head_quant:
+        if self._is_per_token_head_quant or self._is_tq4:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
             if key_cache.dtype == torch.uint8:
@@ -695,6 +705,20 @@ class TritonAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
         # Reshape the input keys and values and store them in the cache.
+        if self._is_tq4:
+            self._ensure_scale_caches(kv_cache)
+            key_cache, value_cache = kv_cache.unbind(1)
+            triton_reshape_and_cache_flash_tq4(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                self._k_scale_cache,
+                self._v_scale_cache,
+                slot_mapping,
+                rotation_matrix=self._tq4_rotation,
+            )
+            return
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
@@ -728,7 +752,7 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
-        if self._is_per_token_head_quant:
+        if self._is_per_token_head_quant or self._is_tq4:
             return False
         return rocm_aiter_ops.is_enabled()
 

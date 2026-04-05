@@ -26,6 +26,7 @@ CacheDType = Literal[
     "fp8_ds_mla",
     "int8_per_token_head",
     "fp8_per_token_head",
+    "tq4",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -242,7 +243,14 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
-        if kv_cache_uses_per_token_head_scales(cache_dtype):
+        if cache_dtype == "tq4":
+            logger.info(
+                "Using TurboQuant 4-bit (tq4) KV cache. "
+                "Near-optimal compression with rotation pre-processing. "
+                "Dynamic per-token-head scales computed at runtime. "
+                "Reference: Zandieh et al., arXiv:2504.19874",
+            )
+        elif kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "

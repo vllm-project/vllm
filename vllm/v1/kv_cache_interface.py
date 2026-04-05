@@ -38,6 +38,7 @@ class KVQuantMode(IntEnum):
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
     INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
+    TQ4 = 4  # TurboQuant 4-bit with rotation pre-processing
 
     @property
     def is_per_token_head(self) -> bool:
@@ -47,6 +48,8 @@ class KVQuantMode(IntEnum):
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    if kv_cache_dtype == "tq4":
+        return KVQuantMode.TQ4
     if kv_cache_dtype == "int8_per_token_head":
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
