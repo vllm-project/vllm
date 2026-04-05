@@ -80,6 +80,51 @@ def test_select_default_backend_by_platform(
 
 
 @patch(
+    "vllm.utils.flashinfer.has_flashinfer",
+    return_value=True,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops.is_fused_moe_enabled",
+    return_value=True,
+)
+@pytest.mark.parametrize(
+    "platform_method,is_cuda_alike",
+    [
+        ("is_cuda", True),
+        ("is_rocm", True),
+        ("is_xpu", False),
+    ],
+)
+def test_select_lora_backend_prefers_triton(
+    mock_aiter_enabled,
+    mock_has_flashinfer,
+    platform_method,
+    is_cuda_alike,
+):
+    """LoRA must keep unquantized MoE on Triton-compatible weights even when
+    faster non-LoRA backends are otherwise available."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=False),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, "is_cuda_alike", return_value=is_cuda_alike),
+        patch.object(current_platform, platform_method, return_value=True),
+    ):
+        moe_config = make_dummy_moe_config()
+        moe_config.is_lora_enabled = True
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.TRITON
+        assert experts_cls is not None
+
+
+@patch(
     "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
     return_value=False,
 )

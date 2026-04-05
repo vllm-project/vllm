@@ -209,6 +209,16 @@ def select_unquantized_moe_backend(
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
+    # LoRA needs Triton's unfused activation/reduction hooks. Selecting the
+    # backend here ensures weights stay in a LoRA-compatible layout instead of
+    # being permuted for a backend like FlashInfer or AITER during load.
+    if moe_config.is_lora_enabled:
+        return _return_or_raise(
+            UnquantizedMoeBackend.TRITON,
+            moe_config,
+            activation_format,
+        )
+
     runner_backend = moe_config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_unquantized_backend(runner_backend)
