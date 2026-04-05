@@ -170,19 +170,32 @@ def test_kv_scale_reload(vllm_runner):
         pytest.skip(reason="Requires FP8 support")
 
     model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+
+    # Load dummy weights, then reload real checkpoint
     with vllm_runner(
         model_name=model,
-        kv_cache_dtype="fp8_e4m3",
+        load_format="dummy",
         enable_prefix_caching=False,
         max_model_len=16,
         max_num_seqs=1,
     ) as llm:
-        perp1 = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
-
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
         llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
-        perp2 = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        reloaded_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
 
-        assert perp1 == pytest.approx(perp2)
+    # Fresh load for reference
+    with vllm_runner(
+        model_name=model,
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        fresh_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+
+    assert reloaded_perp == pytest.approx(fresh_perp)
 
 
 @pytest.mark.parametrize(

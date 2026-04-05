@@ -243,7 +243,8 @@ def finalize_layerwise_reload(*args, **kwargs):
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
-    """Load and process attention scale weights (k_scale, v_scale, etc.) during reload."""
+    """Load and process attention scale weights (k_scale, v_scale, etc.)
+    during reload."""
     quant_method = getattr(layer, "quant_method", None)
     if quant_method is None:
         return
