@@ -55,6 +55,14 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 
+def to_hash(int_hash: int) -> BlockHash:
+    return BlockHash(str(int_hash).encode())
+
+
+def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
+    return [to_hash(i) for i in int_hashes]
+
+
 class MockLoadStoreSpec(LoadStoreSpec):
     def __init__(self, block_hashes: Iterable[BlockHash]):
         self.block_hashes: list[BlockHash] = list(block_hashes)
@@ -109,7 +117,7 @@ class MockOffloadingSpec(OffloadingSpec):
         super().__init__(vllm_config, kv_cache_config)
 
         self.manager = MagicMock(spec=OffloadingManager)
-        self.manager.lookup.return_value = 0
+        self.manager.lookup.return_value = False
         self.manager.prepare_load = lambda block_hashes: (
             MockLoadStoreSpec(block_hashes)
         )
@@ -225,14 +233,14 @@ class RequestRunner:
         self.scheduler_connector: OffloadingConnector = scheduler_connector
 
         # extract mocked OffloadingManager of scheduler connector
-        connector_scheduler = scheduler_connector.connector_scheduler
-        assert connector_scheduler is not None
-        manager = connector_scheduler.manager
+        self.connector_scheduler = scheduler_connector.connector_scheduler
+        assert self.connector_scheduler is not None
+        manager = self.connector_scheduler.manager
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        assert connector_scheduler.gpu_block_size == gpu_block_size
-        assert connector_scheduler.offloaded_block_size == offloaded_block_size
+        assert self.connector_scheduler.gpu_block_size == gpu_block_size
+        assert self.connector_scheduler.offloaded_block_size == offloaded_block_size
 
         # extract OffloadingSpec of worker_connector
         connector_worker = self.worker_connector.connector_worker
