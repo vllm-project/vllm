@@ -6646,9 +6646,17 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
+                    raw = kv_cache_raw_tensors[layer_name].view(dtype)
+                    shape_numel = 1
+                    for s in kv_cache_shape:
+                        shape_numel *= s
+                    if raw.numel() > shape_numel:
+                        # Padded allocation (e.g. compressed KV cache aligned
+                        # to recurrent layer page size). Use only the needed
+                        # portion; the rest is padding.
+                        raw = raw.narrow(0, 0, shape_numel)
                     kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
+                        raw
                         .view(kv_cache_shape)
                         .permute(*inv_order)
                     )
@@ -6878,8 +6886,15 @@ class GPUModelRunner(
             ]
         )
         num_groups = len(self.kv_cache_config.kv_cache_groups)
+        if self.kv_cache_config.per_group_num_blocks is not None:
+            attn_group_count = max(1, sum(
+                1 for nb in self.kv_cache_config.per_group_num_blocks
+                if nb == self.kv_cache_config.num_blocks
+            ))
+        else:
+            attn_group_count = num_groups
         self.max_num_kv_tokens = (
-            self.kv_cache_config.num_blocks // num_groups
+            self.kv_cache_config.num_blocks // attn_group_count
         ) * min_block_size
         dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
         pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size

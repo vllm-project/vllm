@@ -538,7 +538,7 @@ class KVCacheConfig:
     """
 
     num_blocks: int
-    """The number of KV cache blocks"""
+    """The number of KV cache blocks (for the primary/attention groups)"""
     kv_cache_tensors: list[KVCacheTensor]
     """How should model runner initialize the KV cache tensors for each layer"""
     kv_cache_groups: list[KVCacheGroupSpec]
@@ -549,6 +549,12 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    per_group_num_blocks: list[int] | None = None
+    """Per-group block counts. When set, each KV cache group gets its own
+    BlockPool with the specified number of blocks. This enables split
+    allocation where O(1) groups (e.g., mamba in none/align mode) get a
+    small fixed pool and O(n) groups (attention) get the rest of memory.
+    If None, all groups share a single pool with num_blocks blocks."""
 
     @property
     def has_mamba_layers(self) -> bool:

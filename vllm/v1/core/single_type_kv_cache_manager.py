@@ -1106,15 +1106,26 @@ class SinkFullAttentionManager(FullAttentionManager):
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
 
 
-spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
-    FullAttentionSpec: FullAttentionManager,
-    MLAAttentionSpec: FullAttentionManager,
-    SlidingWindowSpec: SlidingWindowManager,
-    ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
-    MambaSpec: MambaManager,
-    CrossAttentionSpec: CrossAttentionManager,
-    SinkFullAttentionSpec: SinkFullAttentionManager,
-}
+def _build_spec_manager_map():
+    m: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
+        FullAttentionSpec: FullAttentionManager,
+        MLAAttentionSpec: FullAttentionManager,
+        SlidingWindowSpec: SlidingWindowManager,
+        ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
+        MambaSpec: MambaManager,
+        CrossAttentionSpec: CrossAttentionManager,
+        SinkFullAttentionSpec: SinkFullAttentionManager,
+    }
+    try:
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantFullAttentionSpec,
+        )
+        m[TurboQuantFullAttentionSpec] = FullAttentionManager
+    except ImportError:
+        pass
+    return m
+
+spec_manager_map = _build_spec_manager_map()
 
 
 def get_manager_for_kv_cache_spec(

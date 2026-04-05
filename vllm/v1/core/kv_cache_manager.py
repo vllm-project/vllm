@@ -142,6 +142,13 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
+        # Collect unique pools for multi-pool operations (reset, events)
+        seen_ids: set[int] = set()
+        self._unique_pools: list = []
+        for pool in self.coordinator.group_pools:
+            if id(pool) not in seen_ids:
+                seen_ids.add(id(pool))
+                self._unique_pools.append(pool)
 
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
@@ -158,8 +165,10 @@ class KVCacheManager:
 
         Returns:
             The KV cache usage (between 0.0 and 1.0).
+            With per-group pools, returns the max usage across all pools
+            since any full pool blocks new requests.
         """
-        return self.block_pool.get_usage()
+        return max(pool.get_usage() for pool in self._unique_pools)
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
@@ -374,7 +383,7 @@ class KVCacheManager:
             request.request_id, total_computed_tokens
         )
 
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+        if not self.coordinator.has_enough_blocks(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
@@ -382,10 +391,8 @@ class KVCacheManager:
             total_computed_tokens=num_local_computed_tokens
             + num_external_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
-        )
-
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
-            # Cannot allocate new blocks
+        ):
+            # Cannot allocate new blocks in one or more pools
             return None
 
         if (
@@ -455,7 +462,23 @@ class KVCacheManager:
         Args:
             block_ids: Set of block IDs to evict from cache.
         """
-        self.block_pool.evict_blocks(block_ids)
+        if len(self._unique_pools) == 1:
+            self._unique_pools[0].evict_blocks(block_ids)
+        else:
+            # With per-group pools, block IDs are pool-local (both start
+            # from 0). We must evict only from the pool that owns each
+            # block. Build a reverse map from block_id -> pool by
+            # checking which pool's cached_block_hash_to_block contains
+            # the block.
+            for pool in self._unique_pools:
+                pool_ids = set()
+                for bid in block_ids:
+                    if bid < pool.num_gpu_blocks:
+                        blk = pool.blocks[bid]
+                        if blk.block_hash is not None:
+                            pool_ids.add(bid)
+                if pool_ids:
+                    pool.evict_blocks(pool_ids)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -466,7 +489,7 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not self.block_pool.reset_prefix_cache():
+        if not all(pool.reset_prefix_cache() for pool in self._unique_pools):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -513,7 +536,10 @@ class KVCacheManager:
         Returns:
             A list of KV cache events.
         """
-        return self.block_pool.take_events()
+        events: list[KVCacheEvent] = []
+        for pool in self._unique_pools:
+            events.extend(pool.take_events())
+        return events
 
     def get_blocks(self, request_id: str) -> KVCacheBlocks:
         """Get the blocks of a request."""
