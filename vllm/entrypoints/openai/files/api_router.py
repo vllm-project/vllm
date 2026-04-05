@@ -200,6 +200,12 @@ def init_files_state(state, args) -> None:
     state.openai_serving_files = OpenAIServingFiles(store, config)
     # Expose the store to MediaConnector so vllm-file:// URLs resolve in
     # chat-completion requests.
+    import atexit
+
     from vllm.entrypoints.openai.files.store import register_store
 
     register_store(store)
+    # Clear the process-wide reference on interpreter shutdown so test
+    # harnesses and `uvicorn --reload` don't leave a stale store (whose
+    # asyncio.Lock is bound to a dead event loop) in module state.
+    atexit.register(register_store, None)

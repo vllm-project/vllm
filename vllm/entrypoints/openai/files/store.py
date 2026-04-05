@@ -11,7 +11,6 @@ unguessable ID and is scoped by an optional request-header value.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import secrets
@@ -33,7 +32,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Background sweeper runs every 5 minutes.
+# Opportunistic sweep interval: at most once per 5 minutes per store,
+# triggered from create_file (see `_maybe_sweep`). No background task.
 _SWEEP_INTERVAL_SECONDS = 300
 
 # Streaming write chunk size — large enough to be efficient, small enough
@@ -228,30 +228,12 @@ class FileUploadStore:
         self._lock = asyncio.Lock()
         self._upload_semaphore = asyncio.Semaphore(config.max_concurrent)
         self._total_bytes = 0
-        self._sweeper_task: asyncio.Task | None = None
         self._last_sweep = time.time()
 
         self._max_size_bytes = config.max_size_mb * 1024 * 1024
         self._max_total_bytes = config.max_total_gb * 1024 * 1024 * 1024
         self._ttl_enabled = config.ttl_seconds >= 0
         self._ttl_seconds = config.ttl_seconds
-
-    # ------------------------------------------------------------------
-    # lifecycle
-    # ------------------------------------------------------------------
-
-    async def start(self) -> None:
-        """Launch the TTL sweeper background task (no-op if TTL disabled)."""
-        if self._ttl_enabled and self._sweeper_task is None:
-            self._sweeper_task = asyncio.create_task(self._sweeper_loop())
-
-    async def shutdown(self) -> None:
-        """Cancel the sweeper and clean up temp directory."""
-        if self._sweeper_task is not None:
-            self._sweeper_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._sweeper_task
-            self._sweeper_task = None
 
     # ------------------------------------------------------------------
     # public API
@@ -671,16 +653,6 @@ class FileUploadStore:
                 p.unlink(missing_ok=True)
 
         await loop.run_in_executor(None, _bulk_unlink)
-
-    async def _sweeper_loop(self) -> None:
-        while True:
-            try:
-                await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
-                await self._sweep_expired()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("file upload sweeper error: %s", e)
 
     async def _maybe_sweep(self) -> None:
         """Opportunistic sweep from create_file, so the store works without
