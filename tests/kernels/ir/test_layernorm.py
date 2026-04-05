@@ -71,16 +71,6 @@ class TestRMSNorm:
         out4 = rms_norm_native(x, None, epsilon=epsilon)
         torch.testing.assert_close(out3, out4)
 
-        # Native impl should support mixed dtypes and follow dtype promotion.
-        mixed_weight_dtype = (
-            torch.float32 if x.dtype != torch.float32 else torch.float16
-        )
-        mixed_weight = torch.rand(
-            x.shape[-1], dtype=mixed_weight_dtype, device=x.device
-        )
-        out_mixed = rms_norm_native(x, mixed_weight, epsilon=epsilon)
-        assert out_mixed.dtype == torch.promote_types(x.dtype, mixed_weight_dtype)
-
     @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels"])
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
         impl = ir.ops.rms_norm.impls[provider]
@@ -124,40 +114,6 @@ class TestRMSNorm:
             out_impl_unit_weight,
             rtol=get_default_rtol(out_impl_no_weight),
             atol=2e-4,
-        )
-
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels"])
-    def test_impls_reject_mixed_weight_dtype(
-        self, dtype, n_tokens, hidden_size, epsilon, provider
-    ):
-        impl = ir.ops.rms_norm.impls[provider]
-        if not impl.supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
-        if provider == "aiter" and dtype not in [torch.float16, torch.bfloat16]:
-            pytest.skip(f"{provider} only supports fp16/bf16 activations")
-
-        x = torch.randn(
-            n_tokens,
-            hidden_size,
-            dtype=dtype,
-            device=current_platform.device_type,
-        )
-        mixed_weight_dtype = torch.float32 if dtype != torch.float32 else torch.float16
-        weight = torch.rand(hidden_size, dtype=mixed_weight_dtype, device=x.device)
-        args = (x, weight, epsilon, None)
-
-        # Provider kernels currently require homogeneous x/weight dtype.
-        assert not impl.supports_args(*args)
-
-        out_native = rms_norm_native(*args)
-        assert out_native.dtype == torch.promote_types(dtype, mixed_weight_dtype)
-
-        # Dispatch should fall back to native for mixed dtype inputs.
-        with ir.ops.rms_norm.set_priority([provider, "native"]):
-            out_dispatch = ir.ops.rms_norm(*args)
-
-        torch.testing.assert_close(
-            out_dispatch, out_native, rtol=get_default_rtol(out_dispatch), atol=1e-3
         )
 
     @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
