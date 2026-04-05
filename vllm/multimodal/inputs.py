@@ -232,19 +232,32 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
     Equality check between
     [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects.
     """
-    if isinstance(a, torch.Tensor):
-        return isinstance(b, torch.Tensor) and torch.equal(a, b)
-    elif isinstance(b, torch.Tensor):
-        return isinstance(a, torch.Tensor) and torch.equal(b, a)
+    # Handle torch.Tensor case
+    if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+        return torch.equal(a, b)
+    if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
+        # One is a tensor, the other is not
+        return False
 
-    if isinstance(a, list):
-        return isinstance(b, list) and all(
-            nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b)
-        )
-    if isinstance(b, list):
-        return isinstance(a, list) and all(
-            nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a)
-        )
+    # Handle list case
+    if isinstance(a, list) and isinstance(b, list):
+        # Must have same length
+        if len(a) != len(b):
+            return False
+        return all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+    if isinstance(a, list) or isinstance(b, list):
+        # One is a list, the other is not
+        return False
+
+    # Handle tuple case (same logic as list)
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        # Must have same length
+        if len(a) != len(b):
+            return False
+        return all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+    if isinstance(a, tuple) or isinstance(b, tuple):
+        # One is a tuple, the other is not
+        return False
 
     # Both a and b are scalars
     return a == b
