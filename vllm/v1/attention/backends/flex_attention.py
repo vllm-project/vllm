@@ -1170,7 +1170,11 @@ def get_kernel_options(
                     "Unable to determine shared memory size on this hardware."
                 )
 
-            if max_shared_memory < 144 * 1024:
+            head_dim = query.shape[-1]
+            if head_dim >= 512 and max_shared_memory < 98304:
+                block_m_candidate = min(block_m_candidate, 16)
+                block_n_candidate = min(block_n_candidate, 16)
+            elif max_shared_memory < 144 * 1024:
                 block_m_candidate = ensure_divisible(
                     max(1, block_m_candidate // 2), block_m
                 )
