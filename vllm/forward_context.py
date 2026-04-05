@@ -237,6 +237,21 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    num_unpadded_tokens: int | None = None
+    """
+    Number of actual (non-padding) tokens in the batch.  When CUDA graphs
+    or DP padding inflate the batch, padded tokens sit at the tail.
+    None means every token is real (no padding).
+    Kept as a plain int so the ubatch wrapper can do slice arithmetic
+    without a GPU→CPU sync (.item()) on the tensor.
+    """
+
+    num_unpadded_tokens_tensor: torch.Tensor | None = None
+    """
+    Same value as :attr:`num_unpadded_tokens` but as a persistent CUDA
+    tensor so the EPLB router kernel can read it inside CUDA-graph replays.
+    """
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -246,6 +261,10 @@ class ForwardContext:
 
 
 _forward_context: ForwardContext | None = None
+
+# Persistent across forward passes so its device-pointer stays constant
+# inside CUDA-graph replays.  Filled by create_forward_context().
+_num_unpadded_tokens_tensor: torch.Tensor | None = None
 
 
 def get_forward_context() -> ForwardContext:
@@ -271,11 +290,23 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    num_unpadded_tokens: int | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
     else:
         all_moe_layers = None
+
+    global _num_unpadded_tokens_tensor
+    num_unpadded_tensor: torch.Tensor | None = None
+    if num_unpadded_tokens is not None:
+        if _num_unpadded_tokens_tensor is None:
+            _num_unpadded_tokens_tensor = torch.tensor(
+                num_unpadded_tokens, dtype=torch.int32, device="cuda"
+            )
+        else:
+            _num_unpadded_tokens_tensor.fill_(num_unpadded_tokens)
+        num_unpadded_tensor = _num_unpadded_tokens_tensor
 
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
@@ -287,6 +318,8 @@ def create_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
+        num_unpadded_tokens=num_unpadded_tokens,
+        num_unpadded_tokens_tensor=num_unpadded_tensor,
         additional_kwargs=additional_kwargs or {},
     )
 
@@ -317,6 +350,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    num_unpadded_tokens: int | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -376,6 +410,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        num_unpadded_tokens,
     )
 
     try:

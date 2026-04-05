@@ -150,6 +150,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        num_unpadded_tokens: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -160,6 +161,7 @@ class EagleSpeculator:
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
+            num_unpadded_tokens=num_unpadded_tokens,
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
@@ -208,6 +210,7 @@ class EagleSpeculator:
                 slot_mappings,
                 num_tokens_across_dp,
                 cudagraph_runtime_mode,
+                num_unpadded_tokens=num_reqs,
             )
             last_hidden_states = last_hidden_states[:num_reqs]
             hidden_states = hidden_states[:num_reqs]
@@ -377,6 +380,7 @@ class EagleSpeculator:
             slot_mappings,
             num_tokens_across_dp=num_tokens_across_dp,
             mm_inputs=mm_inputs,
+            num_unpadded_tokens=input_batch.num_tokens,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)

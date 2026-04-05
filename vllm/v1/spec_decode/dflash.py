@@ -223,6 +223,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=slot_mapping_dict,
+            num_unpadded_tokens=num_query_tokens,
         ):
             self.model(
                 input_ids=self.input_ids[:num_input_tokens],

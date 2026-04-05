@@ -72,6 +72,12 @@ class UBatchContext:
         return False
 
     def _restore_context(self):
+        # Fill the persistent tensor so the EPLB kernel sees the
+        # per-ubatch value during capture and replay.
+        t = self.forward_context.num_unpadded_tokens_tensor
+        if t is not None:
+            val = self.forward_context.num_unpadded_tokens
+            t.fill_(-1 if val is None else val)
         forward_context._forward_context = self.forward_context
 
     def update_stream(self, stream):

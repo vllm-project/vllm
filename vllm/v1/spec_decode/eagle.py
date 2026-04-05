@@ -469,6 +469,7 @@ class SpecDecodeBaseProposer:
             slot_mapping=self._get_slot_mapping(
                 slot_mapping_size, common_attn_metadata.slot_mapping
             ),
+            num_unpadded_tokens=num_tokens,
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -627,6 +628,7 @@ class SpecDecodeBaseProposer:
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=self._get_slot_mapping(input_batch_size),
+                num_unpadded_tokens=batch_size,
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
@@ -1112,6 +1114,7 @@ class SpecDecodeBaseProposer:
                 slot_mapping=self._get_slot_mapping(
                     num_input_tokens, attn_metadata.slot_mapping
                 ),
+                num_unpadded_tokens=num_tokens,
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -1568,6 +1571,7 @@ class SpecDecodeBaseProposer:
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=slot_mapping_dict,
+                num_unpadded_tokens=num_tokens,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None

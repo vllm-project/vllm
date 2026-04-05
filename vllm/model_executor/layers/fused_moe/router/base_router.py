@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -22,10 +23,13 @@ if current_platform.is_cuda_alike():
         out_ids_ptr,
         out_ptr,
         record_enabled_ptr,
+        num_unpadded_tokens_ptr,
         num_logical_experts,
         map_slots,
         out_size,
         numel,
+        experts_per_token,
+        HAS_NUM_UNPADDED: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -47,6 +51,13 @@ if current_platform.is_cuda_alike():
         replica_count = tl.maximum(replica_count, 1)
         # Match torch.compile path: use flattened token position.
         replica_idx = offs % replica_count
+        map_index = safe_expert_id * map_slots + replica_idx
+        physical_id = tl.load(
+            logical_to_physical_ptr + map_index,
+            mask=mask & valid_expert,
+            other=-1,
+        )
+        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
 
         # 2. Record expert load metrics.
 
@@ -61,16 +72,21 @@ if current_platform.is_cuda_alike():
         # If later refactor moved all the MoE kernel calls
         # to the modular kernel, we can move this logic there
         # to achieve better efficiency.
-        map_index = safe_expert_id * map_slots + replica_idx
-        physical_id = tl.load(
-            logical_to_physical_ptr + map_index,
-            mask=mask & valid_expert,
-            other=-1,
-        )
-        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
 
         record_enabled = tl.load(record_enabled_ptr) != 0
-        valid = mask & record_enabled & (physical_id >= 0) & (physical_id < out_size)
+        # Skip padded tokens when recording.
+        if HAS_NUM_UNPADDED:
+            num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
+            is_unpadded = offs < num_unpadded_tokens * experts_per_token
+        else:
+            is_unpadded = True
+        valid = (
+            mask
+            & record_enabled
+            & is_unpadded
+            & (physical_id >= 0)
+            & (physical_id < out_size)
+        )
         safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
         tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
 
@@ -80,11 +96,13 @@ if current_platform.is_cuda_alike():
         logical_replica_count: torch.Tensor,
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
         topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
         if numel == 0:
             return topk_ids
+        experts_per_token = topk_ids.shape[-1] if topk_ids.ndim >= 2 else 1
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
         grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         assert expert_load_view.is_contiguous()
@@ -95,10 +113,13 @@ if current_platform.is_cuda_alike():
             out_flat,
             expert_load_view,
             record_enabled,
+            num_unpadded_tokens,
             logical_replica_count.shape[0],
             logical_to_physical_map.shape[1],
             expert_load_view.shape[0],
             numel,
+            experts_per_token,
+            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
             BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
@@ -109,6 +130,7 @@ if current_platform.is_cuda_alike():
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fused triton implementation: mapping + optional recording in one kernel.
         return _eplb_map_and_record_triton(
@@ -117,6 +139,7 @@ if current_platform.is_cuda_alike():
             logical_replica_count=logical_replica_count,
             expert_load_view=expert_load_view,
             record_enabled=record_enabled,
+            num_unpadded_tokens=num_unpadded_tokens,
         )
 else:
 
@@ -126,6 +149,7 @@ else:
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
 
@@ -198,12 +222,20 @@ class BaseRouter(FusedMoERouter):
             assert self.eplb_state.logical_to_physical_map is not None
             assert self.eplb_state.logical_replica_count is not None
             assert self.eplb_state.should_record_tensor is not None
+
+            num_unpadded_tokens_tensor = (
+                get_forward_context().num_unpadded_tokens_tensor
+                if is_forward_context_available()
+                else None
+            )
+
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 logical_to_physical_map=self.eplb_state.logical_to_physical_map,
                 logical_replica_count=self.eplb_state.logical_replica_count,
                 expert_load_view=self.eplb_state.expert_load_view,
                 record_enabled=self.eplb_state.should_record_tensor,
+                num_unpadded_tokens=num_unpadded_tokens_tensor,
             )
         return topk_ids
 
