@@ -1796,16 +1796,14 @@ class OpenAIServingChat(OpenAIServing):
             None,
         )
         original_fn = original_tc.function if original_tc else None
-        return DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=index,
-                    id=original_tc.id if original_tc else None,
-                    type=original_tc.type if original_tc else None,
-                    function=DeltaFunctionCall(
-                        name=original_fn.name if original_fn else None,
-                        arguments=remaining_call,
-                    ),
-                )
-            ]
-        )
+
+        delta_fn = DeltaFunctionCall(arguments=remaining_call)
+        if original_fn and original_fn.name is not None:
+            delta_fn.name = original_fn.name
+
+        tc = DeltaToolCall(index=index, function=delta_fn)
+        if original_tc and original_tc.id is not None:
+            tc.id = original_tc.id
+            tc.type = original_tc.type or "function"
+
+        return DeltaMessage(tool_calls=[tc])

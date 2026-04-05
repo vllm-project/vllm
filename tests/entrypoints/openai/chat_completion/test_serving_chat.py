@@ -2094,3 +2094,46 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+    def test_continuation_chunk_no_null_type(self):
+        """Test that continuation chunks without id or type don't serialize null type."""
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    function=DeltaFunctionCall(arguments='{"location": "Par'),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, 'is"}', 0
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 0
+        assert tc.id is None
+        assert tc.type is None
+        assert tc.function.name is None
+        assert tc.function.arguments == 'is"}'
+
+        serialized = tc.model_dump(exclude_unset=True)
+        assert "id" not in serialized, (
+            "id should not appear in serialized continuation chunk"
+        )
+        assert "type" not in serialized, (
+            "type must not be null in serialized output; it violates the "
+            "OpenAI streaming spec and causes AI_TypeValidationError"
+        )
+        fn_data = serialized.get("function", {})
+        assert "name" not in fn_data, (
+            "name should not appear in serialized continuation chunk"
+        )
