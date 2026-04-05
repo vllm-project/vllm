@@ -182,7 +182,7 @@ def _lora_expand_fp8(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
-    num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     b_scale: list[torch.Tensor],  # LoRA B weight scale per slice
     a_scale: torch.Tensor | None = None,  # Scale for shrink output (optional)
     offset_start: int = 0,
@@ -191,6 +191,7 @@ def _lora_expand_fp8(
     group_n: int = 0,
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
+    cast_type: bool = False,
 ) -> None:
     """
     FP8-compatible LoRA expand operation.
@@ -208,6 +209,9 @@ def _lora_expand_fp8(
         lora_ids: LoRA IDs to process
         no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
             if there are any requests that require LoRA.
+        num_active_loras (torch.Tensor): A CPU tensor of size 1, containing
+            the number of active LoRAs. Stored as a tensor so torch.compile
+            treats it as dynamic.
         offset_start (int, optional): Offset start for output_tensor.
             Defaults to 0.
         add_inputs (bool, optional): Whether to add the input tensor to the
@@ -216,6 +220,8 @@ def _lora_expand_fp8(
         group_n (int, optional): Block size for N in block-wise quantization.
         use_fp8_w8a8 (bool, optional): Whether to use FP8 W8A8 quantization.
         per_channel_quant (bool, optional): Whether to use per-channel quantization.
+        cast_type (bool, optional): Whether to cast input to weight dtype
+            inside the kernel (for weight-only FP8 with non-FP8 inputs).
     """
     assert no_lora_flag_cpu.numel() == 1
     if no_lora_flag_cpu.item():
@@ -223,10 +229,11 @@ def _lora_expand_fp8(
         return
 
     if use_fp8_w8a8:
-        assert inputs.dtype in [
-            torch.float8_e4m3fn,
-            torch.float8_e5m2,
-        ]
+        if not cast_type:
+            assert inputs.dtype in [
+                torch.float8_e4m3fn,
+                torch.float8_e5m2,
+            ], f"FP8 expand expects FP8 input, got {inputs.dtype}"
         for weight in lora_b_weights:
             assert weight.dtype in [
                 torch.float8_e5m2,
@@ -266,7 +273,7 @@ def _lora_expand_fp8(
     ADD_INPUTS = add_inputs
     MAX_LORAS = lora_ids.size(0)
 
-    CAST_TYPE = False
+    CAST_TYPE = cast_type
     NUM_SLICES = len(lora_b_weights)
 
     # Triton kernel configs.
@@ -291,7 +298,7 @@ def _lora_expand_fp8(
     grid = (
         triton.cdiv(M, BLOCK_M) * triton.cdiv(MAX_N, BLOCK_N),
         NUM_SLICES,
-        num_active_loras,
+        num_active_loras.item(),
     )
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
     # making PDL invalid and affecting the kernel performance.
@@ -377,7 +384,7 @@ def _lora_expand_fp8_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,
     b_scale: list[torch.Tensor],
     a_scale: torch.Tensor | None = None,
     offset_start: int = 0,
@@ -386,6 +393,7 @@ def _lora_expand_fp8_fake(
     group_n: int = 0,
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
+    cast_type: bool = False,
 ) -> None:
     return
 

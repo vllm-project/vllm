@@ -126,8 +126,14 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             device=x.device,
         )
 
+        fp8_shrink_kwargs: dict = {}
+        fp8_expand_kwargs: dict = {}
+        if self.enable_fp8_lora:
+            fp8_shrink_kwargs["lora_a_scale"] = self.lora_a_scale_stacked
+            fp8_expand_kwargs["lora_b_scale"] = self.lora_b_scale_stacked
+
         shrunk_buffer: torch.Tensor | None = self.punica_wrapper.add_shrink(
-            buffer, x, self.lora_a_stacked, 1.0
+            buffer, x, self.lora_a_stacked, 1.0, **fp8_shrink_kwargs
         )
         if not current_platform.can_update_inplace():
             buffer = shrunk_buffer
@@ -150,6 +156,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             self.output_slices,
             offset_start=offset_start,
             add_input=True,
+            **fp8_expand_kwargs,
         )
 
         if not current_platform.can_update_inplace():

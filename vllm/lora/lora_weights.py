@@ -37,7 +37,9 @@ class LoRALayerWeights:
         """Optimize the LoRA by merging the scaling into lora_b."""
         if self.scaling == 1:
             return self
-        self.lora_b *= self.scaling
+        # FIXME:This approach is not compatible with offline FP8 weights.
+        if self.lora_b.dtype is not torch.float8_e4m3fn:
+            self.lora_b *= self.scaling
         self.scaling = 1
         return self
 

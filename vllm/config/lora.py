@@ -69,6 +69,11 @@ class LoRAConfig:
     for variable LoRA usage patterns at the cost of increased startup time and
     memory usage. Only takes effect when cudagraph_specialize_lora is True.
     """
+    enable_fp8_lora: bool = False
+    """When enabled, LoRA weights are quantized to FP8 (float8_e4m3fn) at
+    load time using block-wise quantization, and FP8 Triton kernels are used
+    for the LoRA GEMM operations.  This can improve throughput and reduce
+    LoRA memory usage.  Requires a GPU with FP8 support (SM90+, e.g. H100)."""
 
     def compute_hash(self) -> str:
         """
@@ -92,7 +97,7 @@ class LoRAConfig:
         factors.append(
             tuple(sorted(self.target_modules)) if self.target_modules else None
         )
-
+        factors.append(self.enable_fp8_lora)
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -109,6 +114,11 @@ class LoRAConfig:
         return self
 
     def verify_with_model_config(self, model_config: ModelConfig):
+        if self.enable_fp8_lora:
+            logger.info(
+                "FP8 LoRA enabled: weights will be quantized to "
+                "float8_e4m3fn at load time."
+            )
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):

@@ -20,6 +20,9 @@ def _accumulate_mm(
     group_k: tl.constexpr,
     group_n: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
+    per_channel_quant: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
+    b_dtype: tl.constexpr,
 ):
     """
     Core matrix multiplication and accumulation logic with quantization support.
@@ -45,6 +48,8 @@ def _accumulate_mm(
             # a_scale_ptr is (BLOCK_M,) tensor of base pointers per row
             # Load scale for current K-group, result shape: (BLOCK_M,)
             a_scale = tl.load(a_scale_ptr + offs_ks * a_scale_k_stride)
+            if CAST_TYPE:
+                tiled_a = (tiled_a / a_scale[:, None]).to(b_dtype)
             # b_scale_ptr is (BLOCK_N,) tensor with N-offset pre-baked
             # Load scale for current K-group, result shape: (BLOCK_N,)
             b_scale = tl.load(b_scale_ptr + offs_ks * b_scale_k_stride)
@@ -52,9 +57,17 @@ def _accumulate_mm(
                 tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
             )
         else:
+            if CAST_TYPE:
+                if per_channel_quant:
+                    act_scale = tl.load(a_scale_ptr)[:, None]
+                else:
+                    act_scale = tl.load(a_scale_ptr)
+                tiled_a = (tiled_a / act_scale).to(b_dtype)
             # Tensor-wise or per-channel: accumulate and scale at end
             accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
     else:
+        if CAST_TYPE:
+            tiled_a = tiled_a.to(b_dtype)
         accumulator += tl.dot(tiled_a, tiled_b)
     return accumulator
 
@@ -159,6 +172,9 @@ def fp8_mm_k(
                 group_k,
                 group_n,
                 use_fp8_w8a8,
+                per_channel_quant,
+                CAST_TYPE,
+                b_dtype,
             )
         else:
             # Partial block at the tail: mask out-of-bounds elements
@@ -183,6 +199,9 @@ def fp8_mm_k(
                 group_k,
                 group_n,
                 use_fp8_w8a8,
+                per_channel_quant,
+                CAST_TYPE,
+                b_dtype,
             )
 
         a_ptr += STEP_K * ak_stride
@@ -236,6 +255,7 @@ def do_shrink_kernel_fp8(
     USE_GDC: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     """
@@ -306,8 +326,8 @@ def do_shrink_kernel_fp8(
             b_scale = tl.load(b_scale_ptrs)
             # Per-token activation scale
             a_scale = tl.load(a_scale_ptr + ram * a_scale_m_stride)[:, None]
-            # For non-block-wise, pass original pointers (not used in mm loop)
-            mm_a_scale_ptr = a_scale_ptr
+            # Keep row offsets baked into the pointer for fused activation quant.
+            mm_a_scale_ptr = a_scale_ptr + ram * a_scale_m_stride
             mm_b_scale_ptr = cur_b_scale_ptr
         else:
             # Tensor-wise quantization
@@ -342,7 +362,7 @@ def do_shrink_kernel_fp8(
         group_n,
         use_fp8_w8a8,
         per_channel_quant,
-        False,
+        CAST_TYPE,
         cur_lora_ptr.dtype.element_ty,
         USE_GDC,
         base_k=pid_sk * BLOCK_K,
@@ -530,8 +550,8 @@ def do_expand_kernel_fp8(
             b_scale = tl.load(b_scale_ptrs)
             # Per-token activation scale, only if a_scale_ptr provided
             a_scale = tl.load(a_scale_ptr + ram * a_scale_m_stride)[:, None]
-            # For non-block-wise, pass original pointers (not used in mm loop)
-            mm_a_scale_ptr = a_scale_ptr
+            # Keep row offsets baked into the pointer for fused activation quant.
+            mm_a_scale_ptr = a_scale_ptr + ram * a_scale_m_stride
             mm_b_scale_ptr = cur_b_scale_ptr
         else:
             # Tensor-wise quantization
