@@ -969,6 +969,12 @@ class Scheduler(SchedulerInterface):
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
+        
+        # NOTE(zhuohan): For async scheduling, we need to discard the latest
+        # output token on the fly to avoid a redundant repetitive output token.
+        request.num_output_placeholders = 0
+        request.discard_latest_async_tokens = True
+        
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
@@ -1881,10 +1887,6 @@ class Scheduler(SchedulerInterface):
             while self.running:
                 request = self.running.pop()
                 self._preempt_request(request, timestamp)
-                # NOTE(zhuohan): For async scheduling, we need to discard the latest
-                # output token on the fly to avoid a redundant repetitive output token.
-                request.num_output_placeholders = 0
-                request.discard_latest_async_tokens = True
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were
