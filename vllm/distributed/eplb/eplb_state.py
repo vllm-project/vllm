@@ -573,18 +573,22 @@ class EplbState:
                     .float()
                 )
 
-                # Compute balancedness ratio:
-                # for each layer:
-                #   (mean load across ranks) / (max load across ranks)
-                avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
-                max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
+                # Compute per-layer balancedness ratio:
+                #   for each layer: (mean across ranks) / (max across ranks)
+                #   then average across layers.
+                # dim=-1 is the rank dimension.
+                avg_per_layer = num_tokens_per_rank.mean(dim=-1)
+                max_per_layer = num_tokens_per_rank.max(dim=-1).values
+                per_layer_balance = torch.where(
+                    max_per_layer > 0,
+                    avg_per_layer / max_per_layer,
+                    torch.ones_like(max_per_layer),
+                )
+                balancedness = float(per_layer_balance.mean().item())
 
-                # Just to make type checker happy
-                tokens_tensors: list[float] = torch.stack(
-                    [avg_tokens_tensor, max_tokens_tensor]
-                ).tolist()
-                avg_tokens, max_tokens = tokens_tensors
-                balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+                # Summary stats for logging
+                avg_tokens = float(avg_per_layer.sum().item())
+                max_tokens = float(max_per_layer.sum().item())
 
                 if ep_group.rank() == 0:
                     logger.info(
