@@ -938,6 +938,15 @@ class FusedMoEParallelConfig:
     enable_eplb: bool  # whether to enable expert load balancing
 
     @property
+    def use_dp_chunking(self) -> bool:
+        return (
+            self.use_deepep_ll_kernels
+            or self.use_mori_kernels
+            or self.use_fi_nvl_two_sided_kernels
+            or self.use_nixl_ep_kernels
+        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
+
+    @property
     def is_sequence_parallel(self) -> bool:
         return self.sp_size > 1
 
@@ -1169,6 +1178,11 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
+    # Defaults to hidden_dim if not specified.
+    hidden_dim_unpadded: int | None = None
+    # Defaults to intermediate_size_per_partition if not specified.
+    intermediate_size_per_partition_unpadded: int | None = None
+
     moe_backend: str = "auto"
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
     has_bias: bool = False
@@ -1191,6 +1205,13 @@ class FusedMoEConfig:
 
         if self.router_logits_dtype is None:
             self.router_logits_dtype = self.in_dtype
+
+        if self.hidden_dim_unpadded is None:
+            self.hidden_dim_unpadded = self.hidden_dim
+        if self.intermediate_size_per_partition_unpadded is None:
+            self.intermediate_size_per_partition_unpadded = (
+                self.intermediate_size_per_partition
+            )
 
     @property
     def tp_size(self):
