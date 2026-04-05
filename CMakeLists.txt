@@ -340,6 +340,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
+    "csrc/quantization/w8a8/cutlass/fused_fp8_ag_bmm_entry.cu"
+    "csrc/quantization/w8a8/cutlass/fused_fp8_gemm_rs_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
     "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu")
 

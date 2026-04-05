@@ -8,7 +8,7 @@
 
 #include <vector>
 
-torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
+inline torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
   // Ensure tensor is on CUDA
   if (!tensor.is_cuda()) {
     throw std::runtime_error("Tensor must be on CUDA device");
@@ -283,9 +283,26 @@ void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                 fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);
 int64_t meta_size();
-void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
+void all_gather(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
+void reduce_scatter(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                    fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
+void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs,
+                     int64_t buffer_bytes);
 std::tuple<std::vector<int64_t>, std::vector<int64_t>>
 get_graph_buffer_ipc_meta(fptr_t _fa);
+
+torch::Tensor fused_bmm_fp8_reduce_scatter(
+    const torch::Tensor& a, const torch::Tensor& b,
+    const torch::Tensor& a_scale, const torch::Tensor& b_scale,
+    at::ScalarType out_dtype, fptr_t custom_ar_ptr, fptr_t reg_buffer,
+    int64_t reg_buffer_sz_bytes, int64_t rank, int64_t world_size);
+
+torch::Tensor fused_all_gather_bmm_fp8(
+    const torch::Tensor& a, const torch::Tensor& b,
+    const torch::Tensor& a_scale, const torch::Tensor& b_scale,
+    at::ScalarType out_dtype, fptr_t custom_ar_ptr, fptr_t reg_buffer,
+    int64_t reg_buffer_sz_bytes, int64_t rank, int64_t world_size);
 void register_graph_buffers(fptr_t _fa,
                             const std::vector<std::vector<int64_t>>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
