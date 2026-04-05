@@ -10,9 +10,12 @@ typedef __hip_bfloat16 nv_bfloat16;
 #endif
 
 #include <iostream>
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <map>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 #include <cstdlib>
@@ -34,11 +37,12 @@ constexpr int kMaxBlocks = 36;
 
 // Default number of blocks in allreduce kernel.
 #ifndef USE_ROCM
-const int defaultBlockLimit = 36;
-CUpointer_attribute rangeStartAddrAttr = CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+inline constexpr int defaultBlockLimit = 36;
+inline constexpr CUpointer_attribute rangeStartAddrAttr =
+    CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
 #else
-const int defaultBlockLimit = 16;
-hipPointer_attribute rangeStartAddrAttr =
+inline constexpr int defaultBlockLimit = 16;
+inline constexpr hipPointer_attribute rangeStartAddrAttr =
     HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR;
 #endif
 
@@ -60,6 +64,12 @@ struct Signal {
 
 struct __align__(16) RankData {
   const void* ptrs[8];
+};
+
+struct RegisteredBuffer {
+  char* base_ptr;
+  size_t bytes;
+  RankData host_data;
 };
 
 struct __align__(16) RankSignals {
@@ -242,6 +252,26 @@ DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
 
 #else
 
+static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
+  __scoped_atomic_store_n(flag_addr, flag, __ATOMIC_RELEASE,
+                          __MEMORY_SCOPE_SYSTEM);
+}
+
+static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
+  return __scoped_atomic_load_n(flag_addr, __ATOMIC_ACQUIRE,
+                                __MEMORY_SCOPE_DEVICE);
+}
+
+static DINLINE void st_flag_volatile(FlagType* flag_addr, FlagType flag) {
+  __scoped_atomic_store_n(flag_addr, flag, __ATOMIC_RELAXED,
+                          __MEMORY_SCOPE_SYSTEM);
+}
+
+static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
+  return __scoped_atomic_load_n(flag_addr, __ATOMIC_RELAXED,
+                                __MEMORY_SCOPE_DEVICE);
+}
+
 template <int ngpus>
 DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
                               int rank) {
@@ -293,6 +323,76 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
     packed_assign_add(tmp, upcast(ptrs[i][idx]));
   }
   return downcast<P>(tmp);
+}
+
+DINLINE bool is_aligned_to(const void* ptr, size_t alignment) {
+  return (reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) == 0;
+}
+
+inline int select_threads_for_bytes(size_t bytes) {
+  if (bytes <= 16 * 1024) {
+    return 128;
+  }
+  if (bytes <= 128 * 1024) {
+    return 256;
+  }
+  return 512;
+}
+
+inline int select_blocks_for_work(int work_items, int threads,
+                                  int block_limit) {
+  return std::max(1,
+                  std::min(block_limit, (work_items + threads - 1) / threads));
+}
+
+struct LaunchConfig {
+  int threads;
+  int blocks;
+};
+
+inline LaunchConfig select_launch_config(int work_items, size_t bytes,
+                                         int threads, int block_limit) {
+  if (threads == 512) {
+    threads = select_threads_for_bytes(bytes);
+  }
+  return LaunchConfig{
+      threads,
+      select_blocks_for_work(work_items, threads, block_limit),
+  };
+}
+
+template <typename T, int ngpus>
+DINLINE void load_peer_ptrs(const RankData& dp, const T* ptrs[ngpus]) {
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    ptrs[i] = reinterpret_cast<const T*>(dp.ptrs[i]);
+  }
+}
+
+template <typename T, int ngpus>
+DINLINE void gather_copy_1stage(const T* srcs[ngpus], T* result,
+                                int segment_size, int tid, int stride) {
+  for (int idx = tid; idx < segment_size; idx += stride) {
+#pragma unroll
+    for (int i = 0; i < ngpus; i++) {
+      result[i * segment_size + idx] = srcs[i][idx];
+    }
+  }
+}
+
+template <typename T, int ngpus>
+DINLINE bool can_use_packed_gather(const T* srcs[ngpus], T* result, int size) {
+  using P = typename packed_t<T>::P;
+  if (size % P::size != 0 || !is_aligned_to(result, sizeof(P))) {
+    return false;
+  }
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    if (!is_aligned_to(srcs[i], sizeof(P))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 template <typename T, int ngpus>
@@ -365,6 +465,56 @@ __global__ void __launch_bounds__(512, 1)
   }
 }
 
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(512, 1)
+    cross_device_gather_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
+                               T* __restrict__ result, int rank, int size) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  using P = typename packed_t<T>::P;
+  auto dp = *_dp;
+  const T* srcs[ngpus];
+  load_peer_ptrs<T, ngpus>(dp, srcs);
+
+  barrier_at_start<ngpus>(sg, self_sg, rank);
+
+  if (can_use_packed_gather<T, ngpus>(srcs, result, size)) {
+    const P* packed_srcs[ngpus];
+    load_peer_ptrs<P, ngpus>(dp, packed_srcs);
+    gather_copy_1stage<P, ngpus>(packed_srcs, reinterpret_cast<P*>(result),
+                                 size / P::size, tid, stride);
+  } else {
+    gather_copy_1stage<T, ngpus>(srcs, result, size, tid, stride);
+  }
+
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
+}
+
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(512, 1)
+    cross_device_reduce_scatter_1stage(RankData* _dp, RankSignals sg,
+                                       Signal* self_sg, T* __restrict__ result,
+                                       int rank, int size) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  using P = typename packed_t<T>::P;
+  using A = typename packed_t<T>::A;
+  int part = size / ngpus;
+  int start = rank * part;
+  int end = start + part;
+  auto dp = *_dp;
+  const P* ptrs[ngpus];
+  load_peer_ptrs<P, ngpus>(dp, ptrs);
+  barrier_at_start<ngpus>(sg, self_sg, rank);
+
+  for (int idx = start + tid; idx < end; idx += stride) {
+    reinterpret_cast<P*>(result)[idx - start] =
+        packed_reduce<P, ngpus, A>(ptrs, idx);
+  }
+
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
+}
+
 using IPC_KEY = std::array<uint8_t, sizeof(cudaIpcMemHandle_t)>;
 static_assert(sizeof(IPC_KEY) == sizeof(cudaIpcMemHandle_t));
 static_assert(alignof(IPC_KEY) == alignof(cudaIpcMemHandle_t));
@@ -379,6 +529,7 @@ class CustomAllreduce {
   RankSignals sg_;
   // Stores a map from a pointer to its peer pointers from all ranks.
   std::unordered_map<void*, RankData*> buffers_;
+  std::vector<RegisteredBuffer> registered_buffers_;
   Signal* self_sg_;
 
   // Stores rank data from all ranks. This is mainly for cuda graph purposes.
@@ -421,6 +572,7 @@ class CustomAllreduce {
         self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
+    graph_unreg_buffers_.reserve(rank_data_sz / sizeof(RankData));
     for (int i = 0; i < world_size_; i++) {
       sg_.signals[i] = signals[i];
     }
@@ -466,10 +618,82 @@ class CustomAllreduce {
           std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
   }
 
+  [[noreturn]] void throw_unsupported_world_size(const char* op_name) const {
+    throw std::runtime_error("custom " + std::string(op_name) +
+                             " only supports num gpus in (2,4,6,8). Actual "
+                             "num gpus = " +
+                             std::to_string(world_size_));
+  }
+
+  template <typename F>
+  void dispatch_by_world_size(F&& launch, const char* op_name) {
+    switch (world_size_) {
+      case 2:
+        launch(std::integral_constant<int, 2>{});
+        return;
+      case 4:
+        launch(std::integral_constant<int, 4>{});
+        return;
+      case 6:
+        launch(std::integral_constant<int, 6>{});
+        return;
+      case 8:
+        launch(std::integral_constant<int, 8>{});
+        return;
+      default:
+        throw_unsupported_world_size(op_name);
+    }
+  }
+
+  template <typename T>
+  RankData* resolve_rank_data(cudaStream_t stream, T* input) {
+    cudaStreamCaptureStatus status;
+    CUDACHECK(cudaStreamIsCapturing(stream, &status));
+    if (status == cudaStreamCaptureStatusActive) {
+      auto slot = graph_unreg_buffers_.size();
+      check_rank_data_capacity(slot + 1);
+      auto ptrs = d_rank_data_base_ + slot;
+      graph_unreg_buffers_.push_back(input);
+      return ptrs;
+    }
+
+    auto it = buffers_.find(input);
+    if (it == buffers_.end()) {
+      auto* byte_input = reinterpret_cast<char*>(input);
+      for (const auto& registered : registered_buffers_) {
+        auto* range_end = registered.base_ptr + registered.bytes;
+        if (byte_input < registered.base_ptr || byte_input >= range_end) {
+          continue;
+        }
+
+        size_t offset = static_cast<size_t>(byte_input - registered.base_ptr);
+        check_rank_data_capacity();
+
+        RankData offset_data;
+        for (int i = 0; i < world_size_; ++i) {
+          offset_data.ptrs[i] =
+              static_cast<const char*>(registered.host_data.ptrs[i]) + offset;
+        }
+
+        auto d_data = d_rank_data_base_++;
+        CUDACHECK(cudaMemcpy(d_data, &offset_data, sizeof(RankData),
+                             cudaMemcpyHostToDevice));
+        buffers_[input] = d_data;
+        return d_data;
+      }
+
+      throw std::runtime_error(
+          "buffer address " +
+          std::to_string(reinterpret_cast<uint64_t>(input)) +
+          " is not registered!");
+    }
+    return it->second;
+  }
+
   /**
    * Register already-shared IPC pointers.
    */
-  void register_buffer(void** ptrs) {
+  void register_buffer(void** ptrs, size_t buffer_bytes) {
     check_rank_data_capacity();
     RankData data;
     for (int i = 0; i < world_size_; i++) {
@@ -479,6 +703,10 @@ class CustomAllreduce {
     CUDACHECK(
         cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice));
     buffers_[ptrs[rank_]] = d_data;
+    if (buffer_bytes > 0) {
+      registered_buffers_.push_back(RegisteredBuffer{
+          static_cast<char*>(ptrs[rank_]), buffer_bytes, data});
+    }
   }
 
   // Note: when registering graph buffers, we intentionally choose to not
@@ -538,21 +766,7 @@ class CustomAllreduce {
                                std::to_string(kMaxBlocks) + ". Got " +
                                std::to_string(block_limit));
 
-    RankData* ptrs;
-    cudaStreamCaptureStatus status;
-    CUDACHECK(cudaStreamIsCapturing(stream, &status));
-    if (status == cudaStreamCaptureStatusActive) {
-      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
-      graph_unreg_buffers_.push_back(input);
-    } else {
-      auto it = buffers_.find(input);
-      if (it == buffers_.end())
-        throw std::runtime_error(
-            "buffer address " +
-            std::to_string(reinterpret_cast<uint64_t>(input)) +
-            " is not registered!");
-      ptrs = it->second;
-    }
+    RankData* ptrs = resolve_rank_data(stream, input);
 
     size /= d;
     auto bytes = size * sizeof(typename packed_t<T>::P);
@@ -576,44 +790,98 @@ class CustomAllreduce {
       }
     }
 
-#define KL(ngpus, name)                                                       \
-  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
+    dispatch_by_world_size(
+        [&](auto ngpus_tag) {
+          constexpr int ngpus = decltype(ngpus_tag)::value;
+          if (force_1stage) {
+            cross_device_reduce_1stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
                                                  rank_, size);
-#define REDUCE_CASE(ngpus)                              \
-  case ngpus: {                                         \
-    if (force_1stage) {                                 \
-      KL(ngpus, cross_device_reduce_1stage);            \
-    } else if (force_2stage) {                          \
-      KL(ngpus, cross_device_reduce_2stage);            \
-    } else {                                            \
-      if (world_size_ == 2) {                           \
-        KL(ngpus, cross_device_reduce_1stage);          \
-      } else if (fully_connected_) {                    \
-        if ((world_size_ <= 4 && bytes < 512 * 1024) || \
-            (world_size_ <= 8 && bytes < 256 * 1024)) { \
-          KL(ngpus, cross_device_reduce_1stage);        \
-        } else {                                        \
-          KL(ngpus, cross_device_reduce_2stage);        \
-        }                                               \
-      }                                                 \
-    }                                                   \
-    break;                                              \
+            return;
+          }
+          if (force_2stage) {
+            cross_device_reduce_2stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
+                                                 rank_, size);
+            return;
+          }
+          if (world_size_ == 2) {
+            cross_device_reduce_1stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
+                                                 rank_, size);
+            return;
+          }
+          if (fully_connected_ && ((world_size_ <= 4 && bytes < 512 * 1024) ||
+                                   (world_size_ <= 8 && bytes < 256 * 1024))) {
+            cross_device_reduce_1stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
+                                                 rank_, size);
+            return;
+          }
+          cross_device_reduce_2stage<T, ngpus><<<blocks, threads, 0, stream>>>(
+              ptrs, sg_, self_sg_, output, rank_, size);
+        },
+        "allreduce");
   }
 
-    switch (world_size_) {
-      REDUCE_CASE(2)
-      REDUCE_CASE(4)
-      REDUCE_CASE(6)
-      REDUCE_CASE(8)
-      default:
-        throw std::runtime_error(
-            "custom allreduce only supports num gpus in (2,4,6,8). Actual "
-            "num "
-            "gpus = " +
-            std::to_string(world_size_));
+  template <typename T>
+  void allgather(cudaStream_t stream, T* input, T* output, int size,
+                 int threads = 512, int block_limit = defaultBlockLimit) {
+    if (block_limit > kMaxBlocks)
+      throw std::runtime_error("max supported block limit is " +
+                               std::to_string(kMaxBlocks) + ". Got " +
+                               std::to_string(block_limit));
+
+    RankData* ptrs = resolve_rank_data(stream, input);
+
+    auto launch = select_launch_config(
+        size, static_cast<size_t>(size) * sizeof(T), threads, block_limit);
+    dispatch_by_world_size(
+        [&](auto ngpus_tag) {
+          constexpr int ngpus = decltype(ngpus_tag)::value;
+          cross_device_gather_1stage<T, ngpus>
+              <<<launch.blocks, launch.threads, 0, stream>>>(
+                  ptrs, sg_, self_sg_, output, rank_, size);
+        },
+        "allgather");
+  }
+
+  template <typename T>
+  void reduce_scatter(cudaStream_t stream, T* input, T* output, int size,
+                      int threads = 512, int block_limit = defaultBlockLimit) {
+    auto d = packed_t<T>::P::size;
+    if (size % d != 0)
+      throw std::runtime_error(
+          "custom reduce_scatter currently requires input length to be "
+          "multiple of " +
+          std::to_string(d));
+    if (block_limit > kMaxBlocks)
+      throw std::runtime_error("max supported block limit is " +
+                               std::to_string(kMaxBlocks) + ". Got " +
+                               std::to_string(block_limit));
+
+    RankData* ptrs = resolve_rank_data(stream, input);
+
+    size /= d;
+    if (size % world_size_ != 0) {
+      throw std::runtime_error(
+          "custom reduce_scatter requires packed input length divisible by "
+          "world size");
     }
-#undef REDUCE_CASE
-#undef KL
+
+    int chunk_size = size / world_size_;
+    auto launch = select_launch_config(
+        chunk_size,
+        static_cast<size_t>(chunk_size) * sizeof(typename packed_t<T>::P),
+        threads, block_limit);
+    dispatch_by_world_size(
+        [&](auto ngpus_tag) {
+          constexpr int ngpus = decltype(ngpus_tag)::value;
+          cross_device_reduce_scatter_1stage<T, ngpus>
+              <<<launch.blocks, launch.threads, 0, stream>>>(
+                  ptrs, sg_, self_sg_, output, rank_, size);
+        },
+        "reduce_scatter");
   }
 
   ~CustomAllreduce() {

@@ -193,7 +193,7 @@ class CustomAllreduce:
         self._ptr = ops.init_custom_ar(
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
-        ops.register_buffer(self._ptr, self.buffer_ptrs)
+        ops.register_buffer(self._ptr, self.buffer_ptrs, self.max_size)
 
     @contextmanager
     def capture(self):

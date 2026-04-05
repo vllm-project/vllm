@@ -2803,8 +2803,32 @@ def meta_size() -> int:
     return torch.ops._C_custom_ar.meta_size()
 
 
-def register_buffer(fa: int, ipc_tensors: list[int]) -> None:
-    return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors)
+def register_buffer(fa: int, ipc_tensors: list[int], buffer_bytes: int) -> None:
+    return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors, buffer_bytes)
+
+
+def all_gather(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    reg_buffer: int,
+    reg_buffer_sz_bytes: int,
+) -> None:
+    return torch.ops._C_custom_ar.all_gather(
+        fa, inp, out, reg_buffer, reg_buffer_sz_bytes
+    )
+
+
+def reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    reg_buffer: int,
+    reg_buffer_sz_bytes: int,
+) -> None:
+    return torch.ops._C_custom_ar.reduce_scatter(
+        fa, inp, out, reg_buffer, reg_buffer_sz_bytes
+    )
 
 
 def get_graph_buffer_ipc_meta(fa: int) -> tuple[list[int], list[int]]:

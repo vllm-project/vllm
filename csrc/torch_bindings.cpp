@@ -381,6 +381,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " -> ()");
   // conditionally compiled so impl registration is in source file
 
+  // Fused all_gather + FP8 BMM for Blackwell AsyncTP.
+  ops.def(
+      "fused_all_gather_bmm_fp8("
+      "    Tensor a, Tensor b, Tensor a_scale, Tensor b_scale,"
+      "    ScalarType out_dtype, int custom_ar_ptr, int reg_buffer,"
+      "    int reg_buffer_sz_bytes, int rank, int world_size"
+      ") -> Tensor");
+  ops.impl("fused_all_gather_bmm_fp8", torch::kCUDA, &fused_all_gather_bmm_fp8);
+
+  // Fused FP8 BMM + reduce_scatter for Blackwell AsyncTP.
+  ops.def(
+      "fused_bmm_fp8_reduce_scatter("
+      "    Tensor a, Tensor b, Tensor a_scale, Tensor b_scale,"
+      "    ScalarType out_dtype, int custom_ar_ptr, int reg_buffer,"
+      "    int reg_buffer_sz_bytes, int rank, int world_size"
+      ") -> Tensor");
+  ops.impl("fused_bmm_fp8_reduce_scatter", torch::kCUDA,
+           &fused_bmm_fp8_reduce_scatter);
+
   // Expert-specialization mxfp8 blockscaled grouped GEMM (SM100+).
   ops.def(
       "cutlass_mxfp8_grouped_mm("
@@ -635,7 +654,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("dispose", &dispose);
   custom_ar.def("meta_size", &meta_size);
 
-  custom_ar.def("register_buffer", &register_buffer);
+  custom_ar.def(
+      "all_gather(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.impl("all_gather", torch::kCUDA, &all_gather);
+  custom_ar.def(
+      "reduce_scatter(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.impl("reduce_scatter", torch::kCUDA, &reduce_scatter);
+
+  custom_ar.def(
+      "register_buffer(int fa, int[] ipc_tensors, int buffer_bytes) -> ()");
+  custom_ar.impl("register_buffer", &register_buffer);
   custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
   custom_ar.def("register_graph_buffers", &register_graph_buffers);
 

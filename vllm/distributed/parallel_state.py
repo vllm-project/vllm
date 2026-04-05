@@ -287,6 +287,225 @@ direct_register_custom_op(
 )
 
 
+def fused_all_gather_bmm_fp8_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    group_name: str,
+    world_size: int,
+    out_dtype: torch.dtype,
+    backend: str,
+) -> torch.Tensor:
+    if A.ndim != 2 or B.ndim != 2:
+        return torch.empty_like(A)
+    m = A.shape[0] * max(world_size, 1)
+    n = B.shape[1]
+    return torch.empty((m, n), dtype=out_dtype, device=A.device)
+
+
+def fused_bmm_fp8_reduce_scatter_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    group_name: str,
+    world_size: int,
+    out_dtype: torch.dtype,
+    backend: str,
+) -> torch.Tensor:
+    if A.ndim != 2 or B.ndim != 2:
+        return torch.empty_like(A)
+    m = A.shape[0] // max(world_size, 1)
+    n = B.shape[1]
+    return torch.empty((m, n), dtype=out_dtype, device=A.device)
+
+
+def _fallback_all_gather_bmm_fp8(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+    backend: str,
+    group: "GroupCoordinator",
+) -> torch.Tensor:
+    ag_out = group._all_gather_out_place(A, 0)
+    bmm_out = torch.ops.vllm.bmm_fp8.default(
+        ag_out.unsqueeze(0), B.unsqueeze(0), A_scale, B_scale, out_dtype, backend
+    )
+    return bmm_out.view(ag_out.shape[0], B.shape[1])
+
+
+def fused_all_gather_bmm_fp8(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    group_name: str,
+    world_size: int,
+    out_dtype: torch.dtype,
+    backend: str,
+) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    world_size = group.world_size
+
+    if (
+        not hasattr(torch.ops, "_C")
+        or not hasattr(torch.ops._C, "fused_all_gather_bmm_fp8")
+        or A.ndim != 2
+        or B.ndim != 2
+        or A.shape[1] != B.shape[0]
+        or A_scale.numel() != 1
+        or B_scale.numel() != 1
+        or out_dtype not in (torch.float16, torch.bfloat16)
+    ):
+        return _fallback_all_gather_bmm_fp8(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+
+    rank = group.rank_in_group
+    device_communicator = group.device_communicator
+    ca_comm = (
+        getattr(device_communicator, "ca_comm", None)
+        if device_communicator is not None
+        else None
+    )
+    if ca_comm is None or ca_comm.disabled or ca_comm._ptr == 0:
+        return _fallback_all_gather_bmm_fp8(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+
+    reg_buffer = ca_comm.buffer_ptrs[rank]
+    reg_buffer_sz_bytes = ca_comm.max_size
+    a_bytes = A.numel() * A.element_size()
+    if reg_buffer_sz_bytes < a_bytes:
+        return _fallback_all_gather_bmm_fp8(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+
+    return torch.ops._C.fused_all_gather_bmm_fp8(
+        A,
+        B,
+        A_scale,
+        B_scale,
+        out_dtype,
+        ca_comm._ptr,
+        reg_buffer,
+        reg_buffer_sz_bytes,
+        rank,
+        world_size,
+    )
+
+
+def _fallback_bmm_fp8_reduce_scatter(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+    backend: str,
+    group: "GroupCoordinator",
+) -> torch.Tensor:
+    bmm_out = torch.ops.vllm.bmm_fp8.default(
+        A.unsqueeze(0), B.unsqueeze(0), A_scale, B_scale, out_dtype, backend
+    )
+    mm_out = bmm_out.view(A.shape[0], B.shape[1])
+    return group._reduce_scatter_out_place(mm_out, 0)
+
+
+def fused_bmm_fp8_reduce_scatter(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    group_name: str,
+    world_size: int,
+    out_dtype: torch.dtype,
+    backend: str,
+) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    world_size = group.world_size
+
+    if (
+        A.ndim != 2
+        or B.ndim != 2
+        or A.shape[1] != B.shape[0]
+        or A.shape[0] % world_size != 0
+        or A_scale.numel() != 1
+        or B_scale.numel() != 1
+        or out_dtype not in (torch.float16, torch.bfloat16)
+    ):
+        return _fallback_bmm_fp8_reduce_scatter(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+
+    rank = group.rank_in_group
+    device_communicator = group.device_communicator
+    ca_comm = (
+        getattr(device_communicator, "ca_comm", None)
+        if device_communicator is not None
+        else None
+    )
+    if ca_comm is None or ca_comm.disabled or ca_comm._ptr == 0:
+        return _fallback_bmm_fp8_reduce_scatter(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+
+    reg_buffer = ca_comm.buffer_ptrs[rank]
+    reg_buffer_sz_bytes = ca_comm.max_size
+    row_bytes = B.shape[1] * torch.empty((), dtype=out_dtype).element_size()
+    if reg_buffer_sz_bytes < row_bytes * world_size:
+        return _fallback_bmm_fp8_reduce_scatter(
+            A, B, A_scale, B_scale, out_dtype, backend, group
+        )
+
+    return torch.ops._C.fused_bmm_fp8_reduce_scatter(
+        A,
+        B,
+        A_scale,
+        B_scale,
+        out_dtype,
+        ca_comm._ptr,
+        reg_buffer,
+        reg_buffer_sz_bytes,
+        rank,
+        world_size,
+    )
+
+
+def _register_inductor_lowering_for_fused_collective_fp8_ops() -> None:
+    """Register Inductor extern-call lowerings for fused FP8 collective ops."""
+    import torch._inductor.lowering as _lowering
+
+    ops = (
+        torch.ops.vllm.fused_all_gather_bmm_fp8.default,
+        torch.ops.vllm.fused_bmm_fp8_reduce_scatter.default,
+    )
+    for op in ops:
+        if op not in _lowering.lowerings:
+            _lowering.make_fallback(op)
+
+
+direct_register_custom_op(
+    op_name="fused_all_gather_bmm_fp8",
+    op_func=fused_all_gather_bmm_fp8,
+    fake_impl=fused_all_gather_bmm_fp8_fake,
+)
+
+direct_register_custom_op(
+    op_name="fused_bmm_fp8_reduce_scatter",
+    op_func=fused_bmm_fp8_reduce_scatter,
+    fake_impl=fused_bmm_fp8_reduce_scatter_fake,
+)
+
+
 class GroupCoordinator:
     """
     PyTorch ProcessGroup wrapper for a group of processes.
