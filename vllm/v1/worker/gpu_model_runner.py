@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
@@ -6010,6 +6010,30 @@ class GPUModelRunner(
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
+        
+        # Setup torch profiler for graph capture traces (conditional)
+        from vllm.distributed.parallel_state import get_world_group
+        local_rank = get_world_group().local_rank
+        enable_profiler = (local_rank == 0) and self.vllm_config.profiler_config.capture_torch_profiler_dir
+        if enable_profiler:
+            trace_dir = self.vllm_config.profiler_config.capture_torch_profiler_dir
+            profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    trace_dir, worker_name=f"graph_capture_rank_{local_rank}",use_gzip=True
+                ),
+            )
+            logger.info("Rank %d: Torch profiler enabled for CUDA graph capture, traces will be saved to: %s", local_rank, trace_dir)
+        else:
+            profiler = nullcontext()
+            logger.info("Rank %d: Torch profiler disabled for CUDA graph capture", local_rank)
+            
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -6022,6 +6046,7 @@ class GPUModelRunner(
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
+                    profiler=profiler,
                 )
                 torch.accelerator.synchronize()
 
@@ -6065,6 +6090,7 @@ class GPUModelRunner(
         profile_seq_lens: int | None = None,
         allow_microbatching: bool = False,
         num_warmups: int | None = None,
+        profiler: "ContextManager[Any]"  = nullcontext(),
     ):
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
@@ -6081,22 +6107,27 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
-        self._dummy_run(
-            desc.num_tokens,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            uniform_decode=desc.uniform,
-            allow_microbatching=allow_microbatching,
-            skip_eplb=True,
-            remove_lora=False,
-            num_active_loras=desc.num_active_loras,
-            is_graph_capturing=True,
-            profile_seq_lens=profile_seq_lens,
-        )
+        with profiler:
+            with torch.profiler.record_function(
+                f"capture_{desc.num_tokens}_{cudagraph_runtime_mode.name}"
+            ):
+                self._dummy_run(
+                    desc.num_tokens,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    uniform_decode=desc.uniform,
+                    allow_microbatching=allow_microbatching,
+                    skip_eplb=True,
+                    remove_lora=False,
+                    num_active_loras=desc.num_active_loras,
+                    is_graph_capturing=True,
+                    profile_seq_lens=profile_seq_lens,
+                )
 
     def _capture_cudagraphs(
         self,
         batch_descriptors: list[BatchDescriptor],
         cudagraph_runtime_mode: CUDAGraphMode,
+        profiler: "ContextManager[Any]"  = nullcontext(),
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
@@ -6139,6 +6170,7 @@ class GPUModelRunner(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 allow_microbatching=allow_microbatching,
+                profiler=profiler,
             )
             torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
