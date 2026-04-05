@@ -34,7 +34,7 @@ COMM_WORKSPACE_POOL = "comm"
 class WorkspaceManager:
     """Manager for workspace allocation.
 
-    Manages workspace buffers for DBO (Dual Batch Overlap) execution.
+    Manages one workspace buffer per active ubatch slot.
     Can be locked to prevent further growth during execution.
     """
 
@@ -43,14 +43,14 @@ class WorkspaceManager:
         # Cache num ubatches at init based on configuration (default to 1)
         self._num_ubatches = num_ubatches if num_ubatches is not None else 1
         self._current_workspaces: dict[str, list[torch.Tensor | None]] = {
-            DEFAULT_WORKSPACE_POOL: [None, None]
+            DEFAULT_WORKSPACE_POOL: [None] * self._num_ubatches
         }
         self._locked: bool = False
 
     def _get_workspace_pool(self, pool: str) -> list[torch.Tensor | None]:
         workspaces = self._current_workspaces.get(pool)
         if workspaces is None:
-            workspaces = [None, None]
+            workspaces = [None] * self._num_ubatches
             self._current_workspaces[pool] = workspaces
         return workspaces
 
@@ -248,7 +248,7 @@ def init_workspace_manager(
 
     Args:
         device: The device to allocate workspace on.
-        num_ubatches: Number of micro-batches. Defaults to 1.
+        num_ubatches: Number of workspace ubatch slots. Defaults to 1.
     """
     global _manager
     if _manager is not None:
