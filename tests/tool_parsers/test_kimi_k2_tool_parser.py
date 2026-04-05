@@ -423,7 +423,7 @@ def test_split_markers_across_deltas(kimi_k2_tool_parser):
     _results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
 
     # Now the complete marker should be detected via buffer
-    assert kimi_k2_tool_parser.in_tool_section is True
+    assert kimi_k2_tool_parser._stream_state.in_section is True
 
 
 def test_marker_variants(kimi_k2_tool_parser):
@@ -444,7 +444,7 @@ def test_marker_variants(kimi_k2_tool_parser):
             request=None,
         )
         # Should enter tool section mode with singular variant too
-        assert kimi_k2_tool_parser.in_tool_section is True
+        assert kimi_k2_tool_parser._stream_state.in_section is True
 
 
 def test_reentry_to_reasoning_after_tool_section(kimi_k2_tool_parser):
@@ -465,7 +465,7 @@ def test_reentry_to_reasoning_after_tool_section(kimi_k2_tool_parser):
 
     results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
 
-    assert kimi_k2_tool_parser.in_tool_section is False
+    assert kimi_k2_tool_parser._stream_state.in_section is False
     assert results[2] is not None
     assert results[2].content == " More reasoning"
 
@@ -499,69 +499,26 @@ def test_empty_tool_section(kimi_k2_tool_parser):
         request=None,
     )
     # Should exit cleanly without errors
-    assert kimi_k2_tool_parser.in_tool_section is False
-
-
-def test_malformed_tool_section_recovery(kimi_k2_tool_parser):
-    """
-    Test that the parser recovers from a malformed tool section
-    that never closes properly.
-    """
-    kimi_k2_tool_parser.reset_streaming_state()
-
-    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
-
-    # Enter tool section
-    _result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="<|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=[],
-        current_token_ids=[section_begin_id],
-        delta_token_ids=[section_begin_id],
-        request=None,
-    )
-    assert kimi_k2_tool_parser.in_tool_section is True
-
-    # Simulate a lot of text without proper tool calls or section end
-    # This should trigger the error recovery mechanism
-    large_text = "x" * 10000  # Exceeds max_section_chars
-
-    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="<|tool_calls_section_begin|>",
-        current_text="<|tool_calls_section_begin|>" + large_text,
-        delta_text=large_text,
-        previous_token_ids=[section_begin_id],
-        current_token_ids=[section_begin_id] + list(range(100, 100 + len(large_text))),
-        delta_token_ids=list(range(100, 100 + len(large_text))),
-        request=None,
-    )
-
-    # Parser should have force-exited the tool section
-    assert kimi_k2_tool_parser.in_tool_section is False
-    # And returned the content as reasoning
-    assert result2 is not None
-    assert result2.content == large_text
+    assert kimi_k2_tool_parser._stream_state.in_section is False
 
 
 def test_state_reset(kimi_k2_tool_parser):
     """Test that reset_streaming_state() properly clears all state."""
     # Put parser in a complex state
-    kimi_k2_tool_parser.in_tool_section = True
-    kimi_k2_tool_parser.token_buffer = "some buffer"
+    kimi_k2_tool_parser._stream_state.in_section = True
+    kimi_k2_tool_parser._stream_state.buffer = "some buffer"
     kimi_k2_tool_parser.current_tool_id = 5
     kimi_k2_tool_parser.prev_tool_call_arr = [{"id": "test"}]
-    kimi_k2_tool_parser.section_char_count = 1000
 
     # Reset
     kimi_k2_tool_parser.reset_streaming_state()
 
     # Verify all state is cleared
-    assert kimi_k2_tool_parser.in_tool_section is False
-    assert kimi_k2_tool_parser.token_buffer == ""
+    assert kimi_k2_tool_parser._stream_state.in_section is False
+    assert kimi_k2_tool_parser._stream_state.buffer == ""
     assert kimi_k2_tool_parser.current_tool_id == -1
     assert kimi_k2_tool_parser.prev_tool_call_arr == []
-    assert kimi_k2_tool_parser.section_char_count == 0
+    assert kimi_k2_tool_parser._stream_state.section_chars == 0
     assert kimi_k2_tool_parser.current_tool_name_sent is False
     assert kimi_k2_tool_parser.streamed_args_for_tool == []
 
@@ -616,7 +573,7 @@ def test_stream_ends_without_section_end_marker(kimi_k2_tool_parser):
         delta_token_ids=[section_begin_id],
         request=None,
     )
-    assert kimi_k2_tool_parser.in_tool_section is True
+    assert kimi_k2_tool_parser._stream_state.in_section is True
 
     # Some content in tool section
     result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
@@ -634,14 +591,14 @@ def test_stream_ends_without_section_end_marker(kimi_k2_tool_parser):
     # Stream ends (EOF) - no more deltas, no section_end marker
     # Simulate this by manually checking state and resetting
     # (In real usage, the request handler would call reset_streaming_state)
-    assert kimi_k2_tool_parser.in_tool_section is True  # Still in section
+    assert kimi_k2_tool_parser._stream_state.in_section is True  # Still in section
 
     # Reset state (as would happen between requests)
     kimi_k2_tool_parser.reset_streaming_state()
 
     # Verify clean slate
-    assert kimi_k2_tool_parser.in_tool_section is False
-    assert kimi_k2_tool_parser.token_buffer == ""
+    assert kimi_k2_tool_parser._stream_state.in_section is False
+    assert kimi_k2_tool_parser._stream_state.buffer == ""
 
     # Next request should work normally
     result3 = kimi_k2_tool_parser.extract_tool_calls_streaming(
@@ -687,9 +644,8 @@ def test_same_chunk_begin_and_end_markers(kimi_k2_tool_parser):
     )
 
     # CRITICAL: Parser should NOT be stuck in tool section
-    assert kimi_k2_tool_parser.in_tool_section is False, (
-        "Parser stuck in tool section after processing both begin/end in same chunk. "
-        "This indicates the elif bug was not fixed."
+    assert kimi_k2_tool_parser._stream_state.in_section is False, (
+        "Parser stuck in tool section after processing both begin/end in same chunk."
     )
 
     # Result should be empty or contain only stripped content
@@ -739,7 +695,7 @@ def test_same_chunk_begin_content_end_markers(kimi_k2_tool_parser):
     )
 
     # Parser should exit cleanly (not stuck in tool section)
-    assert kimi_k2_tool_parser.in_tool_section is False
+    assert kimi_k2_tool_parser._stream_state.in_section is False
 
     # Verify the fix: next content should stream normally, not be suppressed
     result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
@@ -791,7 +747,7 @@ def test_tool_call_end_and_section_end_same_chunk(kimi_k2_tool_parser):
     results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
 
     # CRITICAL: Parser should have exited section AFTER processing tool
-    assert kimi_k2_tool_parser.in_tool_section is False
+    assert kimi_k2_tool_parser._stream_state.in_section is False
 
     # Tool call should have been emitted (not dropped)
     if results[2] is not None and results[2].content is not None:
@@ -976,3 +932,68 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
 
     # Legitimate content preserved
     assert "compare" in full_content.lower() or len(all_content) > 0
+
+
+def test_multi_turn_section_reentry(kimi_k2_tool_parser):
+    """Test entering tool section, exiting, and entering again in same stream."""
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+
+    deltas = [
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+        (" Between sections ", [10, 11]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+        (" After second section", [20, 21]),
+    ]
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    # Parser should end outside tool section
+    assert kimi_k2_tool_parser._stream_state.in_section is False
+
+    # "Between sections" and "After second section" should appear in content
+    all_content = [r.content for r in results if r and r.content]
+    full_content = "".join(all_content)
+    assert "Between sections" in full_content
+    assert "After second section" in full_content
+
+
+def test_thinking_tools_interleaving(kimi_k2_tool_parser):
+    """Test tool calls following a reasoning/thinking block (K2.5 pattern)."""
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
+    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
+
+    tool_chunk = (
+        "<|tool_call_begin|>functions.get_data:0 "
+        '<|tool_call_argument_begin|> {"query": "xyzzy"} <|tool_call_end|>'
+    )
+
+    deltas = [
+        ("Let me think about this... ", [1, 2, 3]),
+        ("I need to look it up. ", [4, 5]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        (tool_chunk, [tool_begin_id, 10, 11, tool_end_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+        (" Based on the results...", [20, 21]),
+    ]
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    all_content = [r.content for r in results if r and r.content]
+    full_content = "".join(all_content)
+
+    # Reasoning before tool section should be preserved
+    assert "think about this" in full_content
+    # Tool call content should NOT leak
+    assert "get_data" not in full_content
+    assert "xyzzy" not in full_content
+    # Content after section should appear
+    assert "Based on the results" in full_content
