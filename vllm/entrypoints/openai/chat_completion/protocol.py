@@ -783,9 +783,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
+    def set_enable_thinking_for_none_effort(cls, data: Any) -> Any:
+        """Map reasoning_effort='none' to enable_thinking=False.
+
+        Models like Qwen3/Qwen3.5 use an ``enable_thinking`` chat-template
+        kwarg to toggle thinking on/off.  By injecting it into
+        ``chat_template_kwargs`` early (before the reasoning-parser is
+        created), both the Jinja template **and** the reasoning-parser see
+        the flag consistently.  For templates that don't declare the
+        variable it is filtered out by ``resolve_chat_template_kwargs``.
+        """
         if data.get("reasoning_effort") == "none":
-            data["include_reasoning"] = False
+            kwargs = data.get("chat_template_kwargs") or {}
+            if "enable_thinking" not in kwargs:
+                kwargs = {**kwargs, "enable_thinking": False}
+                data["chat_template_kwargs"] = kwargs
         return data
 
 
