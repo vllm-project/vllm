@@ -2036,7 +2036,7 @@ class CohereAsrForConditionalGeneration(
             )
 
         # NOTE: this function is used only by online inference and not offline inference
-        # CohereASR doesnt have encoder prompt
+        # CohereASR doesn't have encoder prompt
         language_tag = f"<|{language}|><|{language}|>"
         pnc = True  # TODO(ekagra): make this configurable later
         pnc_tag = "<|pnc|>" if pnc else "<|nopnc|>"

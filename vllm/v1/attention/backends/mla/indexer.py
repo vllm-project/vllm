@@ -198,7 +198,7 @@ def kv_spans_from_batches(
                     (So the attended KV slice is kv[start:end].)
 
     Assumes each batch contributes its full `seq_len_per_batch[i]`
-    keys to the KV cache, andthe selected tokens within a batch
+    keys to the KV cache, and the selected tokens within a batch
     are the **last** `counts[i]` positions of that sequence.
     """
     q = start_seq_loc.to(dtype=torch.long)

@@ -292,7 +292,7 @@ class LMCacheMPRequestMetadata:
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
-        # TODO: This should be checked everytime we update the num_stored_blocks
+        # TODO: This should be checked every time we update the num_stored_blocks
         min_available_blocks = min(
             len(tracker.block_hashes),
             len(tracker.allocated_block_ids),
