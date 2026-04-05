@@ -67,7 +67,7 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
-
+from vllm.compilation.caching import use_compile_cache_root
 from torch._inductor.utils import fresh_cache
 
 
@@ -1616,6 +1616,14 @@ def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
     with tempfile.TemporaryDirectory() as tmp_dir:
         monkeypatch.setenv("VLLM_CACHE_ROOT", tmp_dir)
         yield tmp_dir
+
+
+@pytest.fixture(autouse=True)
+def fresh_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
+    """A fresh compile-only cache directory which is always applied."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with use_compile_cache_root(tmp_dir):
+            yield
 
 
 @pytest.fixture(scope="function")
