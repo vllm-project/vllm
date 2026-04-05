@@ -180,7 +180,7 @@ def backend_to_kernel_cls(
         return [CutlassBatchedExpertsFp8]
 
     elif backend == Fp8MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsFp8,
         )
 

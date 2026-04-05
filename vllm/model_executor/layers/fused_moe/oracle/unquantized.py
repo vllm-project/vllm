@@ -121,7 +121,7 @@ def backend_to_kernel_cls(
         return BatchedTritonExperts
 
     elif backend == UnquantizedMoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExperts
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
 
         return XPUExperts
 

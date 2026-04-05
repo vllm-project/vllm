@@ -90,6 +90,10 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExperts,
+        XPUExpertsFp8,
+    )
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )
@@ -107,10 +111,6 @@ if HAS_TRITON:
     )
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
-        XPUExperts,
-        XPUExpertsFp8,
     )
 
     __all__ += [
