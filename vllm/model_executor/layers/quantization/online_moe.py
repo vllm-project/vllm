@@ -5,6 +5,7 @@ from abc import abstractmethod
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -110,6 +111,15 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
                 quant_config._w1.bias = w13_bias
             if w2_bias is not None:
                 quant_config._w2.bias = w2_bias
+
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     @property
     def supports_eplb(self) -> bool:
