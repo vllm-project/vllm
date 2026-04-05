@@ -41,3 +41,20 @@ def _check_consistency(target: TokenizerLike, expected: TokenizerLike):
     )
 
     assert target.encode("prompt") == expected.encode("prompt")
+
+
+def test_cached_tokenizer_preserves_class_name():
+    """Test that cached tokenizer preserves original class name.
+
+    This is important for compatibility with HuggingFace transformers
+    processor type checking, which validates tokenizer class name.
+    See: https://github.com/vllm-project/vllm/issues/31080
+    """
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    original_class_name = tokenizer.__class__.__name__
+
+    cached_tokenizer = get_cached_tokenizer(tokenizer)
+
+    # The cached tokenizer's class should have the same name as original
+    assert cached_tokenizer.__class__.__name__ == original_class_name
+    assert cached_tokenizer.__class__.__qualname__ == tokenizer.__class__.__qualname__
