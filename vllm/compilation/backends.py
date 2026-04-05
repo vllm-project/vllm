@@ -246,7 +246,7 @@ class CompilerManager:
         )
         self.loaded_artifacts[cache_key] = compiled_graph
         logger.debug(
-            "Directly load the %s-th graph for compile range %sfrom %s via handle %s",
+            "Directly load the %s-th graph for compile range %s from %s via handle %s",
             graph_index,
             str(compile_range),
             self.compiler.name,
@@ -360,7 +360,11 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
+        if (
+            not self.disable_cache
+            and is_compile_cache_enabled(additional_inductor_config)
+            and handle is not None
+        ):
             self.cache[(compile_range, graph_index, self.compiler.name)] = {
                 "graph_handle": handle,
                 "cache_key": cache_key,

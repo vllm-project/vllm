@@ -295,6 +295,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
         self.cache_dir = cache_dir
+        self.disable_cache = disable_cache
 
     def compile(
         self,
@@ -411,7 +412,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
             _, cache_info = compiled_artifact._artifacts
             return len(cache_info.aot_autograd_artifacts) == 1
 
-        if is_compile_cache_enabled(compiler_config):
+        if not self.disable_cache and is_compile_cache_enabled(compiler_config):
             if not is_saveable_2_10(compiled_graph):
                 raise RuntimeError(
                     "The compiled artifact is not serializable. This usually means "
