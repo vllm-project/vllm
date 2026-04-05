@@ -3,7 +3,12 @@
 
 from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import Literal, cast, get_args, overload
+from typing import TYPE_CHECKING, Literal, cast, get_args, overload
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.expert_weight_provider import (
+        CachedWeightProvider,
+    )
 
 import torch
 from torch.nn.parameter import UninitializedParameter
@@ -54,6 +59,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -279,6 +285,8 @@ class FusedMoE(CustomOp):
         super().__init__()
 
         self._routed_input_transform = routed_input_transform
+        self._gate = gate
+        self._shared_experts_init = shared_experts
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -564,11 +572,110 @@ class FusedMoE(CustomOp):
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
+        # Expert weight provider: populated after weight loading via
+        # _maybe_init_expert_lru_cache().  Initialized *before*
+        # create_weights so that create_weights can inspect
+        # _moe_expert_cache_size and allocate expert weights on CPU pinned
+        # memory when offloading is requested.
+        self.expert_weight_provider: CachedWeightProvider | None = None
+        self._moe_expert_cache_size = vllm_config.offload_config.moe_expert_cache_size
+        if self._moe_expert_cache_size > 0 and self.use_ep:
+            raise ValueError(
+                "moe_expert_cache_size is not compatible with expert "
+                f"parallelism (ep_size={self.ep_size})."
+            )
+        if self._moe_expert_cache_size > 0 and (
+            self.moe_parallel_config.dp_size > 1 or self.is_sequence_parallel
+        ):
+            raise ValueError(
+                "moe_expert_cache_size is not compatible with data parallelism "
+                "or sequence parallelism."
+            )
+        if self._moe_expert_cache_size > 0 and (
+            not vllm_config.model_config.enforce_eager
+        ):
+            raise ValueError(
+                "moe_expert_cache_size requires --enforce-eager; CUDA graph "
+                "capture with an active expert cache produces incorrect "
+                "results."
+            )
+
+        # Disable shared expert overlap if:
+        #   - we are using eplb with non-default backend, because of correctness issues
+        #   - we are using flashinfer with DP, since there nothing to gain
+        #   - we are using marlin kernels
+        backend = self.moe_parallel_config.all2all_backend
+        self.use_overlapped = (
+            not (
+                (self.enable_eplb and backend != "allgather_reducescatter")
+                or self.moe_parallel_config.use_fi_nvl_two_sided_kernels
+            )
+            and getattr(self, 'shared_experts', None) is not None
+        )
+
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         # TODO(bnell): this is un-needed and removed in a follow up PR.
         self.base_quant_method = self.quant_method
 
+        self.runner = self._init_runner()
+
+    def _maybe_init_expert_lru_cache(self) -> None:
+        """Initialize the expert weight provider after weights have been loaded.
+
+        Expert weights may reside on CPU (loaded directly into pinned memory
+        when GPU capacity is insufficient) or on GPU (standard load path).
+        Allocates GPU scratch buffers of size ``moe_expert_cache_size`` and
+        releases the full weight tensors from whichever device they were on.
+
+        Must be called only once, after :meth:`process_weights_after_loading`.
+        """
+        if self._moe_expert_cache_size == 0 or self.expert_weight_provider is not None:
+            return
+        if not hasattr(self, "w13_weight") or not hasattr(self, "w2_weight"):
+            raise ValueError(
+                "moe_expert_cache_size requires w13_weight and w2_weight "
+                f"parameters but they are missing on layer {self.layer_name}."
+            )
+        if self.moe_config.has_bias:
+            raise ValueError(
+                "Expert LRU cache does not support MoE layers with bias "
+                "terms (fused_experts() receives w1/w2 only, not bias). "
+                f"Layer: {self.layer_name}."
+            )
+        from vllm.model_executor.layers.fused_moe.expert_weight_provider import (
+            CachedWeightProvider,
+        )
+
+        w13_scale = getattr(self, "w13_weight_scale", None)
+        w2_scale = getattr(self, "w2_weight_scale", None)
+        if w13_scale is not None and (
+            w13_scale.dim() != 1 or w13_scale.size(0) != self.local_num_experts
+        ):
+            w13_scale = None
+            w2_scale = None
+
+        capacity = min(self._moe_expert_cache_size, self.local_num_experts)
+        self.expert_weight_provider = CachedWeightProvider(
+            capacity=capacity,
+            w13_weight=self.w13_weight.data,
+            w2_weight=self.w2_weight.data,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+        )
+
+        # Release the full weight tensors (CachedWeightProvider holds its own
+        # reference to the CPU pinned backing store).
+        replace_parameter(self, "w13_weight", torch.empty(0))
+        replace_parameter(self, "w2_weight", torch.empty(0))
+        logger.info(
+            "Expert LRU cache enabled for %s: %d/%d experts cached on GPU.",
+            self.layer_name,
+            capacity,
+            self.local_num_experts,
+        )
+
+    def _init_runner(self):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
@@ -577,12 +684,13 @@ class FusedMoE(CustomOp):
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=gate,
-            shared_experts=shared_experts,
+            gate=self._gate,
+            shared_experts=self._shared_experts_init,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
         )
+        return self.runner
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
     # can safely swap out the quant_method. We should figure out a less

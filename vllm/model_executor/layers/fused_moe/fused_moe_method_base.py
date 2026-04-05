@@ -31,6 +31,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
     @property
+    def supports_expert_lru_cache(self) -> bool:
+        """True if this quant method is compatible with expert LRU caching.
+
+        Subclasses override to True when the method allocates w13_weight /
+        w2_weight in the standard per-expert layout and does not reorder or
+        repack weights in a way that is incompatible with slot-based remapping.
+        """
+        return False
+
+    @property
     def supports_internal_mk(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.

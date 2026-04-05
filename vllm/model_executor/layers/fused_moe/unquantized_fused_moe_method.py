@@ -43,6 +43,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     # --8<-- [end:unquantized_fused_moe]
 
+    @property
+    def supports_expert_lru_cache(self) -> bool:
+        # FLASHINFER_TRTLLM reorders weights into a tiled block layout that is
+        # incompatible with the generic per-expert slot-based remapping.
+        return self.unquantized_backend != UnquantizedMoeBackend.FLASHINFER_TRTLLM
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
@@ -93,16 +99,27 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
+
+        # When the expert LRU cache is enabled, allocate expert weights in CPU
+        # pinned memory so that checkpoint loading never allocates GPU memory
+        # for them.  This allows models whose expert weights exceed GPU capacity
+        # to load successfully; the cache init later populates a small GPU
+        # scratch buffer (size = moe_expert_cache_size) from these CPU tensors.
+        use_cpu_pinned = getattr(layer, "_moe_expert_cache_size", 0) > 0
+
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                w13_up_dim,
-                hidden_size,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
+        if use_cpu_pinned:
+            # Explicitly set device="cpu" to override vLLM's torch.device("cuda")
+            # context, then pin.  pin_memory=True cannot be used alone here because
+            # the device context would silently move the allocation to CUDA first.
+            _w13_data = torch.empty(
+                num_experts, w13_up_dim, hidden_size, dtype=params_dtype, device="cpu"
+            ).pin_memory()
+        else:
+            _w13_data = torch.empty(
+                num_experts, w13_up_dim, hidden_size, dtype=params_dtype
+            )
+        w13_weight = torch.nn.Parameter(_w13_data, requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
         if self.moe.has_bias:
@@ -113,15 +130,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
+        if use_cpu_pinned:
+            _w2_data = torch.empty(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
                 dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
+                device="cpu",
+            ).pin_memory()
+        else:
+            _w2_data = torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=params_dtype,
+            )
+        w2_weight = torch.nn.Parameter(_w2_data, requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
         if self.moe.has_bias:
@@ -222,24 +246,45 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
                 self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-        elif current_platform.is_xpu():
-            w13 = layer.w13_weight
-            w2 = layer.w2_weight
-
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
-
-            self._setup_kernel(
-                layer=layer,
-                w13=w13,
-                w2=w2,
+        elif current_platform.is_cuda_alike() or current_platform.is_xpu():
+            # When the expert LRU cache is active, expert weights were loaded
+            # directly into CPU pinned memory (see create_weights).  Skip the
+            # kernel setup (which requires CUDA weights) and go straight to
+            # cache initialization, which allocates the small GPU scratch buffer.
+            cache_active = (
+                self.supports_expert_lru_cache and layer.w13_weight.device.type == "cpu"
             )
-        else:
-            self._setup_kernel(
-                layer=layer,
-                w13=layer.w13_weight,
-                w2=layer.w2_weight,
-            )
+            if cache_active:
+                self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+                layer._maybe_init_expert_lru_cache()
+                # Still need to create the kernel (forward_native requires it)
+                if self.moe_kernel is None:
+                    self.moe_kernel = make_unquantized_moe_kernel(
+                        quant_config=self.moe_quant_config,
+                        moe_config=self.moe,
+                        backend=self.unquantized_backend,
+                        experts_cls=self.experts_cls,
+                        routing_tables=layer._maybe_init_expert_routing_tables(),
+                        shared_experts=getattr(layer, 'shared_experts', None),
+                    )
+            else:
+                w13 = layer.w13_weight
+                w2 = layer.w2_weight
+                # XPU requires transposed weight layout
+                if current_platform.is_xpu():
+                    w13.data = w13.transpose(-1, -2).contiguous()
+                    w2.data = w2.transpose(-1, -2).contiguous()
+                self._setup_kernel(
+                    layer=layer,
+                    w13=w13,
+                    w2=w2,
+                )
+                # Initialize expert LRU cache after kernel setup so the CPU
+                # backing store captures the final (possibly padded/shuffled)
+                # weights.  Skipped for backends whose weight layout is
+                # incompatible with the generic fused_experts() path.
+                if self.supports_expert_lru_cache:
+                    layer._maybe_init_expert_lru_cache()
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:
@@ -275,6 +320,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
+
+        provider = getattr(layer, "expert_weight_provider", None)
+        if provider is not None:
+            result = provider.prepare(topk_ids)
+            return self.moe_kernel.apply(
+                hidden_states=x,
+                w1=result.w1,
+                w2=result.w2,
+                topk_weights=topk_weights,
+                topk_ids=result.topk_ids,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                shared_experts_input=shared_experts_input,
+            )
+
         return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
