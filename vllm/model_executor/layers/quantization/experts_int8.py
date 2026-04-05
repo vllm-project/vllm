@@ -133,7 +133,7 @@ class ExpertsInt8MoEMethod(OnlineMoEMethodBase):
 
     def _setup_kernel(self, layer: FusedMoE) -> None:
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
+        assert self.moe_quant_config is not None
         assert self.experts_cls is not None
         self.moe_kernel = make_int8_moe_kernel(
             moe_quant_config=self.moe_quant_config,
