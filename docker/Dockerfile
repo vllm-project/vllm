@@ -843,3 +843,33 @@ FROM vllm-openai-base AS vllm-openai
 
 ENTRYPOINT ["vllm", "serve"]
 #################### OPENAI API SERVER ####################
+
+#################### OPENAI API SERVER (OpenShift) ####################
+FROM vllm-openai AS vllm-openai-openshift
+
+ENV HOME=/tmp \
+    XDG_CACHE_HOME=/cache \
+    XDG_CONFIG_HOME=/cache/config \
+    HF_HOME=/cache/huggingface \
+    VLLM_CACHE_ROOT=/cache/vllm \
+    VLLM_CONFIG_ROOT=/cache/config/vllm \
+    TRITON_CACHE_DIR=/cache/triton \
+    TORCHINDUCTOR_CACHE_DIR=/cache/torch_inductor \
+    NUMBA_CACHE_DIR=/cache/numba \
+    OUTLINES_CACHE_DIR=/cache/outlines
+
+RUN mkdir -p ${HF_HOME} \
+    ${VLLM_CACHE_ROOT} \
+    ${VLLM_CONFIG_ROOT} \
+    ${TRITON_CACHE_DIR} \
+    ${TORCHINDUCTOR_CACHE_DIR} \
+    ${NUMBA_CACHE_DIR} \
+    ${OUTLINES_CACHE_DIR} \
+    ${HOME}/.config && \
+    chgrp -R 0 /cache ${HOME} && \
+    chmod -R g+rwX /cache ${HOME}
+
+USER 1001
+
+EXPOSE 8000
+#################### OPENAI API SERVER (OpenShift) ####################
