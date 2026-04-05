@@ -183,7 +183,7 @@ def sparse_attn_indexer(
         num_padded_tokens = batch_size * next_n
         seq_lens = decode_metadata.seq_lens[:batch_size]
         # seq_lens is (B, next_n) for native spec decode, (B,) otherwise.
-        # All kernels support both shapes.
+        # fp8_paged_mqa_logits and all topk kernels accept both shapes.
         logits = fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,

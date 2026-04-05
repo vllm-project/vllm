@@ -141,6 +141,10 @@ class DeepseekV32IndexerPrefillMetadata:
 @dataclass
 class DeepSeekV32IndexerDecodeMetadata:
     block_table: torch.Tensor
+    # seq_lens: per-token effective context lengths.
+    #   - flatten path / plain decode: 1D (batch_size,)
+    #   - native MTP path: 2D (B, next_n) where [b,j] = L_b - next_n + j + 1
+    # Both fp8_paged_mqa_logits and the topk kernels accept both shapes.
     seq_lens: torch.Tensor
     decode_lens: torch.Tensor
     requires_padding: bool
@@ -400,6 +404,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
           Plain decode or spec-decode with 2D per-token context lengths.
 
         Returns (seq_lens, block_table, decode_lens, batch_size, requires_padding).
+        seq_lens is 1D (batch_size,) for flatten/plain, 2D (B, next_n) for native MTP.
         """
         if not use_native and max_decode_len > 1:
             assert self.decode_seq_lens_buffer.dim() == 1
