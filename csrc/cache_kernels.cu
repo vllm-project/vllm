@@ -712,6 +712,28 @@ void reshape_and_cache_flash(
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  if (kv_cache_dtype == "nvfp4") {
+#if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
+    // NVFP4 dispatch is compiled separately for SM100+.
+    extern void reshape_and_cache_nvfp4_dispatch(
+        torch::Tensor & key, torch::Tensor & value, torch::Tensor & key_cache,
+        torch::Tensor & value_cache, torch::Tensor & slot_mapping,
+        torch::Tensor & k_scale, torch::Tensor & v_scale);
+    reshape_and_cache_nvfp4_dispatch(key, value, key_cache, value_cache,
+                                     slot_mapping, k_scale, v_scale);
+    return;
+#else
+    TORCH_CHECK(false,
+                "NVFP4 KV cache requires SM100+ (Blackwell). "
+                "Please rebuild vllm with a Blackwell-compatible CUDA target.");
+#endif
+  }
+
+  // Original FP8/auto path.
   int block_size = key_cache.size(1);
 
   int64_t key_stride = key.stride(0);
@@ -729,8 +751,6 @@ void reshape_and_cache_flash(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);
