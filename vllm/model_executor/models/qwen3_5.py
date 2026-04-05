@@ -76,10 +76,10 @@ from .interfaces import (
     SupportsPP,
     _require_is_multimodal,
 )
-from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from .qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
+    Qwen3NextMLP,
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
