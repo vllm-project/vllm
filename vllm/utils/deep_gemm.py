@@ -138,6 +138,41 @@ _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
 
 
+def _import_deep_gemm():
+    """Import the deep_gemm module.
+
+    Prefers an externally installed ``deep_gemm`` package (so users can
+    pin a specific version), then falls back to the vendored copy bundled
+    in the vLLM wheel.
+
+    Returns ``None`` when neither source is usable.
+    """
+    # 1. Try the external (pip-installed) package first.
+    try:
+        module = importlib.import_module("deep_gemm")
+        logger.debug_once("Imported deep_gemm module from site-packages")
+        return module
+    except ImportError:
+        logger.debug_once(
+            "deep_gemm not found in site-packages, "
+            "trying vendored vllm.third_party.deep_gemm"
+        )
+
+    # 2. Fall back to the vendored copy bundled in the vLLM wheel.
+    try:
+        module = importlib.import_module("vllm.third_party.deep_gemm")
+        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
+        return module
+    except ImportError:
+        logger.debug_once("Vendored deep_gemm not found either")
+    except Exception as e:
+        # The vendored module may raise RuntimeError during _C.init()
+        # if JIT include files are missing (e.g. incomplete wheel).
+        logger.warning_once("Failed to import vendored deep_gemm: %s", e)
+
+    return None
+
+
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
     global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
@@ -169,7 +204,9 @@ def _lazy_init() -> None:
             envs.VLLM_CACHE_ROOT, "deep_gemm"
         )
 
-    _dg = importlib.import_module("deep_gemm")
+    _dg = _import_deep_gemm()
+    if _dg is None:
+        return
 
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
@@ -193,8 +230,18 @@ def _lazy_init() -> None:
 
 def get_num_sms() -> int:
     _lazy_init()
-    _dg = importlib.import_module("deep_gemm")
-    return int(_dg.get_num_sms())
+    dg = _import_deep_gemm()
+    if dg is None:
+        raise RuntimeError("DeepGEMM is not available")
+    return int(dg.get_num_sms())
+
+
+def set_num_sms(num_sms: int) -> None:
+    _lazy_init()
+    dg = _import_deep_gemm()
+    if dg is None:
+        raise RuntimeError("DeepGEMM is not available")
+    dg.set_num_sms(num_sms)
 
 
 @functools.cache
@@ -446,6 +493,7 @@ __all__ = [
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
     "get_num_sms",
+    "set_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
