@@ -4,7 +4,9 @@
 from enum import Enum
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -290,6 +292,60 @@ def select_unquantized_moe_backend(
     )
 
 
+def _maybe_pad_intermediate_for_aiter(
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    moe_config: "FusedMoEConfig",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad the MoE intermediate dimension to a multiple of 128 for AITER
+    CK GEMM compatibility. Some models (e.g.
+    expert_intermediate_size=704) have intermediate sizes not aligned to
+    CK's device_gemm tile requirements, causing runtime errors like
+    'device_gemm does not support this GEMM problem'.
+
+    Zero-padding is mathematically safe: the extra w1 outputs are zero
+    (from zero-padded weights), activation(0)*0=0 for gated activations
+    (SiLU/GELU), and the extra w2 input columns are also zero.
+    """
+    AITER_MOE_ALIGN = 128
+    inter = w2_weight.shape[-1]  # intermediate_size_per_partition
+    padded_inter = ((inter + AITER_MOE_ALIGN - 1) // AITER_MOE_ALIGN) * AITER_MOE_ALIGN
+    if padded_inter == inter:
+        return w13_weight, w2_weight
+
+    pad_amount = padded_inter - inter
+    logger.info_once(
+        "Padding MoE intermediate dimension from %d to %d for AITER CK GEMM alignment.",
+        inter,
+        padded_inter,
+    )
+
+    # w13: (E, [2*]inter, hidden) -> (E, [2*]padded_inter, hidden)
+    if moe_config.is_act_and_mul:
+        # Split gate and up projections, pad each, recombine so that
+        # the zero-padding sits at the end of each half, not in between.
+        gate, up = w13_weight.data.chunk(2, dim=1)
+        gate = F.pad(gate, (0, 0, 0, pad_amount))
+        up = F.pad(up, (0, 0, 0, pad_amount))
+        w13_padded = torch.cat([gate, up], dim=1).contiguous()
+    else:
+        w13_padded = F.pad(w13_weight.data, (0, 0, 0, pad_amount)).contiguous()
+
+    # w2: (E, hidden, inter) -> (E, hidden, padded_inter)
+    w2_padded = F.pad(w2_weight.data, (0, pad_amount)).contiguous()
+
+    # Update moe_config so downstream kernels compute the correct shapes.
+    if padded_inter != moe_config.intermediate_size_per_partition:
+        moe_config.intermediate_size_per_partition = padded_inter
+
+    torch.accelerator.empty_cache()
+
+    return (
+        Parameter(w13_padded, requires_grad=False),
+        Parameter(w2_padded, requires_grad=False),
+    )
+
+
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
     layer: Module,
@@ -297,6 +353,9 @@ def convert_to_unquantized_kernel_format(
     w2_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.AITER:
+        w13_weight, w2_weight = _maybe_pad_intermediate_for_aiter(
+            w13_weight, w2_weight, layer.moe_config
+        )
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
