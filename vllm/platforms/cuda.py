@@ -440,6 +440,12 @@ class CudaPlatformBase(Platform):
         return cls.has_device_capability(89)
 
     @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        if not cls.has_device_capability(89):
+            return torch.float8_e5m2
+        return torch.float8_e4m3fn
+
+    @classmethod
     def use_custom_allreduce(cls) -> bool:
         return True
 
