@@ -54,8 +54,16 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.metrics.stats import (
+    PrefixCacheStats,
+    SchedulerStats,
+)
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    IterStats,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -926,6 +934,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            scheduled_at=time.time(),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
 
@@ -1317,6 +1326,16 @@ class Scheduler(SchedulerInterface):
         if self.perf_metrics and self.perf_metrics.is_enabled():
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
+        iter_stats: IterStats | None = None
+        if self.vllm_config.observability_config.token_level_profiling:
+            iter_stats = IterStats(
+                iter_batch_size=len(self.running),
+                iter_waiting_size=len(self.waiting),
+                iter_total_tokens_count=sum(r.num_tokens for r in self.running),
+                token_scheduled_time=scheduler_output.scheduled_at,
+                token_output_time=time.time(),
+            )
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
         kv_connector_stats: KVConnectorStats | None = (
@@ -1471,6 +1490,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        iter_stats=iter_stats,
                     )
                 )
             else:
@@ -2132,9 +2152,15 @@ class Scheduler(SchedulerInterface):
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._free_blocks(self.requests[req_id])
+            if self.vllm_config.observability_config.token_level_profiling:
+                req.record_event(EngineCoreEventType.KV_CACHE_TRANSFER_RECVING_FINISHED)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
+            if self.vllm_config.observability_config.token_level_profiling:
+                self.requests[req_id].record_event(
+                    EngineCoreEventType.KV_CACHE_TRANSFER_SENDING_FINISHED
+                )
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(

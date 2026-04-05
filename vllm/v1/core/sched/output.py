@@ -233,6 +233,9 @@ class SchedulerOutput:
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
 
+    # Record the scheduling time point
+    scheduled_at: float = 0.0
+
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
