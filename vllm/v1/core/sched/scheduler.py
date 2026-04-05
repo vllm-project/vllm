@@ -550,6 +550,29 @@ class Scheduler(SchedulerInterface):
                     if self.ec_connector is not None:
                         self.ec_connector.update_state_after_alloc(request, i)
 
+        # Detect mixed decode/spec_decode batches and disable spec
+        # decode for all requests in that step. The GDN attention backend
+        # cannot handle batches with both regular decode and speculative
+        # decode requests simultaneously (gdn_attn.py asserts this).
+        # This happens when concurrent requests approach max_model_len at
+        # different times, the scheduler disables spec decode per-request
+        # but doesn't enforce batch-level uniformity.
+        if scheduled_spec_decode_tokens:
+            has_non_spec_decode = False
+            for req in scheduled_running_reqs:
+                req_id = req.request_id
+                if (
+                    req_id not in scheduled_spec_decode_tokens
+                    and num_scheduled_tokens.get(req_id, 0) == 1
+                ):
+                    has_non_spec_decode = True
+                    break
+            if has_non_spec_decode:
+                for sid in list(scheduled_spec_decode_tokens.keys()):
+                    spec_toks = scheduled_spec_decode_tokens.pop(sid)
+                    num_scheduled_tokens[sid] -= len(spec_toks)
+                    token_budget += len(spec_toks)
+
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
