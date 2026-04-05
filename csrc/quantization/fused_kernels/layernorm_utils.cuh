@@ -10,6 +10,7 @@
 
 #include "../../cub_helpers.h"
 #include "../../cuda_compat.h"
+#include <type_traits>
 
 namespace vllm {
 
@@ -70,11 +71,11 @@ __device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
   return val[tid];
 }
 
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false>
+template <typename scalar_t, typename weight_t, typename scalar_out_t,
+          bool has_residual = false, bool is_scale_transposed = false>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
-    scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
+    scalar_t const* __restrict__ input, weight_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
     int32_t const hidden_size, int32_t const input_stride,
     scalar_t const* __restrict__ residual = nullptr,
@@ -101,7 +102,11 @@ __device__ void compute_dynamic_per_token_scales(
       if constexpr (has_residual) {
         x += static_cast<float>(residual[token_offset + i]);
       }
-      x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+      if constexpr (std::is_same_v<weight_t, float>) {
+        x = x * rms * weight[i];
+      } else {
+        x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+      }
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
     s_max_vals[threadIdx.x] = block_absmax_val_maybe;
@@ -158,7 +163,11 @@ __device__ void compute_dynamic_per_token_scales(
         x += static_cast<float>(residual[token_offset + i]);
       }
 
-      x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+      if constexpr (std::is_same_v<weight_t, float>) {
+        x = x * rms * weight[i];
+      } else {
+        x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+      }
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
     using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -186,11 +195,12 @@ __device__ void compute_dynamic_per_token_scales(
   }
 }
 
-template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false, bool is_scale_transposed = false>
+template <typename scalar_t, typename weight_t, typename scalar_out_t,
+          bool is_scale_inverted, bool has_residual = false,
+          bool is_scale_transposed = false>
 __device__ void norm_and_quant(
     scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
-    scalar_t const* __restrict__ weight, float const rms, float* const scale,
+    weight_t const* __restrict__ weight, float const rms, float* const scale,
     int32_t const hidden_size, int32_t const input_stride,
     scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0,
     int64_t outer_scale_stride = 1) {
@@ -205,7 +215,11 @@ __device__ void norm_and_quant(
       residual[token_offset + i] = static_cast<scalar_t>(x);
     }
     // Norm
-    x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+    if constexpr (std::is_same_v<weight_t, float>) {
+      x = x * rms * weight[i];
+    } else {
+      x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+    }
     // Quant
     // If groupwise is_scale_inverted is true, so we invert the scale here.
     int64_t scale_idx = 0;
@@ -294,11 +308,12 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
 // Vectorized version of vllm::compute_dynamic_per_token_scales
 // hidden_size must be a multiple of 4
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, int32_t group_size = 0>
+template <typename scalar_t, typename weight_t, typename scalar_out_t,
+          bool has_residual = false, bool is_scale_transposed = false,
+          int32_t group_size = 0>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
-    scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
+    scalar_t const* __restrict__ input, weight_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
     int32_t const hidden_size, int32_t const input_stride,
     scalar_t const* __restrict__ residual = nullptr,
@@ -310,7 +325,7 @@ __device__ void compute_dynamic_per_token_scales(
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input = nullptr;
-  vec4_t<scalar_t> const* vec_weight = nullptr;
+  vec4_t<weight_t> const* vec_weight = nullptr;
   vec4_t<scalar_t> const* vec_residual = nullptr;
 
   int64_t const input_token_offset =
@@ -330,7 +345,7 @@ __device__ void compute_dynamic_per_token_scales(
                                    static_cast<int64_t>(hidden_size >> 2));
     vec_input =
         reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
-    vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+    vec_weight = reinterpret_cast<vec4_t<weight_t> const*>(weight);
     if constexpr (has_residual) {
       vec_residual =
           reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
@@ -340,7 +355,7 @@ __device__ void compute_dynamic_per_token_scales(
 #pragma unroll 4
     for (auto i = thread_offset; i < num_vec_elems; i += threads_per_group) {
       vec4_t<scalar_t> in = vec_input[i];
-      vec4_t<scalar_t> const w = vec_weight[i];
+      vec4_t<weight_t> const w = vec_weight[i];
 
       vec4_t<float> x;
 #pragma unroll
@@ -358,9 +373,14 @@ __device__ void compute_dynamic_per_token_scales(
 
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        block_absmax_val_maybe =
-            fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+        if constexpr (std::is_same_v<weight_t, float>) {
+          block_absmax_val_maybe =
+              fmaxf(block_absmax_val_maybe, fabs(x.val[j] * rms * w.val[j]));
+        } else {
+          block_absmax_val_maybe =
+              fmaxf(block_absmax_val_maybe,
+                    fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+        }
       }
     }
 
@@ -415,7 +435,7 @@ __device__ void compute_dynamic_per_token_scales(
   } else {
     vec_input =
         reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
-    vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+    vec_weight = reinterpret_cast<vec4_t<weight_t> const*>(weight);
     if constexpr (has_residual) {
       vec_residual =
           reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
@@ -426,7 +446,7 @@ __device__ void compute_dynamic_per_token_scales(
 #pragma unroll 4
     for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
       vec4_t<scalar_t> in = vec_input[i];
-      vec4_t<scalar_t> const w = vec_weight[i];
+      vec4_t<weight_t> const w = vec_weight[i];
 
       vec4_t<float> x;
 #pragma unroll
@@ -444,9 +464,14 @@ __device__ void compute_dynamic_per_token_scales(
 
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        block_absmax_val_maybe =
-            fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+        if constexpr (std::is_same_v<weight_t, float>) {
+          block_absmax_val_maybe =
+              fmaxf(block_absmax_val_maybe, fabs(x.val[j] * rms * w.val[j]));
+        } else {
+          block_absmax_val_maybe =
+              fmaxf(block_absmax_val_maybe,
+                    fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+        }
       }
     }
 
@@ -476,12 +501,12 @@ __device__ void compute_dynamic_per_token_scales(
 }
 
 // hidden_size must be a multiple of 4
-template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
-          bool has_residual = false, bool is_scale_transposed = false,
-          int32_t group_size = 0>
+template <typename scalar_t, typename weight_t, typename scalar_out_t,
+          bool is_scale_inverted, bool has_residual = false,
+          bool is_scale_transposed = false, int32_t group_size = 0>
 __device__ void norm_and_quant(
     scalar_out_t* __restrict__ output, scalar_t const* __restrict__ input,
-    scalar_t const* __restrict__ weight, float const rms, float* const scale,
+    weight_t const* __restrict__ weight, float const rms, float* const scale,
     int32_t const hidden_size, int32_t const input_stride,
     scalar_t* __restrict__ residual = nullptr, int64_t outer_scale_stride = 1) {
   int64_t const input_token_offset =
@@ -491,8 +516,8 @@ __device__ void norm_and_quant(
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
       reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
-  vec4_t<scalar_t> const* vec_weight =
-      reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+  vec4_t<weight_t> const* vec_weight =
+      reinterpret_cast<vec4_t<weight_t> const*>(weight);
   q8x4_t<scalar_out_t>* vec_output =
       reinterpret_cast<q8x4_t<scalar_out_t>*>(&output[token_offset]);
   vec4_t<scalar_t>* vec_residual = nullptr;
@@ -508,7 +533,7 @@ __device__ void norm_and_quant(
 #pragma unroll 4
   for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> const in = vec_input[i];
-    vec4_t<scalar_t> const w = vec_weight[i];
+    vec4_t<weight_t> const w = vec_weight[i];
 
     vec4_t<float> x;
 #pragma unroll
@@ -551,8 +576,14 @@ __device__ void norm_and_quant(
     }
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
+      float out_norm = 0.0f;
+      if constexpr (std::is_same_v<weight_t, float>) {
+        out_norm = x.val[j] * rms * w.val[j];
+      } else {
+        out_norm = static_cast<scalar_t>(x.val[j] * rms) * w.val[j];
+      }
       out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-          static_cast<scalar_t>(x.val[j] * rms) * w.val[j], scale_val);
+          out_norm, scale_val);
     }
     vec_output[i] = out;
   }
