@@ -1239,12 +1239,13 @@ class NemotronH_Nano_VL_V2(
             img_context_token_ids=self._img_context_token_ids,
             video_temporal_patch_size=video_temporal_patch_size,
         )
+        device = video_embeddings.device
 
         # video_repl.full is a list of token IDs
-        repl_token_ids = torch.tensor(video_repl.full)
+        repl_token_ids = torch.tensor(video_repl.full, device=device)
 
         # Get embedding token IDs for image context (use pre-tokenized version)
-        embed_token_ids = torch.tensor(self._img_context_token_ids)
+        embed_token_ids = torch.tensor(self._img_context_token_ids, device=device)
 
         # Create mask for video embedding positions
         is_video_embed = torch.isin(repl_token_ids, embed_token_ids)
