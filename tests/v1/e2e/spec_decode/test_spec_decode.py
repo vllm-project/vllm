@@ -309,7 +309,7 @@ def test_speculators_model_integration(
     test_prompts = get_test_prompts(mm_enabled=False)
 
     # First run: Direct speculator model (simplified integration)
-    spec_llm = LLM(model=model_path, max_model_len=4096)
+    spec_llm = LLM(model=model_path, max_model_len=4096, gpu_memory_utilization=0.95)
     evaluate_llm_for_gsm8k(
         spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
     )
@@ -339,7 +339,7 @@ def test_speculators_model_integration(
     cleanup_dist_env_and_memory()
 
     # Second run: Reference without speculative decoding
-    ref_llm = LLM(model=verifier_model, max_model_len=4096)
+    ref_llm = LLM(model=verifier_model, max_model_len=4096, gpu_memory_utilization=0.95)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
     torch.accelerator.empty_cache()
