@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import math
 from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
@@ -17,7 +18,6 @@ from flashinfer import (
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
-from typing_extensions import override
 
 from vllm import envs
 from vllm.config import (
@@ -65,6 +65,7 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.workspace import current_workspace_manager
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -74,6 +75,7 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_gen_workspace_buffer = None
+LOG2_E_SCALE = math.log(2.0)
 
 
 def _get_trtllm_gen_workspace_buffer():
@@ -294,7 +296,7 @@ class BatchDCPPrefillWrapper:
             get_dcp_group(),
             return_lse=True,
         )
-        lse_context = lse_context.transpose(0, 1).contiguous()
+        lse_context = (lse_context.transpose(0, 1) * LOG2_E_SCALE).contiguous()
 
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
@@ -302,7 +304,7 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
         )
-        lse_query = lse_query.transpose(0, 1).contiguous()
+        lse_query = (lse_query.transpose(0, 1) * LOG2_E_SCALE).contiguous()
 
         merge_attn_states(
             out,
@@ -580,14 +582,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
-            self.dcp_kv_cache_interleave_size = (
-                vllm_config.parallel_config.dcp_kv_cache_interleave_size
+            self.cp_kv_cache_interleave_size = (
+                vllm_config.parallel_config.cp_kv_cache_interleave_size
             )
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-            self.dcp_kv_cache_interleave_size = 1
+            self.cp_kv_cache_interleave_size = 1
         self.use_dcp = self.dcp_world_size > 1
         self.dcp_a2a = (
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
@@ -671,7 +673,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             with_numpy=True,
         )
 
-    @override  # type: ignore[misc]
     @classmethod
     def get_cudagraph_support(
         cls: type["FlashInferMetadataBuilder"],
@@ -940,12 +941,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
+        seq_lens_cpu = (
+            common_attn_metadata.seq_lens.cpu() if needs_seq_lens_cpu else None
         )
 
         # Adjust seq_lens_cpu for DCP
@@ -966,8 +963,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 seq_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                self.cp_kv_cache_interleave_size,
             )
+
+        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
+        num_blocks_np = (
+            (seq_lens_np + (page_size - 1)) // page_size
+            if seq_lens_np is not None
+            else None
+        )
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
@@ -1255,6 +1259,11 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+        self.dcp_world_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            if vllm_config is not None
+            else 1
+        )
 
         dcp_a2a = (
             vllm_config is not None
@@ -1277,6 +1286,28 @@ class FlashInferImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
+
+    def _get_dcp_decode_buffers(
+        self,
+        query: torch.Tensor,
+        num_decode_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert self.dcp_world_size > 1
+        total_num_heads = self.num_heads * self.dcp_world_size
+        buffer_shape = (
+            num_decode_tokens,
+            total_num_heads,
+            self.head_size,
+        )
+        lse_shape = (num_decode_tokens, total_num_heads)
+        query_buffer, output_buffer, lse_buffer = (
+            current_workspace_manager().get_simultaneous(
+                (buffer_shape, query.dtype),
+                (buffer_shape, query.dtype),
+                (lse_shape, torch.float32),
+            )
+        )
+        return query_buffer, output_buffer, lse_buffer
 
     def forward(
         self,
@@ -1550,17 +1581,17 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
+                    decode_query_buffer, output_tmp, lse = self._get_dcp_decode_buffers(
+                        decode_query, num_decode_tokens
                     )
-                    output_tmp = torch.empty_like(decode_query)
-                    lse = torch.empty(
-                        (decode_query.size(0), decode_query.size(1)),
-                        dtype=torch.float32,
-                        device=decode_query.device,
+                    decode_query_buffer.copy_(
+                        get_dcp_group().all_gather(
+                            decode_query.contiguous(),
+                            dim=-2,
+                        )
                     )
                     decode_wrapper.run(
-                        decode_query,
+                        decode_query_buffer,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
