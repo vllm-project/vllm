@@ -472,6 +472,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
         weight_dtype = (
             torch.float8_e4m3fn
             if self.quant_config.is_checkpoint_fp8_serialized
@@ -514,6 +515,9 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+
+        if hasattr(self, "fp8_linear"):
+            self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -565,6 +569,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         weight = ModelWeightParameter(
             data=torch.empty(
@@ -589,6 +594,9 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+
+        if hasattr(self, "fp8_linear"):
+            self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -644,6 +652,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         # Expose block size so the v2 weight loaders can translate offsets from
         # element-space -> block-space for BlockQuantScaleParameter.
@@ -775,6 +784,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     ):
         layer.orig_dtype = params_dtype
         layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
 
         # Use FP8 dtype if checkpoint is serialized
         weight_dtype = (
@@ -1095,6 +1105,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -1578,6 +1589,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
 
         if input_size_per_partition % MXFP8_BLOCK_SIZE != 0:
             raise ValueError(
@@ -2034,7 +2046,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 75
 
     @classmethod
     def override_quantization_method(

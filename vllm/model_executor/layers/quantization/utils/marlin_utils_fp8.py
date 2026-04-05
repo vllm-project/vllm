@@ -39,6 +39,21 @@ def fp8_fused_exponent_bias_into_scales(scales):
     return scales * s
 
 
+def marlin_pad(size_n: int, size_k: int, is_a_8bit: bool = False) -> tuple[int, int]:
+    """
+    Calc padded shape [N, K].
+    """
+    tile_size = 16
+    tile_k_size = tile_size
+    tile_n_size = tile_k_size * 4
+    target_tile_n_size = tile_n_size // (2 if is_a_8bit else 1)
+    target_tile_k_size = tile_k_size * (2 if is_a_8bit else 1)
+    return (
+        ((size_n + target_tile_n_size - 1) // target_tile_n_size) * target_tile_n_size,
+        ((size_k + target_tile_k_size - 1) // target_tile_k_size) * target_tile_k_size,
+    )
+
+
 def apply_fp8_marlin_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -53,11 +68,14 @@ def apply_fp8_marlin_linear(
     # For GPUs that lack FP8 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP8 quantization
 
+    n_size, _ = marlin_pad(size_n, size_k)
+    pad_n = n_size - size_n
+
     reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (size_n,)
+    out_shape = input.shape[:-1] + (n_size,)
 
     use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
+        m=reshaped_x.size(0), n=n_size, k=size_k, device=input.device, dtype=input.dtype
     )
 
     inputs = reshaped_x
@@ -65,6 +83,10 @@ def apply_fp8_marlin_linear(
     if input_dtype is not None and input_dtype.itemsize == 1:
         # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
         raise RuntimeError("Marlin W8A8 is not supported.")
+
+    if pad_n != 0 and bias is not None:
+        padding = (0, pad_n)
+        bias = torch.nn.functional.pad(bias, padding, mode="constant", value=0)
 
     output = ops.marlin_gemm(
         a=inputs,
@@ -80,13 +102,13 @@ def apply_fp8_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float8_e4m3fn,
         size_m=reshaped_x.size(0),
-        size_n=size_n,
+        size_n=n_size,
         size_k=size_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
 
-    return output.reshape(out_shape)
+    return output.reshape(out_shape)[..., :size_n]
 
 
 def prepare_fp8_layer_for_marlin(
@@ -107,10 +129,50 @@ def prepare_fp8_layer_for_marlin(
     part_size_k = layer.input_size_per_partition
     weight_block_size = getattr(layer, "weight_block_size", None)
 
+    # Only 0-padding N dim if requires.
+    # The K dimension padding involves complex transformations,
+    # and since no models currently requiring K dimension padding
+    # have been identified, we will omit K dimension padding.
+
+    n_size, _ = marlin_pad(part_size_n, part_size_k)
+    pad_n = n_size - part_size_n
+
     if size_k_first:
         assert layer.weight.shape == (part_size_k, part_size_n)
+        padding = (0, pad_n, 0, 0)
     else:
         assert layer.weight.shape == (part_size_n, part_size_k)
+        padding = (0, 0, 0, pad_n)
+
+    # WEIGHT SCALES
+    # Permute scales
+    scales = None
+    orig_dtype = getattr(layer, "orig_dtype", None)
+    if orig_dtype is None:
+        orig_dtype = getattr(layer, "params_dtype", None)
+    if orig_dtype is None:
+        raise RuntimeError(
+            "Marlin requires either orig_dtype or params_dtype to be set."
+        )
+    if "weight_scale" in dir(layer):
+        scales = layer.weight_scale.to(orig_dtype)
+    elif "weight_scale_inv" in dir(layer):
+        scales = layer.weight_scale_inv.to(orig_dtype)
+    if scales is None:
+        raise RuntimeError("Marlin fp8 requires scales")
+
+    if pad_n != 0:
+        if weight_block_size is not None or scales.nelement() != 1:
+            raise RuntimeError(
+                "Marlin imposes alignment requirements for N-dimensional tensors."
+                " However, currently supports zero-padding only for weight"
+                " with tensor scale."
+            )
+        padded_weight = torch.nn.functional.pad(
+            layer.weight, padding, mode="constant", value=0
+        )
+        replace_parameter(layer, "weight", padded_weight)
+        part_size_n = n_size
 
     device = layer.weight.device
 
@@ -132,13 +194,6 @@ def prepare_fp8_layer_for_marlin(
         num_bits=8,
     )
     replace_parameter(layer, "weight", marlin_qweight)
-
-    # WEIGHT SCALES
-    # Permute scales
-    if "weight_scale" in dir(layer):
-        scales = layer.weight_scale.to(layer.orig_dtype)
-    elif "weight_scale_inv" in dir(layer):
-        scales = layer.weight_scale_inv.to(layer.orig_dtype)
 
     group_size = -1 if weight_block_size is None else weight_block_size[1]
 
