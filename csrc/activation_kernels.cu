@@ -4,6 +4,7 @@
 
 #include <cmath>
 
+#include "activation_utils.cuh"
 #include "cuda_compat.h"
 #include "cuda_vec_utils.cuh"
 #include "dispatch_utils.h"
@@ -77,11 +78,8 @@ __global__ void act_and_mul_kernel(
   }
 }
 
-template <typename T>
-__device__ __forceinline__ T silu_kernel(const T& x) {
-  // x * sigmoid(x)
-  return (T)(((float)x) / (1.0f + expf((float)-x)));
-}
+// silu_kernel is now in activation_utils.cuh (shared with
+// quantization/activation_kernels.cu to avoid duplication).
 
 template <typename packed_t>
 __device__ __forceinline__ packed_t packed_silu_kernel(const packed_t& val) {
