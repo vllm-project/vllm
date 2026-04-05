@@ -375,6 +375,7 @@ def softmax(data):
 @dataclass
 class ModelInfo:
     name: str
+    trust_remote_code: bool = False
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None

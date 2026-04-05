@@ -44,7 +44,9 @@ RERANK_MODELS = [
 ]
 
 
-@pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
+@pytest.mark.parametrize(
+    "model_info", EMBEDDING_MODELS, ids=lambda model_info: model_info.name
+)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     def hf_model_callback(model):
         model.encode = partial(model.encode, task="text-matching")
@@ -54,7 +56,9 @@ def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -
     )
 
 
-@pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
+@pytest.mark.parametrize(
+    "model_info", EMBEDDING_MODELS, ids=lambda model_info: model_info.name
+)
 def test_embed_models_correctness(
     hf_runner, vllm_runner, model_info: EmbedModelInfo, example_prompts
 ) -> None:
@@ -70,12 +74,16 @@ def test_embed_models_correctness(
     )
 
 
-@pytest.mark.parametrize("model_info", RERANK_MODELS)
+@pytest.mark.parametrize(
+    "model_info", RERANK_MODELS, ids=lambda model_info: model_info.name
+)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info)
 
 
-@pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
+@pytest.mark.parametrize(
+    "model_info", EMBEDDING_MODELS, ids=lambda model_info: model_info.name
+)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("dimensions", [16, 32])
 def test_matryoshka(

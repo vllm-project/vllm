@@ -179,6 +179,7 @@ VLM_TEST_SETTINGS = {
     ),
     "ultravox": VLMTestInfo(
         models=["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
+        trust_remote_code=True,
         test_type=VLMTestType.AUDIO,
         prompt_formatter=lambda audio_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{audio_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         audio_idx_to_prompt=lambda idx: "<|audio|>",

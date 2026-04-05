@@ -95,6 +95,7 @@ class VLMTestInfo(NamedTuple):
 
     models: list[str]
     test_type: VLMTestType | Iterable[VLMTestType]
+    trust_remote_code: bool = False
 
     # Should be None only if this is a CUSTOM_INPUTS test
     prompt_formatter: Callable[[str], str] | None = None
@@ -183,6 +184,7 @@ class VLMTestInfo(NamedTuple):
         test cases.
         """
         return {
+            "trust_remote_code": self.trust_remote_code,
             "enforce_eager": self.enforce_eager,
             "max_model_len": self.max_model_len,
             "max_num_seqs": self.max_num_seqs,

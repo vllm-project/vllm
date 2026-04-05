@@ -45,6 +45,7 @@ COLBERT_MODELS = {
     },
     "jina": {
         "model": "jinaai/jina-colbert-v2",
+        "trust_remote_code": True,
         "colbert_dim": 128,
         "max_model_len": 8192,
         "extra_kwargs": {

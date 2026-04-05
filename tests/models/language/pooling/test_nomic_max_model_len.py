@@ -24,7 +24,7 @@ max_model_len = int(original_max_position_embeddings * factor)
 @pytest.mark.parametrize("model_info", MODELS)
 def test_default(model_info, vllm_runner):
     with vllm_runner(
-        model_info.name, runner="pooling", max_model_len=None
+        model_info.name, runner="pooling", max_model_len=None, trust_remote_code=True
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         if model_info.name == "nomic-ai/nomic-embed-text-v2-moe":

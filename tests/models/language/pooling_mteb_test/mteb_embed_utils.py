@@ -153,6 +153,7 @@ def mteb_test_embed_models(
         model_info.name,
         runner="pooling",
         max_model_len=model_info.max_model_len,
+        trust_remote_code=model_info.trust_remote_code,
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
@@ -203,6 +204,7 @@ def mteb_test_embed_models(
             model_info.name,
             is_sentence_transformer=True,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+            trust_remote_code=model_info.trust_remote_code,
         ) as hf_model:
             # e.g. setting default parameters for the encode method of hf_runner
             if hf_model_callback is not None:

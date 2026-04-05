@@ -40,11 +40,15 @@ RERANK_MODELS = [
 ]
 
 
-@pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
+@pytest.mark.parametrize(
+    "model_info", EMBEDDING_MODELS, ids=lambda model_info: model_info.name
+)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
 
-@pytest.mark.parametrize("model_info", RERANK_MODELS)
+@pytest.mark.parametrize(
+    "model_info", RERANK_MODELS, ids=lambda model_info: model_info.name
+)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info)

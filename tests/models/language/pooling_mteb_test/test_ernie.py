@@ -22,7 +22,7 @@ MODELS = [
 ]
 
 
-@pytest.mark.parametrize("model_info", MODELS)
+@pytest.mark.parametrize("model_info", MODELS, ids=lambda model_info: model_info.name)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(
         hf_runner,
@@ -32,7 +32,7 @@ def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -
     )
 
 
-@pytest.mark.parametrize("model_info", MODELS)
+@pytest.mark.parametrize("model_info", MODELS, ids=lambda model_info: model_info.name)
 def test_embed_models_correctness(
     hf_runner, vllm_runner, model_info: EmbedModelInfo, example_prompts
 ) -> None:

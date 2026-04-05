@@ -58,11 +58,11 @@ def check_implementation(
 
 
 @pytest.mark.parametrize(
-    "model,model_impl",
+    "model,model_impl,trust_remote_code",
     [
-        ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("hmellor/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
-        ("allenai/OLMoE-1B-7B-0924", "transformers"),  # MoE
+        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", False),
+        ("hmellor/Ilama-3.2-1B", "auto", True),  # CUSTOM CODE
+        ("allenai/OLMoE-1B-7B-0924", "transformers", False),  # MoE
     ],
 )  # trust_remote_code=True by default
 def test_models(
@@ -71,6 +71,7 @@ def test_models(
     example_prompts: list[str],
     model: str,
     model_impl: str,
+    trust_remote_code: bool,
 ) -> None:
     import transformers
     from packaging.version import Version
@@ -84,7 +85,13 @@ def test_models(
         )
 
     check_implementation(
-        hf_runner, vllm_runner, example_prompts, model, model_impl=model_impl
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        model,
+        model_impl=model_impl,
+        kwargs_ref={"trust_remote_code": trust_remote_code},
+        kwargs_test={"trust_remote_code": trust_remote_code},
     )
 
 
