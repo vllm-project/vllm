@@ -6871,16 +6871,12 @@ class GPUModelRunner(
         )
         routed_experts_capturer = RoutedExpertsCapturer.create()
         self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
-        min_block_size = min(
-            [
-                group.kv_cache_spec.block_size
-                for group in self.kv_cache_config.kv_cache_groups
-            ]
-        )
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
+        # Routed experts are indexed with the attention group's slot_mapping,
+        # so the side buffer must match that group's full KV address space.
         self.max_num_kv_tokens = (
-            self.kv_cache_config.num_blocks // num_groups
-        ) * min_block_size
+            self.kv_cache_config.num_blocks * attn_group.kv_cache_spec.block_size
+        )
         dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
         pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size * dcp_size > 1:
