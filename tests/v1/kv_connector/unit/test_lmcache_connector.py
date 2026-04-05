@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    WorkerConnectorInitializationData,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
@@ -784,3 +788,109 @@ class TestIntegrationScenarios:
         assert aggregated_events[0].block_hashes == ["hash_common"]
         assert aggregated_events[0].parent_block_hash == "parent_common"
         assert aggregated_events[0].token_ids == [1, 2, 3]
+
+
+class TestInitializeWorkerConnector:
+    """Test initialize_worker_connector for LMCache connectors."""
+
+    def test_delegates_model_to_engine(self):
+        """LMCacheConnectorV1 forwards model to engine.register_model."""
+        mock_engine = MagicMock()
+        mock_model = MagicMock(spec=torch.nn.Module)
+
+        connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+        connector._lmcache_engine = mock_engine
+        connector.initialize_worker_connector(
+            WorkerConnectorInitializationData(model=mock_model)
+        )
+        mock_engine.register_model.assert_called_once_with(mock_model)
+
+    def test_skips_engine_without_register_model(self):
+        """No-op when engine lacks register_model."""
+        mock_engine = MagicMock(spec=[])
+        connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+        connector._lmcache_engine = mock_engine
+        connector.initialize_worker_connector(
+            WorkerConnectorInitializationData(
+                model=MagicMock(spec=torch.nn.Module),
+            )
+        )
+
+    def test_skips_when_model_none(self):
+        """Does not call register_model when model is None."""
+        mock_engine = MagicMock()
+        connector = LMCacheConnectorV1.__new__(LMCacheConnectorV1)
+        connector._lmcache_engine = mock_engine
+        connector.initialize_worker_connector(WorkerConnectorInitializationData())
+        mock_engine.register_model.assert_not_called()
+
+    def test_impl_registers_with_vllm_model_tracker(self):
+        """Impl registers model with VLLMModelTracker when available."""
+        mock_tracker = MagicMock()
+        mock_model = MagicMock(spec=torch.nn.Module)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "lmcache": MagicMock(),
+                "lmcache.v1": MagicMock(),
+                "lmcache.v1.compute": MagicMock(),
+                "lmcache.v1.compute.models": MagicMock(),
+                "lmcache.v1.compute.models.utils": MagicMock(
+                    VLLMModelTracker=mock_tracker
+                ),
+            },
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (  # noqa: E501
+                LMCacheConnectorV1Impl,
+            )
+
+            impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+            impl.initialize_worker_connector(
+                WorkerConnectorInitializationData(model=mock_model)
+            )
+
+        mock_tracker.register_model.assert_called_once()
+        assert mock_tracker.register_model.call_args[0][1] is mock_model
+
+    def test_impl_graceful_on_import_error(self):
+        """Doesn't crash if LMCache CacheBlend not installed."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (  # noqa: E501
+            LMCacheConnectorV1Impl,
+        )
+
+        impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+        with patch.dict(
+            "sys.modules",
+            {"lmcache.v1.compute.models.utils": None},
+        ):
+            impl.initialize_worker_connector(
+                WorkerConnectorInitializationData(
+                    model=MagicMock(spec=torch.nn.Module),
+                )
+            )
+
+    def test_impl_skips_when_model_none(self):
+        """Does not call VLLMModelTracker when model is None."""
+        mock_tracker = MagicMock()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "lmcache": MagicMock(),
+                "lmcache.v1": MagicMock(),
+                "lmcache.v1.compute": MagicMock(),
+                "lmcache.v1.compute.models": MagicMock(),
+                "lmcache.v1.compute.models.utils": MagicMock(
+                    VLLMModelTracker=mock_tracker
+                ),
+            },
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (  # noqa: E501
+                LMCacheConnectorV1Impl,
+            )
+
+            impl = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+            impl.initialize_worker_connector(WorkerConnectorInitializationData())
+
+        mock_tracker.register_model.assert_not_called()

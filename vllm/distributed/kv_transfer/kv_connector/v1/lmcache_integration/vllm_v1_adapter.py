@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    WorkerConnectorInitializationData,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
     ENGINE_NAME,
@@ -793,6 +794,35 @@ class LMCacheConnectorV1Impl:
         if self.lmcache_engine is not None:
             kvcaches = list(self.kv_caches.values())
             self.lmcache_engine.post_init(kvcaches=kvcaches)
+
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> None:
+        """Register model with LMCache's VLLMModelTracker for CacheBlend.
+
+        CacheBlend's blender needs access to model weights for selective
+        layer recomputation. Called automatically by vLLM after model
+        loading.
+        """
+        model = initialization_data.model
+        if model is not None:
+            try:
+                from lmcache.v1.compute.models.utils import VLLMModelTracker
+
+                from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (  # noqa: E501
+                    ENGINE_NAME,
+                )
+
+                VLLMModelTracker.register_model(ENGINE_NAME, model)
+                logger.info("Registered model with VLLMModelTracker")
+            except ImportError:
+                logger.debug("LMCache CacheBlend model registration not available")
+            except Exception:
+                logger.warning(
+                    "Failed to register model with VLLMModelTracker",
+                    exc_info=True,
+                )
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
