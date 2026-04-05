@@ -12,6 +12,8 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+from typing import Any
+
 import einops
 import torch
 import torch.nn.functional as F
@@ -270,6 +272,13 @@ def vit_torch_sdpa_wrapper(
     )
 
 
+# Cache BatchPrefillWithRaggedKVCacheWrapper instances by workspace buffer
+# data pointer to avoid re-creating the wrapper on every forward pass.
+# The workspace buffer is a long-lived global tensor, so the cache entries
+# are never stale in practice.
+__flashinfer_prefill_wrapper_cache: dict[int, Any] = {}
+
+
 def flashinfer_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -280,13 +289,66 @@ def flashinfer_wrapper(
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
-
+    assert sequence_lengths is not None
     is_reshaped = q.dim() == 4
 
     if is_reshaped:
         reshape_batch_size = q.shape[0]
         q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+    # cuDNN SDPA requires SM80+ (Ampere and newer).
+    # For Turing (SM75) and older GPUs, fall back to
+    # BatchPrefillWithRaggedKVCacheWrapper which internally uses the fa2
+    # backend (CUTLASS FlashAttention 2 compiled JIT for the target SM).
+    if not current_platform.has_device_capability(80):
+        if (head_dim := q.shape[-1]) % 64 != 0:
+            raise ValueError(
+                "FlashInfer FA2 Prefill kernels require head dimension to "
+                f"be divisible by 64, got head dim {head_dim}"
+            )
+        from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+
+        # Build qo_indptr on CPU to reduce GPU-CPU synchronisation points.
+        # sequence_lengths is [s1, s2, ..., sB, 0, ...(bucketing padding)].
+        # One .cpu() transfer is sufficient; subsequent filtering and cumsum
+        # are cheap CPU operations for the small batch sizes typical of ViTs.
+        seq_lens_cpu = sequence_lengths.view(-1).cpu()
+        real_seq_lens_cpu = seq_lens_cpu[seq_lens_cpu > 0]
+        qo_indptr = torch.cat(
+            [real_seq_lens_cpu.new_zeros(1), real_seq_lens_cpu.cumsum(0)]
+        )
+
+        # Cache the wrapper by workspace buffer identity so we avoid
+        # re-instantiating it (and re-allocating its internal int workspace)
+        # on every forward pass.  plan() must still be called each time
+        # because qo_indptr changes with each new batch.
+        buf_ptr = workspace_buffer.data_ptr()
+        wrapper = __flashinfer_prefill_wrapper_cache.get(buf_ptr)
+        if wrapper is None:
+            wrapper = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer, "NHD")
+            __flashinfer_prefill_wrapper_cache[buf_ptr] = wrapper
+
+        # ViT attention is full self-attention: kv layout matches qo.
+        wrapper.plan(
+            qo_indptr=qo_indptr,
+            kv_indptr=qo_indptr,
+            num_qo_heads=q.shape[1],
+            num_kv_heads=k.shape[1],
+            head_dim_qk=q.shape[2],
+            causal=False,
+            sm_scale=scale,
+            q_data_type=q.dtype,
+            kv_data_type=k.dtype,
+        )
+        output = wrapper.run(q, k, v)
+        if is_reshaped:
+            output = einops.rearrange(
+                output, "(b s) h d -> b s h d", b=reshape_batch_size
+            )
+        return output
+
+    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+
     # cuDNN <= 9.10.2.21 requires q, k to be contiguous
     # this comes with no cost for ViTs with RoPE because
     # RoPE has already made q and k contiguous.
