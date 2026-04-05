@@ -6,6 +6,30 @@
 #include "layernorm_utils.cuh"
 #include "quant_conversions.cuh"
 
+namespace {
+
+torch::Tensor maybe_cast_weight_for_fused_rms_norm_quant(
+    torch::Tensor const& weight, torch::Tensor const& input,
+    const char* op_name) {
+  if (weight.scalar_type() == input.scalar_type()) {
+    return weight;
+  }
+
+  TORCH_CHECK(weight.scalar_type() == torch::kFloat32, op_name,
+              " only supports mixed dtype with fp32 weight. got input dtype=",
+              input.scalar_type(), ", weight dtype=", weight.scalar_type());
+  TORCH_CHECK(input.scalar_type() == torch::kFloat16 ||
+                  input.scalar_type() == torch::kBFloat16,
+              op_name,
+              " only supports fp16/bf16 input when weight is fp32. got input "
+              "dtype=",
+              input.scalar_type());
+
+  return weight.to(input.scalar_type());
+}
+
+}  // namespace
+
 namespace vllm {
 
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
@@ -183,17 +207,19 @@ void rms_norm_dynamic_per_token_quant(
   if (scale_ub.has_value()) {
     TORCH_CHECK(out.dtype() == kFp8Type);
   }
-  TORCH_CHECK(weight.dtype() == input.dtype());
   TORCH_CHECK(scales.dtype() == torch::kFloat32);
   if (residual) {
     TORCH_CHECK(residual->scalar_type() == input.scalar_type());
     TORCH_CHECK(residual->is_contiguous());
   }
+  auto weight_for_kernel = maybe_cast_weight_for_fused_rms_norm_quant(
+      weight, input, "rms_norm_dynamic_per_token_quant");
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
         rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
-            out, input, weight, scales, var_epsilon, scale_ub, residual);
+            out, input, weight_for_kernel, scales, var_epsilon, scale_ub,
+            residual);
       });
 }
 
@@ -271,12 +297,13 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
   if (scale_ub.has_value()) {
     TORCH_CHECK(out.dtype() == kFp8Type);
   }
-  TORCH_CHECK(weight.dtype() == input.dtype());
   TORCH_CHECK(scales.dtype() == torch::kFloat32);
   if (residual) {
     TORCH_CHECK(residual->scalar_type() == input.scalar_type());
     TORCH_CHECK(residual->is_contiguous());
   }
+  auto weight_for_kernel = maybe_cast_weight_for_fused_rms_norm_quant(
+      weight, input, "rms_norm_per_block_quant");
 
   TORCH_CHECK(group_size == 128 || group_size == 64,
               "Unsupported group size: ", group_size);
@@ -295,7 +322,7 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
               "scales buffer too small: need ", num_tokens * num_groups,
               " elements, got ", scales.numel());
 
-  rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
-                                    var_epsilon, scale_ub, residual,
+  rms_norm_per_block_quant_dispatch(out, input, weight_for_kernel, scales,
+                                    group_size, var_epsilon, scale_ub, residual,
                                     is_scale_transposed);
 }

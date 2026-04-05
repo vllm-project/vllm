@@ -385,7 +385,6 @@ class GemmaRMSNorm(CustomOp):
         orig_dtype = x.dtype
         weight = self.weight.data.float() + 1.0
         if residual is None:
-            # Keep Gemma semantics while still using the shared op:
             # compute rms+weight in fp32, cast once at the end.
             return ir.ops.rms_norm(x.float(), weight, self.variance_epsilon).to(
                 orig_dtype

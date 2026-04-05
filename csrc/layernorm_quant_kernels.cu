@@ -15,6 +15,30 @@
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
 
+namespace {
+
+torch::Tensor maybe_cast_weight_for_static_rms_norm_quant(
+    torch::Tensor const& weight, torch::Tensor const& input,
+    const char* op_name) {
+  if (weight.scalar_type() == input.scalar_type()) {
+    return weight;
+  }
+
+  TORCH_CHECK(weight.scalar_type() == torch::kFloat32, op_name,
+              " only supports mixed dtype with fp32 weight. got input dtype=",
+              input.scalar_type(), ", weight dtype=", weight.scalar_type());
+  TORCH_CHECK(input.scalar_type() == torch::kFloat16 ||
+                  input.scalar_type() == torch::kBFloat16,
+              op_name,
+              " only supports fp16/bf16 input when weight is fp32. got input "
+              "dtype=",
+              input.scalar_type());
+
+  return weight.to(input.scalar_type());
+}
+
+}  // namespace
+
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
@@ -193,6 +217,8 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
+  auto weight_for_kernel = maybe_cast_weight_for_static_rms_norm_quant(
+      weight, input, "rms_norm_static_fp8_quant");
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
@@ -213,7 +239,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                                        vec_size>
                     <<<grid, block, 0, stream>>>(
                         out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                        input_stride, weight.data_ptr<scalar_t>(),
+                        input_stride, weight_for_kernel.data_ptr<scalar_t>(),
                         scale.data_ptr<float>(), epsilon, num_tokens,
                         hidden_size);
               });
@@ -231,8 +257,9 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                   <<<grid, block, 0, stream>>>(                              \
                       out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
                       input_stride, residual.data_ptr<scalar_t>(),           \
-                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
-                      epsilon, num_tokens, hidden_size);                     \
+                      weight_for_kernel.data_ptr<scalar_t>(),                \
+                      scale.data_ptr<float>(), epsilon, num_tokens,          \
+                      hidden_size);                                          \
             });                                                              \
       });
 void fused_add_rms_norm_static_fp8_quant(
@@ -245,7 +272,8 @@ void fused_add_rms_norm_static_fp8_quant(
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(residual.is_contiguous());
   TORCH_CHECK(residual.scalar_type() == input.scalar_type());
-  TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  auto weight_for_kernel = maybe_cast_weight_for_static_rms_norm_quant(
+      weight, input, "fused_add_rms_norm_static_fp8_quant");
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
@@ -268,7 +296,7 @@ void fused_add_rms_norm_static_fp8_quant(
    */
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
-  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
+  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight_for_kernel.data_ptr());
   bool ptrs_are_aligned =
       inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
   bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
