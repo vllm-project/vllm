@@ -44,6 +44,29 @@ uv pip install -e .
     On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which is currently the only supported device.
 
 !!! example "Troubleshooting"
+    ### Apple Clang 21+ Compilation Error
+
+    If the build fails with errors like the following on macOS:
+
+    ```text
+    error: chained comparison 'X < Y <= Z' does not behave the same as 
+    a mathematical expression [-Wparentheses]
+        static_assert(0 < M <= 8);
+    ```
+
+    **Cause:** Apple Clang 21+ treats `-Wparentheses` warnings as errors by default.
+
+    **Solution:** Set the `CXXFLAGS` environment variable before building:
+
+    ```bash
+    export CXXFLAGS="-Wno-parentheses"
+    uv pip install -e .
+    ```
+
+    ---
+
+    ### Missing C++ Headers
+
     If the build fails with errors like the following where standard C++ headers cannot be found, try to remove and reinstall your
     [Command Line Tools for Xcode](https://developer.apple.com/download/all/).
 
@@ -61,6 +84,8 @@ uv pip install -e .
     ```
 
     ---
+
+    ### C++ Standard Compatibility Errors
 
     If the build fails with C++11/C++17 compatibility errors like the following, the issue is that the build system is defaulting to an older C++ standard:
 
