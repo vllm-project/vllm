@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.logits_processor.builtin import LogitBiasLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
@@ -68,6 +69,20 @@ def create_logits_tensor(
     return logits
 
 
+def create_logit_bias_processor(
+    biases: dict[int, dict[int, float]],
+) -> LogitsProcessors:
+    """Quickly construct a LogitBiasLogitsProcessor with the specified biases,
+    and return a LogitsProcessors object containing that processor.
+
+    Args:
+        biases: A dict mapping request index -> {token_id: bias_value}
+    """
+    processor = LogitBiasLogitsProcessor(None, torch.device(DEVICE), False)
+    processor.biases = biases
+    return LogitsProcessors([processor])
+
+
 def create_sampling_metadata(
     all_greedy: bool,
     output_token_ids: list[list[int]] | None = None,
@@ -82,6 +97,7 @@ def create_sampling_metadata(
     repetition_penalties: list[float] | None = None,
     bad_words_token_ids: dict[int, list[list[int]]] | None = None,
     allowed_token_ids_mask: torch.Tensor | None = None,
+    logitsprocs: LogitsProcessors | None = None,
 ) -> SamplingMetadata:
     """Create a v1 sampling metadata object with all_greedy set
     to the given value. Either all greedy or all random sampling
@@ -125,7 +141,7 @@ def create_sampling_metadata(
         spec_token_ids=[] if spec_token_ids is None else spec_token_ids,
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
-        logitsprocs=LogitsProcessors(),
+        logitsprocs=logitsprocs if logitsprocs is not None else LogitsProcessors(),
     )
 
 
@@ -869,6 +885,144 @@ def test_allowed_token_ids(rejection_sampler):
         [[15, -1, -1, -1], [10, 5, 10, -1], [7, 10, 12, 5]],
         dtype=torch.int,
         device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_logit_bias_greedy(rejection_sampler):
+    """Test that logit bias changes token accept/reject behavior in greedy mode.
+
+    Constructs 3 requests:
+    - Requests 0 and 2 set logit bias {2: -200.0}, which lowers token 2's logit
+      from 100.0 to -100.0, below token 15's 99.0, causing argmax to become 15
+      and token 2 to be rejected.
+    - Request 1 has no bias, so all tokens are accepted normally.
+    Also verifies correct handling of non-consecutive request indices
+    (requests 0 and 2 have bias, request 1 does not).
+    """
+    spec_tokens = [[1, 2, 3], [1, 15, 3], [1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4], [1, 15, 3, 4], [1, 2, 3, 4]]
+
+    logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
+
+    # Set logit bias for requests 0 and 2 to significantly lower token 2's logit
+    logitsprocs = create_logit_bias_processor(
+        biases={0: {2: -200.0}, 2: {2: -200.0}},
+    )
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=[[2], [3], [4]],
+        spec_token_ids=spec_tokens,
+        logitsprocs=logitsprocs,
+    )
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[i][-1] for i in range(len(output_tokens))],
+        device=logits.device,
+    )
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        spec_tokens, device=logits.device
+    )
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # Request 0: token 2 biased, argmax becomes 15, rejected -> [1, 15, -1, -1]
+    # Request 1: no bias, all tokens match -> [1, 15, 3, 4]
+    # Request 2: token 2 biased, argmax becomes 15, rejected -> [1, 15, -1, -1]
+    expected = torch.tensor(
+        [[1, 15, -1, -1], [1, 15, 3, 4], [1, 15, -1, -1]],
+        dtype=torch.int,
+        device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_logit_bias_with_empty_draft_tokens(rejection_sampler):
+    """Test correct handling of logit bias in a batch containing empty draft token lists.
+
+    Constructs 3 requests:
+    - Request 0: has 3 draft tokens, with logit bias {2: -200.0}
+    - Request 1: has no draft tokens (empty list), only outputs bonus token
+    - Request 2: has 3 draft tokens, with logit bias {2: -200.0}
+    Verifies that apply_with_spec_decode correctly handles 0 values in num_draft_tokens.
+    """
+    spec_tokens = [[1, 2, 3], [], [1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4], [7], [1, 2, 3, 4]]
+
+    logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
+
+    logitsprocs = create_logit_bias_processor(
+        biases={0: {2: -200.0}, 2: {2: -200.0}},
+    )
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=[[2], [3], [4]],
+        spec_token_ids=spec_tokens,
+        logitsprocs=logitsprocs,
+    )
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[i][-1] for i in range(len(output_tokens))],
+        device=logits.device,
+    )
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        spec_tokens, device=logits.device
+    )
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # Request 0: token 2 biased and rejected -> [1, 15, -1, -1]
+    # Request 1: no draft tokens, only bonus token -> [7, -1, -1, -1]
+    # Request 2: token 2 biased and rejected -> [1, 15, -1, -1]
+    expected = torch.tensor(
+        [[1, 15, -1, -1], [7, -1, -1, -1], [1, 15, -1, -1]],
+        dtype=torch.int,
+        device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_logit_bias_empty_biases(rejection_sampler):
+    """Test no-op behavior when biases are empty.
+
+    Passes a LogitBiasLogitsProcessor with an empty biases dict,
+    and verifies that all draft tokens are accepted, producing output
+    identical to the case without logit bias.
+    """
+    spec_tokens = [[1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4]]  # 4 is the bonus token
+
+    logits = create_logits_tensor(output_tokens)
+
+    # Empty biases of LogitBiasLogitsProcessor
+    logitsprocs = create_logit_bias_processor(biases={})
+    metadata = create_sampling_metadata(
+        all_greedy=True,
+        logitsprocs=logitsprocs,
+    )
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[0][-1]], device=logits.device
+    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # Empty biases do not affect any token, all draft tokens are accepted
+    expected = torch.tensor(
+        [[1, 2, 3, 4]], dtype=torch.int, device=logits.device
     )
     assert torch.equal(output.sampled_token_ids, expected)
 
