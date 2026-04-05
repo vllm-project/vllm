@@ -138,6 +138,15 @@ def eagle_prepare_inputs_padded_kernel(
     if req_idx >= num_reqs:
         return
 
+    q_start_idx = tl.load(query_start_loc_gpu_ptr + req_idx)
+    q_end_idx = tl.load(query_start_loc_gpu_ptr + req_idx + 1)
+    query_len = q_end_idx - q_start_idx
+
+    if query_len == 0:
+        tl.store(token_indices_to_sample_ptr + req_idx, q_end_idx - 1)
+        tl.store(num_rejected_tokens_gpu_ptr + req_idx, 0)
+        return
+
     # Calculate num_draft_tokens from cu_num_draft_tokens, which is an inclusive
     # cumulative sum (first entry is the first value, not zero).
     cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + req_idx)
@@ -155,7 +164,7 @@ def eagle_prepare_inputs_padded_kernel(
 
     # query_start_loc[req_idx + 1] is the start position of the next request,
     # which is one past the last token of this request.
-    q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + req_idx + 1) - 1
+    q_last_tok_idx = q_end_idx - 1
 
     index_to_sample = q_last_tok_idx - num_rejected_tokens
     tl.store(token_indices_to_sample_ptr + req_idx, index_to_sample)

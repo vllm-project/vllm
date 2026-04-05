@@ -31,8 +31,9 @@ class CudagraphDispatcher:
     runnable without cudagraph (if the mode does not match or mode is NONE).
     """
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, for_draft_model: bool = False):
         self.vllm_config = vllm_config
+        self.for_draft_model = for_draft_model
         self.compilation_config = vllm_config.compilation_config
         self.uniform_decode_query_len = (
             1
@@ -134,9 +135,11 @@ class CudagraphDispatcher:
         uniform_decode: bool,
         has_lora: bool,
         num_active_loras: int = 0,
+        uniform_decode_query_len: int | None = None,
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
-        uniform_decode_query_len = self.uniform_decode_query_len
+        if uniform_decode_query_len is None:
+            uniform_decode_query_len = self.uniform_decode_query_len
         num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
         if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
@@ -229,6 +232,26 @@ class CudagraphDispatcher:
                     ),
                 )
 
+        if self.for_draft_model and cudagraph_mode.has_full_cudagraphs():
+            max_num_tokens = self.vllm_config.scheduler_config.max_num_seqs
+            assert self.compilation_config.cudagraph_capture_sizes is not None, (
+                "Cudagraph capture sizes must be set when full mode is enabled."
+            )
+            capture_sizes_for_draft_model = []
+            for size in self.compilation_config.cudagraph_capture_sizes:
+                capture_sizes_for_draft_model.append(size)
+                if size >= max_num_tokens:
+                    break
+            for bs, num_active_loras in product(
+                capture_sizes_for_draft_model, lora_cases
+            ):
+                self.add_cudagraph_key(
+                    CUDAGraphMode.FULL,
+                    self._create_padded_batch_descriptor(
+                        bs, True, num_active_loras > 0, num_active_loras, 1
+                    ),
+                )
+
         self.keys_initialized = True
 
     def dispatch(
@@ -239,6 +262,7 @@ class CudagraphDispatcher:
         num_active_loras: int = 0,
         valid_modes: AbstractSet[CUDAGraphMode] | None = None,
         invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
+        uniform_decode_query_len: int | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using piecewise only),
@@ -298,9 +322,15 @@ class CudagraphDispatcher:
                 )
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
-        normalized_uniform = uniform_decode and self.cudagraph_mode.separate_routine()
+        normalized_uniform = uniform_decode and (
+            self.cudagraph_mode.separate_routine() or self.for_draft_model
+        )
         batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, normalized_uniform, has_lora, effective_num_active_loras
+            num_tokens,
+            normalized_uniform,
+            has_lora,
+            effective_num_active_loras,
+            uniform_decode_query_len,
         )
 
         if CUDAGraphMode.FULL in allowed_modes:
