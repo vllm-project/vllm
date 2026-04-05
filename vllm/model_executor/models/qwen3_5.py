@@ -575,10 +575,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     # Qwen3.5 does not support multimodal pruning (EVS).
     supports_multimodal_pruning = False
 
-    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
-    }
+    packed_modules_mapping = (
+        Qwen3_5ForCausalLMBase.packed_modules_mapping
+        | Qwen3VLForConditionalGeneration.packed_modules_mapping
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
