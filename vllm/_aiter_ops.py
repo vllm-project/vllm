@@ -1160,6 +1160,16 @@ class rocm_aiter_ops:
         }
         return mapping.get(name)
 
+    @staticmethod
+    def get_version() -> str:
+        """Return the installed AITER library version, or 'unknown'."""
+        try:
+            import aiter
+
+            return getattr(aiter, "__version__", "unknown")
+        except ImportError:
+            return "unknown"
+
     @classmethod
     @if_aiter_supported
     def is_enabled(cls) -> bool:

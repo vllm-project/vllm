@@ -746,12 +746,44 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        self.emulate = (
-            not current_platform.supports_mx()
-            or not self.ocp_mx_scheme.startswith("w_mxfp4")
-        ) and (
-            self.mxfp4_backend is Mxfp4MoeBackend.NONE or not self.use_rocm_aiter_moe
+        can_use_native_ck = (
+            current_platform.supports_mx()
+            and self.ocp_mx_scheme is not None
+            and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.ocp_mx_scheme.endswith("a_mxfp4")
+            and self.use_rocm_aiter_moe
         )
+        can_use_mxfp4_backend = (
+            self.mxfp4_backend is not Mxfp4MoeBackend.NONE
+        )
+
+        self.emulate = not (can_use_native_ck or can_use_mxfp4_backend)
+
+        # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
+        # alignment requirements. When violated (e.g. MiniMax-M2.1 with
+        # TP=4 yields intermediate_size_per_partition=384), AITER raises:
+        # "device_gemm ... does not support this GEMM problem".
+        # Fall back to emulation in that case.
+        if (
+            not self.emulate
+            and self.use_rocm_aiter_moe
+            and self.ocp_mx_scheme is not None
+            and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+        ):
+            logger.warning_once(
+                "AITER CK MXFP4 MoE GEMM does not support "
+                "intermediate_size_per_partition=%d (not a multiple of %d). "
+                "This typically happens when intermediate_size / "
+                "tensor_parallel_size produces an incompatible dimension. "
+                "Falling back to emulation mode. To avoid this overhead, "
+                "use a compatible tensor_parallel_size or set "
+                "VLLM_ROCM_USE_AITER_MOE=0.",
+                moe.intermediate_size_per_partition,
+                CK_MXFP4_MOE_DIM_ALIGNMENT,
+            )
+            self.use_rocm_aiter_moe = False
+            self.emulate = True
 
         if self.emulate:
             logger.warning_once(
@@ -761,7 +793,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
+                "layers computed in high precision. If you see gibberish "
+                "output with native mode, try VLLM_ROCM_USE_AITER_MOE=0 "
+                "to force emulation as a workaround."
             )
         else:
             logger.warning_once(
@@ -781,7 +815,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        if self.mxfp4_backend is not None:
+        if self.mxfp4_backend is not Mxfp4MoeBackend.NONE:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
                     self.mxfp4_backend, hidden_size, intermediate_size_per_partition
@@ -972,6 +1006,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # Existing AITER path for w_mxfp4_a_mxfp4 and other schemes
         from aiter.utility.fp4_utils import e8m0_shuffle
+
+        logger.info("Using AITER %s for MXFP4 MoE weight processing",
+                    rocm_aiter_ops.get_version())
 
         # Pre-shuffle weight scales
         s0, s1, _ = layer.w13_weight_scale.shape
