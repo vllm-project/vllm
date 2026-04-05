@@ -468,6 +468,14 @@ class CompletionResponseChoice(OpenAIBaseModel):
     token_ids: list[int] | None = None  # For response
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None  # For prompt
+    routed_experts: list[list[list[int]]] | None = Field(
+        default=None,
+        description=(
+            "The routed expert indices for each generated token, with shape "
+            "[seq_len, num_layers, topk]. Only present when the server is "
+            "started with --enable-return-routed-experts."
+        ),
+    )
 
 
 class CompletionResponse(OpenAIBaseModel):

@@ -531,6 +531,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    routed_experts=(
+                        output.routed_experts.tolist()
+                        if output.routed_experts is not None
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
 
