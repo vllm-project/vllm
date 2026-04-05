@@ -144,7 +144,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
             output_slices (tuple[int, ...]): Every slice's size
-            add_inputs (bool): Defaults to True.
+            add_inputs (bool): If True, add LoRA output to y; if False, write
+                LoRA-only output to y (used for dual-stream when base and LoRA
+                run on different CUDA streams). Defaults to True.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -161,7 +163,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 num_tokens, self.lora_config.specialize_active_lora
             ),
             offset_start=offset_start,
-            add_inputs=True,
+            add_inputs=add_inputs,
         )
 
         y = y.view_as(y_org)
@@ -244,7 +246,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         buffer = torch.empty(
             (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
         )
-
+        add_inputs = kwargs.pop("add_inputs", True)
         self.add_shrink(
             buffer,  # type: ignore
             x,
@@ -257,7 +259,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             buffer,  # type: ignore
             lora_b_stacked,
             output_slices,
-            add_inputs=True,
+            add_inputs=add_inputs,
             **kwargs,
         )
 
