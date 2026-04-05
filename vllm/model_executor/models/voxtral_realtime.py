@@ -269,11 +269,28 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
 
         # Feed output tokens back into buffer in background
         async def feed_tokens():
+            timeout_count = 0
             while True:
-                all_outputs = await asyncio.wait_for(
-                    input_stream.get(),
-                    timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S,
-                )
+                try:
+                    all_outputs = await asyncio.wait_for(
+                        input_stream.get(),
+                        timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S,
+                    )
+                    if timeout_count > 0:
+                        logger.info(
+                            "feed_tokens received tokens after %d timeout(s).",
+                            timeout_count,
+                        )
+                        timeout_count = 0
+                except asyncio.TimeoutError:
+                    timeout_count += 1
+                    if timeout_count == 1 or timeout_count % 10 == 0:
+                        logger.warning(
+                            "Timeout #%d waiting for output tokens "
+                            "in feed_tokens; retrying.",
+                            timeout_count,
+                        )
+                    continue
                 await buffer.append_tokens(all_outputs[-1:])
 
         audio_task = asyncio.create_task(feed_audio())
