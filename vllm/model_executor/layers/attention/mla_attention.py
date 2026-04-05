@@ -318,6 +318,8 @@ def _detect_output_quant_key(
                     f"(output_dim={output_dim}, num_groups={num_groups}). "
                     f"Only group_size 128 and 64 are supported."
                 )
+        # output_scale None implies MXFP4, not supported
+        assert output_scale is None
         return kNvfp4Dynamic
     return kFp8StaticTensorSym
 
