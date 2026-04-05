@@ -210,6 +210,25 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # Check CUDA version compatibility for sm_103+ (GB300)
+        # CUDA <= 12.9 does not support sm_103a architecture
+        # See: https://github.com/vllm-project/vllm/issues/30245
+        device_cap = cls.get_device_capability()
+        if device_cap is not None and torch.version.cuda is not None:
+            cuda_version = torch.version.cuda
+            cuda_major = int(cuda_version.split(".")[0])
+            sm_version = device_cap.major * 10 + device_cap.minor
+            if sm_version >= 103 and cuda_major < 13:
+                gpu_name = cls.get_device_name()
+                raise RuntimeError(
+                    f"GPU {gpu_name} (compute capability "
+                    f"{device_cap.major}.{device_cap.minor}, sm_{sm_version})"
+                    f" requires CUDA >= 13.0, but found CUDA {cuda_version}."
+                    f" Please upgrade to PyTorch 2.11+ (which defaults to"
+                    f" CUDA 13.0) or use a container image with CUDA 13.0"
+                    f" or newer (e.g. a 'cu130' tagged image)."
+                )
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
