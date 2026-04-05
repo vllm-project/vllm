@@ -102,6 +102,7 @@ EAGER = [True, False]
         "flashinfer-cudnn",
         "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
         "flashinfer-cutlass",
+        "cutlass",  # vLLM-native CUTLASS sm_100 FP4 kernel
     ],
 )
 def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
@@ -109,3 +110,30 @@ def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
     with vllm_runner(model, enforce_eager=eager) as llm:
         output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
     assert output[0][1] == "1 2 3 4 5 6"
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="modelopt_fp4 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
+@pytest.mark.parametrize("eager", EAGER)
+def test_nvfp4_default_backend(vllm_runner, model, eager, monkeypatch):
+    monkeypatch.delenv("VLLM_NVFP4_GEMM_BACKEND", raising=False)
+    with vllm_runner(model, enforce_eager=eager) as llm:
+        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
+    assert output[0][1] == "1 2 3 4 5 6"
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="modelopt_fp4 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
+def test_nvfp4_emulation(vllm_runner, model, monkeypatch):
+    # Emulation uses lossy software FP4 approximation, so output is not
+    # deterministic with hardware kernels. Verify inference runs without error.
+    monkeypatch.setenv("VLLM_USE_NVFP4_CT_EMULATIONS", "1")
+    with vllm_runner(model, enforce_eager=True) as llm:
+        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
+    assert output and output[0][1]
