@@ -131,6 +131,10 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    enable_fused_moe_sum_all_reduce: bool = False
+    """If True, enable fused MoE sum all-reduce optimization to overlap
+    MoE expert computation with all-reduce communication."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
