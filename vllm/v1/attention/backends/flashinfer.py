@@ -387,7 +387,7 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        return [64, 128, 256]
+        return [64, 128, 256, 512]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
