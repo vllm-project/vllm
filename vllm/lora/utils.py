@@ -194,6 +194,40 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
+_TRAINABLE_TOKENS_DELTA_SUFFIX = ".token_adapter.trainable_tokens_delta"
+
+
+def is_trainable_tokens_delta(name: str) -> bool:
+    """Check if a weight name is a PEFT trainable_tokens_delta weight."""
+    return name.endswith(_TRAINABLE_TOKENS_DELTA_SUFFIX)
+
+
+def parse_trainable_tokens_delta_name(
+    name: str, weights_mapper: "WeightsMapper | None" = None
+) -> str:
+    """Extract module name from a trainable_tokens_delta weight name.
+
+    e.g. 'base_model.model.language_model.model.embed_tokens
+          .token_adapter.trainable_tokens_delta'
+       -> 'language_model.model.embed_tokens'
+    """
+    # Apply same prefix stripping + weights_mapper logic as
+    # parse_fine_tuned_lora_name
+    if name.startswith("base_model.model."):
+        name = name.replace("base_model.model.", "")
+        name = weights_mapper._map_name(name) if weights_mapper else name
+        name = "base_model.model." + name
+    else:
+        name = weights_mapper._map_name(name) if weights_mapper else name
+
+    start_index = 2 if name.startswith("base_model.model.") else 0
+
+    # Strip the token_adapter.trainable_tokens_delta suffix
+    core = name.removesuffix(_TRAINABLE_TOKENS_DELTA_SUFFIX)
+    parts = core.split(".")
+    return ".".join(parts[start_index:])
+
+
 def is_base_embedding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
     embedding_suffixes = (
