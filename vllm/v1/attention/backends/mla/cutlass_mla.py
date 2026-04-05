@@ -17,12 +17,12 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
@@ -162,11 +162,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # Share workspace buffer across all executions
         self._workspace = g_sm100_workspace
 
-        # Pre-allocated output buffer, lazily sized on first call.
-        # Zero-init once to prevent NaN in padding slots (seq_lens=0)
-        # from contaminating downstream per-tensor reductions.
-        self._decode_out: torch.Tensor | None = None
-
     def _sm100_cutlass_mla_decode(
         self,
         q_nope: torch.Tensor,
@@ -223,15 +218,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype)
             else q_nope.dtype
         )
-        # Reuse pre-allocated zero-init output buffer to avoid a memset
-        # kernel on every CUDA graph replay.
-        if (
-            self._decode_out is None
-            or self._decode_out.shape[0] < B_q
-            or self._decode_out.dtype != dtype
-        ):
-            self._decode_out = q_nope.new_zeros((B_q, MAX_HEADS, D_latent), dtype=dtype)
-        out = self._decode_out[:B_q]
+        out = q_nope.new_empty((B_q, MAX_HEADS, D_latent), dtype=dtype)
         lse = (
             torch.empty((B_q, MAX_HEADS), dtype=torch.float32, device=q_nope.device)
             if self.need_to_return_lse_for_decode
