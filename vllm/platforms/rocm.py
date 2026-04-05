@@ -55,6 +55,7 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 # Architecture -> Reason.
 _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {}
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
+    # CDNA3 (gfx942)
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
     "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
@@ -63,6 +64,10 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
+    # CDNA4 (gfx950)
+    "0x75a0": "AMD_Instinct_MI350X",
+    "0x75a3": "AMD_Instinct_MI355X",
+    # RDNA3
     "0x744c": "AMD_Radeon_RX7900XTX",
     "0x7551": "AMD_Radeon_R9700",
 }
