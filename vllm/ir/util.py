@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Any
 
 
+@functools.cache
+def hash_file(path: Path) -> str:
+    """Hash the contents of a file, cached per path."""
+    hasher = hashlib.sha256()
+    hasher.update(path.read_bytes())
+    return hasher.hexdigest()
+
+
 def hash_source(*srcs: str | Any) -> str:
     """
     Utility method to hash the sources of functions or objects.
