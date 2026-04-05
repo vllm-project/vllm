@@ -14,9 +14,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -116,7 +114,6 @@ class ReasoningParser:
     def extract_reasoning(
         self,
         model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -126,7 +123,6 @@ class ReasoningParser:
 
         Parameters:
             model_output: The model-generated string to extract reasoning content from.
-            request: The request object that was used to generate the model_output.
 
         Returns:
             A tuple containing the reasoning content and the content.
@@ -298,6 +294,7 @@ class ReasoningParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
+                assert isinstance(name, list)
                 names = name
             else:
                 names = [class_name]

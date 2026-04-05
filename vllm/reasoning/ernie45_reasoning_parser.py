@@ -2,17 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
 
@@ -137,9 +132,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             # no </think> in previous or delta, reasoning content continues
             return DeltaMessage(reasoning=delta_text)
 
-    def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> tuple[str | None, str | None]:
+    def extract_reasoning(self, model_output: str) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
         The Ernie45 thinking model output format is
@@ -150,7 +143,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
-        reasoning, content = super().extract_reasoning(model_output, request)
+        reasoning, content = super().extract_reasoning(model_output)
         if content:
             start_idx = content.find(self.response_start_token)
             end_idx = content.rfind(self.response_end_token)

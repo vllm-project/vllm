@@ -184,7 +184,6 @@ class Parser:
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -194,7 +193,6 @@ class Parser:
 
         Args:
             model_output: The complete model-generated string.
-            request: The request object used to generate the output.
 
         Returns:
             A tuple of (reasoning, response_content).
@@ -308,11 +306,10 @@ class DelegatingParser(Parser):
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         if self._reasoning_parser is None:
             return None, model_output
-        return self._reasoning_parser.extract_reasoning(model_output, request)
+        return self._reasoning_parser.extract_reasoning(model_output)
 
     def extract_response_outputs(
         self,
@@ -325,7 +322,7 @@ class DelegatingParser(Parser):
         logprobs: list[Logprob] | None = None,
     ) -> list[ResponseOutputItem]:
         # First extract reasoning
-        reasoning, content = self.extract_reasoning(model_output, request)
+        reasoning, content = self.extract_reasoning(model_output)
 
         # Then parse tool calls from the content
         tool_calls, content = self._parse_tool_calls(
