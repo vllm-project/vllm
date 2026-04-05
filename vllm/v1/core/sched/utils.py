@@ -59,6 +59,31 @@ def check_sequence_repetition(
     return False
 
 
+def validate_mamba_chunk_invariant_batch_settings(
+    max_num_scheduled_tokens: int,
+    mamba_chunk_size: int,
+    long_prefill_token_threshold: int,
+) -> None:
+    """Raise if scheduler limits conflict with mamba chunk alignment
+    in batch-invariant mode."""
+    if max_num_scheduled_tokens < mamba_chunk_size:
+        raise ValueError(
+            f"max_num_batched_tokens ({max_num_scheduled_tokens}) "
+            f"< mamba_chunk_size ({mamba_chunk_size}). "
+            f"Batch-invariant mode with mamba models requires "
+            f"max_num_batched_tokens >= mamba_chunk_size to guarantee "
+            f"chunk-aligned prefill scheduling."
+        )
+    if 0 < long_prefill_token_threshold < mamba_chunk_size:
+        raise ValueError(
+            f"long_prefill_token_threshold ({long_prefill_token_threshold}) "
+            f"< mamba_chunk_size ({mamba_chunk_size}). "
+            f"Batch-invariant mode with mamba models requires "
+            f"long_prefill_token_threshold >= mamba_chunk_size "
+            f"(or 0 to disable the threshold)."
+        )
+
+
 def remove_all(lst: list, items_to_remove: set) -> list:
     """Remove all items from a list that are in the items_to_remove set.
 

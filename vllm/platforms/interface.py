@@ -607,6 +607,8 @@ class Platform:
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
 
+        cls._ensure_batch_invariant_chunk_alignment(vllm_config)
+
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
         assert attn_page_size >= mamba_page_size
@@ -628,6 +630,36 @@ class Platform:
                 "exactly equal.",
                 mamba_padding_pct,
             )
+
+    @classmethod
+    def _ensure_batch_invariant_chunk_alignment(cls, vllm_config: "VllmConfig") -> None:
+        import vllm.envs as envs
+        from vllm.utils.math_utils import round_up
+
+        cache_config = vllm_config.cache_config
+        if not (envs.VLLM_BATCH_INVARIANT and cache_config.enable_prefix_caching):
+            return
+
+        effective_mamba_block_size = cache_config.mamba_block_size
+        assert effective_mamba_block_size is not None
+
+        chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        assert chunk_size is not None
+
+        if effective_mamba_block_size % chunk_size == 0:
+            return
+
+        aligned = round_up(effective_mamba_block_size, chunk_size)
+        logger.info(
+            "Batch-invariant mode: rounding mamba_block_size from %d "
+            "to %d to align with mamba_chunk_size=%d.",
+            effective_mamba_block_size,
+            aligned,
+            chunk_size,
+        )
+        cache_config.mamba_block_size = aligned
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.block_size = aligned
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
