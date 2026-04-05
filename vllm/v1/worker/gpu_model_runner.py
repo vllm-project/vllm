@@ -6553,10 +6553,18 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        alignment = 256
+        total_size = sum(
+            (t.size + alignment - 1) // alignment * alignment
+            for t in kv_cache_config.kv_cache_tensors
+        )
+        kv_cache_raw_tensor_global = torch.zeros(
+            total_size, dtype=torch.int8, device=self.device
+        )
+        offset = 0
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.int8, device=self.device
-            )
+            tensor = kv_cache_raw_tensor_global[offset : offset + kv_cache_tensor.size]
+            offset += (kv_cache_tensor.size + alignment - 1) // alignment * alignment
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
 
