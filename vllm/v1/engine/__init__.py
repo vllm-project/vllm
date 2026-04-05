@@ -238,6 +238,9 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_master_port: int
     new_data_parallel_master_port_list: list[int]
     coord_store_port: int
+    # For same-size peer swap (DP rank recovery): identifies the dead DP rank.
+    # -1 means this is a normal elastic scaling operation, not a recovery.
+    dead_data_parallel_rank: int = -1
 
 
 class ReconfigureRankType(enum.IntEnum):

@@ -621,7 +621,7 @@ class WorkerProc:
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
         )
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH or envs.VLLM_ELASTIC_EP_RECOVERY_LAUNCH:
             self.worker.elastic_ep_execute("load_model")
         else:
             self.worker.load_model()

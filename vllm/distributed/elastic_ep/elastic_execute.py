@@ -24,6 +24,7 @@ from vllm.distributed import (
     get_tp_group,
 )
 from vllm.distributed.elastic_ep.standby_state import (
+    create_recovery_groups,
     create_standby_groups,
     get_standby_dp_group,
     get_standby_ep_group,
@@ -565,6 +566,100 @@ class ElasticEPScalingExecutor:
             old_num_physical_experts,
         )
 
+    def receive_weights_from_donor(self, donor_dp_rank: int) -> None:
+        """Replacement rank receives model weights from the donor rank during peer-swap recovery.
+
+        Unlike ``receive_weights`` (which computes the sender from
+        ``dp_rank - old_dp_size``), recovery is a same-size swap so the
+        replacement rank has the same index as the dead rank.  The donor is
+        the lowest-numbered surviving DP rank.
+        """
+        dp_group = get_dp_group()
+        assert isinstance(dp_group, StatelessGroupCoordinator)
+        model = self.worker.model_runner.get_model()
+        batch_transfer_weights(
+            model=model,
+            is_sender=False,
+            peer_rank=donor_dp_rank,
+            dp_group=dp_group,
+            expert_weights=model.expert_weights,
+        )
+        torch.accelerator.synchronize()
+
+    def transfer_weights_to_replacement(
+        self, dead_dp_rank: int, donor_dp_rank: int
+    ) -> None:
+        """Donor rank sends model weights to the replacement rank during peer-swap recovery.
+
+        Only the donor rank acts as sender; all other surviving ranks are
+        no-ops so the collective_rpc call can be issued to all workers
+        uniformly.  The donor is the lowest-numbered surviving DP rank.
+        """
+        dp_group = get_dp_group()
+        assert isinstance(dp_group, StatelessGroupCoordinator)
+        if dp_group.rank_in_group != donor_dp_rank:
+            return
+        model = self.worker.model_runner.get_model()
+        batch_transfer_weights(
+            model=model,
+            is_sender=True,
+            peer_rank=dead_dp_rank,
+            dp_group=dp_group,
+            expert_weights=model.expert_weights,
+        )
+        torch.accelerator.synchronize()
+
     def prepare_new_worker(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
             prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
+
+    def reconnect_peer(
+        self, reconfig_request: ReconfigureDistributedRequest
+    ) -> None:
+        """Reconnect communication fabric after a same-size DP rank peer swap.
+
+        Called on every *surviving* rank once the replacement rank is ready to
+        rendezvous.  Steps:
+
+        1. Rendezvous new process groups (same topology, fresh TCPStore) via
+           ``create_recovery_groups``.
+        2. Atomically promote standby → active via ``_replace_active_groups``.
+        3. For each EP rank that belonged to the dead DP rank, disconnect the
+           dead worker and reconnect the replacement worker in the NIXL buffer.
+
+        The replacement rank (the fresh worker that took the dead rank's slot)
+        also calls ``create_recovery_groups`` + ``_replace_active_groups``, and
+        then its NIXL buffer is initialized normally via
+        ``NixlEPAll2AllManager.get_handle`` during the first MoE forward pass —
+        the same ``_init_buffer`` path used at startup.  This method only
+        handles the surviving-rank side of the swap.
+        """
+        from vllm.distributed.device_communicators.all2all import (
+            NixlEPAll2AllManager,
+        )
+
+        parallel_config = self.worker.vllm_config.parallel_config
+        master_ip = reconfig_request.new_data_parallel_master_ip
+
+        create_recovery_groups(
+            recovery_coord_store_port=reconfig_request.coord_store_port,
+            master_ip=master_ip,
+            enable_eplb=parallel_config.enable_eplb,
+        )
+        _replace_active_groups(**pop_standby_groups())
+
+        # EP rank range for the dead DP rank: dp_rank * tp_size .. (dp_rank+1)*tp_size - 1
+        dead_dp_rank = reconfig_request.dead_data_parallel_rank
+        assert dead_dp_rank >= 0, (
+            "reconnect_peer requires a valid dead_data_parallel_rank"
+        )
+        tp_size = get_tp_group().world_size
+        new_ep_tcp_store = get_ep_group().tcp_store_group.store
+
+        for tp_rank in range(tp_size):
+            ep_rank = dead_dp_rank * tp_size + tp_rank
+            NixlEPAll2AllManager.replace_peer(
+                dead_ep_rank=ep_rank,
+                new_ep_rank=ep_rank,
+                new_tcp_store=new_ep_tcp_store if tp_rank == 0 else None,
+            )

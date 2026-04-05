@@ -46,7 +46,7 @@ class UniProcExecutor(Executor):
         self.driver_worker.init_worker(all_kwargs=[kwargs])
         self.driver_worker.init_device()
 
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH or envs.VLLM_ELASTIC_EP_RECOVERY_LAUNCH:
             self.driver_worker.elastic_ep_execute("load_model")
         else:
             self.driver_worker.load_model()
