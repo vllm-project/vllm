@@ -9,9 +9,15 @@ import pytest
 
 from vllm.engine.protocol import StreamingInput
 from vllm.outputs import RequestOutput
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
+
+
+def get_engine_input(engine: AsyncLLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 @pytest.fixture
@@ -156,8 +162,14 @@ async def test_generate_with_async_generator():
     llm.add_request = mock_add_request
 
     async def input_generator() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="Hello", sampling_params=sampling_params)
-        yield StreamingInput(prompt=" world", sampling_params=sampling_params)
+        yield StreamingInput(
+            get_engine_input(llm, "Hello"),
+            sampling_params=sampling_params,
+        )
+        yield StreamingInput(
+            get_engine_input(llm, " world"),
+            sampling_params=sampling_params,
+        )
 
     outputs = []
     async for output in llm.generate(input_generator(), sampling_params, request_id):

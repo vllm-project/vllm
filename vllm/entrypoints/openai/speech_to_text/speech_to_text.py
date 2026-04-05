@@ -46,7 +46,11 @@ from vllm.multimodal.audio import get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
-from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
+from vllm.renderers.inputs.preprocess import (
+    parse_enc_dec_prompt,
+    parse_model_prompt,
+    prompt_to_seq,
+)
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
 
@@ -133,10 +137,16 @@ class OpenAISpeechToText(OpenAIServing):
         via ``get_language_detection_prompt`` and
         ``parse_language_detection_output``.
         """
+        model_config = self.model_config
+
         prompt = self.model_cls.get_language_detection_prompt(
             audio_chunk,
             self.asr_config,
         )
+        parsed_prompts = [
+            parse_model_prompt(model_config, prompt) for prompt in prompt_to_seq(prompt)
+        ]
+
         allowed_token_ids = self.model_cls.get_language_token_ids(
             self.tokenizer,
         )
@@ -146,8 +156,10 @@ class OpenAISpeechToText(OpenAIServing):
             allowed_token_ids=allowed_token_ids,
         )
 
+        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
+
         result_generator = self.engine_client.generate(
-            prompt,
+            engine_inputs[0],
             sampling_params,
             request_id,
         )

@@ -7,12 +7,10 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any
 
 import torch
 
 import vllm.envs as envs
-from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -21,7 +19,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
-from vllm.inputs import EngineInput, PromptType
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -288,14 +286,10 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest
-        | PromptType
-        | EngineInput
-        | AsyncGenerator[StreamingInput, None],
+        prompt: EngineInput | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
@@ -331,41 +325,24 @@ class AsyncLLM(EngineClient):
                 params,
                 arrival_time,
                 lora_request,
-                tokenization_kwargs,
                 trace_headers,
                 priority,
                 data_parallel_rank,
             )
 
         # Convert Input --> Request.
-        if isinstance(prompt, EngineCoreRequest):
-            logger.warning_once(
-                "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
-                "is deprecated and will be removed in v0.18. You should instead pass "
-                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
-            )
-
-            request = prompt
-            if request_id != request.request_id:
-                logger.warning_once(
-                    "AsyncLLM.add_request() was passed a request_id parameter that "
-                    "does not match the EngineCoreRequest.request_id attribute. The "
-                    "latter will be used, and the former will be ignored."
-                )
-        else:
-            request = self.input_processor.process_inputs(
-                request_id,
-                prompt,
-                params,
-                supported_tasks=await self.get_supported_tasks(),
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-            )
-            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+        request = self.input_processor.process_inputs(
+            request_id,
+            prompt,
+            params,
+            supported_tasks=await self.get_supported_tasks(),
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+            data_parallel_rank=data_parallel_rank,
+        )
+        prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         if reasoning_ended is not None:
             request.reasoning_ended = reasoning_ended
@@ -426,7 +403,6 @@ class AsyncLLM(EngineClient):
         sampling_params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
@@ -437,7 +413,6 @@ class AsyncLLM(EngineClient):
             supported_tasks=await self.get_supported_tasks(),
             arrival_time=arrival_time,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=priority,
             data_parallel_rank=data_parallel_rank,
@@ -451,7 +426,7 @@ class AsyncLLM(EngineClient):
         # once the input stream is closed.
         final_req = self.input_processor.process_inputs(
             request_id=request_id,
-            prompt=TokensPrompt(prompt_token_ids=[0]),
+            prompt=tokens_input([0]),
             params=sampling_params,
             **inputs,  # type: ignore[arg-type]
         )
@@ -528,16 +503,12 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest
-        | PromptType
-        | EngineInput
-        | AsyncGenerator[StreamingInput, None],
+        prompt: EngineInput | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
         prompt_text: str | None = None,
         lora_request: LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
@@ -565,7 +536,6 @@ class AsyncLLM(EngineClient):
                 prompt,
                 sampling_params,
                 lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
@@ -776,13 +746,12 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType | EngineInput,
+        prompt: EngineInput,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -806,7 +775,6 @@ class AsyncLLM(EngineClient):
                 prompt,
                 pooling_params,
                 lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
                 reasoning_ended=reasoning_ended,

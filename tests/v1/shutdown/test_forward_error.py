@@ -11,6 +11,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.shutdown.utils import (
     SHUTDOWN_TEST_THRESHOLD_BYTES,
     SHUTDOWN_TEST_TIMEOUT_SEC,
+    get_engine_input,
 )
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -73,7 +74,9 @@ async def test_async_llm_model_error(
 
     async def generate(request_id: str):
         generator = async_llm.generate(
-            "Hello my name is", request_id=request_id, sampling_params=SamplingParams()
+            get_engine_input(async_llm, "Hello my name is"),
+            request_id=request_id,
+            sampling_params=SamplingParams(),
         )
         try:
             async for _ in generator:

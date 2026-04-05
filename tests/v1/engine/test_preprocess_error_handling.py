@@ -5,6 +5,7 @@ import pytest
 import torch.cuda
 
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
@@ -45,7 +46,6 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
 
     # Create a failing request by crafting a request with an invalid token
     # We need to use a direct approach since LLM.generate tokenizes for us
-    from vllm.inputs import TokensPrompt
 
     # This should raise an exception due to the preprocessing failure
     # Special token id to trigger the failure

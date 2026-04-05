@@ -30,7 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -38,10 +38,12 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
-
 TEXT_PROMPT = "Hello"
+
+
+def get_engine_input(engine: AsyncLLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 class DummyKVConnectorMetadata(KVConnectorMetadata):
@@ -230,7 +232,7 @@ async def test_abort_during_final_step(async_scheduling: bool):
                 async def generate():
                     async for output in engine.generate(
                         request_id=request_id,
-                        prompt=TEXT_PROMPT,
+                        prompt=get_engine_input(engine, TEXT_PROMPT),
                         sampling_params=sampling_params,
                     ):
                         outputs.append(output)

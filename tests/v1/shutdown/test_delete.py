@@ -8,6 +8,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.shutdown.utils import (
     SHUTDOWN_TEST_THRESHOLD_BYTES,
     SHUTDOWN_TEST_TIMEOUT_SEC,
+    get_engine_input,
 )
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -46,7 +47,7 @@ async def test_async_llm_delete(
     async_llm = AsyncLLM.from_engine_args(engine_args)
     if send_one_request:
         async for _ in async_llm.generate(
-            "Hello my name is",
+            get_engine_input(async_llm, "Hello my name is"),
             request_id="abc",
             sampling_params=SamplingParams(
                 max_tokens=1, output_kind=RequestOutputKind.DELTA
@@ -97,7 +98,8 @@ def test_llm_delete(
         )
         if send_one_request:
             llm.generate(
-                "Hello my name is", sampling_params=SamplingParams(max_tokens=1)
+                "Hello my name is",
+                sampling_params=SamplingParams(max_tokens=1),
             )
         del llm
 

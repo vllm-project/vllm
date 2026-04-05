@@ -168,7 +168,6 @@ steps:
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/
-  - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
@@ -182,7 +181,6 @@ steps:
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
