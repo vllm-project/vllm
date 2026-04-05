@@ -126,6 +126,7 @@ class Executor(ABC):
         # With TP>1, compilation happens in worker processes, so the main
         # process config is never updated. Use max across workers since they
         # compile in parallel.
+        compilation_times = [t for t in compilation_times if t is not None]
         if compilation_times:
             self.vllm_config.compilation_config.compilation_time = max(
                 compilation_times
