@@ -1464,6 +1464,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
     # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
+    # - "torch": use torch._scaled_mm (requires PyTorch >= 2.8)
     # - <none>: automatically pick an available backend
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
@@ -1474,6 +1475,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "flashinfer-cutlass",
             "cutlass",
             "marlin",
+            "torch",
         ],
     ),
     # Controls garbage collection during CUDA graph capture.
