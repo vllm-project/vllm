@@ -37,8 +37,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Gemma4ReasoningParser",
     ),
     "glm45": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningWithThinkingParser",
+        "glm4_moe_reasoning_parser",
+        "Glm4MoeReasoningParser",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
