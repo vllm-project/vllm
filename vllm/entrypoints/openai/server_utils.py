@@ -457,6 +457,18 @@ async def lifespan(app: FastAPI):
         else:
             task = None
 
+        # Register DNS-AID SVCB record after the socket is bound and the
+        # engine client is ready.  The lazy import keeps dns-aid off the
+        # critical path when the feature is disabled.
+        dns_aid_record = None
+        _args = getattr(app.state, "args", None)
+        if getattr(_args, "dns_aid_enabled", False):
+            from vllm.entrypoints.serve.instrumentator.dns_aid import (
+                register as _dns_aid_register,
+            )
+
+            dns_aid_record = await _dns_aid_register(_args, app.state.engine_client)
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -465,6 +477,12 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            if dns_aid_record is not None:
+                from vllm.entrypoints.serve.instrumentator.dns_aid import (
+                    deregister as _dns_aid_deregister,
+                )
+
+                await _dns_aid_deregister(dns_aid_record)
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state
