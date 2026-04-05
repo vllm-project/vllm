@@ -1127,6 +1127,119 @@ def test_fused_marlin_moe(
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
 
 
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+def test_fused_marlin_moe_cuda_graph():
+    """Test that GPTQ Marlin MoE works correctly with CUDA graphs.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/36811
+    The bug was caused by:
+    1. cudaFuncSetAttribute(MaxDynamicSharedMemorySize) being overwritten
+       by later CUDA graph captures with different blocks_per_sm values.
+    2. Batch-dependent c_tmp buffer sizing via sorted_token_ids.size(0).
+    """
+    torch.cuda.manual_seed(42)
+
+    # Use 64 experts like Qwen3.5-35B-A3B to trigger the bug
+    e, topk = 64, 8
+    n, k = 1024, 1024
+    group_size = 128
+    quant_type = scalar_types.uint4b8
+    dtype = torch.half
+
+    # Batch sizes matching vLLM's CUDA graph capture sizes
+    batch_sizes = [1, 2, 4, 8, 16, 24, 32]
+
+    # Create weights (shared across all batch sizes)
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+
+    w1_data = MarlinMoEWeightData.make(
+        w=w1,
+        quant_type=quant_type,
+        group_size=group_size,
+        act_order=False,
+    )
+    w2_data = MarlinMoEWeightData.make(
+        w=w2,
+        quant_type=quant_type,
+        group_size=group_size,
+        act_order=False,
+    )
+
+    # Capture a CUDA graph for each batch size
+    graphs = {}
+    static_inputs = {}
+    static_outputs = {}
+
+    for m in batch_sizes:
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+
+        # Static input tensors for graph replay
+        a_static = a.clone()
+        topk_weights_static = topk_weights.clone()
+        topk_ids_static = topk_ids.clone()
+
+        stream = torch.cuda.Stream()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.stream(stream), torch.cuda.graph(graph):
+            out = fused_marlin_moe(
+                a_static,
+                w1_data.qweight,
+                w2_data.qweight,
+                None,
+                None,
+                w1_data.scales,
+                w2_data.scales,
+                topk_weights_static,
+                topk_ids_static,
+                global_num_experts=e,
+                quant_type_id=quant_type.id,
+                is_k_full=True,
+            )
+
+        graphs[m] = graph
+        static_inputs[m] = (a_static, topk_weights_static, topk_ids_static)
+        static_outputs[m] = out
+
+    torch.accelerator.synchronize()
+
+    # Replay each graph and compare against eager mode.
+    # The bug manifested when replaying small batch size graphs (e.g., M=1)
+    # after larger batch sizes had overwritten cudaFuncSetAttribute.
+    for m in batch_sizes:
+        a_static, topk_weights_static, topk_ids_static = static_inputs[m]
+
+        # Compute eager reference with the same inputs
+        eager_out = fused_marlin_moe(
+            a_static,
+            w1_data.qweight,
+            w2_data.qweight,
+            None,
+            None,
+            w1_data.scales,
+            w2_data.scales,
+            topk_weights_static,
+            topk_ids_static,
+            global_num_experts=e,
+            quant_type_id=quant_type.id,
+            is_k_full=True,
+        )
+
+        # Replay the captured graph
+        static_outputs[m].zero_()
+        graphs[m].replay()
+        torch.accelerator.synchronize()
+
+        torch.testing.assert_close(
+            static_outputs[m],
+            eager_out,
+            atol=1e-2,
+            rtol=1e-2,
+        )
+
+
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 @pytest.mark.parametrize("m", [1, 256])
