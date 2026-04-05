@@ -693,7 +693,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                assert not fp8_attention, "DCP not support fp8 kvcache now."
+                assert not fp8_attention, (
+                    "DCP does not support FP8 KV cache yet. "
+                    "Try disabling DCP by setting "
+                    "decode_context_parallel_size=1."
+                )
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                 mqa_q = torch.cat(mqa_q, dim=-1)
                 # mqa_q do allgather in head dim.
@@ -2608,7 +2612,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
-        assert k_scale is None, "DCP not support scaled kvcache now."
+        assert k_scale is None, (
+            "DCP does not support scaled KV cache yet. "
+            "Try disabling DCP by setting "
+            "decode_context_parallel_size=1."
+        )
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None

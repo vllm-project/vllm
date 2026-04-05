@@ -309,7 +309,9 @@ class SlidingWindowSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
-            "DCP not support sliding window."
+            "DCP does not support sliding window yet. "
+            "Try disabling DCP by setting "
+            "decode_context_parallel_size=1."
         )
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
