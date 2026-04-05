@@ -23,6 +23,7 @@ if HAS_TRITON:
         lora_expand,
         lora_shrink,
     )
+    from vllm.lora.ops.triton_ops.lora_fused_op import lora_shrink_expand
 
 from vllm import _custom_ops as ops
 
@@ -213,6 +214,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         """
         Applicable to linear-related lora.
 
+        Uses a fused shrink+expand custom op that launches both Triton
+        kernels back-to-back for PDL (Programmatic Dependent Launch)
+        overlap on SM90+ GPUs.
+
         Semantics:
             for i in range(len(lora_a_stacked)):
                 y[i] += (
@@ -240,26 +245,29 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         r = lora_b_stacked[0].size(-1)
         # We set the buffer to be float32 by default, refer to:
         # https://github.com/triton-lang/triton/issues/1387
-        # Note: buffer is zeroed inside the shrink op
+        # Note: buffer is zeroed inside the fused op
         buffer = torch.empty(
             (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
         )
 
-        self.add_shrink(
-            buffer,  # type: ignore
-            x,
+        x_flat = x.view(-1, x.shape[-1])
+        y_org = y
+        y = y.view(-1, y.shape[-1])
+
+        lora_shrink_expand(
+            x_flat,
             lora_a_stacked,
-            scale,
-            **kwargs,
-        )
-        self.add_expand(
-            y,
-            buffer,  # type: ignore
+            buffer,
             lora_b_stacked,
-            output_slices,
-            add_inputs=True,
-            **kwargs,
+            y,
+            *self.token_mapping_meta.meta_args(
+                x_flat.size(0), self.lora_config.specialize_active_lora
+            ),
+            scale,
+            offset_start=0,
         )
+
+        y = y.view_as(y_org)
 
     def add_lora_logits(
         self,
