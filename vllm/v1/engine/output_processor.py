@@ -298,11 +298,6 @@ class RequestState:
                 return None
 
             if self.output_kind == RequestOutputKind.DELTA:
-                # Send tokens from the offset in DELTA mode, otherwise all
-                # tokens are sent.
-                new_token_ids = self.detokenizer.output_token_ids[
-                    self.sent_tokens_offset :
-                ]
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
@@ -314,9 +309,7 @@ class RequestState:
                 finished,
             )
 
-        output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
-        )
+        output = self._new_completion_output(finish_reason, stop_reason, routed_experts)
 
         if self.parent_req is None:
             outputs = [output]
@@ -375,7 +368,6 @@ class RequestState:
 
     def _new_completion_output(
         self,
-        token_ids: list[int],
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         routed_experts: np.ndarray | None = None,
@@ -387,8 +379,7 @@ class RequestState:
 
         # Prepare text and token_ids, based on delta mode
         text = self.detokenizer.get_next_output_text(finished, delta)
-        if not delta:
-            token_ids = self.detokenizer.output_token_ids
+        token_ids = self.detokenizer.get_next_output_token_ids(finished, delta)
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
