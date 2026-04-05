@@ -63,8 +63,8 @@ def test_mm_cache_stats(
     caplog_vllm,
 ):
     llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
-        max_model_len=4096,
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        max_model_len=8192,
         max_num_seqs=5,
         enforce_eager=True,
         mm_processor_cache_type=mm_processor_cache_type,

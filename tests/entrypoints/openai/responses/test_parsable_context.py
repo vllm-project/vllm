@@ -20,7 +20,7 @@ from .conftest import (
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "Qwen/Qwen3-8B"
+MODEL_NAME = "Qwen/Qwen3-4B"
 
 _PYTHON_TOOL_INSTRUCTION = (
     "You must use the Python tool to execute code. "

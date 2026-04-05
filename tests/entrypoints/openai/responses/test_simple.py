@@ -9,7 +9,7 @@ from tests.utils import RemoteOpenAIServer
 
 from .conftest import validate_streaming_event_stack
 
-MODEL_NAME = "Qwen/Qwen3-8B"
+MODEL_NAME = "Qwen/Qwen3-4B"
 
 
 @pytest.fixture(scope="module")

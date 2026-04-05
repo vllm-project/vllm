@@ -87,6 +87,7 @@ def test_kv_sharing_fast_prefill(
 
         llm = LLM(
             model="google/gemma-3n-E2B-it",
+            max_model_len=16384,
             enforce_eager=enforce_eager,
             compilation_config=compilation_config,
             seed=SEED,
