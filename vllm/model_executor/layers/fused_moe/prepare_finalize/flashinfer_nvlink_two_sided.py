@@ -37,7 +37,7 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         return None
 
     def topk_indices_dtype(self) -> torch.dtype | None:
-        return None
+        return torch.int32
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
