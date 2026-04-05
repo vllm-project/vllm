@@ -264,6 +264,85 @@ def test_causal_conv1d_update_with_batch_gather(
     assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
 
 
+@pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("silu_activation", [True, False])
+@pytest.mark.parametrize("has_bias", [True, False])
+@pytest.mark.parametrize("seqlen", [1])
+@pytest.mark.parametrize("width", [3, 4])
+@pytest.mark.parametrize("dim", [2048 + 16])
+@pytest.mark.parametrize("batch_size", [3])
+def test_causal_conv1d_update_cache_lines_lt_batch(
+    batch_size, dim, width, seqlen, has_bias, silu_activation, itype
+):
+    """Regression test for #36566: num_cache_lines < padded batch size.
+
+    During CUDA graph capture the batch is padded beyond the number of
+    allocated mamba cache blocks.  The kernel handles this via PAD_SLOT_ID
+    early-return and bounds-check masks, so this must not raise.
+    """
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+
+    set_random_seed(0)
+
+    padding = 5
+    padded_batch_size = batch_size + padding
+    # Intentionally fewer cache lines than the padded batch size
+    total_entries = batch_size + 2
+    assert total_entries < padded_batch_size
+
+    x = torch.randn(
+        padded_batch_size, seqlen, dim, device=device, dtype=itype
+    ).transpose(1, 2)
+    x_ref = x.clone()
+
+    conv_state_indices = torch.randperm(total_entries)[:batch_size].to(
+        dtype=torch.int32, device=device
+    )
+    unused_states_bool = torch.ones(total_entries, dtype=torch.bool, device=device)
+    unused_states_bool[conv_state_indices] = False
+    padded_state_indices = torch.concat(
+        [
+            conv_state_indices,
+            torch.as_tensor([PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
+        ],
+        dim=0,
+    )
+
+    conv_state = torch.randn(
+        total_entries, width - 1, dim, device=device, dtype=itype
+    ).transpose(1, 2)
+    conv_state_for_padding_test = conv_state.clone()
+
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
+    conv_state_ref = conv_state[conv_state_indices, :].detach().clone()
+    activation = None if not silu_activation else "silu"
+
+    out = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation=activation,
+        conv_state_indices=padded_state_indices,
+        pad_slot_id=PAD_SLOT_ID,
+        validate_data=True,
+    )
+    out_ref = causal_conv1d_update_ref(
+        x_ref[:batch_size], conv_state_ref, weight, bias, activation=activation
+    )
+
+    assert torch.equal(conv_state[conv_state_indices, :], conv_state_ref)
+    assert torch.equal(
+        conv_state[unused_states_bool],
+        conv_state_for_padding_test[unused_states_bool],
+    )
+    assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
+
+
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
