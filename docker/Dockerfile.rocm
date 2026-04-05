@@ -149,7 +149,7 @@ RUN uv pip install --system meson auditwheel patchelf tomlkit
 RUN cd /usr/local/src && \
     git clone ${UCX_REPO} &&  \
     cd ucx  && \
-    git fetch origin ${UCX_BRANCH} && \
+    git fetch origin akaratza_ipc_lazy_gpu_pin && \
     git checkout ${UCX_BRANCH} && \
     ./autogen.sh && \
     mkdir build && cd build && \
@@ -172,7 +172,7 @@ ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
 RUN git clone ${RIXL_REPO} /opt/rixl && \
     cd /opt/rixl && \
-    git fetch origin ${RIXL_BRANCH} && \
+    git fetch origin akaratza_defer_packrkey && \
     git checkout ${RIXL_BRANCH} && \
     meson setup build --prefix=${RIXL_HOME} \
                      -Ducx_path=${UCX_HOME} \
