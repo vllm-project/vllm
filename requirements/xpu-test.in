@@ -13,7 +13,6 @@ pytest-shard
 absl-py
 accelerate
 arctic-inference
-hf_transfer
 lm_eval[api]
 modelscope
 

@@ -74,6 +74,7 @@ repos:
         --no-emit-package, nvidia-nvjitlink,
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx,
+        --no-emit-package, compressed-tensors,
       ]
       files: ^requirements/rocm-test\.(in|txt)$
 - repo: local

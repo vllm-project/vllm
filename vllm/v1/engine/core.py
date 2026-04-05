@@ -16,6 +16,7 @@ from logging import DEBUG
 from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
 
+import huggingface_hub
 import msgspec
 import zmq
 
@@ -1111,6 +1112,7 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
+            huggingface_hub.close_session()
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             if signal_callback is not None:
