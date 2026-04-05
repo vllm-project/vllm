@@ -553,10 +553,18 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
-        libcublas-${CUDA_VERSION_DASH} \
-        # Fixes nccl_allocator requiring nccl.h at runtime
-        # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-        libnccl-dev && \
+        libcublas-${CUDA_VERSION_DASH} && \
+    # Fixes nccl_allocator requiring nccl.h at runtime
+    # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
+    # For CUDA 13+, libnccl-dev may not resolve to the right variant,
+    # so we pin to the version matching our CUDA version
+    NCCL_PKG=$(apt-cache madison libnccl-dev 2>/dev/null | \
+        grep "cuda${CUDA_VERSION_DASH}" | head -1 | awk '{print $1"="$3}') && \
+    if [ -n "$NCCL_PKG" ]; then \
+        apt-get install -y --no-install-recommends --allow-change-held-packages "$NCCL_PKG"; \
+    else \
+        apt-get install -y --no-install-recommends libnccl-dev; \
+    fi && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
