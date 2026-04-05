@@ -24,6 +24,7 @@ from vllm.distributed import (
     get_tp_group,
 )
 from vllm.distributed.elastic_ep.standby_state import (
+    create_recovery_groups,
     create_standby_groups,
     get_standby_dp_group,
     get_standby_ep_group,
@@ -568,3 +569,54 @@ class ElasticEPScalingExecutor:
     def prepare_new_worker(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
             prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
+
+    def reconnect_peer(
+        self, reconfig_request: ReconfigureDistributedRequest
+    ) -> None:
+        """Reconnect communication fabric after a same-size DP rank peer swap.
+
+        Called on every *surviving* rank once the replacement rank is ready to
+        rendezvous.  Steps:
+
+        1. Rendezvous new process groups (same topology, fresh TCPStore) via
+           ``create_recovery_groups``.
+        2. Atomically promote standby → active via ``_replace_active_groups``.
+        3. For each EP rank that belonged to the dead DP rank, disconnect the
+           dead worker and reconnect the replacement worker in the NIXL buffer.
+
+        The replacement rank (the fresh worker that took the dead rank's slot)
+        also calls ``create_recovery_groups`` + ``_replace_active_groups``, and
+        then its NIXL buffer is initialized normally via
+        ``NixlEPAll2AllManager.get_handle`` during the first MoE forward pass —
+        the same ``_init_buffer`` path used at startup.  This method only
+        handles the surviving-rank side of the swap.
+        """
+        from vllm.distributed.device_communicators.all2all import (
+            NixlEPAll2AllManager,
+        )
+
+        parallel_config = self.worker.vllm_config.parallel_config
+        master_ip = reconfig_request.new_data_parallel_master_ip
+
+        create_recovery_groups(
+            recovery_coord_store_port=reconfig_request.coord_store_port,
+            master_ip=master_ip,
+            enable_eplb=parallel_config.enable_eplb,
+        )
+        _replace_active_groups(**pop_standby_groups())
+
+        # EP rank range for the dead DP rank: dp_rank * tp_size .. (dp_rank+1)*tp_size - 1
+        dead_dp_rank = reconfig_request.dead_data_parallel_rank
+        assert dead_dp_rank >= 0, (
+            "reconnect_peer requires a valid dead_data_parallel_rank"
+        )
+        tp_size = get_tp_group().world_size
+        new_ep_tcp_store = get_ep_group().tcp_store_group.store
+
+        for tp_rank in range(tp_size):
+            ep_rank = dead_dp_rank * tp_size + tp_rank
+            NixlEPAll2AllManager.replace_peer(
+                dead_ep_rank=ep_rank,
+                new_ep_rank=ep_rank,
+                new_tcp_store=new_ep_tcp_store if tp_rank == 0 else None,
+            )
