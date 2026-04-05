@@ -150,8 +150,13 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
         importlib.metadata.entry_points = fake_entry_points  # type: ignore
 
-        # fork is required for workers to see entrypoint patch
-        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        # Run in-process so the entrypoint patch is visible.
+        # Previously this used fork, but _maybe_force_spawn() overrides
+        # to spawn when CUDA is initialized, breaking the patch.
+        import vllm.envs
+
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        vllm.envs.disable_envs_cache()
         _run_test({}, logitproc_loaded=True)
         return
 
