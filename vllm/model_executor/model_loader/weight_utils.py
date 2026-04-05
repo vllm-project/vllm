@@ -575,8 +575,12 @@ def download_weights_from_hf(
                     allow_patterns = ["*.safetensors"]
             else:
                 # Use the first pattern found in the HF repo's files.
+                # HfFileSystem.ls() returns full repo-relative paths
+                # (e.g. "org/model/model.safetensors"), so we must match
+                # against basenames since fnmatch("*") does not cross "/".
+                file_basenames = [os.path.basename(f) for f in file_list]
                 for pattern in allow_patterns:
-                    if fnmatch.filter(file_list, pattern):
+                    if fnmatch.filter(file_basenames, pattern):
                         allow_patterns = [pattern]
                         break
         except Exception as e:

@@ -62,6 +62,144 @@ def test_download_weights_from_hf():
         )
 
 
+class TestDownloadWeightsPatternSelection:
+    """Tests for pattern selection in download_weights_from_hf.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/38829
+    Unsharded model.safetensors was not found because fnmatch does not
+    match '*' across '/' in full repo-relative paths from HfFileSystem.ls().
+    """
+
+    def test_unsharded_safetensors_pattern_selected(self):
+        """When HfFileSystem.ls() returns full paths containing a single
+        model.safetensors, the *.safetensors pattern must still be selected
+        over *.bin even if spurious .bin files exist."""
+        from unittest.mock import MagicMock, patch
+
+        file_list = [
+            "test-org/test-model/model.safetensors",
+            "test-org/test-model/training_args.bin",
+            "test-org/test-model/config.json",
+        ]
+
+        mock_fs = MagicMock()
+        mock_fs.ls.return_value = file_list
+
+        with (
+            patch(
+                "vllm.model_executor.model_loader.weight_utils.HfFileSystem",
+                return_value=mock_fs,
+            ),
+            patch(
+                "vllm.model_executor.model_loader.weight_utils.snapshot_download",
+                return_value="/tmp/fake_dir",
+            ) as mock_download,
+            patch(
+                "pathlib.Path.glob",
+                return_value=["/tmp/fake_dir/model.safetensors"],
+            ),
+        ):
+            download_weights_from_hf(
+                "test-org/test-model",
+                allow_patterns=["*.safetensors", "*.bin"],
+                cache_dir="/tmp/cache",
+            )
+
+            call_kwargs = mock_download.call_args
+            assert call_kwargs is not None
+            used_pattern = call_kwargs.kwargs.get("allow_patterns") or call_kwargs[
+                1
+            ].get("allow_patterns")
+            assert used_pattern == "*.safetensors", (
+                f"Expected *.safetensors but got {used_pattern}"
+            )
+
+    def test_sharded_safetensors_pattern_selected(self):
+        """Sharded safetensors with full repo paths should also match."""
+        from unittest.mock import MagicMock, patch
+
+        file_list = [
+            "test-org/test-model/model-00001-of-00002.safetensors",
+            "test-org/test-model/model-00002-of-00002.safetensors",
+            "test-org/test-model/model.safetensors.index.json",
+            "test-org/test-model/config.json",
+        ]
+
+        mock_fs = MagicMock()
+        mock_fs.ls.return_value = file_list
+
+        with (
+            patch(
+                "vllm.model_executor.model_loader.weight_utils.HfFileSystem",
+                return_value=mock_fs,
+            ),
+            patch(
+                "vllm.model_executor.model_loader.weight_utils.hf_hub_download",
+            ) as mock_hf_download,
+            patch(
+                "vllm.model_executor.model_loader.weight_utils.snapshot_download",
+                return_value="/tmp/fake_dir",
+            ),
+            patch("pathlib.Path.glob", return_value=[]),
+            patch("builtins.open", create=True),
+            patch(
+                "json.load",
+                return_value={
+                    "weight_map": {
+                        "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                        "lm_head.weight": "model-00002-of-00002.safetensors",
+                    }
+                },
+            ),
+        ):
+            mock_hf_download.return_value = "/tmp/fake_index.json"
+            download_weights_from_hf(
+                "test-org/test-model",
+                allow_patterns=["*.safetensors", "*.bin"],
+                cache_dir="/tmp/cache",
+            )
+            mock_hf_download.assert_called_once()
+
+    def test_only_bin_files_selects_bin(self):
+        """When repo has only .bin weight files, *.bin pattern should be used."""
+        from unittest.mock import MagicMock, patch
+
+        file_list = [
+            "test-org/test-model/pytorch_model.bin",
+            "test-org/test-model/config.json",
+        ]
+
+        mock_fs = MagicMock()
+        mock_fs.ls.return_value = file_list
+
+        with (
+            patch(
+                "vllm.model_executor.model_loader.weight_utils.HfFileSystem",
+                return_value=mock_fs,
+            ),
+            patch(
+                "vllm.model_executor.model_loader.weight_utils.snapshot_download",
+                return_value="/tmp/fake_dir",
+            ) as mock_download,
+            patch(
+                "pathlib.Path.glob",
+                return_value=["/tmp/fake_dir/pytorch_model.bin"],
+            ),
+        ):
+            download_weights_from_hf(
+                "test-org/test-model",
+                allow_patterns=["*.safetensors", "*.bin"],
+                cache_dir="/tmp/cache",
+            )
+
+            call_kwargs = mock_download.call_args
+            assert call_kwargs is not None
+            used_pattern = call_kwargs.kwargs.get("allow_patterns") or call_kwargs[
+                1
+            ].get("allow_patterns")
+            assert used_pattern == "*.bin", f"Expected *.bin but got {used_pattern}"
+
+
 class TestMaybeRemapKvScaleName:
     """Tests for maybe_remap_kv_scale_name covering all checkpoint formats."""
 
