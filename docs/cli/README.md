@@ -147,6 +147,42 @@ vllm bench throughput \
 
 See [vllm bench throughput](./bench/throughput.md) for the full reference of all available arguments.
 
+## launch
+
+Launch individual vLLM components without a full inference engine.
+
+Available Commands:
+
+```bash
+vllm launch {render}
+```
+
+### render
+
+Start a GPU-less preprocessing server that runs the full request preprocessing
+pipeline — chat template rendering, tokenization, and tool/reasoning parsing —
+without any GPU or inference engine.
+
+```bash
+vllm launch render --model meta-llama/Llama-3.1-8B-Instruct
+```
+
+Once running, the render endpoints are available at:
+
+- `POST /v1/chat/completions/render` — returns conversation and token IDs without generating
+- `POST /v1/completions/render` — returns token IDs without generating
+
+Example:
+
+```bash
+curl http://localhost:8000/v1/chat/completions/render \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-3.1-8B-Instruct",
+       "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+See [vllm launch render](./launch.md) for the full reference of all available arguments.
+
 ## collect-env
 
 Start collecting environment information.

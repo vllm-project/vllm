@@ -4,5 +4,6 @@ nav:
   - chat.md
   - complete.md
   - run-batch.md
+  - launch.md
   - vllm bench:
     - bench/**/*.md

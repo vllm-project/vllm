@@ -64,6 +64,9 @@ We currently support the following OpenAI APIs:
 
 In addition, we have the following custom APIs:
 
+- [Render API](#render-api) (`/v1/chat/completions/render`, `/v1/completions/render`)
+    - Available on both `vllm serve` and `vllm launch render` servers.
+    - Returns rendered inputs (conversation messages and token IDs) without running inference.
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
 - [pooling API](../models/pooling_models/README.md#pooling-api) (`/pooling`)
@@ -548,6 +551,15 @@ yes_id = tokenizer.encode("Yes", add_special_tokens=False)[0]
 no_id = tokenizer.encode("No", add_special_tokens=False)[0]
 print(f"Yes: {yes_id}, No: {no_id}")
 ```
+
+### Render API
+
+Our Render API runs the full request preprocessing pipeline — chat template rendering, tokenization, and tool/reasoning parsing — and returns the rendered inputs without inference. It is available on both a standard `vllm serve` server and a CPU-only [`vllm launch render`](../cli/launch.md) server.
+
+Two endpoints are provided:
+
+- `/v1/chat/completions/render` — preprocesses a chat completion request and returns the conversation and token IDs.
+- `/v1/completions/render` — preprocesses a completion request and returns the token IDs.
 
 ## Ray Serve LLM
 
