@@ -5838,6 +5838,19 @@ class GPUModelRunner(
                 gc.unfreeze()
                 gc.collect()
 
+    def shutdown(self) -> None:
+        """Release GPU tensors (model weights, KV caches, workspace) so that
+        memory is reclaimable when running in the same process."""
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+        from vllm.v1.worker.workspace import reset_workspace_manager
+
+        self._cleanup_profiling_kv_cache()
+        self.compilation_config.static_forward_context.clear()
+        self.model = None  # type: ignore[assignment]
+        _ROPE_DICT.clear()
+
+        reset_workspace_manager()
+
     def _cleanup_profiling_kv_cache(self) -> None:
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches") and self.kv_caches:

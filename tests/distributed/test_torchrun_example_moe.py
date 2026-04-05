@@ -37,6 +37,7 @@ llm = LLM(
     enable_expert_parallel=int(os.getenv("ENABLE_EP", "0")) == 1,
     distributed_executor_backend="external_launcher",
     gpu_memory_utilization=random.uniform(0.7, 0.9),
+    max_model_len=2048,
     seed=0,
 )
 

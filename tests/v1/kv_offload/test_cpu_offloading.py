@@ -87,10 +87,13 @@ class MockSubscriber:
 def _wait_for_prefix_cache_reset(llm: LLM) -> None:
     """Wait for async offload transfers to finish so prefix cache can reset.
 
-    The GPU-to-CPU offload runs on a CUDA stream asynchronously.  While blocks
+    The GPU-to-CPU offload runs on a CUDA stream asynchronously. While blocks
     are still held by the offload worker, ``reset_prefix_cache`` returns
-    ``False``.  Retry with a short sleep until it succeeds or we time out.
+    ``False``. Between retries we send a dummy single-token prefill to force
+    the engine to step, which polls the worker for completed transfers and
+    frees GPU blocks.
     """
+    _dummy_params = SamplingParams(max_tokens=1)
     deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
     while not llm.reset_prefix_cache():
         if time.monotonic() > deadline:
@@ -98,7 +101,13 @@ def _wait_for_prefix_cache_reset(llm: LLM) -> None:
                 "reset_prefix_cache did not succeed within "
                 f"{_RESET_CACHE_TIMEOUT}s - async offload may be stuck"
             )
-        time.sleep(0.1)
+        # Force an engine step so the scheduler polls get_finished()
+        # and releases GPU blocks held by in-flight async stores.
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=[0])],
+            _dummy_params,
+            use_tqdm=False,
+        )
 
 
 def _latency_test(llm: LLM, subscriber: MockSubscriber):

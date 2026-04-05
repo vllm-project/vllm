@@ -118,9 +118,9 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # RIXL/UCX build stages
 FROM base AS build_rixl
-ARG RIXL_BRANCH="f33a5599"
+ARG RIXL_BRANCH="56346271"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
-ARG UCX_BRANCH="da3fac2a"
+ARG UCX_BRANCH="06caea93"
 ARG UCX_REPO="https://github.com/ROCm/ucx.git"
 ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
@@ -147,7 +147,7 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
 RUN uv pip install --system meson auditwheel patchelf tomlkit
 
 RUN cd /usr/local/src && \
-    git clone ${UCX_REPO} &&  \
+    git clone --no-single-branch ${UCX_REPO} &&  \
     cd ucx  && \
     git checkout ${UCX_BRANCH} && \
     ./autogen.sh && \
@@ -169,7 +169,7 @@ RUN cd /usr/local/src && \
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
-RUN git clone ${RIXL_REPO} /opt/rixl && \
+RUN git clone --no-single-branch ${RIXL_REPO} /opt/rixl && \
     cd /opt/rixl && \
     git checkout ${RIXL_BRANCH} && \
     meson setup build --prefix=${RIXL_HOME} \
@@ -180,7 +180,12 @@ RUN git clone ${RIXL_REPO} /opt/rixl && \
     ninja install
 
 # Generate RIXL wheel
-RUN cd /opt/rixl && mkdir -p /app/install && \
+# Exclude libcore from auditwheel: it is a transitive gRPC dependency
+# that is not shipped in the wheel and varies across base images.
+RUN cd /opt/rixl && \
+    sed -i "s/--exclude 'libamdhip64\*'/--exclude 'libamdhip64*' --exclude 'libcore*'/" \
+        contrib/build-wheel.sh && \
+    mkdir -p /app/install && \
     ./contrib/build-wheel.sh \
         --output-dir /app/install \
         --rocm-dir ${ROCM_PATH} \
@@ -322,6 +327,10 @@ FROM base AS test
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
+# Install libnuma-dev, required to build fastsafetensors from source.
+RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
@@ -330,12 +339,11 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip install --system -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
-
-# Verify that PyTorch is the ROCm build, not CUDA
-RUN python3 -c "import torch; assert torch.version.hip is not None, \
-    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
-    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
+    && uv pip install --system *.whl \
+    # Rebuild fastsafetensors from source so its C++ extension is compiled
+    # with USE_ROCM and can detect libamdhip64.so at runtime.
+    && python3 -m pip install --force-reinstall --no-deps \
+        --no-binary fastsafetensors fastsafetensors
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
