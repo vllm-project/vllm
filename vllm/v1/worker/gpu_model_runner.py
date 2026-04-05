@@ -5749,41 +5749,76 @@ class GPUModelRunner(
                             "enable_mm_embeds=True).",
                         )
                     else:
-                        # NOTE: Currently model is profiled with a single
-                        # non-text modality with the max possible input
-                        # tokens even when it supports multiple.
-                        dummy_modality = mm_budget.get_modality_with_max_tokens()
-                        max_mm_items_per_batch = mm_budget.mm_max_items_per_batch[
-                            dummy_modality
-                        ]
+                        # On consumer RDNA GPUs (gfx1100/1101/1103/1150/1151)
+                        # MIOpen has no pre-compiled solver DB, so any
+                        # convolution op triggered by embed_multimodal hangs
+                        # indefinitely during exhaustive kernel search.
+                        # Skip only the encoder warm-up pass; the rest of
+                        # profile_run (text decoder dummy run, sampler, etc.)
+                        # still executes so memory profiling is not disrupted.
+                        skip_encoder_profiling = False
+                        if current_platform.is_rocm():
+                            from vllm.platforms.rocm import on_consumer_rdna
 
-                        logger.info_once(
-                            "Encoder cache will be initialized with a "
-                            "budget of %s tokens, and profiled with "
-                            "%s %s items of the maximum feature size.",
-                            encoder_budget,
-                            max_mm_items_per_batch,
-                            dummy_modality,
-                            scope="local",
-                        )
+                            if on_consumer_rdna():
+                                try:
+                                    device_name = current_platform.get_device_name()
+                                except Exception:
+                                    device_name = "unknown"
+                                logger.warning(
+                                    "Skipping encoder cache profiling on "
+                                    "consumer RDNA GPU (%s): MIOpen has no "
+                                    "pre-compiled solver database for this "
+                                    "architecture. Server startup will "
+                                    "proceed, but multimodal requests "
+                                    "involving vision encoders may hang or "
+                                    "be extremely slow on first invocation "
+                                    "due to MIOpen kernel autotuning. "
+                                    "Consider using text-only models on "
+                                    "this GPU, or set "
+                                    "--gpu-memory-utilization to a lower "
+                                    "value to reserve headroom for encoder "
+                                    "activations.",
+                                    device_name,
+                                )
+                                skip_encoder_profiling = True
 
-                        # Create dummy batch of multimodal inputs.
-                        batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                            dummy_modality,
-                            max_mm_items_per_batch,
-                        )
+                        if not skip_encoder_profiling:
+                            # NOTE: Currently model is profiled with a single
+                            # non-text modality with the max possible input
+                            # tokens even when it supports multiple.
+                            dummy_modality = mm_budget.get_modality_with_max_tokens()
+                            max_mm_items_per_batch = mm_budget.mm_max_items_per_batch[
+                                dummy_modality
+                            ]
 
-                        # Run multimodal encoder.
-                        dummy_encoder_outputs = self.model.embed_multimodal(
-                            **batched_dummy_mm_inputs
-                        )
+                            logger.info_once(
+                                "Encoder cache will be initialized with a "
+                                "budget of %s tokens, and profiled with "
+                                "%s %s items of the maximum feature size.",
+                                encoder_budget,
+                                max_mm_items_per_batch,
+                                dummy_modality,
+                                scope="local",
+                            )
 
-                        sanity_check_mm_encoder_outputs(
-                            dummy_encoder_outputs,
-                            expected_num_items=max_mm_items_per_batch,
-                        )
-                        for i, output in enumerate(dummy_encoder_outputs):
-                            self.encoder_cache[f"tmp_{i}"] = output
+                            # Create dummy batch of multimodal inputs.
+                            batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                                dummy_modality,
+                                max_mm_items_per_batch,
+                            )
+
+                            # Run multimodal encoder.
+                            dummy_encoder_outputs = self.model.embed_multimodal(
+                                **batched_dummy_mm_inputs
+                            )
+
+                            sanity_check_mm_encoder_outputs(
+                                dummy_encoder_outputs,
+                                expected_num_items=max_mm_items_per_batch,
+                            )
+                            for i, output in enumerate(dummy_encoder_outputs):
+                                self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(

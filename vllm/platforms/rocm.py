@@ -185,6 +185,25 @@ _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
 
+# Consumer RDNA GPUs (RDNA 3 / 3.5) that lack pre-compiled MIOpen solver
+# databases. Running MIOpen convolution on these architectures (e.g., from
+# embed_multimodal during encoder-cache profiling) triggers an exhaustive
+# kernel search that hangs indefinitely.
+# Affected arches: gfx1100 (RX 7900 XTX/XT/GRE), gfx1101 (RX 7800 XT),
+#                  gfx1102 (RX 7600 XT/7600), gfx1103 (Radeon 780M iGPU),
+#                  gfx1150 (Radeon 890M, Strix Point),
+#                  gfx1151 (Radeon 8060S, Strix Halo).
+# RDNA 4 (gfx1200, gfx1201) may also need adding once tested.
+_CONSUMER_RDNA_ARCHES = (
+    "gfx1100",
+    "gfx1101",
+    "gfx1102",
+    "gfx1103",
+    "gfx1150",
+    "gfx1151",
+)
+_ON_CONSUMER_RDNA = any(arch in _GCN_ARCH for arch in _CONSUMER_RDNA_ARCHES)
+
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     """
@@ -279,6 +298,19 @@ def on_gfx942() -> bool:
 
 def on_gfx950() -> bool:
     return _ON_GFX950
+
+
+def on_consumer_rdna() -> bool:
+    """Return True for consumer RDNA 3 / 3.5 GPUs that lack MIOpen solver DBs.
+
+    These architectures (gfx1100, gfx1101, gfx1102, gfx1103, gfx1150, gfx1151) do not
+    ship with pre-compiled MIOpen convolution solver databases. Any code path
+    that triggers MIOpen convolution (e.g., ViT encoder forward pass) will
+    cause an exhaustive autotuning search that either hangs indefinitely or
+    takes many hours. Callers can use this flag to skip such code paths and
+    fall back to safer alternatives.
+    """
+    return _ON_CONSUMER_RDNA
 
 
 @cache
