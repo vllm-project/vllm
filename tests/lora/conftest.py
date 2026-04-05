@@ -274,6 +274,11 @@ def olmoe_lora_files():
 
 
 @pytest.fixture(scope="session")
+def nemotron_lora_files():
+    return snapshot_download(repo_id="dasereb/Nemotron_3_Nano_BF16_r16_zeros")
+
+
+@pytest.fixture(scope="session")
 def qwen3_lora_files():
     return snapshot_download(repo_id="charent/self_cognition_Alice")
 
