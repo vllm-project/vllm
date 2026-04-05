@@ -356,17 +356,32 @@ def use_rocm_custom_paged_attention(
 ) -> bool:
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
+    # The free kernel (runtime head_size/block_size) handles any combination not
+    # covered by the template-specialized non-free kernels.
     if _ON_GFX9:
+        # Non-free kernel: head_size in {64,128} and block_size in {16,32}.
+        # Free kernel: any head_size in {64,128,192,256} and any block_size.
         return (
             (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
-            and (head_size == 64 or head_size == 128)
-            and (block_size == 16 or block_size == 32)
+            and head_size in (64, 128, 192, 256)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and sinks is None
         )
-
+    elif _ON_GFX12X:
+        # Non-free kernel: head_size=128 and block_size=16.
+        # Free kernel: any head_size in {64,128,192,256} and any block_size.
+        return (
+            (sliding_window == 0 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and head_size in (64, 128, 192, 256)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16)
+            and alibi_slopes is None
+            and kv_cache_dtype == "auto"
+            and sinks is None
+        )
     else:
+        # GFX11: only the template-specialized non-free kernel (head_size=128, block_size=16).
         return (
             _ON_GFX1X
             and (sliding_window == 0 or sliding_window == (-1, -1))

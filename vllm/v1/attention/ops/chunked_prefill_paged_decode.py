@@ -367,12 +367,15 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
+    # Force Triton for stride-padded hybrid layouts: they use
+    # reshape_and_cache_flash during cache update, so decode must stay on the
+    # matching stride-aware path. (The custom op now handles non-power-of-2
+    # block sizes like Qwen3's 544, so block size no longer forces Triton.)
     has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-    # Force Triton for non-standard blocks like Qwen3's 544 and for
-    # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
-    # during cache update, so keep decode on the matching stride-aware path.
+    # Still needed below to size the Triton block (non-pow2 blocks use 32); it
+    # no longer gates use_custom (the custom op now handles free block sizes).
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2 or not has_native_layout:
+    if not has_native_layout:
         use_custom = False
 
     if use_custom:
@@ -380,7 +383,6 @@ def chunked_prefill_paged_decode(
         max_num_partitions = (
             max_seq_len + _PARTITION_SIZE_ROCM - 1
         ) // _PARTITION_SIZE_ROCM
-        assert _PARTITION_SIZE_ROCM % block_size == 0
         total_num_seq = block_table.shape[0]
         # Extra space for multi-pass float4 reduction buffer.
         # The float4 buffer starts at byte offset

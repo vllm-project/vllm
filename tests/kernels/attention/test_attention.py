@@ -11,6 +11,7 @@ from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx12x
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
 
@@ -549,12 +550,12 @@ def test_paged_attention_multipass_rocm(
     device: str,
 ) -> None:
     """Test multi-pass reduction with seq_len > 128K."""
-    if current_platform.is_navi() and head_size != 128:
-        pytest.skip("Navi only supports head_size=128")
+    if current_platform.is_navi() and not on_gfx12x() and head_size != 128:
+        pytest.skip("GFX11 only supports head_size=128")
 
     gqa_ratio = num_heads[0] // num_heads[1]
-    if current_platform.is_navi() and not (3 <= gqa_ratio <= 16):
-        pytest.skip("Navi requires 3 <= gqa_ratio <= 16")
+    if current_platform.is_navi() and not on_gfx12x() and not (3 <= gqa_ratio <= 16):
+        pytest.skip("GFX11 requires 3 <= gqa_ratio <= 16")
 
     _run_multipass_attention(
         kv_cache_factory, head_size, num_heads, dtype, device,
@@ -583,13 +584,256 @@ def test_paged_attention_multipass_short_seq_rocm(
     float4 sentinels for unused passes.
     """
     gqa_ratio = num_heads[0] // num_heads[1]
-    if current_platform.is_navi() and not (3 <= gqa_ratio <= 16):
-        pytest.skip("Navi requires 3 <= gqa_ratio <= 16")
+    if current_platform.is_navi() and not on_gfx12x() and not (3 <= gqa_ratio <= 16):
+        pytest.skip("GFX11 requires 3 <= gqa_ratio <= 16")
 
     _run_multipass_attention(
         kv_cache_factory, head_size, num_heads, dtype, device,
         seq_len=100,
         max_seq_len=MULTIPASS_SEQ_LEN + 131072,
+    )
+
+
+# ============================================================================
+# ROCm "free" kernel tests (GFX9 and GFX12)
+#
+# paged_attention_ll4mi_QKV_mfma16_free_kernel is dispatched when:
+#   (a) head_size ∉ {64, 128}  (CALL_CUSTOM_LAUNCHER_BLK_HEAD default branch)
+#   (b) block_size ∉ {16, 32} for head_size ∈ {64, 128}  (CALL_CUSTOM_LAUNCHER_BLK default)
+# GFX11 has no free kernel; GFX9 and GFX12 both do.
+# ============================================================================
+
+# (num_query_heads, num_kv_heads): gqa_ratio=16.
+_FREE_KERNEL_HEADS = (16, 1)
+_FREE_KERNEL_SKIP = pytest.mark.skipif(
+    not current_platform.is_rocm() or
+    (current_platform.is_navi() and not on_gfx12x()),
+    reason="ROCm free-kernel (GFX9 or GFX12 only)",
+)
+
+
+def _run_rocm_free_attention(
+    kv_cache_factory,
+    *,
+    head_size: int,
+    block_size: int,
+    num_seqs: int,
+    max_seq_len: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    num_blocks: int = NUM_BLOCKS,
+) -> None:
+    """Allocate KV cache, run paged_attention_rocm, compare to reference."""
+    num_query_heads, num_kv_heads = _FREE_KERNEL_HEADS
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    scale = float(1.0 / (head_size**0.5))
+
+    query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
+    query.uniform_(-scale, scale)
+
+    seq_lens_list = [random.randint(1, max_seq_len) for _ in range(num_seqs)]
+    seq_lens_list[-1] = max_seq_len
+    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int)
+
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int,
+    )
+
+    key_caches, value_caches = kv_cache_factory(
+        num_blocks, block_size, 1, num_kv_heads, head_size,
+        "auto", dtype, seed, device,
+    )
+    key_cache, value_cache = key_caches[0], value_caches[0]
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    partition_size = 256
+    num_partitions = (max_seq_len + partition_size - 1) // partition_size
+    output = torch.empty_like(query)
+    tmp_output = torch.empty(
+        size=(num_seqs, num_query_heads, num_partitions, head_size), dtype=dtype,
+    )
+    exp_sums = torch.empty(
+        size=(num_seqs, num_query_heads, num_partitions), dtype=torch.float32,
+    )
+    max_logits = torch.empty_like(exp_sums)
+
+    ops.paged_attention_rocm(
+        output, exp_sums, max_logits, tmp_output,
+        query, key_cache, value_cache, num_kv_heads, scale,
+        block_tables, seq_lens, None, block_size, max_seq_len,
+        None, "auto", k_scale, v_scale,
+    )
+
+    ref_output = torch.empty_like(query)
+    ref_single_query_cached_kv_attention(
+        ref_output, query, num_query_heads // num_kv_heads,
+        key_cache, value_cache, block_tables, seq_lens, scale, None,
+    )
+
+    atol = get_default_atol(output)
+    rtol = get_default_rtol(output)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+@_FREE_KERNEL_SKIP
+@pytest.mark.parametrize("num_seqs", [1, 7])
+@pytest.mark.parametrize("block_size", [16, 32])
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_paged_attention_rocm_free_head256(
+    kv_cache_factory,
+    num_seqs: int,
+    block_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """Free kernel: head_size=256 with standard block_sizes (16, 32).
+
+    Hits the default branch of CALL_CUSTOM_LAUNCHER_BLK_HEAD because
+    head_size=256 is not a template specialisation.
+    """
+    _run_rocm_free_attention(
+        kv_cache_factory,
+        head_size=256, block_size=block_size, num_seqs=num_seqs,
+        max_seq_len=4096, dtype=dtype, seed=seed, device=device,
+    )
+
+
+@_FREE_KERNEL_SKIP
+@pytest.mark.parametrize("num_seqs", [1, 7])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_paged_attention_rocm_free_nonstandard_blocksize(
+    kv_cache_factory,
+    num_seqs: int,
+    head_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """Free kernel: head_size ∈ {64,128} but block_size=64 (not 16 or 32).
+
+    Hits the default branch of CALL_CUSTOM_LAUNCHER_BLK, so the templated
+    HEAD_SIZE is known but block_size is treated as a runtime parameter.
+    """
+    _run_rocm_free_attention(
+        kv_cache_factory,
+        head_size=head_size, block_size=64, num_seqs=num_seqs,
+        max_seq_len=4096, dtype=dtype, seed=seed, device=device,
+    )
+
+
+@_FREE_KERNEL_SKIP
+@pytest.mark.parametrize("num_seqs", [1, 3])
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_paged_attention_rocm_free_qwen35(
+    kv_cache_factory,
+    num_seqs: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """Free kernel: Qwen3.5 use case — head_size=256, block_size=2096.
+
+    block_size=2096 arises from vLLM's hybrid-model block alignment when
+    Mamba SSM states use float32 (mamba_ssm_dtype='float32').  Both the
+    head_size and block_size switches fall through to the free kernel.
+    Uses a small num_blocks to keep GPU memory consumption manageable.
+    """
+    block_size = 2096
+    max_seq_len = block_size * 3  # 3 blocks worth of tokens
+    num_blocks = num_seqs * 4     # headroom above the 3 needed blocks
+    _run_rocm_free_attention(
+        kv_cache_factory,
+        head_size=256, block_size=block_size, num_seqs=num_seqs,
+        max_seq_len=max_seq_len, dtype=dtype, seed=seed, device=device,
+        num_blocks=num_blocks,
+    )
+
+
+# Broad parametrized sweep: (head_size, block_size) pairs that trigger the
+# free kernel, with varying sequence counts, lengths, and dtypes.
+#
+# Trigger conditions (either OR both):
+#   • head_size ∉ {64, 128}  — non-standard head size
+#   • block_size ∉ {16, 32}  — non-standard block size
+#
+# Sequence-length cases:
+#   • "short"  — fits in one reduction partition (≤256 tokens)
+#   • "medium" — a handful of partitions
+#   • "long"   — many partitions (stress-tests NPAR_LOOPS accumulation)
+_FREE_KERNEL_CASES = [
+    # (head_size, block_size, num_seqs, max_seq_len)
+    # ── non-standard head_size, standard block_size ────────────────────────
+    (32,  16,  1,   256),   # short, head_size<64
+    (32,  32,  4,  2048),   # medium
+    (32,  16,  7, 16384),   # long
+    (96,  16,  1,   256),
+    (96,  32,  4,  2048),
+    (160, 16,  1,   256),
+    (160, 32,  4,  2048),
+    (256, 16,  1,   256),   # single partition
+    (256, 16,  4,  4096),
+    (256, 32,  7,  8192),
+    (256, 16,  2, 32768),   # 128 partitions
+    # ── standard head_size, non-standard block_size ────────────────────────
+    (64,  64,  1,   256),
+    (64,  64,  4,  4096),
+    (64, 128,  4,  2048),
+    (128,  64, 1,   256),
+    (128,  64, 4,  4096),
+    (128, 128, 4,  2048),
+    (128, 128, 7,  8192),
+    # ── both non-standard ──────────────────────────────────────────────────
+    (32,   64, 4,  2048),
+    (256,  64, 4,  4096),
+    (256, 128, 4,  2048),
+    (96,  64,  4,  2048),
+    # ── large block_size (Qwen3.5 / hybrid-model alignment) ───────────────
+    (256, 512,  2,  3 * 512),
+    (256, 1024, 2,  3 * 1024),
+    (128, 512,  2,  3 * 512),
+    (256, 2096, 1,  32768), # Qwen3.5-122B
+]
+
+
+@_FREE_KERNEL_SKIP
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize(
+    "head_size,block_size,num_seqs,max_seq_len", _FREE_KERNEL_CASES,
+)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_paged_attention_rocm_free(
+    kv_cache_factory,
+    head_size: int,
+    block_size: int,
+    num_seqs: int,
+    max_seq_len: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """Free kernel: broad parametrized sweep over head/block/seq/dtype combos."""
+    # Ensure num_blocks is large enough for the random block_tables.
+    # Each seq needs ceil(max_seq_len / block_size) blocks; add 25% headroom.
+    min_blocks = num_seqs * ((max_seq_len + block_size - 1) // block_size)
+    num_blocks = max(NUM_BLOCKS, min_blocks * 5 // 4)
+    _run_rocm_free_attention(
+        kv_cache_factory,
+        head_size=head_size, block_size=block_size,
+        num_seqs=num_seqs, max_seq_len=max_seq_len,
+        dtype=dtype, seed=seed, device=device,
+        num_blocks=num_blocks,
     )
 
 
