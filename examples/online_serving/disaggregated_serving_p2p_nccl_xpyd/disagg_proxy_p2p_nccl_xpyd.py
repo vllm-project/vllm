@@ -24,14 +24,12 @@ DEFAULT_PING_SECONDS = 5
 
 
 def _remove_oldest_instances(instances: dict[str, Any]) -> None:
-    oldest_key = next(iter(instances), None)
-    while oldest_key is not None:
-        value = instances[oldest_key]
-        if value[1] > time.time():
-            break
-        print(f"🔴Remove [HTTP:{oldest_key}, ZMQ:{value[0]}, stamp:{value[1]}]")
-        instances.pop(oldest_key, None)
-        oldest_key = next(iter(instances), None)
+    now = time.time()
+    expired_keys = [k for k, v in instances.items() if v[1] <= now]
+    for key in expired_keys:
+        value = instances[key]
+        print(f"🔴Remove [HTTP:{key}, ZMQ:{value[0]}, stamp:{value[1]}]")
+        instances.pop(key, None)
 
 
 def _listen_for_register(poller, router_socket):
