@@ -14,6 +14,7 @@
 #   CUDA_VISIBLE_DEVICES=0,1 bash tests/v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 #
 # Environment variables:
+#   TEST_CONFIG         - config id passed to pytest (e.g. "llama3-8b-eagle3")
 #   KV_BUFFER_DEVICES   - space-separated list of devices to test
 #                         (default: "cuda cpu")
 #   SD_METHOD           - spec decode method (default: eagle3)
@@ -30,6 +31,7 @@ set -x
 
 # ── Model & spec decode config ──────────────────────────────────────────
 
+TEST_CONFIG="${TEST_CONFIG:-}"
 MODEL_NAME="${MODEL_NAME:-meta-llama/Llama-3.1-8B-Instruct}"
 SD_METHOD="${SD_METHOD:-eagle3}"
 SD_MODEL="${SD_MODEL:-RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3}"
@@ -149,6 +151,7 @@ run_test_for_device() {
   echo "================================================================"
   echo "NixlConnector PD + Spec Decode Acceptance Test (kv_buffer_device=${kv_device})"
   echo "================================================================"
+  echo "Config:             ${TEST_CONFIG:-'(auto)'}"
   echo "Model:              ${MODEL_NAME}"
   echo "SD method:          ${SD_METHOD}"
   echo "SD model:           ${SD_MODEL}"
@@ -192,7 +195,7 @@ run_test_for_device() {
       --tensor-parallel-size $PREFILLER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND &
+      --attention-backend "$ATTENTION_BACKEND" &
 
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=("$PORT")
@@ -225,7 +228,7 @@ run_test_for_device() {
       --tensor-parallel-size $DECODER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND &
+      --attention-backend "$ATTENTION_BACKEND" &
 
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=("$PORT")
@@ -253,8 +256,10 @@ run_test_for_device() {
 
   # Run test
   echo "Running spec decode acceptance test (kv_buffer_device=${kv_device}, backend=${ATTENTION_BACKEND})..."
-  DECODE_PORT=${DECODE_PORTS[0]} \
-  TEST_MODEL=$MODEL_NAME \
+  TEST_CONFIG="$TEST_CONFIG" \
+  TEST_MODEL="$MODEL_NAME" \
+  DECODE_PORT="${DECODE_PORTS[0]}" \
+  PROXY_PORT="$PROXY_PORT" \
   python3 -m pytest -s -x "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py"
 
   # Tear down before next iteration
