@@ -86,7 +86,8 @@ serve-baseline: | $(RESULTS_DIR)
 	VLLM_DEEP_GEMM_WARMUP=skip \
 	$(PYTHON) -m vllm.entrypoints.openai.api_server \
 		$(COMMON_SERVE_ARGS) \
-		--port $(BASELINE_PORT) &
+		--port $(BASELINE_PORT) \
+		> $(RESULTS_DIR)/baseline.log 2>&1 &
 	echo $$! > $(BASELINE_PID_FILE)
 	$(call wait_for_server,$(BASELINE_PORT))
 
@@ -129,7 +130,8 @@ serve-eplb: | $(RESULTS_DIR)
 	$(PYTHON) -m vllm.entrypoints.openai.api_server \
 		$(COMMON_SERVE_ARGS) \
 		--enable-eplb \
-		--port $(EPLB_PORT) &
+		--port $(EPLB_PORT) \
+		> $(RESULTS_DIR)/eplb.log 2>&1 &
 	echo $$! > $(EPLB_PID_FILE)
 	$(call wait_for_server,$(EPLB_PORT))
 
@@ -173,7 +175,8 @@ serve-eplb-redundant: | $(RESULTS_DIR)
 		$(COMMON_SERVE_ARGS) \
 		--enable-eplb \
 		--eplb-config '{"num_redundant_experts": $(NUM_REDUNDANT)}' \
-		--port $(EPLB_RED_PORT) &
+		--port $(EPLB_RED_PORT) \
+		> $(RESULTS_DIR)/eplb_redundant.log 2>&1 &
 	echo $$! > $(EPLB_RED_PID_FILE)
 	$(call wait_for_server,$(EPLB_RED_PORT))
 
