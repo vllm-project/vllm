@@ -82,8 +82,12 @@ def list_files(
     prefix = "/".join(parts[1:])
     bucket_name = parts[0]
 
-    objects = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-    paths = [obj["Key"] for obj in objects.get("Contents", [])]
+    paginator = s3.get_paginator("list_objects_v2")
+    paths = [
+        obj["Key"]
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+        for obj in page.get("Contents", [])
+    ]
 
     paths = _filter_ignore(paths, ["*/"])
     if allow_pattern is not None:
