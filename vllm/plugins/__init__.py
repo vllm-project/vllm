@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -22,7 +23,7 @@ PLATFORM_PLUGINS_GROUP = "vllm.platform_plugins"
 STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
 
 # make sure one process only loads plugins once
-plugins_loaded = False
+plugins_loaded = None
 
 
 def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
@@ -72,9 +73,9 @@ def load_general_plugins():
     multiple times without causing issues.
     """
     global plugins_loaded
-    if plugins_loaded:
+    if plugins_loaded == os.getpid():
         return
-    plugins_loaded = True
+    plugins_loaded = os.getpid()
 
     plugins = load_plugins_by_group(group=DEFAULT_PLUGINS_GROUP)
     # general plugins, we only need to execute the loaded functions
