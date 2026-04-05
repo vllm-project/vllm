@@ -16,7 +16,8 @@ def rms_norm(
     x_var = x if variance_size is None else x[..., :variance_size]
     variance = x_var.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + epsilon)
-    x = x.to(orig_dtype)
     if weight is not None:
-        x = x * weight
+        x = (x.to(weight.dtype) * weight).to(orig_dtype)
+    else:
+        x = x.to(orig_dtype)
     return x
