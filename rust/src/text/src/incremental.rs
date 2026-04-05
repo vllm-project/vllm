@@ -22,8 +22,7 @@ pub trait IncrementalDecoder: Send {
 
 /// [`IncrementalDecoder`] built on [`Tokenizer::decode()`] with prefix-diffing.
 ///
-/// This is the same sliding-window algorithm used by `tokenizers::DecodeStream` and
-/// `fastokens::DecodeStream`.
+/// This is the same sliding-window algorithm used by `tokenizers::DecodeStream`
 pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     tokenizer: &'a T,
     skip_special_tokens: bool,
@@ -69,16 +68,16 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         self.ids.push(token_id);
         let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         let prefix_len = self.prefix.len();
-        let new_bytes = string.len().saturating_sub(prefix_len);
-        if new_bytes > 0 && !string.ends_with('\u{FFFD}') {
-            self.cumulative_output.push_str(&string[prefix_len..]);
-            self.ids.drain(..self.prefix_index);
-            self.prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
-            self.prefix_index = self.ids.len();
-            Ok(new_bytes)
-        } else {
-            Ok(0)
+        if string.len() <= prefix_len || string.ends_with('\u{FFFD}') {
+            return Ok(0);
         }
+        // Ensure we split at a utf-8 char boundary.
+        let new_chunk = &string[string.floor_char_boundary(prefix_len)..];
+        self.cumulative_output.push_str(new_chunk);
+        self.ids.drain(..self.prefix_index);
+        self.prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
+        self.prefix_index = self.ids.len();
+        Ok(new_chunk.len())
     }
 
     fn next_chunk(&mut self) -> Option<String> {
@@ -95,14 +94,14 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
 
     fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)> {
         if !self.ids.is_empty() {
-            let text = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
+            let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             let prefix_len = self.prefix.len();
             self.ids.clear();
             self.prefix.clear();
             self.prefix_index = 0;
-            if text.len() > prefix_len {
-                self.cumulative_output.push_str(&text[prefix_len..]);
-            }
+            // Ensure we split at a utf-8 char boundary.
+            self.cumulative_output
+                .push_str(&string[string.floor_char_boundary(prefix_len)..]);
         }
         if let Some(truncate_output_to) = truncate_output_to {
             self.cumulative_output.truncate(truncate_output_to);
@@ -259,6 +258,50 @@ mod tests {
         assert_eq!(last_chunk, None); // all consumed via next_chunk
         assert_eq!(full, "Hello, world!");
         assert_eq!(full_text, "Hello, world!");
+    }
+
+    /// Backend simulating non-monotonic decode where adding a token changes how
+    /// earlier tokens decode (context-dependent normalization), causing prefix_len
+    /// to land mid-UTF-8. Reproduces the class of bug from vllm-project/vllm#17448.
+    #[derive(Debug)]
+    struct NonMonotonicBackend;
+
+    impl Tokenizer for NonMonotonicBackend {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+            match token_ids {
+                [1] => Ok("abc".into()),
+                [1, 2] => Ok("ab".into()),
+                // Token 3 triggers a normalization change: "ab" becomes emoji + "d".
+                // prefix_len=3 ("abc") lands inside the 4-byte emoji 🎉.
+                [1, 2, 3] => Ok("🎉d".into()), // 🎉 is 4 bytes + d = 5 bytes
+                [2, 3] => Ok("🎉d".into()),    // prefix recompute after drain
+                [3] => Ok("d".into()),         // after drain
+                _ => panic!("unexpected decode: {:?}", token_ids),
+            }
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+    }
+
+    /// Without the char-boundary fix, this panics slicing mid-emoji.
+    #[test]
+    fn non_monotonic_decode_does_not_panic() {
+        let backend = NonMonotonicBackend;
+        let mut decoder = backend.create_decode_stream(&[], false, 0);
+
+        // Token 1: "abc", prefix="abc"
+        assert_eq!(decoder.push_token(1).unwrap(), 3);
+        // Token 2: "ab" (shorter), no emit
+        assert_eq!(decoder.push_token(2).unwrap(), 0);
+        // Token 3: "🎉d" — prefix_len=3 is mid-emoji. Without fix this panics.
+        let added = decoder.push_token(3).unwrap();
+        assert!(added > 0);
     }
 
     #[test]
