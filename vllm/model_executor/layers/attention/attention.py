@@ -380,6 +380,10 @@ class Attention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
+        # Initialize TurboQuant buffers (Pi, S, centroids) if tq cache dtype
+        if kv_cache_dtype.startswith("tq-"):
+            self._init_turboquant_buffers(kv_cache_dtype, head_size, prefix)
+
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
@@ -397,6 +401,33 @@ class Attention(nn.Module, AttentionLayerBase):
                 if is_per_head
                 else GroupShape.PER_TENSOR,
             )
+
+    def _init_turboquant_buffers(
+        self, cache_dtype: str, head_size: int, prefix: str
+    ) -> None:
+        """Initialize TurboQuant rotation/projection matrices and centroids."""
+        from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
+        from vllm.model_executor.layers.quantization.turboquant.quantizer import (
+            generate_rotation_matrix,
+        )
+        from vllm.model_executor.layers.quantization.turboquant.centroids import get_centroids
+
+        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
+
+        # Extract layer index from prefix (e.g. "model.layers.5.self_attn")
+        from vllm.model_executor.models.utils import extract_layer_index
+        layer_idx = extract_layer_index(prefix)
+        seed = tq_config.seed + layer_idx * 1337
+
+        self.register_buffer(
+            "_tq_Pi",
+            generate_rotation_matrix(head_size, seed=seed),
+        )
+        self.register_buffer(
+            "_tq_centroids",
+            get_centroids(head_size, tq_config.centroid_bits),
+        )
+        self._tq_config = tq_config
 
     def forward(
         self,
@@ -554,6 +585,19 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
+            )
+        elif self.kv_cache_dtype.startswith("tq-"):
+            from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
+            tq_config = TurboQuantConfig.from_cache_dtype(
+                self.kv_cache_dtype, self.head_size)
+            padded_slot = tq_config.padded_slot_size
+            effective_head_size = padded_slot // 2
+            return FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=effective_head_size,
+                head_size_v=effective_head_size,
+                dtype=self.kv_cache_torch_dtype,
             )
         else:
             return FullAttentionSpec(

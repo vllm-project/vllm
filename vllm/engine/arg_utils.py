@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
@@ -1620,6 +1621,27 @@ class EngineArgs:
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
+
+        # TurboQuant boundary layer protection: auto-populate skip layers
+        # from TQ_BOUNDARY_LAYERS env var when using TQ cache dtype.
+        # Disabled for hybrid models (attention+mamba) because boundary
+        # layers use native dtype, creating a page size mismatch that
+        # breaks the required page size unification.
+        n_boundary = int(os.environ.get("TQ_BOUNDARY_LAYERS", "2"))
+        if (resolved_cache_dtype.startswith("tq-") and n_boundary > 0
+                and not model_config.is_hybrid):
+            from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
+            num_layers = model_config.hf_text_config.num_hidden_layers
+            boundary_layers = TurboQuantConfig.get_boundary_skip_layers(
+                num_layers, n_boundary)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            merged = sorted(
+                existing | set(boundary_layers), key=lambda x: int(x))
+            cache_config.kv_cache_dtype_skip_layers = merged
+            logger.info(
+                "TQ boundary protection: skipping layers %s "
+                "(TQ_BOUNDARY_LAYERS=%d, num_layers=%d)",
+                merged, n_boundary, num_layers)
 
         ray_runtime_env = None
         if is_ray_initialized():
