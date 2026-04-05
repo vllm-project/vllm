@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+import socket as stdlib_socket
 import threading
 import weakref
 from collections.abc import Callable, Iterator
@@ -22,7 +23,12 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
+    get_tcp_uri,
+    is_valid_ipv6_address,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
@@ -66,6 +72,37 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+
+    def release_held_ports(self) -> None:
+        """Release pre-bound TCP sockets right before ZMQ binds.
+
+        Sockets are stored as a plain attribute (not a dataclass field)
+        to avoid breaking msgspec serialization in the handshake path.
+        """
+        for attr in ("_held_input_sockets", "_held_output_sockets"):
+            for s in getattr(self, attr, []):
+                s.close()
+            setattr(self, attr, [])
+
+    def pop_held_ports(
+        self,
+    ) -> tuple[list[stdlib_socket.socket], list[stdlib_socket.socket]]:
+        """Transfer ownership of any reserved TCP sockets."""
+        input_sockets = getattr(self, "_held_input_sockets", [])
+        output_sockets = getattr(self, "_held_output_sockets", [])
+        self._held_input_sockets = []
+        self._held_output_sockets = []
+        return input_sockets, output_sockets
+
+    def __getstate__(self):
+        # Exclude held sockets from pickling (e.g. Ray actor serialization).
+        state = self.__dict__.copy()
+        state.pop("_held_input_sockets", None)
+        state.pop("_held_output_sockets", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
 
 @dataclass
@@ -445,6 +482,19 @@ class CoreEngineActorManager:
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
 
+        def make_control_bundle(node_ip: str) -> dict[str, float]:
+            # The engine actor is scheduled on the final CPU-only bundle. Keep
+            # that bundle colocated with the group's first GPU bundle so the
+            # actor does not float to an unrelated node and reorder worker
+            # ranks away from the advertised DP bootstrap host.
+            return {"CPU": 1.0, "node:" + node_ip: 0.001}
+
+        def get_bundle_node_ip(bundle: dict[str, float]) -> str:
+            for key in bundle:
+                if key.startswith("node:"):
+                    return key.split(":", 1)[1]
+            raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
+
         dp_master_ip_key = f"node:{dp_master_ip}"
         nodes = sorted(
             available_resources.values(), key=lambda x: dp_master_ip_key not in x
@@ -576,10 +626,15 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    control_node_ip = get_bundle_node_ip(collected_bundles[0])
+                    bundles = collected_bundles + [
+                        make_control_bundle(control_node_ip)
+                    ]
                     collected_bundles = []
                 else:
-                    bundles = device_bundle * world_size + [{"CPU": 1.0}]
+                    bundles = device_bundle * world_size + [
+                        make_control_bundle(node_ip)
+                    ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
@@ -892,6 +947,41 @@ class CoreEngineActorManager:
             ray.util.remove_placement_group(pg)
 
 
+def _get_tcp_socket_family(host: str) -> int:
+    if is_valid_ipv6_address(host):
+        return stdlib_socket.AF_INET6
+
+    try:
+        addrinfos = stdlib_socket.getaddrinfo(
+            host,
+            None,
+            type=stdlib_socket.SOCK_STREAM,
+            proto=stdlib_socket.IPPROTO_TCP,
+        )
+    except stdlib_socket.gaierror:
+        return stdlib_socket.AF_INET
+
+    for family, socktype, _, _, _ in addrinfos:
+        if (socktype == stdlib_socket.SOCK_STREAM
+                and family in (stdlib_socket.AF_INET, stdlib_socket.AF_INET6)):
+            return family
+
+    return stdlib_socket.AF_INET
+
+
+def _reserve_tcp_port(host: str, family: int) -> stdlib_socket.socket:
+    bind_host = host
+    if not bind_host:
+        bind_host = "::" if family == stdlib_socket.AF_INET6 else ""
+
+    sock = stdlib_socket.socket(family, stdlib_socket.SOCK_STREAM)
+    if family == stdlib_socket.AF_INET6:
+        sock.bind((bind_host, 0, 0, 0))
+    else:
+        sock.bind((bind_host, 0))
+    return sock
+
+
 def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
@@ -918,16 +1008,35 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
-    return EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
+    if client_local_only:
+        return EngineZmqAddresses(
+            inputs=[
+                get_open_zmq_ipc_path() for _ in range(num_api_servers)
+            ],
+            outputs=[
+                get_open_zmq_ipc_path() for _ in range(num_api_servers)
+            ],
+        )
+
+    # TCP path: batch-allocate ports and hold sockets to prevent
+    # TOCTOU race between allocation and ZMQ bind (see parallel.py:483).
+    family = _get_tcp_socket_family(host)
+    held_inputs = [_reserve_tcp_port(host, family) for _ in range(num_api_servers)]
+    held_outputs = [_reserve_tcp_port(host, family) for _ in range(num_api_servers)]
+    ports = [
+        *(sock.getsockname()[1] for sock in held_inputs),
+        *(sock.getsockname()[1] for sock in held_outputs),
+    ]
+
+    addrs = EngineZmqAddresses(
+        inputs=[get_tcp_uri(host, p) for p in ports[:num_api_servers]],
+        outputs=[get_tcp_uri(host, p) for p in ports[num_api_servers:]],
     )
+    # Store as plain attribute (not a dataclass field) so msgspec
+    # serialization in the handshake path doesn't try to encode sockets.
+    addrs._held_input_sockets = held_inputs
+    addrs._held_output_sockets = held_outputs
+    return addrs
 
 
 @contextlib.contextmanager

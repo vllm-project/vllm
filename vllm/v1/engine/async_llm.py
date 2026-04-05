@@ -83,7 +83,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         stat_loggers: list[StatLoggerFactory] | None = None,
         aggregate_engine_logging: bool = False,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> None:
@@ -217,7 +217,7 @@ class AsyncLLM(EngineClient):
         enable_log_requests: bool = False,
         aggregate_engine_logging: bool = False,
         disable_log_stats: bool = False,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> "AsyncLLM":

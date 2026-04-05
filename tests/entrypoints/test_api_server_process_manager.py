@@ -89,6 +89,37 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
             assert not proc.is_alive()
 
 
+def test_api_server_process_manager_closes_parent_held_sockets(api_server_args):
+    global WORKER_RUNTIME_SECONDS
+    WORKER_RUNTIME_SECONDS = 0.5
+
+    args = api_server_args.copy()
+    held_input_sockets = []
+    held_output_sockets = []
+    for _ in range(args["num_servers"]):
+        input_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        input_sock.bind(("127.0.0.1", 0))
+        held_input_sockets.append(input_sock)
+
+        output_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        output_sock.bind(("127.0.0.1", 0))
+        held_output_sockets.append(output_sock)
+
+    args["held_input_sockets"] = held_input_sockets
+    args["held_output_sockets"] = held_output_sockets
+
+    manager = APIServerProcessManager(**args)
+    try:
+        assert len(manager._held_socket_ready_events) == args["num_servers"]
+        assert all(event.is_set() for event in manager._held_socket_ready_events)
+        assert all(sock.fileno() == -1 for sock in held_input_sockets)
+        assert all(sock.fileno() == -1 for sock in held_output_sockets)
+        assert all(proc.is_alive() for proc in manager.processes)
+    finally:
+        manager.shutdown()
+        time.sleep(0.2)
+
+
 @patch("vllm.v1.utils.run_api_server_worker_proc", mock_run_api_server_worker)
 def test_wait_for_completion_or_failure(api_server_args):
     """Test that wait_for_completion_or_failure works with failures."""
