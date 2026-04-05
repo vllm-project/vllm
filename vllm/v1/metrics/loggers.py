@@ -233,6 +233,15 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
 
+            # Add detailed preemption stats if available
+            if (
+                self.last_scheduler_stats.preemption_stats is not None
+                and self.last_scheduler_stats.preemption_stats.num_preemptions > 0
+            ):
+                preempt_stats = self.last_scheduler_stats.preemption_stats
+                log_parts.append("Max preemptions per request: %d")
+                log_args.append(preempt_stats.max_preemption_count)
+
         log_parts.extend(
             [
                 "GPU KV cache usage: %.1f%%",
@@ -413,6 +422,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
+        self.model_name = model_name  # Store for dynamic metric creation
         max_model_len = vllm_config.model_config.max_model_len
 
         self.per_engine_labelvalues: dict[int, list[object]] = {
@@ -586,6 +596,22 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_num_preempted_reqs = create_metric_per_engine(
             counter_num_preempted_reqs, per_engine_labelvalues
+        )
+
+        counter_preemptions_by_priority = self._counter_cls(
+            name="vllm:scheduler_preemptions_by_priority",
+            documentation=("Number of preemptions grouped by request priority."),
+            labelnames=labelnames + ["priority"],
+        )
+        self.counter_preemptions_by_priority = counter_preemptions_by_priority
+
+        gauge_max_preemption_count = self._gauge_cls(
+            name="vllm:scheduler_max_preemption_count",
+            documentation="Maximum number of times a single request was preempted.",
+            labelnames=labelnames,
+        )
+        self.gauge_max_preemption_count = make_per_engine(
+            gauge_max_preemption_count, engine_indexes, model_name
         )
 
         counter_prompt_tokens = self._counter_cls(
@@ -1072,6 +1098,21 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            # Log preemption stats
+            if scheduler_stats.preemption_stats is not None:
+                preempt_stats = scheduler_stats.preemption_stats
+
+                # Update max preemption count gauge
+                self.gauge_max_preemption_count[engine_idx].set(
+                    preempt_stats.max_preemption_count
+                )
+
+                # Update preemptions by priority counters
+                for priority, count in preempt_stats.preemptions_by_priority.items():
+                    self.counter_preemptions_by_priority.labels(
+                        self.model_name, str(engine_idx), str(priority)
+                    ).inc(count)
 
             if (
                 self.kv_cache_metrics_enabled

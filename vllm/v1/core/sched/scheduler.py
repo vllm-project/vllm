@@ -54,7 +54,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    PreemptionStats,
+    PrefixCacheStats,
+    SchedulerStats,
+)
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -255,6 +259,11 @@ class Scheduler(SchedulerInterface):
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
+
+        # Preemption tracking for metrics
+        self.preemption_count_this_interval = 0
+        self.preempted_req_ids_this_interval: set[str] = set()
+        self.preemptions_by_priority_this_interval: dict[int, int] = defaultdict(int)
 
         if self.vllm_config.model_config.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
@@ -971,6 +980,10 @@ class Scheduler(SchedulerInterface):
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+            # Track preemption metrics
+            self.preemption_count_this_interval += 1
+            self.preempted_req_ids_this_interval.add(request.request_id)
+            self.preemptions_by_priority_this_interval[request.priority] += 1
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
@@ -1952,6 +1965,27 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+
+        # Collect preemption stats
+        preemption_stats = None
+        if self.preemption_count_this_interval > 0:
+            max_preemption_count = max(
+                (req.num_preemptions for req in self.requests.values()),
+                default=0,
+            )
+            preemption_stats = PreemptionStats(
+                num_preemptions=self.preemption_count_this_interval,
+                num_preempted_requests=len(self.preempted_req_ids_this_interval),
+                preemptions_by_priority=dict(
+                    self.preemptions_by_priority_this_interval
+                ),
+                max_preemption_count=max_preemption_count,
+            )
+            # Reset interval counters
+            self.preemption_count_this_interval = 0
+            self.preempted_req_ids_this_interval.clear()
+            self.preemptions_by_priority_this_interval.clear()
+
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting) + len(self.skipped_waiting),
@@ -1960,6 +1994,7 @@ class Scheduler(SchedulerInterface):
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
+            preemption_stats=preemption_stats,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,

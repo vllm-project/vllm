@@ -168,6 +168,23 @@ class KVCacheEvictionEvent:
 
 
 @dataclass
+class PreemptionStats:
+    """Stats for request preemptions in the scheduler."""
+
+    num_preemptions: int = 0
+    """Total number of preemption events in this interval."""
+
+    num_preempted_requests: int = 0
+    """Number of unique requests that were preempted."""
+
+    preemptions_by_priority: dict[int, int] = field(default_factory=dict)
+    """Preemption count grouped by request priority."""
+
+    max_preemption_count: int = 0
+    """Maximum number of times a single request was preempted."""
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -185,6 +202,8 @@ class SchedulerStats:
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+
+    preemption_stats: PreemptionStats | None = None
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
