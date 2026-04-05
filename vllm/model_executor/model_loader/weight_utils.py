@@ -960,6 +960,19 @@ def safetensors_weights_iterator(
                     param = f.get_tensor(name)
                     yield name, param
 
+        # Free the Linux page cache for the safetensors file just loaded.
+        # This prevents the OS from keeping the file in system RAM, which
+        # artificially deflates the UMA free memory metric and KV budget.
+        if hasattr(os, "posix_fadvise"):
+            try:
+                fd = os.open(st_file, os.O_RDONLY)
+                try:
+                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+
 
 def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
