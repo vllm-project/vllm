@@ -171,6 +171,7 @@ class OpenAIServingRender:
             stream=bool(request.stream),
             stream_options=(request.stream_options if request.stream else None),
             cache_salt=request.cache_salt,
+            shared_prefix_tokens=getattr(request, "shared_prefix_tokens", 0),
             priority=request.priority,
         )
 
@@ -304,6 +305,7 @@ class OpenAIServingRender:
                     stream=bool(request.stream),
                     stream_options=(request.stream_options if request.stream else None),
                     cache_salt=request.cache_salt,
+                    shared_prefix_tokens=getattr(request, "shared_prefix_tokens", 0),
                     priority=request.priority,
                 )
             )
@@ -408,6 +410,9 @@ class OpenAIServingRender:
         prompt_token_ids = render_for_completion(messages)
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
+        if getattr(request, "shared_prefix_tokens", 0) > 0:
+            engine_input["shared_prefix_tokens"] = request.shared_prefix_tokens
+
         return messages, [engine_input]
 
     def create_error_response(
@@ -488,7 +493,7 @@ class OpenAIServingRender:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "shared_prefix_tokens")
                 if (v := getattr(request, k, None)) is not None
             },
             skip_mm_cache=skip_mm_cache,
@@ -533,7 +538,7 @@ class OpenAIServingRender:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "shared_prefix_tokens")
                 if (v := getattr(request, k, None)) is not None
             },
             skip_mm_cache=skip_mm_cache,

@@ -155,6 +155,8 @@ class InputPreprocessor:
             inputs["prompt"] = prompt_text
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
+        if (spt := parsed_content.get("shared_prefix_tokens", 0)) > 0:
+            inputs["shared_prefix_tokens"] = spt
 
         return inputs
 
@@ -184,6 +186,8 @@ class InputPreprocessor:
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
+        if (spt := parsed_content.get("shared_prefix_tokens", 0)) > 0:
+            inputs["shared_prefix_tokens"] = spt
 
         return inputs
 

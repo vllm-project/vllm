@@ -716,6 +716,9 @@ class OpenAIServingResponses(OpenAIServing):
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
         engine_input["arrival_time"] = arrival_time
 
+        if getattr(request, "shared_prefix_tokens", 0) > 0:
+            engine_input["shared_prefix_tokens"] = request.shared_prefix_tokens
+
         return messages, [engine_input]
 
     async def _initialize_tool_sessions(

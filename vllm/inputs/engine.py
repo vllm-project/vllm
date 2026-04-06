@@ -25,6 +25,9 @@ class _InputOptions(TypedDict):
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
+    shared_prefix_tokens: NotRequired[int]
+    """When positive, shifts cache_salt injection to the boundary block."""
+
 
 class TokensInput(_InputOptions):
     """Represents token-based input to the engine."""
@@ -44,6 +47,7 @@ def tokens_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    shared_prefix_tokens: int = 0,
 ) -> TokensInput:
     """
     Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
@@ -55,6 +59,8 @@ def tokens_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if shared_prefix_tokens > 0:
+        inputs["shared_prefix_tokens"] = shared_prefix_tokens
 
     return inputs
 
@@ -77,6 +83,7 @@ def embeds_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    shared_prefix_tokens: int = 0,
 ) -> EmbedsInput:
     """
     Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
@@ -88,6 +95,8 @@ def embeds_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if shared_prefix_tokens > 0:
+        inputs["shared_prefix_tokens"] = shared_prefix_tokens
 
     return inputs
 
@@ -137,6 +146,7 @@ def mm_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    shared_prefix_tokens: int = 0,
 ) -> MultiModalInput:
     inputs = MultiModalInput(
         type="multimodal",
@@ -150,6 +160,8 @@ def mm_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if shared_prefix_tokens > 0:
+        inputs["shared_prefix_tokens"] = shared_prefix_tokens
 
     return inputs
 
@@ -192,6 +204,8 @@ def mm_enc_dec_input(
         inputs["encoder_prompt"] = encoder_inputs["prompt"]
     if "cache_salt" in encoder_inputs:
         inputs["cache_salt"] = encoder_inputs["cache_salt"]
+    if (spt := encoder_inputs.get("shared_prefix_tokens", 0)) > 0:
+        inputs["shared_prefix_tokens"] = spt
 
     return inputs
 
@@ -335,6 +349,8 @@ def build_enc_dec_input(
 
     if cache_salt := enc_input.get("cache_salt"):
         dec_input_new["cache_salt"] = cache_salt
+    if (spt := enc_input.get("shared_prefix_tokens", 0)) > 0:
+        dec_input_new["shared_prefix_tokens"] = spt
 
     return EncoderDecoderInput(
         type="enc_dec",

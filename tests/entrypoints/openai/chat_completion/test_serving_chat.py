@@ -994,6 +994,26 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     assert len(captured_inputs) == 1
     assert captured_inputs[0]["cache_salt"] == "test_salt"
 
+    captured_inputs.clear()
+
+    # Test with shared_prefix_tokens
+    req.shared_prefix_tokens = 42
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0].get("shared_prefix_tokens") == 42
+
+    captured_inputs.clear()
+
+    # Test shared_prefix_tokens defaults to absent when 0
+    req.shared_prefix_tokens = 0
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0].get("shared_prefix_tokens", 0) == 0
+
 
 @pytest.mark.asyncio
 async def test_serving_chat_data_parallel_rank_extraction():

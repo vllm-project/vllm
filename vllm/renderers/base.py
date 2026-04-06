@@ -700,6 +700,8 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
+        if (spt := prompt.get("shared_prefix_tokens", 0)) > 0:
+            engine_input["shared_prefix_tokens"] = spt
 
         return engine_input
 
@@ -729,6 +731,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return embeds_input(
             prompt_embeds=prompt_embeds,
             cache_salt=prompt.get("cache_salt"),
+            shared_prefix_tokens=prompt.get("shared_prefix_tokens", 0),
         )
 
     async def _process_tokens_async(

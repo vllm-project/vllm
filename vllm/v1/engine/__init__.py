@@ -100,6 +100,7 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    shared_prefix_tokens: int = 0
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

@@ -95,6 +95,12 @@ class _PromptOptions(TypedDict):
     Optional cache salt to be used for prefix caching.
     """
 
+    shared_prefix_tokens: NotRequired[int]
+    """
+    When positive and cache_salt is set, the salt is applied starting at
+    the block containing this token offset instead of block 0.
+    """
+
 
 class TextPrompt(_PromptOptions):
     """Schema for a text prompt."""

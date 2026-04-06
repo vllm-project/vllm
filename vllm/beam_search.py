@@ -43,12 +43,14 @@ class BeamSearchSequence:
         # Handle decoder-only inputs
         prompt_text = prompt.get("prompt")
         cache_salt = prompt.get("cache_salt")
+        shared_prefix_tokens = prompt.get("shared_prefix_tokens", 0)
 
         if prompt["type"] == "token":
             return tokens_input(
                 self.tokens,
                 prompt=prompt_text,
                 cache_salt=cache_salt,
+                shared_prefix_tokens=shared_prefix_tokens,
             )
 
         return mm_input(
@@ -58,6 +60,7 @@ class BeamSearchSequence:
             mm_placeholders=prompt["mm_placeholders"],
             prompt=prompt_text,
             cache_salt=cache_salt,
+            shared_prefix_tokens=shared_prefix_tokens,
         )
 
     def _build_encoder_decoder_inputs(
@@ -84,12 +87,14 @@ class BeamSearchSequence:
                 mm_placeholders=dec_prompt["mm_placeholders"],
                 prompt=dec_prompt.get("prompt"),
                 cache_salt=dec_prompt.get("cache_salt"),
+                shared_prefix_tokens=dec_prompt.get("shared_prefix_tokens", 0),
             )
         else:
             new_dec_prompt = tokens_input(
                 self.tokens,
                 prompt=dec_prompt.get("prompt"),
                 cache_salt=dec_prompt.get("cache_salt"),
+                shared_prefix_tokens=dec_prompt.get("shared_prefix_tokens", 0),
             )
 
         return EncoderDecoderInput(
