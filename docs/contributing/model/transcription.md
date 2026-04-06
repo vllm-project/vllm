@@ -193,7 +193,7 @@ Provide a fast duration→token estimate to improve streaming usage statistics:
 
 The API server takes care of basic audio I/O and optional chunking before building prompts:
 
-- Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate` using `librosa`.
+- Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate` using `AudioResampler`.
 - Chunking: If `SpeechToTextConfig.allow_audio_chunking` is True and the duration exceeds `max_audio_clip_s`, the server splits the audio into overlapping chunks and generates a prompt per chunk. Overlap is controlled by `overlap_chunk_second`.
 - Energy-aware splitting: When `min_energy_split_window_size` is set, the server finds low-energy regions to minimize cutting within words.
 
