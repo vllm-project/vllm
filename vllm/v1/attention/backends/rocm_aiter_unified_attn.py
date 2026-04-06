@@ -87,12 +87,14 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """RocmAiterUnifiedAttention supports all attention types."""
+        """ENCODER_DECODER is not supported because forward() hardcodes
+        causal=True, which is incorrect for cross-attention layers where
+        decoder queries should attend to all encoder positions.
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER_DECODER,
         )
 
 
