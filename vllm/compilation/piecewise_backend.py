@@ -83,9 +83,8 @@ class RangeEntry:
 
 
 class PiecewiseBackend:
-    # Shared size → range-entry index mapping, aliased from VllmBackend.
-    _size_to_range_index: list[int]
     # Per-subgraph array mapping range-entry index → RangeEntry.
+    # The shared size → range-entry index lives on VllmBackend.
     _range_index_to_entry: list[RangeEntry | None]
 
     def __init__(
@@ -353,14 +352,7 @@ class PiecewiseBackend:
         builds the per-subgraph _range_index_to_entry array so that dispatch
         in __call__ is just two plain list dereferences.
         """
-        vllm_backend = getattr(self, "vllm_backend", None)
-        if vllm_backend is not None:
-            self._size_to_range_index = vllm_backend._size_to_range_index
-            num_entries = vllm_backend._num_range_entries
-        else:
-            # Fallback for tests without a real VllmBackend.
-            self._size_to_range_index = []
-            num_entries = 0
+        num_entries = self.vllm_backend._num_range_entries
 
         # Build per-subgraph index → RangeEntry array.
         self._range_index_to_entry = [None] * num_entries
@@ -388,15 +380,11 @@ class PiecewiseBackend:
         if self.compile_sizes is None:
             return None
 
-        # Normalize to a plain int so that SymInt / numpy-int values work
-        # correctly as a list index.
-        runtime_shape = int(runtime_shape)
-
         # Two list dereferences: size → index, index → RangeEntry.
-        cache = self._size_to_range_index
+        cache = self.vllm_backend._size_to_range_index
         if 0 <= runtime_shape < len(cache):
             idx = cache[runtime_shape]
-            if idx < 0:
+            if idx < 0:  # -1 means no compile range covers this size
                 return None
             return self._range_index_to_entry[idx]
 

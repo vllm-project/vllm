@@ -206,8 +206,8 @@ def test_shared_dispatch_cache_across_instances():
         compile_sizes=[], compile_ranges=ranges, vllm_backend=fake_backend
     )
 
-    # Both must reference the SAME underlying index list.
-    assert b1._size_to_range_index is b2._size_to_range_index
+    # Both must reference the SAME underlying index list (owned by VllmBackend).
+    assert b1.vllm_backend._size_to_range_index is b2.vllm_backend._size_to_range_index
 
     # But each has its own entry array (different RangeEntry objects).
     assert b1._range_index_to_entry is not b2._range_index_to_entry
