@@ -276,6 +276,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "int2_per_token_head",
         "int4_per_token_head",
         "int8_per_token_head",
         "fp8_per_token_head",
@@ -322,13 +323,18 @@ class TritonAttentionBackend(AttentionBackend):
 
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
-            # INT4 packed: two int4 values per byte → half the head bytes.
+            # Packed quantization: reduce head bytes based on packing ratio.
             data_head_size = head_size
             if cache_dtype_str == "int4_per_token_head":
                 assert head_size % 2 == 0, (
                     f"INT4 packed requires even head_size, got {head_size}"
                 )
                 data_head_size = head_size // 2
+            elif cache_dtype_str == "int2_per_token_head":
+                assert head_size % 4 == 0, (
+                    f"INT2 packed requires head_size divisible by 4, got {head_size}"
+                )
+                data_head_size = head_size // 4
             return (num_blocks, 2, block_size, num_kv_heads, data_head_size + scale_pad)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 

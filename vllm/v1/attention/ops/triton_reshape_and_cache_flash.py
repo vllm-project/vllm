@@ -454,6 +454,251 @@ def _reshape_cache_int4_packed(
     )
 
 
+# ---------------------------------------------------------------------------
+# INT2 WHT + Lloyd-Max quantization (KV_QUANT_MODE=5)
+# ---------------------------------------------------------------------------
+# The Walsh-Hadamard Transform gaussianizes any distribution.
+# After rotation, all values follow a predictable N(0, σ) distribution.
+# Lloyd-Max centroids are placed optimally for N(0,1).
+# The vector norm is stored separately (float32 per head) as norm/d^1.5
+# so the attention kernel just multiplies by the stored scale.
+#
+# 4 centroids packed 4 per byte → head_size/4 bytes per head.
+# ---------------------------------------------------------------------------
+
+# Lloyd-Max centroids for N(0,1) — 4 levels
+_LLOYD_MAX_4_CENTROIDS = [-1.5104, -0.4528, 0.4528, 1.5104]
+_LLOYD_MAX_4_BOUNDS = [-0.9816, 0.0, 0.9816]
+
+
+def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
+    """Unnormalized Walsh-Hadamard Transform along the last dimension.
+
+    H_d × x where H_d has entries ±1 and H_d × H_d = d × I.
+    The last dimension must be a power of 2.
+    """
+    d = x.shape[-1]
+    assert d & (d - 1) == 0, f"Requires power-of-2 dim, got {d}"
+    h = 1
+    while h < d:
+        xv = x.view(*x.shape[:-1], d // (2 * h), 2, h)
+        a = xv[..., 0, :]
+        b = xv[..., 1, :]
+        x = torch.stack([a + b, a - b], dim=-2).reshape(x.shape)
+        h <<= 1
+    return x
+
+
+# Deterministic ±1 signs for Randomized Hadamard Transform.
+# RHT = H × D × x  (sign flip + WHT).  Breaks residual structure
+# in KV vectors, improving quantization quality.
+_RHT_SIGNS_CACHE: dict[tuple[int, int, str], torch.Tensor] = {}
+
+
+def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor:
+    """Return a cached deterministic ±1 sign vector of length *d*."""
+    key = (d, round_idx, str(device))
+    if key not in _RHT_SIGNS_CACHE:
+        gen = torch.Generator()
+        gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)
+        signs = 2.0 * torch.bernoulli(
+            torch.full((d,), 0.5), generator=gen
+        ) - 1.0
+        _RHT_SIGNS_CACHE[key] = signs.to(device)
+    return _RHT_SIGNS_CACHE[key]
+
+
+def _single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    """Single Randomized Hadamard Transform: H × D₁ × x.
+
+    Used by INT4 per-token-head quantization to gaussianize data
+    before asymmetric quantization.
+    """
+    d = x.shape[-1]
+    d1 = _get_rht_signs(d, 0, x.device)
+    if inverse:
+        return fast_hadamard_transform(x) * d1
+    else:
+        return fast_hadamard_transform(x * d1)
+
+
+@triton.jit
+def _lloyd_max_quantize_4(z):
+    """Quantize N(0,1) values to 4 Lloyd-Max centroids (INT2).
+
+    Returns index in [0, 3].
+    Boundaries: [-0.9816, 0, 0.9816]
+    """
+    return tl.where(
+        z < 0.0,
+        tl.where(z < -0.9816, 0, 1).to(tl.uint8),
+        tl.where(z < 0.9816, 2, 3).to(tl.uint8),
+    )
+
+
+@triton.jit
+def _reshape_cache_int2_wht(
+    key_ptr,  # [num_tokens, num_kv_heads, head_size]  (WHT-transformed)
+    value_ptr,  # [num_tokens, num_kv_heads, head_size_v] (WHT-transformed)
+    key_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size//4] uint8
+    value_cache_ptr,
+    k_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32 (norm/d)
+    v_scale_cache_ptr,
+    slot_mapping_ptr,
+    stride_key_tok: tl.int64,
+    stride_key_head: tl.int64,
+    stride_val_tok: tl.int64,
+    stride_val_head: tl.int64,
+    stride_kc_blk: tl.int64,
+    stride_kc_slot: tl.int64,
+    stride_kc_head: tl.int64,
+    stride_vc_blk: tl.int64,
+    stride_vc_slot: tl.int64,
+    stride_vc_head: tl.int64,
+    stride_ks_blk: tl.int64,
+    stride_ks_slot: tl.int64,
+    stride_ks_head: tl.int64,
+    stride_vs_blk: tl.int64,
+    stride_vs_slot: tl.int64,
+    stride_vs_head: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+    head_size_v: tl.constexpr,
+    QUARTER_HEAD_PADDED: tl.constexpr,
+):
+    """INT2 WHT + Lloyd-Max 4-centroid quantization.
+
+    Packs 4 × 2-bit indices per byte → head_size/4 bytes per head.
+    """
+    tok = tl.program_id(0)
+    head = tl.program_id(1)
+
+    slot = tl.load(slot_mapping_ptr + tok).to(tl.int64)
+    if slot < 0:
+        return
+
+    blk = slot // block_size
+    slot_in_blk = slot % block_size
+
+    qtr_offs = tl.arange(0, QUARTER_HEAD_PADDED)
+    offs_0 = qtr_offs * 4
+    offs_1 = qtr_offs * 4 + 1
+    offs_2 = qtr_offs * 4 + 2
+    offs_3 = qtr_offs * 4 + 3
+
+    # ---- Key ----------------------------------------------------------------
+    qtr_k = head_size // 4
+    mask_0k = offs_0 < head_size
+    mask_1k = offs_1 < head_size
+    mask_2k = offs_2 < head_size
+    mask_3k = offs_3 < head_size
+    key_base = key_ptr + tok * stride_key_tok + head * stride_key_head
+
+    k0 = tl.load(key_base + offs_0, mask=mask_0k, other=0.0).to(tl.float32)
+    k1 = tl.load(key_base + offs_1, mask=mask_1k, other=0.0).to(tl.float32)
+    k2 = tl.load(key_base + offs_2, mask=mask_2k, other=0.0).to(tl.float32)
+    k3 = tl.load(key_base + offs_3, mask=mask_3k, other=0.0).to(tl.float32)
+
+    # Compute norm
+    k_sq = (
+        tl.sum(tl.where(mask_0k, k0 * k0, 0.0))
+        + tl.sum(tl.where(mask_1k, k1 * k1, 0.0))
+        + tl.sum(tl.where(mask_2k, k2 * k2, 0.0))
+        + tl.sum(tl.where(mask_3k, k3 * k3, 0.0))
+    )
+    k_norm = tl.sqrt(k_sq + 1e-12)
+
+    # Normalize to N(0,1)
+    k_inv_sigma = tl.sqrt(float(head_size)) / k_norm
+    k0_z = k0 * k_inv_sigma
+    k1_z = k1 * k_inv_sigma
+    k2_z = k2 * k_inv_sigma
+    k3_z = k3 * k_inv_sigma
+
+    # Lloyd-Max quantize to [0, 3]
+    q0 = _lloyd_max_quantize_4(k0_z)
+    q1 = _lloyd_max_quantize_4(k1_z)
+    q2 = _lloyd_max_quantize_4(k2_z)
+    q3 = _lloyd_max_quantize_4(k3_z)
+
+    # Pack 4 × 2-bit indices per byte
+    k_packed = (q0 & 0x3) | ((q1 & 0x3) << 2) | ((q2 & 0x3) << 4) | ((q3 & 0x3) << 6)
+    tl.store(
+        key_cache_ptr
+        + blk * stride_kc_blk
+        + slot_in_blk * stride_kc_slot
+        + head * stride_kc_head
+        + qtr_offs,
+        k_packed,
+        mask=qtr_offs < qtr_k,
+    )
+
+    # Store norm/d^1.5 as scale. Single RHT gives dot(Q,K) × d.
+    # IRHT multiplies by d. Scale absorbs both: 1/d for scores,
+    # 1/sqrt(d) for de-normalizing z back to original magnitude.
+    k_scale = k_norm / float(head_size ** 1.5)
+    tl.store(
+        k_scale_cache_ptr
+        + blk * stride_ks_blk
+        + slot_in_blk * stride_ks_slot
+        + head * stride_ks_head,
+        k_scale,
+    )
+
+    # ---- Value --------------------------------------------------------------
+    qtr_v = head_size_v // 4
+    mask_0v = offs_0 < head_size_v
+    mask_1v = offs_1 < head_size_v
+    mask_2v = offs_2 < head_size_v
+    mask_3v = offs_3 < head_size_v
+    val_base = value_ptr + tok * stride_val_tok + head * stride_val_head
+
+    v0 = tl.load(val_base + offs_0, mask=mask_0v, other=0.0).to(tl.float32)
+    v1 = tl.load(val_base + offs_1, mask=mask_1v, other=0.0).to(tl.float32)
+    v2 = tl.load(val_base + offs_2, mask=mask_2v, other=0.0).to(tl.float32)
+    v3 = tl.load(val_base + offs_3, mask=mask_3v, other=0.0).to(tl.float32)
+
+    v_sq = (
+        tl.sum(tl.where(mask_0v, v0 * v0, 0.0))
+        + tl.sum(tl.where(mask_1v, v1 * v1, 0.0))
+        + tl.sum(tl.where(mask_2v, v2 * v2, 0.0))
+        + tl.sum(tl.where(mask_3v, v3 * v3, 0.0))
+    )
+    v_norm = tl.sqrt(v_sq + 1e-12)
+    v_inv_sigma = tl.sqrt(float(head_size_v)) / v_norm
+    v0_z = v0 * v_inv_sigma
+    v1_z = v1 * v_inv_sigma
+    v2_z = v2 * v_inv_sigma
+    v3_z = v3 * v_inv_sigma
+
+    vq0 = _lloyd_max_quantize_4(v0_z)
+    vq1 = _lloyd_max_quantize_4(v1_z)
+    vq2 = _lloyd_max_quantize_4(v2_z)
+    vq3 = _lloyd_max_quantize_4(v3_z)
+
+    v_packed = (
+        (vq0 & 0x3) | ((vq1 & 0x3) << 2) | ((vq2 & 0x3) << 4) | ((vq3 & 0x3) << 6)
+    )
+    tl.store(
+        value_cache_ptr
+        + blk * stride_vc_blk
+        + slot_in_blk * stride_vc_slot
+        + head * stride_vc_head
+        + qtr_offs,
+        v_packed,
+        mask=qtr_offs < qtr_v,
+    )
+
+    v_scale = v_norm / float(head_size_v ** 1.5)
+    tl.store(
+        v_scale_cache_ptr
+        + blk * stride_vs_blk
+        + slot_in_blk * stride_vs_slot
+        + head * stride_vs_head,
+        v_scale,
+    )
+
+
 # Mapping from KVQuantMode to (QUANT_MAX, QUANT_MIN) for the
 # per-token-head quantization kernel.  Keyed by mode (not dtype)
 # because int4 and int8 share the same storage dtype (torch.int8).
@@ -497,8 +742,56 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     head_size_v = value.shape[2]
     block_size = key_cache.shape[1]
 
-    # INT4 packed: dispatch to the dedicated packing kernel.
+    # INT2: WHT + Lloyd-Max 4 centroids.
+    if kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
+        key_wht = fast_hadamard_transform(key.float()).to(key.dtype)
+        value_wht = fast_hadamard_transform(value.float()).to(value.dtype)
+        assert head_size % 4 == 0 and head_size_v % 4 == 0
+        qtr_head_padded = triton.next_power_of_2(
+            max(head_size, head_size_v) // 4
+        )
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            num_warps = 4
+        else:
+            num_warps = min(16, max(1, qtr_head_padded // 32))
+        _reshape_cache_int2_wht[(num_tokens, num_kv_heads)](
+            key_ptr=key_wht,
+            value_ptr=value_wht,
+            key_cache_ptr=key_cache,
+            value_cache_ptr=value_cache,
+            k_scale_cache_ptr=k_scale_cache,
+            v_scale_cache_ptr=v_scale_cache,
+            slot_mapping_ptr=slot_mapping,
+            stride_key_tok=key_wht.stride(0),
+            stride_key_head=key_wht.stride(1),
+            stride_val_tok=value_wht.stride(0),
+            stride_val_head=value_wht.stride(1),
+            stride_kc_blk=key_cache.stride(0),
+            stride_kc_slot=key_cache.stride(1),
+            stride_kc_head=key_cache.stride(2),
+            stride_vc_blk=value_cache.stride(0),
+            stride_vc_slot=value_cache.stride(1),
+            stride_vc_head=value_cache.stride(2),
+            stride_ks_blk=k_scale_cache.stride(0),
+            stride_ks_slot=k_scale_cache.stride(1),
+            stride_ks_head=k_scale_cache.stride(2),
+            stride_vs_blk=v_scale_cache.stride(0),
+            stride_vs_slot=v_scale_cache.stride(1),
+            stride_vs_head=v_scale_cache.stride(2),
+            block_size=block_size,
+            head_size=head_size,
+            head_size_v=head_size_v,
+            QUARTER_HEAD_PADDED=qtr_head_padded,
+            num_warps=num_warps,
+        )
+        return
+
+    # INT4 packed: RHT + asymmetric quantizer with steganographic zp.
+    # Single RHT gaussianizes data → better quantization.
+    # softmax_scale/d in attention compensates the d amplification.
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        key = _single_rht(key.float()).to(key.dtype)
+        value = _single_rht(value.float()).to(value.dtype)
         assert head_size % 2 == 0 and head_size_v % 2 == 0
         half_head_padded = triton.next_power_of_2(max(head_size, head_size_v) // 2)
         if current_platform.is_rocm() or current_platform.is_xpu():
