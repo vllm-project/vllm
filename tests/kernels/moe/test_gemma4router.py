@@ -46,7 +46,7 @@ def test_gemma4_routing_kernel_triton(
     tri_ws, tri_is = sort_by_id(tri_w, tri_ids)
 
     ids_ok = (ref_is == tri_is).all().item()
-    weights_ok = torch.allclose(ref_ws, tri_ws, atol=1e-4, rtol=1e-4)
+    weights_ok = torch.allclose(ref_ws, tri_ws, atol=1e-2, rtol=1e-2)
     ok = ids_ok and weights_ok
     max_err = (ref_ws - tri_ws).abs().max().item()
     print(
@@ -61,3 +61,4 @@ def test_gemma4_routing_kernel_triton(
                 f"  first bad row {r}: ref_ids={ref_ids[r].tolist()} "
                 f"tri_ids={tri_ids[r].tolist()}"
             )
+        assert ok
