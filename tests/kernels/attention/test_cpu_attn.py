@@ -699,8 +699,16 @@ def test_fp8_round_trip(dtype: torch.dtype):
 @torch.inference_mode()
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("k_scale,v_scale", [(1.0, 1.0), (0.5, 2.0)])
-def test_fp8_end_to_end(dtype: torch.dtype, k_scale: float, v_scale: float):
-    """Tests B & C: FP8 attention output matches simulated quant->dequant reference."""
+def test_fp8_reshape_and_cache_round_trip(
+    dtype: torch.dtype, k_scale: float, v_scale: float
+):
+    """Tests the encode path of cpu_attn_reshape_and_cache_fp8.
+
+    Encodes KV to FP8, manually dequantizes in Python, then runs standard float
+    attention to verify the encode round-trip is accurate enough.  This test
+    does NOT call cpu_attention_with_kv_cache_fp8; the on-the-fly dequant kernel
+    is tested separately in test_fp8_end_to_end_native.
+    """
     set_random_seed(0)
     num_query_heads = 4
     num_kv_heads = 4

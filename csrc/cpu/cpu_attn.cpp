@@ -283,9 +283,14 @@ void cpu_attention_with_kv_cache_fp8(
   input.k_scale_fp8 = static_cast<float>(k_scale);
   input.v_scale_fp8 = static_cast<float>(v_scale);
 
+#if !defined(__AVX2__) && !defined(__AVX512F__)
+  TORCH_CHECK(false,
+              "cpu_attention_with_kv_cache_fp8 requires AVX2 or AVX-512; "
+              "FP8 KV cache is not supported on this platform.");
+#endif
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "cpu_attention_with_kv_cache_fp8", [&]() {
-        // FP8 is only supported on the VEC path for now.
+        // FP8 is only supported on the VEC (x86 AVX2/AVX-512) path.
         CPU_ATTN_DISPATCH(query.size(2), cpu_attention::ISA::VEC, [&]() {
           using fp8_impl_t =
               cpu_attention::AttentionImplFP8VEC<scalar_t, attn_impl::HeadDim>;

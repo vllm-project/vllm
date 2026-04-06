@@ -523,6 +523,10 @@ def _get_attn_isa(
     supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
     fp8_kv = is_quantized_kv_cache(kv_cache_dtype) if kv_cache_dtype else False
+    if fp8_kv and (supports_arm or supports_vxe):
+        raise NotImplementedError(
+            "FP8 KV cache is only supported on x86 (requires AVX2 or AVX-512)."
+        )
     if (
         supports_amx
         and dtype in (torch.bfloat16,)
