@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -11,6 +13,7 @@ from tests.reasoning.utils import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 
 parser_name = "qwen3"
 start_token = "<think>"
@@ -222,6 +225,117 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+class _FakeQwen3ToolTokenizer:
+    def get_vocab(self):
+        return {
+            "<think>": 1,
+            "</think>": 2,
+            "<tool_call>": 3,
+            "</tool_call>": 4,
+        }
+
+
+def test_embedded_tool_call_is_promoted_from_reasoning_into_content():
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        _FakeQwen3ToolTokenizer()
+    )
+
+    reasoning, content = parser.extract_reasoning(
+        """<think>The verification confirms my solution:
+- s = 2.5 km/h
+- t = 24 minutes
+- Total time at speed 3 km/h = 204 minutes
+
+<tool_call>
+<function=Finish>
+<parameter=answer>
+204
+</parameter>
+</function>
+</tool_call>
+</think>""",
+        request=request,
+    )
+
+    assert reasoning == (
+        "The verification confirms my solution:\n"
+        "- s = 2.5 km/h\n"
+        "- t = 24 minutes\n"
+        "- Total time at speed 3 km/h = 204 minutes"
+    )
+    assert content == (
+        "<tool_call>\n"
+        "<function=Finish>\n"
+        "<parameter=answer>\n"
+        "204\n"
+        "</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+
+def test_promoted_qwen3_reasoning_tool_call_remains_parseable():
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        _FakeQwen3ToolTokenizer()
+    )
+    tool_parser = Qwen3CoderToolParser(_FakeQwen3ToolTokenizer(), tools=None)
+
+    _, content = parser.extract_reasoning(
+        """<think>verify result
+<tool_call>
+<function=Finish>
+<parameter=answer>
+204
+</parameter>
+</function>
+</tool_call></think>assistant trailing text""",
+        request=request,
+    )
+
+    assert content is not None
+    assert "assistant trailing text" in content
+
+    tool_call_info = tool_parser.extract_tool_calls(content, request=request)
+
+    assert tool_call_info.tools_called is True
+    assert len(tool_call_info.tool_calls) == 1
+    tool_call = tool_call_info.tool_calls[0]
+    assert tool_call.function.name == "Finish"
+    assert json.loads(tool_call.function.arguments) == {"answer": "204"}
+
+
+def test_truncated_qwen3_reasoning_still_recovers_embedded_tool_call():
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        _FakeQwen3ToolTokenizer()
+    )
+
+    reasoning, content = parser.extract_reasoning(
+        """verify result
+<tool_call>
+<function=Finish>
+<parameter=answer>
+204
+</parameter>
+</function>
+</tool_call>""",
+        request=request,
+    )
+
+    assert reasoning == "verify result"
+    assert content == (
+        "<tool_call>\n"
+        "<function=Finish>\n"
+        "<parameter=answer>\n"
+        "204\n"
+        "</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
 
 
 # Multi-token delta tests: simulate real-world streaming where a single

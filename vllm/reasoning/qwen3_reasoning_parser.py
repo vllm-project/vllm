@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,12 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
+
+
+_EMBEDDED_TOOL_CALL_RE = re.compile(
+    r"<tool_call>(.*?)</tool_call>|<tool_call>.*$",
+    re.DOTALL,
+)
 
 
 class Qwen3ReasoningParser(BaseThinkingReasoningParser):
@@ -51,6 +58,46 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    @staticmethod
+    def _split_embedded_tool_calls(
+        reasoning: str | None,
+        content: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Promote tool-call XML blocks out of reasoning into content.
+
+        Qwen3.5 models can emit XML tool calls before `</think>`. The serving
+        stack parses reasoning before tool calls, so these embedded tool calls
+        would otherwise be lost because downstream tool parsers only inspect
+        the content channel.
+        """
+        if (
+            not reasoning
+            or "<tool_call>" not in reasoning
+            or "<function=" not in reasoning
+        ):
+            return reasoning, content
+
+        extracted_blocks: list[str] = []
+
+        def _collect_or_keep(match: re.Match[str]) -> str:
+            block = match.group(0)
+            if "<function=" not in block:
+                return block
+            extracted_blocks.append(block.strip())
+            return ""
+
+        remaining_reasoning = _EMBEDDED_TOOL_CALL_RE.sub(_collect_or_keep, reasoning)
+        remaining_reasoning = remaining_reasoning.strip() or None
+
+        if not extracted_blocks:
+            return reasoning, content
+
+        content_parts = ["\n\n".join(extracted_blocks)]
+        if content:
+            content_parts.append(content)
+        merged_content = "\n\n".join(part for part in content_parts if part) or None
+        return remaining_reasoning, merged_content
+
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
@@ -84,13 +131,13 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                 return None, model_output
             # Thinking enabled but no </think>: output was truncated.
             # Everything generated so far is reasoning.
-            return model_output, None
+            return self._split_embedded_tool_calls(model_output, None)
 
         # Extract reasoning content from the model output.
         reasoning, _, content = model_output.partition(self.end_token)
 
         final_content = content or None
-        return reasoning, final_content
+        return self._split_embedded_tool_calls(reasoning, final_content)
 
     def extract_reasoning_streaming(
         self,
