@@ -487,11 +487,21 @@ class OpenAISpeechToText(OpenAIServing):
             list_result_generator.append(generator)
 
         # Check if the language is in the no space languages set
-        separator  = "" if request.language and request.language.lower() in self.model_cls.no_space_languages else " "
+        separator = (
+            ""
+            if request.language
+            and request.language.lower() in self.model_cls.no_space_languages
+            else " "
+        )
 
         if request.stream:
             return stream_generator_method(
-                request, list_result_generator, request_id, request_metadata, duration_s, separator
+                request,
+                list_result_generator,
+                request_id,
+                request_metadata,
+                duration_s,
+                separator,
             )
         # Non-streaming response.
         total_segments = []
