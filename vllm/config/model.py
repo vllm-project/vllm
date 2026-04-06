@@ -21,6 +21,7 @@ from vllm.config.multimodal import (
     MultiModalConfig,
 )
 from vllm.config.pooler import PoolerConfig
+from vllm.config.quantization import OnlineQuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
@@ -199,6 +200,10 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    quantization_config: dict[str, Any] | OnlineQuantizationConfigArgs | None = None
+    """Arguments for online quantization.
+    Auto-created when `quantization` equals to one of the string values of
+    the `OnlineQuantScheme` enum."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
@@ -647,6 +652,19 @@ class ModelConfig:
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
 
+            if (
+                self.renderer_num_workers > 1
+                and self.multimodal_config.mm_processor_cache_gb > 0
+            ):
+                raise ValueError(
+                    "Cannot use --renderer-num-workers > 1 with the "
+                    "multimodal processor cache enabled. The cache is "
+                    "not thread-safe and does not support concurrent "
+                    "renderer workers. Please set "
+                    "--renderer-num-workers 1 (the default), or "
+                    "disable the cache with --mm-processor-cache-gb 0."
+                )
+
         # Multimodal GGUF models must use original repo for mm processing
         if is_gguf(self.tokenizer) and self.is_multimodal_model:
             raise ValueError(
@@ -930,11 +948,11 @@ class ModelConfig:
                 "modelopt_fp4",
                 "modelopt_mxfp8",
                 "modelopt_mixed",
-                "petit_nvfp4",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "cpu_awq",
+                "gguf",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -1189,6 +1207,7 @@ class ModelConfig:
             "gemma3",
             "molmo2",
             "paligemma",
+            "umm",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
