@@ -123,6 +123,20 @@ def _sync_hip_cuda_env_vars():
 # Sync at import time - catches misconfigurations from process start.
 _sync_hip_cuda_env_vars()
 
+
+def _set_rocm_env_defaults():
+    """Set env vars required for ROCm stability.
+
+    HSA_NO_SCRATCH_RECLAIM is needed for RCCL on ROCm 7.1+ to prevent
+    hangs during collective operations. The Docker image already sets
+    this, but bare-metal and pip-install users need it too.
+    """
+    if os.environ.get("HSA_NO_SCRATCH_RECLAIM") is None:
+        os.environ["HSA_NO_SCRATCH_RECLAIM"] = "1"
+
+
+_set_rocm_env_defaults()
+
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
