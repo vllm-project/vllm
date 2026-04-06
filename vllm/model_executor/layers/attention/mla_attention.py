@@ -1045,14 +1045,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, prefill_k_pe)
 
-        torch.ops.vllm.mla_attention_prefill_with_output(
+        # Functional op: returns result instead of mutating
+        prefill_result = torch.ops.vllm.mla_attention_prefill_with_output(
             prefill_q,
             k,
             v,
-            prefill_output,
             dummy_tensor,
             self.layer_name,
         )
+        prefill_output.copy_(prefill_result)
 
         # Decode path: W_UK_T BMM is visible to torch.compile for fusion
         decode_q_nope, decode_q_pe = decode_q.split(
@@ -1458,13 +1459,15 @@ def mla_attention_prefill_with_output(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    output: torch.Tensor,
     dummy_tensor: torch.Tensor,
     layer_name: str,
-) -> None:
-    """MLA prefill attention kernel with output buffer.
+) -> torch.Tensor:
+    """MLA prefill attention kernel - functional version.
 
     kv_b_proj should be done outside this op to be visible to torch.compile.
+
+    Returns:
+        Attention output tensor of shape [num_tokens, num_heads * v_head_dim]
     """
     # Use dummy_tensor to establish ordering dependency (adds zero)
     _ = dummy_tensor.sum() * 0
@@ -1473,15 +1476,23 @@ def mla_attention_prefill_with_output(
     if attn_layer.kv_cache_dtype.startswith("fp8"):
         kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
+    # Allocate output buffer
+    output = torch.empty(
+        q.shape[0],
+        attn_layer.num_heads * attn_layer.v_head_dim,
+        dtype=q.dtype,
+        device=q.device,
+    )
+
     # Handle empty input (no prefill tokens in this batch) or profile run
     if attn_metadata is None or q.shape[0] == 0:
         output.fill_(0)
-        return
+        return output
 
     # Handle case where there are no prefills in this batch
     if attn_metadata.prefill is None or attn_metadata.num_prefills == 0:
         output.fill_(0)
-        return
+        return output
 
     assert attn_metadata.prefill is not None
     prefill_metadata = attn_metadata.prefill
@@ -1533,23 +1544,46 @@ def mla_attention_prefill_with_output(
         output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
         output.copy_(output_prefill)
 
+    return output
+
 
 def mla_attention_prefill_with_output_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    output: torch.Tensor,
     dummy_tensor: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     """Fake implementation for torch.compile."""
-    return
+    # Get attn_layer from context to determine output shape
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+
+    if attn_metadata is None:
+        # Profile run - return empty tensor with expected shape
+        # Output shape: [num_tokens, num_heads * v_head_dim]
+        # We can infer from k/v shapes
+        return torch.empty(
+            q.shape[0], k.shape[1] * v.shape[-1], dtype=q.dtype, device=q.device
+        )
+
+    # Get layer to determine exact output shape
+    attn_layer = forward_context.no_compile_layers.get(layer_name)
+    if attn_layer is not None:
+        output_size = attn_layer.num_heads * attn_layer.v_head_dim
+    else:
+        # Fallback: infer from v shape
+        output_size = k.shape[1] * v.shape[-1]
+
+    return torch.empty(q.shape[0], output_size, dtype=q.dtype, device=q.device)
 
 
 direct_register_custom_op(
     op_name="mla_attention_prefill_with_output",
     op_func=mla_attention_prefill_with_output,
-    mutates_args=["output"],
+    mutates_args=[],
     fake_impl=mla_attention_prefill_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch._C.Tag.cudagraph_unsafe,),
