@@ -501,9 +501,7 @@ def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor
     if key not in _RHT_SIGNS_CACHE:
         gen = torch.Generator()
         gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)
-        signs = 2.0 * torch.bernoulli(
-            torch.full((d,), 0.5), generator=gen
-        ) - 1.0
+        signs = 2.0 * torch.bernoulli(torch.full((d,), 0.5), generator=gen) - 1.0
         _RHT_SIGNS_CACHE[key] = signs.to(device)
     return _RHT_SIGNS_CACHE[key]
 
@@ -636,7 +634,7 @@ def _reshape_cache_int2_wht(
     # Store norm/d^1.5 as scale. Single RHT gives dot(Q,K) × d.
     # IRHT multiplies by d. Scale absorbs both: 1/d for scores,
     # 1/sqrt(d) for de-normalizing z back to original magnitude.
-    k_scale = k_norm / float(head_size ** 1.5)
+    k_scale = k_norm / float(head_size**1.5)
     tl.store(
         k_scale_cache_ptr
         + blk * stride_ks_blk
@@ -689,7 +687,7 @@ def _reshape_cache_int2_wht(
         mask=qtr_offs < qtr_v,
     )
 
-    v_scale = v_norm / float(head_size_v ** 1.5)
+    v_scale = v_norm / float(head_size_v**1.5)
     tl.store(
         v_scale_cache_ptr
         + blk * stride_vs_blk
@@ -747,9 +745,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
         key_wht = fast_hadamard_transform(key.float()).to(key.dtype)
         value_wht = fast_hadamard_transform(value.float()).to(value.dtype)
         assert head_size % 4 == 0 and head_size_v % 4 == 0
-        qtr_head_padded = triton.next_power_of_2(
-            max(head_size, head_size_v) // 4
-        )
+        qtr_head_padded = triton.next_power_of_2(max(head_size, head_size_v) // 4)
         if current_platform.is_rocm() or current_platform.is_xpu():
             num_warps = 4
         else:

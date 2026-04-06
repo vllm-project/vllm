@@ -291,19 +291,23 @@ def kernel_unified_attention_2d(
         q_mask = query_mask_0[:, None] & query_mask_1[:, None]
         Q_s0 = tl.load(
             query_ptr + q_base + offs_q0[None, :],
-            mask=mask_q0[None, :] & q_mask, other=0.0,
+            mask=mask_q0[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
         Q_s1 = tl.load(
             query_ptr + q_base + offs_q1[None, :],
-            mask=mask_q1[None, :] & q_mask, other=0.0,
+            mask=mask_q1[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
         Q_s2 = tl.load(
             query_ptr + q_base + offs_q2[None, :],
-            mask=mask_q2[None, :] & q_mask, other=0.0,
+            mask=mask_q2[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
         Q_s3 = tl.load(
             query_ptr + q_base + offs_q3[None, :],
-            mask=mask_q3[None, :] & q_mask, other=0.0,
+            mask=mask_q3[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
 
     block_table_offset = seq_idx * block_table_stride
@@ -415,8 +419,8 @@ def kernel_unified_attention_2d(
                 mask=half_dim_mask[:, None] & tile_mask[None, :],
                 other=0,
             )
-            K_lo_raw = (K_packed & 0xF)
-            K_hi_raw = ((K_packed >> 4) & 0xF)
+            K_lo_raw = K_packed & 0xF
+            K_hi_raw = (K_packed >> 4) & 0xF
             v_off_i4 = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
@@ -428,8 +432,8 @@ def kernel_unified_attention_2d(
                 mask=half_dim_mask[None, :] & tile_mask[:, None],
                 other=0,
             )
-            V_lo_raw = (V_packed & 0xF)
-            V_hi_raw = ((V_packed >> 4) & 0xF)
+            V_lo_raw = V_packed & 0xF
+            V_hi_raw = (V_packed >> 4) & 0xF
             ks_idx = (
                 physical_block_idx * stride_ks_blk
                 + slot_in_blk * stride_ks_slot
@@ -607,8 +611,10 @@ def kernel_unified_attention_2d(
         elif KV_QUANT_MODE == 5:
             # INT2: 4-way split-dot with Lloyd-Max centroids
             raw_dot = (
-                tl.dot(Q_s0, KC0) + tl.dot(Q_s1, KC1)
-                + tl.dot(Q_s2, KC2) + tl.dot(Q_s3, KC3)
+                tl.dot(Q_s0, KC0)
+                + tl.dot(Q_s1, KC1)
+                + tl.dot(Q_s2, KC2)
+                + tl.dot(Q_s3, KC3)
             )
             S += raw_dot * (scale * k_token_head_scales[None, :])
         elif KV_QUANT_MODE >= 2:
@@ -758,19 +764,23 @@ def kernel_unified_attention_2d(
         )
         tl.store(
             output_ptr + out_base + offs_q0[None, :],
-            acc_s0, mask=mask_q0[None, :] & out_mask,
+            acc_s0,
+            mask=mask_q0[None, :] & out_mask,
         )
         tl.store(
             output_ptr + out_base + offs_q1[None, :],
-            acc_s1, mask=mask_q1[None, :] & out_mask,
+            acc_s1,
+            mask=mask_q1[None, :] & out_mask,
         )
         tl.store(
             output_ptr + out_base + offs_q2[None, :],
-            acc_s2, mask=mask_q2[None, :] & out_mask,
+            acc_s2,
+            mask=mask_q2[None, :] & out_mask,
         )
         tl.store(
             output_ptr + out_base + offs_q3[None, :],
-            acc_s3, mask=mask_q3[None, :] & out_mask,
+            acc_s3,
+            mask=mask_q3[None, :] & out_mask,
         )
     if KV_QUANT_MODE < 4:
         acc = acc / L[:, None]
@@ -953,19 +963,23 @@ def kernel_unified_attention_3d(
         q_mask = query_mask_0[:, None] & query_mask_1[:, None]
         Q_s0 = tl.load(
             query_ptr + q_base + offs_q0[None, :],
-            mask=mask_q0[None, :] & q_mask, other=0.0,
+            mask=mask_q0[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
         Q_s1 = tl.load(
             query_ptr + q_base + offs_q1[None, :],
-            mask=mask_q1[None, :] & q_mask, other=0.0,
+            mask=mask_q1[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
         Q_s2 = tl.load(
             query_ptr + q_base + offs_q2[None, :],
-            mask=mask_q2[None, :] & q_mask, other=0.0,
+            mask=mask_q2[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
         Q_s3 = tl.load(
             query_ptr + q_base + offs_q3[None, :],
-            mask=mask_q3[None, :] & q_mask, other=0.0,
+            mask=mask_q3[None, :] & q_mask,
+            other=0.0,
         ).to(tl.float32)
 
     block_table_offset = seq_idx * block_table_stride
@@ -1075,8 +1089,8 @@ def kernel_unified_attention_3d(
                 mask=half_dim_mask[:, None] & tile_mask[None, :],
                 other=0,
             )
-            K_lo_raw = (K_packed & 0xF)
-            K_hi_raw = ((K_packed >> 4) & 0xF)
+            K_lo_raw = K_packed & 0xF
+            K_hi_raw = (K_packed >> 4) & 0xF
             v_off_i4 = (
                 physical_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_2
@@ -1088,8 +1102,8 @@ def kernel_unified_attention_3d(
                 mask=half_dim_mask[None, :] & tile_mask[:, None],
                 other=0,
             )
-            V_lo_raw = (V_packed & 0xF)
-            V_hi_raw = ((V_packed >> 4) & 0xF)
+            V_lo_raw = V_packed & 0xF
+            V_hi_raw = (V_packed >> 4) & 0xF
             ks_idx = (
                 physical_block_idx * stride_ks_blk
                 + slot_in_blk * stride_ks_slot
@@ -1267,8 +1281,10 @@ def kernel_unified_attention_3d(
         elif KV_QUANT_MODE == 5:
             # INT2: 4-way split-dot with Lloyd-Max centroids
             raw_dot = (
-                tl.dot(Q_s0, KC0) + tl.dot(Q_s1, KC1)
-                + tl.dot(Q_s2, KC2) + tl.dot(Q_s3, KC3)
+                tl.dot(Q_s0, KC0)
+                + tl.dot(Q_s1, KC1)
+                + tl.dot(Q_s2, KC2)
+                + tl.dot(Q_s3, KC3)
             )
             S += raw_dot * (scale * k_token_head_scales[None, :])
         elif KV_QUANT_MODE >= 2:
@@ -1406,19 +1422,23 @@ def kernel_unified_attention_3d(
         out_mask = query_mask_0[:, None] & query_mask_1[:, None]
         tl.store(
             segm_output_ptr + segm_base + offs_q0[None, :],
-            acc_s0, mask=mask_q0[None, :] & out_mask,
+            acc_s0,
+            mask=mask_q0[None, :] & out_mask,
         )
         tl.store(
             segm_output_ptr + segm_base + offs_q1[None, :],
-            acc_s1, mask=mask_q1[None, :] & out_mask,
+            acc_s1,
+            mask=mask_q1[None, :] & out_mask,
         )
         tl.store(
             segm_output_ptr + segm_base + offs_q2[None, :],
-            acc_s2, mask=mask_q2[None, :] & out_mask,
+            acc_s2,
+            mask=mask_q2[None, :] & out_mask,
         )
         tl.store(
             segm_output_ptr + segm_base + offs_q3[None, :],
-            acc_s3, mask=mask_q3[None, :] & out_mask,
+            acc_s3,
+            mask=mask_q3[None, :] & out_mask,
         )
     if KV_QUANT_MODE < 4:
         segm_output_offset = (
@@ -1615,11 +1635,13 @@ def unified_attention(
             from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
                 fast_hadamard_transform,
             )
+
             q = fast_hadamard_transform(q.float()).to(q_orig_dtype)
         else:
             from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
                 _single_rht,
             )
+
             q = _single_rht(q.float()).to(q_orig_dtype)
             softmax_scale = softmax_scale / q.shape[2]
 

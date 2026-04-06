@@ -273,6 +273,7 @@ def test_reshape_and_cache_per_token_head(
             from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
                 fast_hadamard_transform,
             )
+
             for label, data, cache, sc in [
                 ("key", key, key_cache, k_scale_cache),
                 ("val", value, value_cache, v_scale_cache),
@@ -299,6 +300,7 @@ def test_reshape_and_cache_per_token_head(
             from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
                 _single_rht,
             )
+
             for label, data, cache, sc in [
                 ("key", key, key_cache, k_scale_cache),
                 ("val", value, value_cache, v_scale_cache),
@@ -423,6 +425,7 @@ def test_per_token_head_round_trip_accuracy(
         from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
             fast_hadamard_transform,
         )
+
         _LM4 = torch.tensor(
             [-1.5104, -0.4528, 0.4528, 1.5104], device="cuda", dtype=torch.float32
         )
@@ -462,6 +465,7 @@ def test_per_token_head_round_trip_accuracy(
                         from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
                             _single_rht,
                         )
+
                         sc_bits = actual_sc.view(torch.int32)
                         zp = (sc_bits & 0xF).to(torch.float32)
                         clean_sc = (sc_bits & -16).view(torch.float32)
@@ -472,13 +476,17 @@ def test_per_token_head_round_trip_accuracy(
                         full[0::2] = lo
                         full[1::2] = hi
                         deq_rht = (full - zp) * clean_sc
-                        actual_deq = _single_rht(
-                            deq_rht.unsqueeze(0), inverse=True
-                        ).squeeze(0) / head_size
+                        actual_deq = (
+                            _single_rht(deq_rht.unsqueeze(0), inverse=True).squeeze(0)
+                            / head_size
+                        )
                     else:
                         actual_deq = cache[blk, off, h].float() * actual_sc
                     torch.testing.assert_close(
-                        actual_deq, orig, atol=rt_atol, rtol=rt_atol,
+                        actual_deq,
+                        orig,
+                        atol=rt_atol,
+                        rtol=rt_atol,
                     )
 
 
