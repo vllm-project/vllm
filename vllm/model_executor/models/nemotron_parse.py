@@ -70,9 +70,7 @@ def _get_image_size_tuple(image_size: int | Iterable[int]) -> tuple[int, int]:
         return (image_size, image_size)
     size = tuple(image_size)
     if len(size) == 0:
-        raise ValueError(
-            f"image_size must not be empty, got {image_size!r}"
-        )
+        raise ValueError(f"image_size must not be empty, got {image_size!r}")
     if len(size) == 1:
         return (size[0], size[0])
     return (size[0], size[1])
