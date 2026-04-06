@@ -1,3 +1,5 @@
+-r common.txt
+
 # testing
 pytest
 tensorizer==2.10.1
