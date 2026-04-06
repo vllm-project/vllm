@@ -326,7 +326,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             calculate_kv_scales = cache_config.calculate_kv_scales
@@ -415,6 +414,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
+        self._decode_fn = getattr(self.impl, "_forward_decode", self.impl.forward_mqa)
         self.use_direct_call = not current_platform.opaque_attention_op()
         self.exposed_split = (
             envs.VLLM_MLA_EXPOSED_SPLIT
@@ -970,15 +970,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         Returns:
             Tensor of shape [..., nope_dim + pe_dim]
         """
-        k = torch.empty(
-            (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
-            dtype=k_nope.dtype,
-            device=k_nope.device,
-        )
-        # Direct copies with efficient broadcasting
-        k[..., : k_nope.shape[-1]] = k_nope
-        k[..., k_nope.shape[-1] :] = k_pe
-        return k
+        return self.impl._concat_k_nope_k_pe(k_nope, k_pe)
 
     # Property accessors for impl methods
     @property
@@ -992,11 +984,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def _forward_decode(self, *args, **kwargs):
         # Older MLA implementations used _forward_decode; current backends
         # expose forward_mqa. Support both during the refactor transition.
-        if hasattr(self.impl, "_forward_decode"):
-            return self.impl._forward_decode(  # type: ignore[attr-defined]
-                *args, **kwargs
-            )
-        return self.impl.forward_mqa(*args, **kwargs)
+        return self._decode_fn(*args, **kwargs)
 
     def forward_exposed_split(
         self,
@@ -1131,7 +1119,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output
 
 
-@maybe_transfer_kv_layer
 def _get_mla_context(
     layer_name: str,
 ) -> tuple["MLACommonMetadata", "MLAAttention", torch.Tensor]:
@@ -1334,7 +1321,7 @@ def mla_write_kv_cache(
     attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
 
     if attn_metadata is None or kv_cache.numel() == 0:
-        return kv_c_normed.sum().unsqueeze(0)
+        return kv_c_normed.flatten()[0:1].clone()
 
     ops.concat_and_cache_mla(
         kv_c_normed,
@@ -1345,8 +1332,7 @@ def mla_write_kv_cache(
         scale=attn_layer._k_scale,
     )
 
-    # using sum() to create a scalar dependency
-    return kv_c_normed.sum().unsqueeze(0)
+    return kv_c_normed.flatten()[0:1].clone()
 
 
 def mla_write_kv_cache_fake(
@@ -1356,7 +1342,8 @@ def mla_write_kv_cache_fake(
 ) -> torch.Tensor:
     """Fake implementation for torch.compile."""
     # Return a scalar tensor that depends on input for ordering
-    return kv_c_normed.sum().unsqueeze(0)
+    # return kv_c_normed.sum().unsqueeze(0)
+    return kv_c_normed.flatten()[0:1].clone()
 
 
 direct_register_custom_op(
@@ -1382,7 +1369,7 @@ def mla_attention_decode(
     tokens).
     """
     # Use dummy_tensor to establish ordering dependency (adds zero)
-    _ = dummy_tensor.sum() * 0
+    _ = dummy_tensor + 0
 
     attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
     if attn_layer.kv_cache_dtype.startswith("fp8"):
@@ -1412,7 +1399,9 @@ def mla_attention_decode_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile."""
     # Get layer config to avoid hardcoding dimensions
-    _, attn_layer, _ = _get_mla_context(layer_name)
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    # _, attn_layer, _ = _get_mla_context(layer_name)
 
     # Handle both tuple and tensor input
     if isinstance(decode_q, tuple):
