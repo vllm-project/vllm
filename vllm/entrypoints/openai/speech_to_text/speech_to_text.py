@@ -5,7 +5,7 @@ import io
 import math
 import time
 import zlib
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Set
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -67,6 +67,17 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
+
+
+def asr_inter_chunk_separator(
+    language: str | None, no_space_languages: Set[str]
+) -> str:
+    """Space to insert between ASR text chunks for streaming and non-streaming join.
+
+    Languages in ``no_space_languages`` (e.g. Chinese, Japanese) use an empty
+    separator; others use a single ASCII space.
+    """
+    return "" if language and language.lower() in no_space_languages else " "
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -486,12 +497,8 @@ class OpenAISpeechToText(OpenAIServing):
 
             list_result_generator.append(generator)
 
-        # Check if the language is in the no space languages set
-        separator = (
-            ""
-            if request.language
-            and request.language.lower() in self.model_cls.no_space_languages
-            else " "
+        separator = asr_inter_chunk_separator(
+            request.language, self.model_cls.no_space_languages
         )
 
         if request.stream:
