@@ -11,6 +11,7 @@ from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import supports_xccl
 
+from . import interface
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,16 @@ def rocm_platform_plugin() -> str | None:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
         logger.debug("ROCm platform is not available because: %s", str(e))
+
+    if not is_rocm and interface.in_wsl():
+        try:
+            import torch
+
+            if getattr(torch.version, "hip", None):
+                is_rocm = True
+                logger.debug("Confirmed ROCm platform is available in WSL via torch.version.hip.")
+        except Exception as e:
+            logger.debug("WSL ROCm fallback detection failed because: %s", str(e))
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
