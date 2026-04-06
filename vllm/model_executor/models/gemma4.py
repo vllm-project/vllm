@@ -146,7 +146,6 @@ def gemma4_fused_routing_kernel_triton(
     per_expert_scale: torch.Tensor,
     num_warps: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sort-v3: sort + vectorized extraction. See _routing_kernel_sort_v3."""
     gating_output = gating_output.contiguous()
     per_expert_scale = per_expert_scale.contiguous()
     T, E = gating_output.shape
