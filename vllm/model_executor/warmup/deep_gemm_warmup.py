@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
