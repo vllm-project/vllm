@@ -848,7 +848,9 @@ cases = [
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929")
+@pytest.mark.xfail(
+    reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929"
+)
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     args.enforce_eager = enforce_eager
     assert_draft_model_correctness(args)
@@ -856,7 +858,9 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
 
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929")
+@pytest.mark.xfail(
+    reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929"
+)
 def test_draft_model_realistic_example():
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -873,7 +877,9 @@ def test_draft_model_realistic_example():
 
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929")
+@pytest.mark.xfail(
+    reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929"
+)
 def test_draft_model_parallel_drafting():
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -901,7 +907,9 @@ def test_draft_model_parallel_drafting():
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929")
+@pytest.mark.xfail(
+    reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929"
+)
 def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
     tgt_model, draft_model = models
     sd_case = ArgsTest(
@@ -915,7 +923,9 @@ def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
 
 @multi_gpu_only(num_gpus=2)
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929")
+@pytest.mark.xfail(
+    reason="Draft model tests fail with async_scheduling=False and engine init errors - issue #38929"
+)
 def test_draft_model_tensor_parallelism():
     """Ensure spec decode works when running with TP > 1."""
     _skip_if_insufficient_gpus_for_tp(2)
