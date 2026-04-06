@@ -486,9 +486,12 @@ class OpenAISpeechToText(OpenAIServing):
 
             list_result_generator.append(generator)
 
+        # Check if the language is in the no space languages set
+        separator  = "" if request.language and request.language.lower() in self.model_cls.no_space_languages else " "
+
         if request.stream:
             return stream_generator_method(
-                request, list_result_generator, request_id, request_metadata, duration_s
+                request, list_result_generator, request_id, request_metadata, duration_s, separator
             )
         # Non-streaming response.
         total_segments = []
@@ -500,7 +503,6 @@ class OpenAISpeechToText(OpenAIServing):
                 "translate": TranslationSegment,
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
-            text = ""
             chunk_size_in_s = self.asr_config.max_audio_clip_s
             if chunk_size_in_s is None:
                 assert len(list_result_generator) == 1, (
@@ -528,7 +530,7 @@ class OpenAISpeechToText(OpenAIServing):
                     else:
                         raw_text = op.outputs[0].text
                         text_parts.append(self.model_cls.post_process_output(raw_text))
-            text = "".join(text_parts)
+            text = separator.join(text_parts)
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
@@ -581,6 +583,7 @@ class OpenAISpeechToText(OpenAIServing):
         | type[TranslationResponseStreamChoice],
         stream_response_class: type[TranscriptionStreamResponse]
         | type[TranslationStreamResponse],
+        separator: str,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
@@ -597,6 +600,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         try:
             for result_generator in list_result_generator:
+                beginning_of_chunk = True
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
@@ -613,6 +617,9 @@ class OpenAISpeechToText(OpenAIServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
+                    if beginning_of_chunk:
+                        output.text = separator + output.text
+                        beginning_of_chunk = False
 
                     # TODO: For models that output structured formats (e.g.,
                     # Qwen3-ASR with "language X<asr_text>" prefix), streaming
