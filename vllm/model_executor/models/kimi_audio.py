@@ -1051,6 +1051,71 @@ class KimiAudioForConditionalGeneration(
 
         return padded_inputs_embeds, True
 
+    def _slice_runtime_kimi_prompt_inputs(
+        self,
+        *,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        audio_token_ids: torch.Tensor,
+        text_input_ids: torch.Tensor | None,
+        is_continuous_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Align raw Kimi prompt tensors to the scheduled runtime chunk.
+
+        In the v1 runtime, prefix caching or chunked prefill may schedule only a
+        suffix of the original prompt. The raw dual-stream Kimi tensors are
+        still stored at full prompt length, so we need to slice them to the
+        positions of the currently scheduled tokens before building
+        `inputs_embeds`.
+        """
+        if input_ids is None:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+
+        scheduled_tokens = input_ids.shape[-1]
+        prompt_tokens = audio_token_ids.shape[-1]
+        if scheduled_tokens >= prompt_tokens:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+
+        if positions.numel() == 0:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+
+        def _normalize_index(index: torch.Tensor) -> torch.Tensor | None:
+            if index.dim() == 1:
+                return index
+            if index.dim() == 2 and index.shape[0] == 1:
+                return index.squeeze(0)
+            return None
+
+        seq_positions = _normalize_index(positions)
+        if seq_positions is None:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+
+        seq_positions = seq_positions.to(device=audio_token_ids.device).long()
+        if seq_positions.numel() != scheduled_tokens:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+        if seq_positions.numel() == 0:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+        if int(seq_positions.min().item()) < 0:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+        if int(seq_positions.max().item()) >= prompt_tokens:
+            return audio_token_ids, text_input_ids, is_continuous_mask
+
+        def _slice_seq(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            if tensor is None:
+                return None
+            if tensor.dim() == 1:
+                return tensor.index_select(0, seq_positions)
+            if tensor.dim() == 2 and tensor.shape[0] == 1:
+                sliced = tensor[0].index_select(0, seq_positions)
+                return sliced.unsqueeze(0)
+            return tensor
+
+        return (
+            _slice_seq(audio_token_ids),
+            _slice_seq(text_input_ids),
+            _slice_seq(is_continuous_mask),
+        )
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -1157,6 +1222,17 @@ class KimiAudioForConditionalGeneration(
                     and is_continuous_mask.shape[0] == 1
                 ):
                     is_continuous_mask = is_continuous_mask.squeeze(0)
+            (
+                audio_token_ids,
+                text_input_ids,
+                is_continuous_mask,
+            ) = self._slice_runtime_kimi_prompt_inputs(
+                input_ids=input_ids,
+                positions=positions,
+                audio_token_ids=audio_token_ids,
+                text_input_ids=text_input_ids,
+                is_continuous_mask=is_continuous_mask,
+            )
             if inputs_embeds is None:
                 kimi_inputs_embeds = self._build_kimi_audio_inputs_embeds(
                     audio_token_ids=audio_token_ids,

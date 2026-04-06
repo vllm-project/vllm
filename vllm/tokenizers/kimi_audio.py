@@ -404,13 +404,15 @@ class KimiAudioTokenizer(TokenizerLike):
             raise ValueError(
                 "No chat template available. Provide `chat_template` explicitly."
             )
+        render_kwargs = dict(kwargs)
+        render_kwargs.pop("conversation", None)
         # Use render_jinja_template instead of apply_chat_template
         # Note: render_jinja_template returns ([prompts], [generation_indices])
         rendered, _ = hf_chat_utils.render_jinja_template(
-            conversation,
+            [conversation],
             chat_template=template,
             tools=tools,
-            **kwargs,
+            **render_kwargs,
         )
         # Extract the first (and usually only) prompt
         prompt = rendered[0] if rendered else ""

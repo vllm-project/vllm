@@ -5,6 +5,7 @@ from openai_harmony import (
 )
 
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
     serialize_message,
     serialize_messages,
 )
@@ -37,3 +38,25 @@ def test_serialize_messages() -> None:
     }
     msg = Message.from_dict(msg_value)
     assert serialize_messages([msg, dict_value]) == [msg_value, dict_value]
+
+
+def test_build_chat_params_preserves_mm_processor_kwargs() -> None:
+    mm_processor_kwargs = {
+        "messages": [
+            {"role": "user", "message_type": "text", "content": "hello"},
+            {"role": "user", "message_type": "audio"},
+        ],
+        "output_type": "text",
+    }
+    request = ResponsesRequest(
+        model="test-model",
+        input="hello",
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    params = request.build_chat_params(
+        default_template="template",
+        default_template_content_format="string",
+    )
+
+    assert params.mm_processor_kwargs == mm_processor_kwargs

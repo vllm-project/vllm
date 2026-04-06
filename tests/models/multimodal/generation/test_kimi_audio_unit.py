@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import safetensors.torch
 import torch
+from transformers.utils import chat_template_utils as hf_chat_utils
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm.model_executor.models import kimi_audio as kimi_audio_model
@@ -17,6 +20,10 @@ from vllm.model_executor.models.kimi_audio_prompt import (
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.transformers_utils.processors import kimi_audio_speech as speech_utils
 from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
+from vllm.transformers_utils.processors.kimi_audio_whisper_vq import (
+    WhisperVQConfig,
+    WhisperVQEncoder,
+)
 
 KIMI_AUDIO_MODEL = "moonshotai/Kimi-Audio-7B-Instruct"
 
@@ -102,6 +109,62 @@ def test_kimi_audio_prompt_builder_supports_text_history():
         "<|im_kimia_speech_ct_id|><|im_msg_end|>"
         "<|im_kimia_assistant_msg_start|>"
     )
+
+
+def test_kimi_audio_chat_template_renders_service_messages():
+    template_path = (
+        Path(__file__).resolve().parents[4]
+        / "vllm"
+        / "transformers_utils"
+        / "chat_templates"
+        / "template_kimi_audio.jinja"
+    )
+    template = template_path.read_text()
+    content = KimiAudioPromptBuilder.build_user_audio_content(
+        "Please answer the question in the audio.",
+    )
+
+    rendered, _ = hf_chat_utils.render_jinja_template(
+        [[{"role": "user", "content": content}]],
+        chat_template=template,
+    )
+
+    assert rendered == [
+        "<|im_kimia_user_msg_start|>Please answer the question in the audio.\n"
+        "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
+        "<|im_kimia_speech_ct_id|><|im_msg_end|>"
+        "<|im_kimia_assistant_msg_start|>"
+    ]
+
+
+def test_kimi_audio_tokenizer_wraps_single_conversation_for_template_render(
+    monkeypatch,
+):
+    captured = {}
+    tokenizer = object.__new__(KimiAudioTokenizer)
+    tokenizer.get_chat_template = lambda chat_template, tools=None: chat_template
+    tokenizer.encode = lambda text, add_special_tokens=False: [1, 2, 3]
+
+    def fake_render_jinja_template(conversations, **kwargs):
+        captured["conversations"] = conversations
+        captured["kwargs"] = kwargs
+        return ["rendered prompt"], []
+
+    monkeypatch.setattr(
+        "vllm.tokenizers.kimi_audio.hf_chat_utils.render_jinja_template",
+        fake_render_jinja_template,
+    )
+
+    prompt = KimiAudioTokenizer.apply_chat_template(
+        tokenizer,
+        conversation=[{"role": "user", "content": "hello"}],
+        chat_template="unused template",
+        tokenize=False,
+    )
+
+    assert prompt == "rendered prompt"
+    assert captured["conversations"] == [[{"role": "user", "content": "hello"}]]
+    assert "conversation" not in captured["kwargs"]
 
 
 def test_kimi_audio_prompt_builder_builds_token_level_audio_text_streams():
@@ -375,35 +438,42 @@ def test_kimi_audio_speech_tokenizer_honors_device_override(monkeypatch):
     assert tokenizer.device == "cpu"
 
 
-def test_kimi_audio_speech_tokenizer_can_import_local_whisper_vq(monkeypatch, tmp_path):
-    source_root = tmp_path / "Kimi-Audio"
-    speech_dir = (
-        source_root
-        / "kimia_infer"
-        / "models"
-        / "tokenizer"
-        / "glm4"
-        / "speech_tokenizer"
-    )
-    speech_dir.mkdir(parents=True)
-    (speech_dir / "__init__.py").write_text("", encoding="utf-8")
-    (speech_dir / "configuration_whisper.py").write_text(
-        "class WhisperVQConfig:\n    pass\n",
-        encoding="utf-8",
-    )
-    (speech_dir / "modeling_whisper.py").write_text(
-        "class WhisperVQEncoder:\n    pass\n",
-        encoding="utf-8",
-    )
+def test_kimi_audio_speech_tokenizer_loads_vendored_whisper_vq(tmp_path):
+    model_path = tmp_path / "glm-4-voice-tokenizer"
+    model_path.mkdir()
 
-    monkeypatch.setenv("KIMI_AUDIO_SOURCE_ROOT", str(source_root))
-    speech_utils._import_local_whisper_vq_encoder.cache_clear()
+    config = WhisperVQConfig(
+        vocab_size=32,
+        num_mel_bins=4,
+        d_model=8,
+        encoder_attention_heads=2,
+        encoder_ffn_dim=16,
+        encoder_layers=4,
+        max_source_positions=12,
+        dropout=0.0,
+        attention_dropout=0.0,
+        activation_dropout=0.0,
+        encoder_layerdrop=0.0,
+        pooling_kernel_size=2,
+        pooling_type="avg",
+        pooling_position=2,
+        quantize_vocab_size=4,
+        quantize_position=4,
+        quantize_encoder_only=True,
+        quantize_ema_decay=0.99,
+        quantize_causal_block_size=4,
+        encoder_causal_convolution=True,
+    )
+    config.save_pretrained(model_path)
 
-    imported = speech_utils._import_local_whisper_vq_encoder()
+    model = WhisperVQEncoder(config)
+    safetensors.torch.save_file(model.state_dict(), model_path / "model.safetensors")
 
-    assert imported is not None
-    assert imported[0].__name__ == "WhisperVQConfig"
-    assert imported[1].__name__ == "WhisperVQEncoder"
+    loaded = speech_utils._load_local_quantize_encoder(str(model_path), "cpu")
+
+    assert isinstance(loaded, WhisperVQEncoder)
+    assert loaded.config.quantize_encoder_only
+    assert loaded.conv1.weight.shape == model.conv1.weight.shape
 
 
 class _FakeProcessorTokenizer(_FakePromptTokenizer):

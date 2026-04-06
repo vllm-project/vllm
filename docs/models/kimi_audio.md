@@ -21,8 +21,8 @@ other models.
   `moonshotai/Kimi-Audio-7B-Instruct`.
 - The discrete speech tokenizer is resolved from
   `THUDM/glm-4-voice-tokenizer` by default.
-- Local development overrides are optional and environment-based:
-  `KIMI_AUDIO_SPEECH_TOKENIZER_PATH` and `KIMI_AUDIO_SOURCE_ROOT`.
+- An optional local cache override is available through
+  `KIMI_AUDIO_SPEECH_TOKENIZER_PATH`.
 - Kimi-Audio does not require a model-specific attention backend override in
   vLLM. It follows the same platform-default backend selection as other vLLM
   models unless the caller explicitly configures a backend.

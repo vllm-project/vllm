@@ -1131,3 +1131,25 @@ def test_chat_completion_request_n_parameter_massive_value(
             max_tokens=1,
             default_sampling_params={},
         )
+
+
+def test_build_chat_params_preserves_mm_processor_kwargs() -> None:
+    mm_processor_kwargs = {
+        "messages": [
+            {"role": "user", "message_type": "text", "content": "hello"},
+            {"role": "user", "message_type": "audio"},
+        ],
+        "output_type": "text",
+    }
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hello"}],
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    params = request.build_chat_params(
+        default_template="template",
+        default_template_content_format="string",
+    )
+
+    assert params.mm_processor_kwargs == mm_processor_kwargs

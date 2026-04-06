@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Sequence
 from functools import lru_cache
 from glob import glob
@@ -19,10 +18,14 @@ import torchaudio
 from huggingface_hub import snapshot_download
 from transformers import AutoModel, WhisperFeatureExtractor
 
+from vllm.transformers_utils.processors.kimi_audio_whisper_vq import (
+    WhisperVQConfig,
+    WhisperVQEncoder,
+)
+
 KIMIA_SPEECH_TOKENIZER_REPO = "THUDM/glm-4-voice-tokenizer"
 KIMIA_SPEECH_TOKENIZER_ENV = "KIMI_AUDIO_SPEECH_TOKENIZER_PATH"
 KIMIA_SPEECH_TOKENIZER_DEVICE_ENV = "KIMI_AUDIO_SPEECH_TOKENIZER_DEVICE"
-KIMI_AUDIO_SOURCE_ROOT_ENV = "KIMI_AUDIO_SOURCE_ROOT"
 
 
 def _resolve_speech_tokenizer_path(model_name_or_path: str) -> str:
@@ -39,56 +42,9 @@ def _resolve_speech_tokenizer_path(model_name_or_path: str) -> str:
         return model_name_or_path
 
 
-def _resolve_kimi_audio_source_root() -> str | None:
-    env_path = os.environ.get(KIMI_AUDIO_SOURCE_ROOT_ENV)
-    if env_path and os.path.isdir(env_path):
-        return env_path
-
-    return None
-
-
-@lru_cache(maxsize=1)
-def _import_local_whisper_vq_encoder() -> tuple[Any, Any] | None:
-    source_root = _resolve_kimi_audio_source_root()
-    if source_root is None:
-        return None
-
-    speech_tokenizer_file = os.path.join(
-        source_root,
-        "kimia_infer",
-        "models",
-        "tokenizer",
-        "glm4",
-        "speech_tokenizer",
-        "modeling_whisper.py",
-    )
-    if not os.path.isfile(speech_tokenizer_file):
-        return None
-
-    if source_root not in sys.path:
-        sys.path.insert(0, source_root)
-
-    from kimia_infer.models.tokenizer.glm4.speech_tokenizer import (
-        configuration_whisper as whisper_config,
-    )
-    from kimia_infer.models.tokenizer.glm4.speech_tokenizer import (
-        modeling_whisper as whisper_modeling,
-    )
-
-    WhisperVQConfig = whisper_config.WhisperVQConfig
-    WhisperVQEncoder = whisper_modeling.WhisperVQEncoder
-
-    return WhisperVQConfig, WhisperVQEncoder
-
-
 def _load_local_quantize_encoder(
     model_path: str, device: torch.device | str
-) -> Any | None:
-    imported = _import_local_whisper_vq_encoder()
-    if imported is None:
-        return None
-
-    WhisperVQConfig, WhisperVQEncoder = imported
+) -> Any:
     config = WhisperVQConfig.from_pretrained(model_path)
     config.quantize_encoder_only = True
     model = WhisperVQEncoder(config)

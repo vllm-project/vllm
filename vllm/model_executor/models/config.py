@@ -190,6 +190,24 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class MoonshotKimiaForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # Kimi-Audio's dual-stream prompt assembly is correct under eager mode
+        # and torch.compile, but cudagraph replay reuses stale runtime-aligned
+        # Kimi prompt chunks and corrupts output. Keep compile enabled and only
+        # disable cudagraph capture for this model.
+        from vllm.config.compilation import CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.info(
+                "MoonshotKimiaForCausalLM disables cudagraphs to preserve "
+                "correct Kimi-Audio dual-stream generation."
+            )
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -600,6 +618,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MoonshotKimiaForCausalLM": MoonshotKimiaForCausalLMConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
