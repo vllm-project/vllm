@@ -319,6 +319,7 @@ DISK_EVICTION_POLICY = os.environ.get("VLLM_DISK_EVICTION_POLICY", "lfu").lower(
 
 # Mount point for test results (JUnit XML, container logs).
 RESULTS_MOUNT = "/tmp/vllm-ci-results"
+CONTAINER_REPO_ROOT = "/vllm-workspace"
 
 # ---------------------------------------------------------------------------
 # Two-tier cache configuration (L1 ephemeral + L2 persistent)
@@ -1071,6 +1072,12 @@ def build_test_engine_shell_exports():
     return "export {} && ".format(" ".join(assignments)) if assignments else ""
 
 
+def build_git_root_shell_exports():
+    # type: () -> str
+    """Return a shell export for the repo root inside test containers."""
+    return f'export GIT_ROOT="${{GIT_ROOT:-{CONTAINER_REPO_ROOT}}}" && '
+
+
 def execute_hard_resets():
     # type: () -> None
     """Execute any hard-reset operations requested via env vars.
@@ -1251,6 +1258,7 @@ def log_effective_config():
         "  CONTAINER_PIDS_LIMIT:      "
         f"{_format_container_pids_limit(CONTAINER_PIDS_LIMIT)}"
     )
+    info(f"  CONTAINER_REPO_ROOT:       {CONTAINER_REPO_ROOT}")
     info(f"  CONTAINER_IPC_MODE:        {CONTAINER_IPC_MODE}")
     if _container_uses_private_shm(CONTAINER_IPC_MODE):
         info(f"  CONTAINER_SHM_SIZE:        {CONTAINER_SHM_SIZE}")
@@ -5567,6 +5575,8 @@ def build_single_node_docker_cmd(
         f"{results_dir}:{RESULTS_MOUNT}",
         # Container-only env vars.
         "-e",
+        f"GIT_ROOT={CONTAINER_REPO_ROOT}",
+        "-e",
         "PYTHONPATH=..",
         # NCCL tuning for ROCm multi-GPU tests.
         # NCCL_DEBUG=WARN: log NCCL warnings (INFO is too noisy for CI).
@@ -6610,11 +6620,13 @@ def _inject_junit_into_multi_node_cmd(cmd, node_idx, pair_idx, results_host_dir)
     # The XML path is inside the container. We'll copy it out after the
     # test using ``docker cp``.
     xml_path = f"/tmp/results_node{node_idx}_pair{pair_idx}.xml"
+    git_root_exports = build_git_root_shell_exports()
     test_engine_exports = build_test_engine_shell_exports()
     # Inject PYTEST_ADDOPTS before the command. If the command already
     # sets PYTEST_ADDOPTS, this prepends (pytest merges them).
+    export_prefix = f"{git_root_exports}{test_engine_exports}"
     return (
-        f'{test_engine_exports}export PYTEST_ADDOPTS="${{PYTEST_ADDOPTS:-}} '
+        f'{export_prefix}export PYTEST_ADDOPTS="${{PYTEST_ADDOPTS:-}} '
         f'--junitxml={xml_path}" && {cmd}'
     )
 
