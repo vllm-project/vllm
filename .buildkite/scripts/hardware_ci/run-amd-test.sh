@@ -35,23 +35,6 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-wait_for_clean_gpus() {
-  local timeout=${1:-300}
-  local start=$SECONDS
-  echo "--- Waiting for clean GPU state (timeout: ${timeout}s)"
-  while true; do
-    if grep -q clean /opt/amdgpu/etc/gpu_state; then
-      echo "GPUs state is \"clean\""
-      return
-    fi
-    if (( SECONDS - start >= timeout )); then
-      echo "Error: GPUs did not reach clean state within ${timeout}s" >&2
-      exit 1
-    fi
-    sleep 3
-  done
-}
-
 cleanup_docker() {
   # Get Docker's root directory
   docker_root=$(docker info -f '{{.DockerRootDir}}')
@@ -365,18 +348,11 @@ apply_rocm_test_overrides() {
 ###############################################################################
 
 # --- GPU initialization ---
-echo "--- Confirming Clean Initial State"
-wait_for_clean_gpus
-
 echo "--- ROCm info"
 rocminfo
 
 # --- Docker housekeeping ---
 cleanup_docker
-
-echo "--- Resetting GPUs"
-echo "reset" > /opt/amdgpu/etc/gpu_state
-wait_for_clean_gpus
 
 # --- Pull test image ---
 echo "--- Pulling container"

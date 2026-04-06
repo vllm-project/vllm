@@ -447,9 +447,16 @@ def dummy_hf_overrides(
     Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
     """
-    hf_config.update(exist_overrides or {})
+    # Copy because this helper is called more than once
+    # while loading config, and we `.pop()`
+    exist_overrides = (exist_overrides or {}).copy()
+    text_config_override = exist_overrides.pop("text_config", None)
+    hf_config.update(exist_overrides)
 
     text_config = hf_config.get_text_config()
+    if text_config_override is not None:
+        # multimodal test models may override *some* text-model fields
+        text_config.update(text_config_override)
 
     # Ensure at least 2 expert per group
     # Since `grouped_topk` assumes top-2
