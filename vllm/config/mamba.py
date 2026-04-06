@@ -54,9 +54,6 @@ class MambaConfig:
         return value
 
     def __post_init__(self):
-        if self.backend is None:
-            self.backend = MambaBackendEnum.TRITON
-
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 
@@ -66,10 +63,10 @@ class MambaConfig:
                     "on NVIDIA CUDA platforms. Please do not specify  "
                     "`--enable-mamba-cache-stochastic-rounding`."
                 )
-            if (
-                self.backend == MambaBackendEnum.TRITON
-                and not current_platform.is_device_capability_family(100)
-            ):
+            if self.backend in {
+                MambaBackendEnum.TRITON,
+                None,
+            } and not current_platform.is_device_capability_family(100):
                 raise ValueError(
                     "Stochastic rounding for Mamba cache with triton backend requires "
                     "compute capability 10.0 (data center Blackwell). The `cvt.rs` "
