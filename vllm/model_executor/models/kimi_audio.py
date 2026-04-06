@@ -1061,6 +1061,8 @@ class KimiAudioForConditionalGeneration(
         audio_token_ids: torch.Tensor | list[torch.Tensor],
         text_input_ids: torch.Tensor | list[torch.Tensor] | None,
         is_continuous_mask: torch.Tensor | list[torch.Tensor] | None,
+        runtime_request_num_scheduled_tokens: torch.Tensor | Sequence[int] | None = None,
+        runtime_request_has_raw_mm_inputs: torch.Tensor | Sequence[bool] | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """Align raw Kimi prompt tensors to the scheduled runtime chunk.
 
@@ -1112,6 +1114,97 @@ class KimiAudioForConditionalGeneration(
                 return tensors[0]
             return torch.cat(tensors, dim=0)
 
+        def _as_runtime_request_metadata(
+            value: torch.Tensor | Sequence[int] | Sequence[bool] | None,
+            *,
+            dtype: torch.dtype,
+        ) -> torch.Tensor | None:
+            if value is None:
+                return None
+            if isinstance(value, torch.Tensor):
+                if value.dim() == 1:
+                    return value.to(dtype=dtype)
+                if value.dim() == 2 and value.shape[0] == 1:
+                    return value.squeeze(0).to(dtype=dtype)
+                return None
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+                return None
+            return torch.as_tensor(list(value), dtype=dtype)
+
+        def _slice_single_request_runtime_tokens(
+            *,
+            seq_input_ids: torch.Tensor,
+            seq_positions: torch.Tensor,
+            audio_tensor: torch.Tensor,
+            text_tensor: torch.Tensor | None,
+            mask_tensor: torch.Tensor | None,
+        ) -> tuple[
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+        ] | None:
+            if (
+                seq_positions.dim() != 1
+                or seq_positions.numel() != seq_input_ids.numel()
+            ):
+                return None
+            if seq_positions.numel() == 0:
+                return None
+
+            prompt_tokens = int(audio_tensor.shape[-1])
+            seq_positions = seq_positions.to(
+                device=audio_tensor.device,
+                dtype=torch.long,
+            )
+            if int(seq_positions.min().item()) < 0:
+                return None
+
+            prompt_mask = seq_positions < prompt_tokens
+            if not prompt_mask.any():
+                return None, None, None
+
+            audio_output = torch.full(
+                seq_input_ids.shape,
+                fill_value=KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                dtype=audio_tensor.dtype,
+                device=audio_tensor.device,
+            )
+            text_output = seq_input_ids.to(
+                device=audio_tensor.device,
+                dtype=(
+                    text_tensor.dtype
+                    if text_tensor is not None
+                    else seq_input_ids.dtype
+                ),
+            ).clone()
+            mask_output = (
+                torch.zeros(
+                    seq_input_ids.shape,
+                    dtype=mask_tensor.dtype,
+                    device=audio_tensor.device,
+                )
+                if mask_tensor is not None
+                else None
+            )
+
+            selected_positions = seq_positions[prompt_mask]
+            audio_output[prompt_mask] = audio_tensor.index_select(
+                0,
+                selected_positions,
+            )
+            if text_tensor is not None:
+                text_output[prompt_mask] = text_tensor.index_select(
+                    0,
+                    selected_positions.to(device=text_tensor.device),
+                ).to(device=audio_tensor.device)
+            if mask_output is not None:
+                mask_output[prompt_mask] = mask_tensor.index_select(
+                    0,
+                    selected_positions.to(device=mask_tensor.device),
+                ).to(device=audio_tensor.device)
+
+            return audio_output, text_output, mask_output
+
         def _slice_request_tensor(
             tensor: torch.Tensor,
             seq_positions: torch.Tensor,
@@ -1158,13 +1251,144 @@ class KimiAudioForConditionalGeneration(
                 if audio_request_tensors is not None
                 else None
             )
+            runtime_request_token_counts = _as_runtime_request_metadata(
+                runtime_request_num_scheduled_tokens,
+                dtype=torch.long,
+            )
+            runtime_request_has_raw_mm = _as_runtime_request_metadata(
+                runtime_request_has_raw_mm_inputs,
+                dtype=torch.bool,
+            )
+            if (
+                audio_request_tensors is not None
+                and runtime_request_token_counts is not None
+                and runtime_request_has_raw_mm is not None
+                and runtime_request_token_counts.numel()
+                == runtime_request_has_raw_mm.numel()
+                and int(runtime_request_token_counts.sum().item())
+                == input_ids.numel()
+            ):
+                expected_raw_mm_requests = int(
+                    runtime_request_has_raw_mm.sum().item()
+                )
+                if expected_raw_mm_requests == len(audio_request_tensors):
+                    if (
+                        text_request_tensors is not None
+                        and len(text_request_tensors) != expected_raw_mm_requests
+                    ):
+                        text_request_tensors = None
+                    if (
+                        mask_request_tensors is not None
+                        and len(mask_request_tensors) != expected_raw_mm_requests
+                    ):
+                        mask_request_tensors = None
+
+                    if expected_raw_mm_requests == 0:
+                        return None, None, None
+
+                    audio_dtype = audio_request_tensors[0].dtype
+                    mask_dtype = (
+                        mask_request_tensors[0].dtype
+                        if mask_request_tensors is not None
+                        and len(mask_request_tensors) > 0
+                        else torch.bool
+                    )
+                    audio_segment_outputs: list[torch.Tensor] = []
+                    text_segment_outputs: list[torch.Tensor] = []
+                    mask_segment_outputs: list[torch.Tensor] | None = (
+                        [] if mask_request_tensors is not None else None
+                    )
+                    prompt_req_idx = 0
+                    token_offset = 0
+
+                    for num_tokens, has_raw_mm in zip(
+                        runtime_request_token_counts.tolist(),
+                        runtime_request_has_raw_mm.tolist(),
+                    ):
+                        seq_len = int(num_tokens)
+                        if seq_len <= 0:
+                            continue
+
+                        next_offset = token_offset + seq_len
+                        seq_input_ids = input_ids[token_offset:next_offset]
+                        seq_positions = positions[token_offset:next_offset]
+                        token_offset = next_offset
+
+                        sliced_segment = None
+                        if has_raw_mm:
+                            sliced_segment = _slice_single_request_runtime_tokens(
+                                seq_input_ids=seq_input_ids,
+                                seq_positions=seq_positions,
+                                audio_tensor=audio_request_tensors[prompt_req_idx],
+                                text_tensor=(
+                                    text_request_tensors[prompt_req_idx]
+                                    if text_request_tensors is not None
+                                    else None
+                                ),
+                                mask_tensor=(
+                                    mask_request_tensors[prompt_req_idx]
+                                    if mask_request_tensors is not None
+                                    else None
+                                ),
+                            )
+                            prompt_req_idx += 1
+
+                        if sliced_segment is not None and sliced_segment[0] is not None:
+                            audio_segment_outputs.append(sliced_segment[0])
+                            text_segment_outputs.append(sliced_segment[1])
+                            if mask_segment_outputs is not None:
+                                mask_segment_outputs.append(sliced_segment[2])
+                            continue
+
+                        audio_segment_outputs.append(
+                            torch.full(
+                                seq_input_ids.shape,
+                                fill_value=KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                                dtype=audio_dtype,
+                                device=input_ids.device,
+                            )
+                        )
+                        text_segment_outputs.append(seq_input_ids)
+                        if mask_segment_outputs is not None:
+                            mask_segment_outputs.append(
+                                torch.zeros(
+                                    seq_input_ids.shape,
+                                    dtype=mask_dtype,
+                                    device=input_ids.device,
+                                )
+                            )
+
+                    if prompt_req_idx == len(audio_request_tensors):
+                        return (
+                            _cat_request_tensors(audio_segment_outputs),
+                            _cat_request_tensors(text_segment_outputs),
+                            _cat_request_tensors(mask_segment_outputs),
+                        )
+            if audio_request_tensors is not None and len(audio_request_tensors) == 1:
+                single_request_runtime_tokens = _slice_single_request_runtime_tokens(
+                    seq_input_ids=input_ids,
+                    seq_positions=positions,
+                    audio_tensor=audio_request_tensors[0],
+                    text_tensor=(
+                        text_request_tensors[0]
+                        if text_request_tensors is not None
+                        else None
+                    ),
+                    mask_tensor=(
+                        mask_request_tensors[0]
+                        if mask_request_tensors is not None
+                        else None
+                    ),
+                )
+                if single_request_runtime_tokens is not None:
+                    return single_request_runtime_tokens
             if audio_request_tensors is not None and len(audio_request_tensors) == 1:
                 audio_token_ids = audio_request_tensors[0]
                 if text_request_tensors is not None:
                     text_input_ids = text_request_tensors[0]
                 if mask_request_tensors is not None:
                     is_continuous_mask = mask_request_tensors[0]
-            if audio_request_tensors is not None and len(audio_request_tensors) > 1:
+            if audio_request_tensors is not None:
                 if positions.dim() == 1 and positions.numel() == len(
                     audio_request_tensors
                 ):
@@ -1199,27 +1423,71 @@ class KimiAudioForConditionalGeneration(
                     position_segments = []
                     input_segments = []
 
+                if (
+                    len(audio_request_tensors) > 0
+                    and len(position_segments) == len(audio_request_tensors)
+                ):
+                    decode_only_segments = [
+                        seq_positions.numel() > 0
+                        and int(seq_positions.min().item()) >= int(tensor.shape[-1])
+                        for seq_positions, tensor in zip(
+                            position_segments,
+                            audio_request_tensors,
+                        )
+                    ]
+                    if decode_only_segments and all(decode_only_segments):
+                        return None, None, None
+
                 if len(position_segments) >= len(audio_request_tensors):
-                    leading_text_only_segments = (
-                        len(position_segments) - len(audio_request_tensors)
-                    )
                     mask_dtype = (
                         mask_request_tensors[0].dtype
                         if mask_request_tensors is not None
                         and len(mask_request_tensors) > 0
                         else torch.bool
                     )
+                    audio_dtype = audio_request_tensors[0].dtype
                     audio_segment_outputs: list[torch.Tensor] = []
-                    text_segment_outputs: list[torch.Tensor] | None = []
+                    text_segment_outputs: list[torch.Tensor] = []
                     mask_segment_outputs: list[torch.Tensor] | None = (
                         [] if mask_request_tensors is not None else None
                     )
+                    request_idx = 0
 
-                    for seq_input_ids in input_segments[:leading_text_only_segments]:
+                    for seg_idx, seq_positions in enumerate(position_segments):
+                        seq_input_ids = input_segments[seg_idx]
+
+                        sliced_segment = None
+                        if request_idx < len(audio_request_tensors):
+                            sliced_segment = _slice_single_request_runtime_tokens(
+                                seq_input_ids=seq_input_ids,
+                                seq_positions=seq_positions,
+                                audio_tensor=audio_request_tensors[request_idx],
+                                text_tensor=(
+                                    text_request_tensors[request_idx]
+                                    if text_request_tensors is not None
+                                    else None
+                                ),
+                                mask_tensor=(
+                                    mask_request_tensors[request_idx]
+                                    if mask_request_tensors is not None
+                                    else None
+                                ),
+                            )
+
+                        if sliced_segment is not None and sliced_segment[0] is not None:
+                            audio_segment_outputs.append(sliced_segment[0])
+                            text_segment_outputs.append(sliced_segment[1])
+                            if mask_segment_outputs is not None:
+                                mask_segment_outputs.append(sliced_segment[2])
+                            request_idx += 1
+                            continue
+
                         audio_segment_outputs.append(
-                            torch.full_like(
-                                seq_input_ids,
+                            torch.full(
+                                seq_input_ids.shape,
                                 fill_value=KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                                dtype=audio_dtype,
+                                device=seq_input_ids.device,
                             )
                         )
                         text_segment_outputs.append(seq_input_ids)
@@ -1232,36 +1500,12 @@ class KimiAudioForConditionalGeneration(
                                 )
                             )
 
-                    for request_idx, seq_positions in enumerate(
-                        position_segments[leading_text_only_segments:]
-                    ):
-                        audio_segment_outputs.append(
-                            _slice_request_tensor(
-                                audio_request_tensors[request_idx],
-                                seq_positions,
-                            )
+                    if request_idx == len(audio_request_tensors):
+                        return (
+                            _cat_request_tensors(audio_segment_outputs),
+                            _cat_request_tensors(text_segment_outputs),
+                            _cat_request_tensors(mask_segment_outputs),
                         )
-                        text_segment_outputs.append(
-                            input_segments[leading_text_only_segments + request_idx]
-                            if text_request_tensors is None
-                            else _slice_request_tensor(
-                                text_request_tensors[request_idx],
-                                seq_positions,
-                            )
-                        )
-                        if mask_segment_outputs is not None:
-                            mask_segment_outputs.append(
-                                _slice_request_tensor(
-                                    mask_request_tensors[request_idx],
-                                    seq_positions,
-                                )
-                            )
-
-                    return (
-                        _cat_request_tensors(audio_segment_outputs),
-                        _cat_request_tensors(text_segment_outputs),
-                        _cat_request_tensors(mask_segment_outputs),
-                    )
                 audio_token_ids = _cat_request_tensors(audio_request_tensors)
                 if text_request_tensors is not None:
                     text_input_ids = _cat_request_tensors(text_request_tensors)
@@ -1404,6 +1648,14 @@ class KimiAudioForConditionalGeneration(
         audio_token_ids = kwargs.pop("audio_token_ids", None)
         text_input_ids = kwargs.pop("text_token_ids", None)
         is_continuous_mask = kwargs.pop("is_continuous_mask", None)
+        runtime_request_num_scheduled_tokens = kwargs.pop(
+            "runtime_request_num_scheduled_tokens",
+            None,
+        )
+        runtime_request_has_raw_mm_inputs = kwargs.pop(
+            "runtime_request_has_raw_mm_inputs",
+            None,
+        )
         multimodal_embeddings = kwargs.get("multimodal_embeddings")
 
         model_input_ids = input_ids
@@ -1439,6 +1691,12 @@ class KimiAudioForConditionalGeneration(
                 audio_token_ids=audio_token_ids,
                 text_input_ids=text_input_ids,
                 is_continuous_mask=is_continuous_mask,
+                runtime_request_num_scheduled_tokens=(
+                    runtime_request_num_scheduled_tokens
+                ),
+                runtime_request_has_raw_mm_inputs=(
+                    runtime_request_has_raw_mm_inputs
+                ),
             )
             if inputs_embeds is None:
                 kimi_inputs_embeds = self._build_kimi_audio_inputs_embeds(

@@ -446,6 +446,170 @@ def test_kimi_audio_runtime_slice_supports_mixed_decode_and_prefill_batch():
     )
 
 
+def test_kimi_audio_runtime_slice_supports_single_prompt_request_after_decode():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+
+    (
+        audio_token_ids,
+        text_input_ids,
+        is_continuous_mask,
+    ) = KimiAudioForConditionalGeneration._slice_runtime_kimi_prompt_inputs(
+        model,
+        input_ids=torch.tensor([99, 9], dtype=torch.int32),
+        positions=torch.tensor([4, 2], dtype=torch.long),
+        audio_token_ids=torch.tensor([[20, 21, 22]], dtype=torch.long),
+        text_input_ids=torch.tensor([[2, 2, 2]], dtype=torch.long),
+        is_continuous_mask=torch.tensor([[False, True, True]]),
+    )
+
+    assert torch.equal(
+        audio_token_ids,
+        torch.tensor([KimiAudioProcessor.KIMIA_TEXT_BLANK, 22], dtype=torch.long),
+    )
+    assert torch.equal(text_input_ids, torch.tensor([99, 2], dtype=torch.long))
+    assert torch.equal(is_continuous_mask, torch.tensor([False, True]))
+
+
+def test_kimi_audio_runtime_slice_supports_single_prompt_request_before_decode():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+
+    (
+        audio_token_ids,
+        text_input_ids,
+        is_continuous_mask,
+    ) = KimiAudioForConditionalGeneration._slice_runtime_kimi_prompt_inputs(
+        model,
+        input_ids=torch.tensor([9, 9, 9, 99], dtype=torch.int32),
+        positions=torch.tensor([0, 1, 2, 4], dtype=torch.long),
+        audio_token_ids=torch.tensor([[20, 21, 22]], dtype=torch.long),
+        text_input_ids=torch.tensor([[2, 2, 2]], dtype=torch.long),
+        is_continuous_mask=torch.tensor([[False, True, True]]),
+    )
+
+    assert torch.equal(
+        audio_token_ids,
+        torch.tensor(
+            [20, 21, 22, KimiAudioProcessor.KIMIA_TEXT_BLANK],
+            dtype=torch.long,
+        ),
+    )
+    assert torch.equal(
+        text_input_ids,
+        torch.tensor([2, 2, 2, 99], dtype=torch.long),
+    )
+    assert torch.equal(
+        is_continuous_mask,
+        torch.tensor([False, True, True, False]),
+    )
+
+
+def test_kimi_audio_runtime_slice_supports_interleaved_decode_between_prompts():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+
+    (
+        audio_token_ids,
+        text_input_ids,
+        is_continuous_mask,
+    ) = KimiAudioForConditionalGeneration._slice_runtime_kimi_prompt_inputs(
+        model,
+        input_ids=torch.tensor([9, 9, 99, 8, 8], dtype=torch.int32),
+        positions=torch.tensor([0, 1, 4, 0, 1], dtype=torch.long),
+        audio_token_ids=[
+            torch.tensor([10, 11], dtype=torch.long),
+            torch.tensor([20, 21], dtype=torch.long),
+        ],
+        text_input_ids=[
+            torch.tensor([1, 1], dtype=torch.long),
+            torch.tensor([2, 2], dtype=torch.long),
+        ],
+        is_continuous_mask=[
+            torch.tensor([False, True]),
+            torch.tensor([False, True]),
+        ],
+    )
+
+    assert torch.equal(
+        audio_token_ids,
+        torch.tensor(
+            [10, 11, KimiAudioProcessor.KIMIA_TEXT_BLANK, 20, 21],
+            dtype=torch.long,
+        ),
+    )
+    assert torch.equal(
+        text_input_ids,
+        torch.tensor([1, 1, 99, 2, 2], dtype=torch.long),
+    )
+    assert torch.equal(
+        is_continuous_mask,
+        torch.tensor([False, True, False, False, True]),
+    )
+
+
+def test_kimi_audio_runtime_slice_uses_runtime_request_boundaries():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+    full_audio_ids = torch.cat(
+        [
+            torch.full((176,), 7, dtype=torch.long),
+            torch.tensor([20, 21, 22, 23], dtype=torch.long),
+        ]
+    )
+    full_text_ids = torch.cat(
+        [
+            torch.full((176,), 3, dtype=torch.long),
+            torch.tensor([2, 2, 2, 2], dtype=torch.long),
+        ]
+    )
+    full_continuous_mask = torch.cat(
+        [
+            torch.zeros(176, dtype=torch.bool),
+            torch.tensor([False, True, True, False]),
+        ]
+    )
+
+    (
+        audio_token_ids,
+        text_input_ids,
+        is_continuous_mask,
+    ) = KimiAudioForConditionalGeneration._slice_runtime_kimi_prompt_inputs(
+        model,
+        input_ids=torch.tensor([91, 92, 93, 9, 9, 9, 9], dtype=torch.int32),
+        positions=torch.tensor([176, 192, 208, 176, 177, 178, 179], dtype=torch.long),
+        audio_token_ids=full_audio_ids.unsqueeze(0),
+        text_input_ids=full_text_ids.unsqueeze(0),
+        is_continuous_mask=full_continuous_mask.unsqueeze(0),
+        runtime_request_num_scheduled_tokens=torch.tensor(
+            [1, 1, 1, 4], dtype=torch.int32
+        ),
+        runtime_request_has_raw_mm_inputs=torch.tensor(
+            [False, False, False, True], dtype=torch.bool
+        ),
+    )
+
+    assert torch.equal(
+        audio_token_ids,
+        torch.tensor(
+            [
+                KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                20,
+                21,
+                22,
+                23,
+            ],
+            dtype=torch.long,
+        ),
+    )
+    assert torch.equal(
+        text_input_ids,
+        torch.tensor([91, 92, 93, 2, 2, 2, 2], dtype=torch.int32),
+    )
+    assert torch.equal(
+        is_continuous_mask,
+        torch.tensor([False, False, False, False, True, True, False]),
+    )
+
+
 def test_kimi_audio_generation_prompt_uses_prompt_builder(monkeypatch):
     captured = {}
 
@@ -905,6 +1069,155 @@ def test_kimi_audio_forward_supports_mixed_decode_and_prefill_batch():
             [12.0, 12.0],
             [22.0, 22.0],
             [24.0, 24.0],
+        ]
+    )
+    assert torch.equal(outputs, expected)
+
+
+def test_kimi_audio_forward_supports_single_prompt_request_after_decode():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+    model.language_model = _FakeLanguageModel()
+
+    outputs = KimiAudioForConditionalGeneration.forward(
+        model,
+        input_ids=torch.tensor([99, 0], dtype=torch.int32),
+        positions=torch.tensor([4, 2], dtype=torch.long),
+        audio_token_ids=torch.tensor([[20, 21, 22]], dtype=torch.long),
+        text_token_ids=torch.tensor([[2, 2, 2]], dtype=torch.long),
+        is_continuous_mask=torch.tensor([[False, True, True]]),
+    )
+
+    expected = torch.tensor(
+        [
+            [
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 99.0,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 99.0,
+            ],
+            [24.0, 24.0],
+        ]
+    )
+    assert torch.equal(outputs, expected)
+
+
+def test_kimi_audio_forward_supports_single_prompt_request_before_decode():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+    model.language_model = _FakeLanguageModel()
+
+    outputs = KimiAudioForConditionalGeneration.forward(
+        model,
+        input_ids=torch.tensor([0, 0, 0, 99], dtype=torch.int32),
+        positions=torch.tensor([0, 1, 2, 4], dtype=torch.long),
+        audio_token_ids=torch.tensor([[20, 21, 22]], dtype=torch.long),
+        text_token_ids=torch.tensor([[2, 2, 2]], dtype=torch.long),
+        is_continuous_mask=torch.tensor([[False, True, True]]),
+    )
+
+    expected = torch.tensor(
+        [
+            [22.0, 22.0],
+            [23.0, 23.0],
+            [24.0, 24.0],
+            [
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 99.0,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 99.0,
+            ],
+        ]
+    )
+    assert torch.equal(outputs, expected)
+
+
+def test_kimi_audio_forward_supports_interleaved_decode_between_prompts():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+    model.language_model = _FakeLanguageModel()
+
+    outputs = KimiAudioForConditionalGeneration.forward(
+        model,
+        input_ids=torch.tensor([0, 0, 99, 0, 0], dtype=torch.int32),
+        positions=torch.tensor([0, 1, 4, 0, 1], dtype=torch.long),
+        audio_token_ids=[
+            torch.tensor([10, 11], dtype=torch.long),
+            torch.tensor([20, 21], dtype=torch.long),
+        ],
+        text_token_ids=[
+            torch.tensor([1, 1], dtype=torch.long),
+            torch.tensor([2, 2], dtype=torch.long),
+        ],
+        is_continuous_mask=[
+            torch.tensor([False, True]),
+            torch.tensor([False, True]),
+        ],
+    )
+
+    expected = torch.tensor(
+        [
+            [11.0, 11.0],
+            [12.0, 12.0],
+            [
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 99.0,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 99.0,
+            ],
+            [22.0, 22.0],
+            [23.0, 23.0],
+        ]
+    )
+    assert torch.equal(outputs, expected)
+
+
+def test_kimi_audio_forward_uses_runtime_request_boundaries():
+    model = object.__new__(KimiAudioForConditionalGeneration)
+    model.language_model = _FakeLanguageModel()
+    full_audio_ids = torch.cat(
+        [
+            torch.full((176,), 7, dtype=torch.long),
+            torch.tensor([20, 21, 22, 23], dtype=torch.long),
+        ]
+    )
+    full_text_ids = torch.cat(
+        [
+            torch.full((176,), 3, dtype=torch.long),
+            torch.tensor([2, 2, 2, 2], dtype=torch.long),
+        ]
+    )
+    full_continuous_mask = torch.cat(
+        [
+            torch.zeros(176, dtype=torch.bool),
+            torch.tensor([False, True, True, False]),
+        ]
+    )
+
+    outputs = KimiAudioForConditionalGeneration.forward(
+        model,
+        input_ids=torch.tensor([91, 92, 93, 0, 0, 0, 0], dtype=torch.int32),
+        positions=torch.tensor([176, 192, 208, 176, 177, 178, 179], dtype=torch.long),
+        audio_token_ids=full_audio_ids.unsqueeze(0),
+        text_token_ids=full_text_ids.unsqueeze(0),
+        is_continuous_mask=full_continuous_mask.unsqueeze(0),
+        runtime_request_num_scheduled_tokens=torch.tensor(
+            [1, 1, 1, 4], dtype=torch.int32
+        ),
+        runtime_request_has_raw_mm_inputs=torch.tensor(
+            [False, False, False, True], dtype=torch.bool
+        ),
+    )
+
+    expected = torch.tensor(
+        [
+            [
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 91.0,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 91.0,
+            ],
+            [
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 92.0,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 92.0,
+            ],
+            [
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 93.0,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK + 93.0,
+            ],
+            [22.0, 22.0],
+            [23.0, 23.0],
+            [24.0, 24.0],
+            [25.0, 25.0],
         ]
     )
     assert torch.equal(outputs, expected)

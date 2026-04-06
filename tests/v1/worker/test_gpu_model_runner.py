@@ -162,6 +162,112 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
     )
 
 
+def test_extract_mm_kwargs_includes_cached_prompt_requests(monkeypatch):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_multimodal_raw_input_only_model = True
+    runner.device = torch.device("cpu")
+    runner.pin_memory = False
+    runner.model = SimpleNamespace(builds_multimodal_inputs_embeds_in_forward=True)
+    runner.input_batch = SimpleNamespace(
+        req_ids=["cached_prompt", "new_prompt", "cached_decode"]
+    )
+
+    cached_prompt_data = {"audio_token_ids": torch.tensor([11], dtype=torch.long)}
+    new_prompt_data = {"audio_token_ids": torch.tensor([22], dtype=torch.long)}
+    cached_decode_data = {"audio_token_ids": torch.tensor([33], dtype=torch.long)}
+
+    runner.requests = {
+        "cached_prompt": SimpleNamespace(
+            prompt_token_ids=[1, 2, 3, 4],
+            num_computed_tokens=2,
+            mm_features=[
+                SimpleNamespace(modality="audio", data=cached_prompt_data),
+            ],
+        ),
+        "new_prompt": SimpleNamespace(
+            prompt_token_ids=[5, 6, 7],
+            num_computed_tokens=0,
+            mm_features=[
+                SimpleNamespace(modality="audio", data=new_prompt_data),
+            ],
+        ),
+        "cached_decode": SimpleNamespace(
+            prompt_token_ids=[8, 9],
+            num_computed_tokens=2,
+            mm_features=[
+                SimpleNamespace(modality="audio", data=cached_decode_data),
+            ],
+        ),
+    }
+
+    captured_mm_kwargs = []
+
+    def fake_group_and_batch_mm_kwargs(mm_kwargs, device, pin_memory):
+        captured_mm_kwargs.extend(mm_kwargs)
+        yield "audio", len(mm_kwargs), {
+            "audio_token_ids": [item[1]["audio_token_ids"] for item in mm_kwargs]
+        }
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.group_and_batch_mm_kwargs",
+        fake_group_and_batch_mm_kwargs,
+    )
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[
+            NewRequestData(
+                req_id="new_prompt",
+                prompt_token_ids=[5, 6, 7],
+                mm_features=[],
+                sampling_params=None,
+                pooling_params=None,
+                block_ids=([0],),
+                num_computed_tokens=0,
+                lora_request=None,
+            )
+        ],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=["cached_prompt", "cached_decode"],
+            resumed_req_ids=set(),
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[None, None],
+            num_computed_tokens=[2, 2],
+            num_output_tokens=[0, 1],
+        ),
+        num_scheduled_tokens={
+            "cached_prompt": 2,
+            "new_prompt": 3,
+            "cached_decode": 1,
+        },
+        total_num_scheduled_tokens=6,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    mm_kwargs = GPUModelRunner._extract_mm_kwargs(runner, scheduler_output)
+
+    assert captured_mm_kwargs == [
+        ("audio", cached_prompt_data),
+        ("audio", new_prompt_data),
+    ]
+    assert mm_kwargs["audio_token_ids"] == [
+        cached_prompt_data["audio_token_ids"],
+        new_prompt_data["audio_token_ids"],
+    ]
+    assert torch.equal(
+        mm_kwargs["runtime_request_num_scheduled_tokens"],
+        torch.tensor([2, 3, 1], dtype=torch.int32),
+    )
+    assert torch.equal(
+        mm_kwargs["runtime_request_has_raw_mm_inputs"],
+        torch.tensor([True, True, False], dtype=torch.bool),
+    )
+
+
 def _is_req_scheduled(model_runner, req_id: str) -> bool:
     return req_id in model_runner.input_batch.req_id_to_index
 

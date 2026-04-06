@@ -1532,8 +1532,34 @@ class GPUModelRunner(
             return {}
 
         mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
-        for req in scheduler_output.scheduled_new_reqs:
-            for feature in req.mm_features:
+        include_runtime_request_metadata = bool(
+            getattr(
+                self.model,
+                "builds_multimodal_inputs_embeds_in_forward",
+                False,
+            )
+        )
+        runtime_request_num_scheduled_tokens: list[int] = []
+        runtime_request_has_raw_mm_inputs: list[bool] = []
+        for req_id in self.input_batch.req_ids:
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if num_scheduled_tokens <= 0:
+                continue
+
+            if include_runtime_request_metadata:
+                runtime_request_num_scheduled_tokens.append(num_scheduled_tokens)
+
+            req_state = self.requests[req_id]
+            prompt_token_ids = req_state.prompt_token_ids
+            prompt_len = len(prompt_token_ids) if prompt_token_ids is not None else 0
+            needs_raw_mm_inputs = req_state.num_computed_tokens < prompt_len
+            if include_runtime_request_metadata:
+                runtime_request_has_raw_mm_inputs.append(needs_raw_mm_inputs)
+            if not needs_raw_mm_inputs:
+                # Pure decode steps do not need the raw multimodal prompt tensors.
+                continue
+
+            for feature in req_state.mm_features:
                 if feature.data is not None:
                     mm_kwargs.append((feature.modality, feature.data))
 
@@ -1545,6 +1571,18 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
         ):
             mm_kwargs_combined.update(mm_kwargs_batch)
+
+        if include_runtime_request_metadata and runtime_request_num_scheduled_tokens:
+            mm_kwargs_combined["runtime_request_num_scheduled_tokens"] = torch.tensor(
+                runtime_request_num_scheduled_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            mm_kwargs_combined["runtime_request_has_raw_mm_inputs"] = torch.tensor(
+                runtime_request_has_raw_mm_inputs,
+                dtype=torch.bool,
+                device=self.device,
+            )
 
         return mm_kwargs_combined
 
