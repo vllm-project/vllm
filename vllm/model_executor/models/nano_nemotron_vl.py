@@ -601,15 +601,23 @@ class NanoNemotronVLMultiModalProcessor(
             if k != "use_audio_in_video"
         }
 
-        if not (
-            use_audio_in_video
-            and "video" in inputs.mm_data_items
-            and "audio" not in inputs.mm_data_items
-        ):
+        if not (use_audio_in_video and "video" in inputs.mm_data_items):
             return super().apply(inputs, timing_ctx)
 
-        mm_items, audio_items = self._extract_audio_from_videos(inputs.mm_data_items)
-        inputs.mm_data_items = mm_items
+        mm_items = inputs.mm_data_items
+        if "audio" in mm_items:
+            videos = mm_items.get_items("video", VideoProcessorItems)
+            audios = mm_items.get_items("audio", AudioProcessorItems)
+            if len(audios) != len(videos):
+                raise ValueError(
+                    "use_audio_in_video requires equal number of audio and "
+                    f"video items, got num_audios={len(audios)}, "
+                    f"num_videos={len(videos)}"
+                )
+            audio_items = audios.get_all()
+        else:
+            mm_items, audio_items = self._extract_audio_from_videos(mm_items)
+            inputs.mm_data_items = mm_items
 
         prompt = inputs.prompt
         tokenizer = self.info.get_tokenizer()

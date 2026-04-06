@@ -3,6 +3,7 @@
 """Tests for Nemotron-Nano-VL's multimodal preprocessing kwargs."""
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -10,6 +11,11 @@ from transformers import PretrainedConfig
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import rescale_image_size
+from vllm.multimodal.parse import (
+    AudioProcessorItems,
+    MultiModalDataItems,
+    VideoProcessorItems,
+)
 from vllm.multimodal.processing import BaseMultiModalProcessor
 
 from ....conftest import ImageTestAssets
@@ -135,3 +141,77 @@ def test_processor_override(
         max_num,
         hf_processor_mm_kwargs,
     )
+
+
+def test_use_audio_in_video_with_prepopulated_audio(monkeypatch: pytest.MonkeyPatch):
+    from vllm.model_executor.models.nano_nemotron_vl import (
+        AUDIO_CONTEXT,
+        NanoNemotronBaseVLMultiModalProcessor,
+        NanoNemotronVLMultiModalProcessor,
+    )
+    from vllm.multimodal.processing.inputs import ProcessorInputs
+
+    processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+
+    class _Tokenizer:
+        def encode(self, text: str, add_special_tokens: bool = False):
+            return text
+
+        def decode(self, prompt, skip_special_tokens: bool = False):
+            return prompt
+
+    tokenizer = _Tokenizer()
+    processor.info = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+
+    mm_items = MultiModalDataItems(
+        {
+            "video": VideoProcessorItems(
+                data=[object()],
+                metadata=[{"fps": 2, "frames_indices": [0]}],
+            ),
+            "audio": AudioProcessorItems([object()]),
+        }
+    )
+
+    def fail_super_apply(self, processor_inputs, timing_ctx=None):
+        raise AssertionError("Expected Nemotron use_audio_in_video fast-path")
+
+    monkeypatch.setattr(
+        NanoNemotronBaseVLMultiModalProcessor,
+        "apply",
+        fail_super_apply,
+    )
+
+    def fake_apply_hf_processor(processor_inputs, timing_ctx=None):
+        assert processor_inputs.prompt == f"This is a video:\n<video>{AUDIO_CONTEXT}"
+        return (
+            [1, 2, 3],
+            SimpleNamespace(kwargs={}, prompt_updates={}, hashes={}),
+            False,
+        )
+
+    class _Placeholder:
+        def to_range(self):
+            return None
+
+    def fake_maybe_apply_prompt_updates(
+        mm_items, prompt_ids, mm_kwargs, mm_prompt_updates, is_update_applied
+    ):
+        return prompt_ids, {
+            "video": [_Placeholder()],
+            "audio": [_Placeholder()],
+        }
+
+    processor._apply_hf_processor = fake_apply_hf_processor
+    processor._maybe_apply_prompt_updates = fake_maybe_apply_prompt_updates
+
+    processed_inputs = processor.apply(
+        ProcessorInputs(
+            prompt="<video>",
+            mm_data_items=mm_items,
+            hf_processor_mm_kwargs={"use_audio_in_video": True},
+        )
+    )
+
+    assert processed_inputs["prompt_token_ids"] == [1, 2, 3]
+    assert set(processed_inputs["mm_placeholders"]) == {"video", "audio"}
