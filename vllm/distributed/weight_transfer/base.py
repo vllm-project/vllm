@@ -44,6 +44,22 @@ class WeightTransferInitRequest:
 
 
 @dataclass
+class WeightTransferStartRequest:
+    """API-level request to start a weight update sequence."""
+
+    is_checkpoint_format: bool = True
+    """Whether incoming weights are in checkpoint format (need layerwise
+    processing) or kernel format (direct copy)."""
+
+
+@dataclass
+class WeightTransferFinishRequest:
+    """API-level request to finish a weight update sequence."""
+
+    pass
+
+
+@dataclass
 class WeightTransferUpdateRequest:
     """API-level weight update request."""
 

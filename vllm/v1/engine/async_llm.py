@@ -15,7 +15,9 @@ import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
+    WeightTransferFinishRequest,
     WeightTransferInitRequest,
+    WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -1052,6 +1054,16 @@ class AsyncLLM(EngineClient):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
+    async def start_weight_update(self, request: WeightTransferStartRequest) -> None:
+        """Start a new weight update sequence."""
+        if not isinstance(request, WeightTransferStartRequest):
+            raise TypeError(f"Expected WeightTransferStartRequest, got {type(request)}")
+
+        await self.collective_rpc(
+            "start_weight_update",
+            kwargs={"is_checkpoint_format": request.is_checkpoint_format},
+        )
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
         Batched weight update for RL training.
@@ -1070,3 +1082,12 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}
         )
+
+    async def finish_weight_update(self, request: WeightTransferFinishRequest) -> None:
+        """Finish the current weight update sequence."""
+        if not isinstance(request, WeightTransferFinishRequest):
+            raise TypeError(
+                f"Expected WeightTransferFinishRequest, got {type(request)}"
+            )
+
+        await self.collective_rpc("finish_weight_update")

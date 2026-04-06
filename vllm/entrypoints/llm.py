@@ -38,7 +38,9 @@ from vllm.config.quantization import (
     OnlineQuantizationConfigArgs,
 )
 from vllm.distributed.weight_transfer.base import (
+    WeightTransferFinishRequest,
     WeightTransferInitRequest,
+    WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import EngineArgs
@@ -1873,6 +1875,24 @@ class LLM:
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
+    def start_weight_update(self, request: WeightTransferStartRequest | dict) -> None:
+        """
+        Start a new weight update sequence.
+
+        Args:
+            request: Weight transfer start request with is_checkpoint_format
+        """
+        is_checkpoint_format = (
+            request["is_checkpoint_format"]
+            if isinstance(request, dict)
+            else request.is_checkpoint_format
+        )
+
+        self.llm_engine.collective_rpc(
+            "start_weight_update",
+            kwargs={"is_checkpoint_format": is_checkpoint_format},
+        )
+
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
         Update the weights of the model.
@@ -1887,6 +1907,14 @@ class LLM:
         self.llm_engine.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}
         )
+
+    def finish_weight_update(
+        self, request: WeightTransferFinishRequest | dict | None = None
+    ) -> None:
+        """
+        Finish the current weight update sequence.
+        """
+        self.llm_engine.collective_rpc("finish_weight_update")
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

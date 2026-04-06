@@ -43,7 +43,9 @@ import vllm
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
+    WeightTransferFinishRequest,
     WeightTransferInitRequest,
+    WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
@@ -298,6 +300,11 @@ async def main():
     names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
     print(f"[sync] Got metadata for {len(names)} parameters.")
 
+    print("[sync] Starting weight update...")
+    await engine.start_weight_update(
+        WeightTransferStartRequest(is_checkpoint_format=True)
+    )
+
     print("[sync] Broadcasting weights from FSDP → vLLM...")
     broadcast_handles = [
         w.gather_and_broadcast_weights.remote(packed=True) for w in fsdp_workers
@@ -315,6 +322,8 @@ async def main():
         )
     )
     ray.get(broadcast_handles)
+
+    await engine.finish_weight_update(WeightTransferFinishRequest())
     print("[sync] Weight broadcast complete.")
 
     print("[sync] Resuming generation...")

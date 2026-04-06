@@ -933,6 +933,13 @@ class Worker(WorkerBase):
             model_config=self.model_config,
         )
 
+    def _check_weight_transfer_engine(self) -> None:
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. "
+                "Please set weight_transfer_config to enable weight transfer."
+            )
+
     def init_weight_transfer_engine(self, init_info: dict) -> None:
         """
         Initialize weight transfer mechanism.
@@ -941,26 +948,53 @@ class Worker(WorkerBase):
         Args:
             init_info: Dictionary containing backend-specific initialization info
         """
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. "
-                "Please set weight_transfer_config to enable weight transfer."
-            )
+        self._check_weight_transfer_engine()
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        """
+        Start a new weight update sequence.
+
+        Prepares the model for receiving weights. For checkpoint format,
+        this runs initialize_layerwise_reload. For kernel format, this is
+        a no-op but must still be called for consistency.
+
+        Args:
+            is_checkpoint_format: Whether incoming weights are in checkpoint
+                format (need layerwise processing) or kernel format (direct
+                copy). Stored as state for finish_weight_update.
+        """
+        self._check_weight_transfer_engine()
+
+        # Store state so update_weights/finish_weight_update can check
+        self._is_checkpoint_format = is_checkpoint_format
+        self._weight_update_active = True
+
+        if is_checkpoint_format:
+            from vllm.model_executor.model_loader.reload import (
+                initialize_layerwise_reload,
+            )
+
+            model = self.model_runner.model
+            with torch.device(self.device):
+                initialize_layerwise_reload(model)
+
     def update_weights(self, update_info: dict) -> None:
         """
-        Batched weight update from the trainer.
+        Receive weights from the trainer (one or more chunks).
+
+        Must be called between start_weight_update and finish_weight_update.
 
         Args:
             update_info: Dictionary containing backend-specific update info
         """
-        if self.weight_transfer_engine is None:
+        self._check_weight_transfer_engine()
+
+        if not getattr(self, "_weight_update_active", False):
             raise RuntimeError(
-                "Weight transfer not configured. "
-                "Please set weight_transfer_config to enable weight transfer."
+                "start_weight_update must be called before update_weights."
             )
 
         # Parse dict into backend-specific typed dataclass
@@ -969,19 +1003,10 @@ class Worker(WorkerBase):
         model = self.model_runner.model
 
         if typed_update_info.is_checkpoint_format:
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-                initialize_layerwise_reload,
+            self.weight_transfer_engine.receive_weights(
+                typed_update_info,
+                load_weights=model.load_weights,
             )
-
-            # Use layerwise reload pattern for checkpoint format weights
-            with torch.device(self.device):
-                initialize_layerwise_reload(model)
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
-                )
-                finalize_layerwise_reload(model, self.model_config)
         else:
             # Weights are already in kernel format, copy directly
             def load_weights_direct(
@@ -999,6 +1024,34 @@ class Worker(WorkerBase):
         # NCCL broadcast/packed path are asynchronous.
         # Sync here so the next step uses the new weights.
         torch.accelerator.synchronize()
+
+    def finish_weight_update(self) -> None:
+        """
+        Finish the current weight update sequence.
+
+        For checkpoint format, this runs finalize_layerwise_reload.
+        Uses the is_checkpoint_format state stored by start_weight_update.
+        """
+        self._check_weight_transfer_engine()
+
+        if not getattr(self, "_weight_update_active", False):
+            raise RuntimeError(
+                "start_weight_update must be called before finish_weight_update."
+            )
+
+        is_checkpoint_format = self._is_checkpoint_format
+
+        if is_checkpoint_format:
+            from vllm.model_executor.model_loader.reload import (
+                finalize_layerwise_reload,
+            )
+
+            model = self.model_runner.model
+            finalize_layerwise_reload(model, self.model_config)
+
+        # Reset state
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
 
     def shutdown(self) -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
