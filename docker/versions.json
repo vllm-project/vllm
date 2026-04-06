@@ -7,6 +7,9 @@
     "PYTHON_VERSION": {
       "default": "3.12"
     },
+    "UBUNTU_VERSION": {
+      "default": "22.04"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "nvidia/cuda:12.9.1-devel-ubuntu20.04"
     },
@@ -65,7 +68,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.4"
+      "default": "0.6.7"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
@@ -83,7 +86,7 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.3"
+      "default": ">=0.15.7"
     }
   }
 }

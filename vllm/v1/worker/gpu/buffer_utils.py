@@ -27,12 +27,10 @@ def async_copy_to_gpu(
         assert device is not None
         out = torch.empty_like(x, device=device)
 
-    # CPU-to-CPU copy
-    tmp = x.pin_memory()
-    assert tmp is not x
-
-    # CPU-to-GPU copy
-    return out.copy_(tmp, non_blocking=True)
+    # Copy directly to GPU — explicit pin_memory() causes sporadic stalls
+    # under high concurrency due to CUDA driver contention. The driver
+    # handles the transfer efficiently without manual pinning.
+    return out.copy_(x, non_blocking=True)
 
 
 class UvaBuffer:

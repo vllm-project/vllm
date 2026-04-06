@@ -1,0 +1,44 @@
+group: Spec Decode
+depends_on:
+  - image-build
+steps:
+- label: Spec Decode Eagle
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+
+- label: Spec Decode Speculators + MTP
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/transformers_utils/configs/speculators/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+
+- label: Spec Decode Ngram + Suffix
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
+
+- label: Spec Decode Draft Model
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"

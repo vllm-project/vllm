@@ -16,7 +16,8 @@ import requests
 from openai import InternalServerError, NotFoundError, OpenAI
 from openai_harmony import Message
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     BASE_TEST_ENV,
     events_contain_type,

@@ -4,17 +4,15 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
-from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
-from vllm.entrypoints.utils import (
-    create_error_response,
-    load_aware_call,
-    with_cancellation,
+from vllm.entrypoints.pooling.embed.protocol import (
+    CohereEmbedRequest,
+    EmbeddingRequest,
 )
+from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
+from vllm.entrypoints.utils import load_aware_call, with_cancellation
 
 router = APIRouter()
 
@@ -39,11 +37,27 @@ async def create_embedding(
 ):
     handler = embedding(raw_request)
     if handler is None:
-        error_response = create_error_response(
-            message="The model does not support Embeddings API"
-        )
-        return JSONResponse(
-            content=error_response.model_dump(),
-            status_code=error_response.error.code,
-        )
+        raise NotImplementedError("The model does not support Embeddings API")
+
+    return await handler(request, raw_request)
+
+
+@router.post(
+    "/v2/embed",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_cohere_embedding(
+    request: CohereEmbedRequest,
+    raw_request: Request,
+):
+    handler = embedding(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Embeddings API")
+
     return await handler(request, raw_request)

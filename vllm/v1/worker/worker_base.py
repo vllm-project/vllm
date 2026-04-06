@@ -104,10 +104,6 @@ class WorkerBase:
         """
         raise NotImplementedError
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks."""
-        raise NotImplementedError
-
     def reset_mm_cache(self) -> None:
         reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
         if callable(reset_fn):
@@ -126,7 +122,7 @@ class WorkerBase:
 
         return format_model_inspection(self.get_model())
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError
 
@@ -199,8 +195,8 @@ class WorkerWrapperBase:
         All workers have rpc_rank=0, but they have different ranks in the TP
         group.
         """
-        self.rpc_rank = rpc_rank
-        self.global_rank = self.rpc_rank if global_rank is None else global_rank
+        self.rpc_rank: int = rpc_rank
+        self.global_rank: int = self.rpc_rank if global_rank is None else global_rank
 
         # Initialized after init_worker is called
         self.worker: WorkerBase

@@ -412,6 +412,11 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm")
 
 
+def has_nixl_ep() -> bool:
+    """Whether the optional `nixl_ep` package is available."""
+    return _has_module("nixl_ep")
+
+
 def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
     is_available = _has_module("triton_kernels") or _has_module(
@@ -456,3 +461,8 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+def has_fbgemm_gpu() -> bool:
+    """Whether the optional `fbgemm_gpu` package is available."""
+    return _has_module("fbgemm_gpu")

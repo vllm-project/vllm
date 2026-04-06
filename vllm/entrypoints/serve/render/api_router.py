@@ -9,8 +9,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import create_error_response
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -25,7 +25,7 @@ def render(request: Request) -> OpenAIServingRender | None:
 @router.post(
     "/v1/chat/completions/render",
     dependencies=[Depends(validate_json_request)],
-    response_model=list,
+    response_model=GenerateRequest,
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
@@ -36,13 +36,8 @@ def render(request: Request) -> OpenAIServingRender | None:
 async def render_chat_completion(request: ChatCompletionRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:
-        error = create_error_response(
-            message="The model does not support Chat Completions Render API",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-        )
-        return JSONResponse(
-            status_code=HTTPStatus.NOT_FOUND, content=error.model_dump()
+        raise NotImplementedError(
+            "The model does not support Chat Completions Render API"
         )
 
     result = await handler.render_chat_request(request)
@@ -50,13 +45,13 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result)
+    return JSONResponse(content=result.model_dump())
 
 
 @router.post(
     "/v1/completions/render",
     dependencies=[Depends(validate_json_request)],
-    response_model=list,
+    response_model=list[GenerateRequest],
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
@@ -66,21 +61,14 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
 async def render_completion(request: CompletionRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:
-        error = create_error_response(
-            message="The model does not support Completions Render API",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-        )
-        return JSONResponse(
-            status_code=HTTPStatus.NOT_FOUND, content=error.model_dump()
-        )
+        raise NotImplementedError("The model does not support Completions Render API")
 
     result = await handler.render_completion_request(request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result)
+    return JSONResponse(content=[item.model_dump() for item in result])
 
 
 def attach_router(app: FastAPI) -> None:

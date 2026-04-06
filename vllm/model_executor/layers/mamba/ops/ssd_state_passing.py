@@ -120,7 +120,7 @@ def _state_passing_fwd(
     )
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE"]), batch, nheads)
-    with torch.cuda.device(states.device.index):
+    with torch.accelerator.device_index(states.device.index):
         _state_passing_fwd_kernel[grid](
             states_ptr=states,
             out_ptr=out,

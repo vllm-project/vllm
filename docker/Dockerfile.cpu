@@ -9,17 +9,13 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
+#   vllm-openai-zen: vLLM from source + zentorch from PyPI via vllm[zen]
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
 #
 # Build arguments:
 #   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
-#   VLLM_CPU_DISABLE_AVX512=false (default)|true
-#   VLLM_CPU_AVX2=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AVX512=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AVX512BF16=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AVX512VNNI=false (default)|true (for cross-compilation)
-#   VLLM_CPU_AMXBF16=false (default)|true (for cross-compilation)
+#   VLLM_CPU_X86=false (default)|true (for cross-compilation)
 #   VLLM_CPU_ARM_BF16=false (default)|true (for cross-compilation)
 #
 
@@ -36,7 +32,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
-    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof \
+    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -91,24 +87,9 @@ ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
 ARG GIT_REPO_CHECK=0
-# Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
-ARG VLLM_CPU_DISABLE_AVX512=0
-ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
-# Support for cross-compilation with AVX2 ISA: docker build --build-arg VLLM_CPU_AVX2="1" ...
-ARG VLLM_CPU_AVX2=0
-ENV VLLM_CPU_AVX2=${VLLM_CPU_AVX2}
-# Support for cross-compilation with AVX512 ISA: docker build --build-arg VLLM_CPU_AVX512="1" ...
-ARG VLLM_CPU_AVX512=0
-ENV VLLM_CPU_AVX512=${VLLM_CPU_AVX512}
-# Support for building with AVX512BF16 ISA: docker build --build-arg VLLM_CPU_AVX512BF16="true" ...
-ARG VLLM_CPU_AVX512BF16=0
-ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
-# Support for building with AVX512VNNI ISA: docker build --build-arg VLLM_CPU_AVX512VNNI="true" ...
-ARG VLLM_CPU_AVX512VNNI=0
-ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
-# Support for building with AMXBF16 ISA: docker build --build-arg VLLM_CPU_AMXBF16="true" ...
-ARG VLLM_CPU_AMXBF16=1
-ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
+# Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
+ARG VLLM_CPU_X86=0
+ENV VLLM_CPU_X86=${VLLM_CPU_X86}
 # Support for cross-compilation with ARM BF16 ISA: docker build --build-arg VLLM_CPU_ARM_BF16="true" ...
 ARG VLLM_CPU_ARM_BF16=0
 ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
@@ -116,7 +97,7 @@ ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
 WORKDIR /vllm-workspace
 
 # Validate build arguments - prevent mixing incompatible ISA flags
-RUN if [ "$TARGETARCH" = "arm64" ] && { [ "$VLLM_CPU_AVX2" != "0" ] || [ "$VLLM_CPU_AVX512" != "0" ] || [ "$VLLM_CPU_AVX512BF16" != "0" ] || [ "$VLLM_CPU_AVX512VNNI" != "0" ]; }; then \
+RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
         echo "ERROR: Cannot use x86-specific ISA flags (AVX2, AVX512, etc.) when building for ARM64 (--platform=linux/arm64)"; \
         exit 1; \
     fi && \
@@ -174,13 +155,13 @@ WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get install -y --no-install-recommends vim numactl xz-utils make clangd-14
+    apt-get install -y --no-install-recommends vim numactl clangd-14
 
 RUN ln -s /usr/bin/clangd-14 /usr/bin/clangd
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e tests/vllm_test_utils
+    uv pip install --no-build-isolation -e tests/vllm_test_utils
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
@@ -222,7 +203,8 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install dist/*.whl
+    uv pip install dist/*.whl && \
+    uv pip install "vllm[audio]"
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"
@@ -232,23 +214,29 @@ LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm"
 
 # Build configuration labels
 ARG TARGETARCH
-ARG VLLM_CPU_DISABLE_AVX512
-ARG VLLM_CPU_AVX2
-ARG VLLM_CPU_AVX512
-ARG VLLM_CPU_AVX512BF16
-ARG VLLM_CPU_AVX512VNNI
-ARG VLLM_CPU_AMXBF16
+ARG VLLM_CPU_X86
 ARG VLLM_CPU_ARM_BF16
 ARG PYTHON_VERSION
 
 LABEL ai.vllm.build.target-arch="${TARGETARCH}"
-LABEL ai.vllm.build.cpu-disable-avx512="${VLLM_CPU_DISABLE_AVX512:-false}"
-LABEL ai.vllm.build.cpu-avx2="${VLLM_CPU_AVX2:-false}"
-LABEL ai.vllm.build.cpu-avx512="${VLLM_CPU_AVX512:-false}"
-LABEL ai.vllm.build.cpu-avx512bf16="${VLLM_CPU_AVX512BF16:-false}"
-LABEL ai.vllm.build.cpu-avx512vnni="${VLLM_CPU_AVX512VNNI:-false}"
-LABEL ai.vllm.build.cpu-amxbf16="${VLLM_CPU_AMXBF16:-false}"
+LABEL ai.vllm.build.cpu-x86="${VLLM_CPU_X86:-false}"
 LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
 LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
+
+ENTRYPOINT ["vllm", "serve"]
+
+
+######################### ZEN CPU PYPI IMAGE #########################
+FROM vllm-openai AS vllm-openai-zen
+
+ARG TARGETARCH
+
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+        echo "ERROR: vllm-openai-amd only supports --platform=linux/amd64"; \
+        exit 1; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "vllm[zen]"
 
 ENTRYPOINT ["vllm", "serve"]

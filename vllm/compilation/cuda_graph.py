@@ -16,7 +16,11 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
@@ -185,6 +189,7 @@ class CUDAGraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
         # need to initialize a CUDAGraphWrapper.
@@ -207,10 +212,12 @@ class CUDAGraphWrapper:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(
-            f"Attribute {key} not exists in the runnable of "
-            f"cudagraph wrapper: {self.runnable}"
-        )
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of "
+                f"cudagraph wrapper: {self._runnable_str}"
+            )
+        raise AttributeError
 
     def unwrap(self) -> Callable[..., Any]:
         # in case we need to access the original runnable.
@@ -224,6 +231,12 @@ class CUDAGraphWrapper:
         self.concrete_cudagraph_entries.clear()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any | None:
+        if not is_forward_context_available():
+            # No forward context means we are outside the normal
+            # inference path (e.g. a vision encoder forward pass).
+            # Just run the underlying function without cudagraphs.
+            return self.runnable(*args, **kwargs)
+
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode

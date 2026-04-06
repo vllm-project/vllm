@@ -151,7 +151,7 @@ class nccl_symm_mem_context:
             self.pynccl_comm = pynccl_comm
             self._mem_pool_ctx = torch.cuda.use_mem_pool(get_nccl_mem_pool())
             self.is_graph_capture = torch.cuda.is_current_stream_capturing()
-            self.device = torch.cuda.current_device()
+            self.device = torch.accelerator.current_device_index()
 
     def __enter__(self):
         if self.disabled:

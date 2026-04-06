@@ -7,6 +7,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from .base_linear import BaseLinearLayerWithLoRA
@@ -55,7 +56,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is ReplicatedLinear
+        return type(source_layer) is maybe_get_oot_by_class(ReplicatedLinear)
 
     def slice_lora_a(
         self, lora_a: torch.Tensor | list[torch.Tensor | None]

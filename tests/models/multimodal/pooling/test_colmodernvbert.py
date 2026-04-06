@@ -10,11 +10,15 @@ embeddings for visual document retrieval.
 import pytest
 import torch
 
-from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
 MODEL_NAME = "ModernVBERT/colmodernvbert-merged"
 COLBERT_DIM = 128
 DTYPE = "half"
+# Fixme:
+#  Update colmodernvbert code to support the latest HF version
+#  and remove revision set.
+REVISION = "4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee"
 
 
 # -----------------------------------------------------------------------
@@ -26,6 +30,7 @@ def test_colmodernvbert_text_token_embed(vllm_runner):
     """Text query produces per-token embeddings with shape (seq_len, 128)."""
     with vllm_runner(
         MODEL_NAME,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
@@ -49,6 +54,7 @@ def test_colmodernvbert_text_relevance_ordering(vllm_runner):
 
     with vllm_runner(
         MODEL_NAME,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
@@ -66,6 +72,7 @@ def test_colmodernvbert_text_late_interaction(vllm_runner):
 
     with vllm_runner(
         MODEL_NAME,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,
@@ -92,6 +99,7 @@ def test_colmodernvbert_image_token_embed(vllm_runner, image_assets):
     """Image input produces per-token embeddings including vision tokens."""
     with vllm_runner(
         MODEL_NAME,
+        revision=REVISION,
         runner="pooling",
         dtype=DTYPE,
         enforce_eager=True,

@@ -105,7 +105,6 @@ plugins:
           - https://pillow.readthedocs.io/en/stable/objects.inv
           - https://numpy.org/doc/stable/objects.inv
           - https://pytorch.org/docs/stable/objects.inv
-          - https://psutil.readthedocs.io/en/stable/objects.inv
   - redirects:
       redirect_maps:
         features/spec_decode/README.md: features/speculative_decoding/README.md
@@ -146,7 +145,6 @@ extra_css:
   - mkdocs/stylesheets/extra.css
 
 extra_javascript:
-  - mkdocs/javascript/reo.js
   - mkdocs/javascript/run_llm_widget.js
   - mkdocs/javascript/mathjax.js
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js

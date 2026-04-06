@@ -39,6 +39,12 @@ When run, benchmark script generates results under **benchmark/results** folder,
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
 - `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
+- `PROMPTS_PER_CONCURRENCY`: Multiplier to compute `num_prompts` for serving tests (`num_prompts = max_concurrency × value`). Overrides JSON `num_prompts`. Default is NULL.
+- `ENABLE_ADAPTIVE_CONCURRENCY`: set the value to '1' to enable adaptive SLA-based concurrency search after the static serving max_concurrency sweep. Default value is 0.
+- `SLA_TTFT_MS`: default TTFT SLA threshold in milliseconds for adaptive concurrency search. Default value is 3000.
+- `SLA_TPOT_MS`: default TPOT SLA threshold in milliseconds for adaptive concurrency search. Default value is 100.
+- `ADAPTIVE_MAX_PROBES`: maximum number of extra adaptive search probes. Default value is 8.
+- `ADAPTIVE_MAX_CONCURRENCY`: maximum allowed concurrency during adaptive search. Default value is 1024.
 
 ### Visualization
 

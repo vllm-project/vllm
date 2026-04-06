@@ -5,24 +5,29 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
+    init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.dp_utils import get_cudagraph_and_dp_padding
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+)
+from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
-from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -75,21 +80,65 @@ class EagleSpeculator:
             device=device,
         )
 
-        self.cudagraph_manager = EagleCudaGraphManager(vllm_config, device)
+        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
+            self.draft_model_config
+        )
+        if self.supports_mm_inputs:
+            self.inputs_embeds = torch.zeros(
+                self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+            )
+
+        self.draft_logits: torch.Tensor | None = None
+        if self.speculative_config.rejection_sample_method == "probabilistic":
+            self.draft_logits = torch.zeros(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.vocab_size,
+                dtype=torch.float32,
+                device=device,
+            )
+
+        # currently we don't  support PIECEWISE for Eagle.
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        else:
+            cudagraph_mode = CUDAGraphMode.NONE
+
+        self.cudagraph_manager = EagleCudaGraphManager(
+            vllm_config, device, cudagraph_mode, self.draft_tokens
+        )
 
     def load_model(self, target_model: nn.Module) -> None:
+        target_attn_layer_names = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        ).keys()
+
         self.model = load_eagle_model(target_model, self.vllm_config)
+
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        ).keys()
+        self.draft_attn_layer_names = set(all_attn_layers) - set(
+            target_attn_layer_names
+        )
 
     def set_attn(
         self,
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
-        attn_groups: list[list[AttentionGroup]],
         block_tables: BlockTables,
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        self.attn_groups = attn_groups
+        _, self.attn_groups = init_attn_backend(
+            kv_cache_config,
+            self.vllm_config,
+            self.device,
+            active_layer_names=self.draft_attn_layer_names,
+        )
         self.block_tables = block_tables
 
     @torch.inference_mode()
@@ -100,6 +149,7 @@ class EagleSpeculator:
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -111,10 +161,25 @@ class EagleSpeculator:
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
         ):
+            inputs_embeds = None
+            if self.supports_mm_inputs:
+                # Merge multimodal embeddings with input ids.
+                mm_embeds, is_mm_embed = mm_inputs or (None, None)
+                num_input_tokens = (
+                    is_mm_embed.shape[0] if is_mm_embed is not None else num_tokens
+                )
+                self.inputs_embeds[:num_input_tokens] = self.model.embed_input_ids(
+                    self.input_buffers.input_ids[:num_input_tokens],
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
+                inputs_embeds = self.inputs_embeds[:num_tokens]
+
             ret_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
+                inputs_embeds=inputs_embeds,
             )
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
@@ -157,6 +222,9 @@ class EagleSpeculator:
                 self.seeds,
                 pos + 1,
                 apply_temperature=True,
+                processed_logits_out=self.draft_logits[:, step]
+                if self.draft_logits is not None
+                else None,
             )
             self.draft_tokens[:num_reqs, step] = draft_tokens
 
@@ -171,8 +239,68 @@ class EagleSpeculator:
                 )
                 if attn_metadata is not None:
                     self.block_tables.compute_slot_mappings(
-                        idx_mapping, query_start_loc, pos
+                        idx_mapping, query_start_loc, pos, num_tokens_padded
                     )
+
+    def _dispatch_and_sync_dp(
+        self,
+        cudagraph_manager: EagleCudaGraphManager,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+    ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+        batch_desc = cudagraph_manager.dispatch(
+            num_reqs, num_tokens, uniform_token_count
+        )
+        num_tokens_across_dp = None
+        if self.dp_size > 1:
+            batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
+                cudagraph_manager,
+                batch_desc,
+                num_tokens,
+                num_reqs,
+                uniform_token_count,
+                self.dp_size,
+                self.dp_rank,
+            )
+        return batch_desc, num_tokens_across_dp
+
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        max_query_len: int,
+    ) -> dict[str, Any] | None:
+        if not self.draft_attn_layer_names:
+            return None
+
+        query_start_loc_cpu = (
+            torch.arange(num_reqs_padded + 1, dtype=torch.int32, device="cpu").clamp_(
+                max=num_reqs
+            )
+            * max_query_len
+        )
+        block_tables = [
+            x[:num_reqs_padded] for x in self.block_tables.input_block_tables
+        ]
+        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
+        attn_metadata = build_attn_metadata(
+            attn_groups=self.attn_groups,
+            num_reqs=num_reqs_padded,
+            num_tokens=num_tokens_padded,
+            query_start_loc_gpu=self.input_buffers.query_start_loc[
+                : num_reqs_padded + 1
+            ],
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+            max_seq_len=self.max_model_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=self.kv_cache_config,
+        )
+        return attn_metadata
 
     def capture_model(self) -> None:
         if self.num_speculative_steps == 1:
@@ -185,6 +313,7 @@ class EagleSpeculator:
             self.block_tables,
             self.attn_groups,
             self.kv_cache_config,
+            progress_bar_desc="Capturing eagle CUDA graphs",
         )
 
     @torch.inference_mode()
@@ -212,6 +341,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -246,6 +376,7 @@ class EagleSpeculator:
             attn_metadata,
             slot_mappings,
             num_tokens_across_dp=num_tokens_across_dp,
+            mm_inputs=mm_inputs,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -260,6 +391,7 @@ class EagleSpeculator:
         idx_mapping.copy_(input_batch.idx_mapping)
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
+
         # Gather the values and copy them to the pre-allocated buffers.
         pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
@@ -272,7 +404,11 @@ class EagleSpeculator:
             self.seeds,
             pos + 1,
             apply_temperature=True,
+            processed_logits_out=self.draft_logits[:, 0]
+            if self.draft_logits is not None
+            else None,
         )
+
         if self.num_speculative_steps == 1:
             # Early exit.
             return draft_tokens.view(-1, 1)
@@ -292,65 +428,49 @@ class EagleSpeculator:
             self.max_num_reqs,
         )
 
-        if not (dummy_run and skip_attn_for_dummy_run):
-            query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-            slot_mappings = self.block_tables.compute_slot_mappings(
-                idx_mapping, query_start_loc, pos
-            )
-
-        cudagraph_mode, cudagraph_size = (
-            self.cudagraph_manager.get_cudagraph_runtime_mode(num_reqs)
+        # Each request produces exactly 1 token per draft decode step,
+        # enabling FULL cudagraph.
+        decode_batch_desc, num_tokens_across_dp = self._dispatch_and_sync_dp(
+            self.cudagraph_manager,
+            num_reqs,
+            num_reqs,
+            uniform_token_count=1,
         )
-        num_tokens_padded, num_tokens_across_dp, synced_cudagraph_mode = (
-            get_cudagraph_and_dp_padding(
-                num_reqs,
-                cudagraph_size,
-                cudagraph_mode.value,
-                self.dp_size,
-                self.dp_rank,
-            )
-        )
-        cudagraph_mode = CUDAGraphMode(synced_cudagraph_mode)
-        if cudagraph_mode == CUDAGraphMode.FULL:
-            # Run full CUDA graph.
-            self.cudagraph_manager.run_fullgraph(num_tokens_padded)
-            return self.draft_tokens[:num_reqs]
 
-        # Run eager or piecewise CUDA graph.
         attn_metadata_updated = None
         slot_mappings_updated = None
         if not (dummy_run and skip_attn_for_dummy_run):
-            query_start_loc_cpu = torch.arange(
-                num_reqs + 1, dtype=torch.int32, device="cpu"
-            )
-            block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
-
-            # FIXME(woosuk): This is UNSAFE!!
-            attn_metadata_updated = build_attn_metadata(
-                attn_groups=self.attn_groups,
-                num_reqs=num_reqs,
-                num_tokens=num_reqs,
-                query_start_loc_gpu=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                max_query_len=1,
-                seq_lens=self.input_buffers.seq_lens[:num_reqs],
-                max_seq_len=self.max_model_len,
-                block_tables=block_tables,
-                slot_mappings=slot_mappings,
-                kv_cache_config=self.kv_cache_config,
+            # Build attention metadata and slot mappings for the draft
+            # decode steps. It is necessary to rebuild the attention
+            # metadata even when replaying the FULL cudagraph so that
+            # any attention metadata builder state is updated.
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                idx_mapping,
+                self.input_buffers.query_start_loc[: num_reqs + 1],
+                pos,
+                decode_batch_desc.num_tokens,
             )
             slot_mappings_updated = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
+            attn_metadata_updated = self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=decode_batch_desc.num_reqs or num_reqs,
+                num_tokens_padded=decode_batch_desc.num_tokens,
+                max_query_len=1,
+            )
 
-        self.generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata_updated,
-            slot_mappings_updated,
-            num_tokens_across_dp=num_tokens_across_dp,
-            cudagraph_runtime_mode=cudagraph_mode,
-        )
+        if decode_batch_desc.cg_mode == CUDAGraphMode.FULL:
+            self.cudagraph_manager.run_fullgraph(decode_batch_desc)
+        else:
+            self.generate_draft(
+                num_reqs,
+                decode_batch_desc.num_tokens,
+                attn_metadata_updated,
+                slot_mappings_updated,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=decode_batch_desc.cg_mode,
+            )
         return self.draft_tokens[:num_reqs]
 
 

@@ -32,6 +32,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "ernie45_reasoning_parser",
         "Ernie45ReasoningParser",
     ),
+    "gemma4": (
+        "gemma4_reasoning_parser",
+        "Gemma4ReasoningParser",
+    ),
     "glm45": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
@@ -67,6 +71,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "mistral": (
         "mistral_reasoning_parser",
         "MistralReasoningParser",
+    ),
+    "nemotron_v3": (
+        "nemotron_v3_reasoning_parser",
+        "NemotronV3ReasoningParser",
     ),
     "olmo3": (
         "olmo3_reasoning_parser",
