@@ -173,7 +173,6 @@ class TileGemm82FP8 {
     static_assert(0 < M && M <= 8);
 
     uint8_t* __restrict__ curr_b_0 = b_tile;
-    uint8_t* __restrict__ curr_b_1 = b_tile + 16;
     float* __restrict__ curr_c_0 = c_tile;
     float* __restrict__ curr_c_1 = c_tile + 16;
 
@@ -190,13 +189,12 @@ class TileGemm82FP8 {
     }
 
     float* __restrict__ curr_a = a_tile;
-    // Precompute combined scale (user scale × 2^120 bias correction) so it
-    // is hoisted out of the k-loop regardless of AVX-512 availability.
-    const float scale_2p120 = scale * 0x1p120f;
+    const float scale_2p8 = scale * 0x1p8f;
     for (int32_t k = 0; k < dynamic_k_size; ++k) {
       // Dequantize 32 FP8 bytes (two groups of 16) to float32.
-      vec_op::FP32Vec16 fp32_b_0_reg(curr_b_0, scale_2p120);
-      vec_op::FP32Vec16 fp32_b_1_reg(curr_b_1, scale_2p120);
+      vec_op::BF16Vec32 fp16_b_reg(curr_b_0, scale_2p8);
+      vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, scale_2p8, 0);
+      vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, scale_2p8, 1);
 
       float* __restrict__ curr_m_a = curr_a;
       vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
@@ -209,7 +207,6 @@ class TileGemm82FP8 {
 
       curr_a += 1;
       curr_b_0 += ldb;
-      curr_b_1 += ldb;
     }
 
     vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
