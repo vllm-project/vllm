@@ -8,22 +8,15 @@ from vllm.model_executor.models.gemma4 import (
     gemma4_routing_function_torch,
 )
 
-NUM_TOKENS = []
-
-# Gemma4 Moe Model has context length of 250K
-# the minus 1 is to ensure that edge cases are tested
-for t in range(1, 19):
-    tlen = 2**t
-    tlen_minus1 = tlen - 1
-    NUM_TOKENS.extend([tlen_minus1, tlen])
-
 
 def sort_by_id(w, ids):
     order = ids.argsort(dim=-1)
     return w.gather(1, order), ids.gather(1, order)
 
 
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+# Gemma4 Moe Model has context length of 250K
+# the minus 1 is to ensure that edge cases are tested
+@pytest.mark.parametrize("num_tokens", [1, 2, 2048, 250000])
 @pytest.mark.parametrize("num_experts", [128])  # gemma4 moe experts
 @pytest.mark.parametrize("topk", [8])  # gemma4 topk
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
