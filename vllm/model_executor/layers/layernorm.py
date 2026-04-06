@@ -241,8 +241,12 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         if residual is None:
+            # TODO(luka): address the weight=None passing issue more generally
             return ir.ops.rms_norm(
-                x, self.weight.data, self.variance_epsilon, self.variance_size_override
+                x,
+                self.weight.data if self.has_weight else None,
+                self.variance_epsilon,
+                self.variance_size_override,
             )
 
         return self.forward_static(
@@ -559,6 +563,11 @@ class RMSNormGated(CustomOp):
             norm_before_gate=self.norm_before_gate,
             activation=self.activation,
         )
+
+    def forward_xpu(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.forward_cuda(x, z)
 
 
 class LayerNorm(nn.Module):

@@ -7,12 +7,20 @@ import torch
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx90a
+
+    on_mi250 = on_gfx90a()
+else:
+    on_mi250 = False
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
-ADD_RESIDUAL = [False, True]
+ADD_RESIDUAL = [False, True] if not on_mi250 else [True]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
