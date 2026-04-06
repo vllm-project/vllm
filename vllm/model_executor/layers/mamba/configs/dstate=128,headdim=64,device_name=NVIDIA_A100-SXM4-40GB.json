@@ -1,0 +1,4 @@
+{
+    "BLOCK_SIZE_M": 16,
+    "num_warps": 4
+}
