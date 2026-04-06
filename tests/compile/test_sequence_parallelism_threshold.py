@@ -13,9 +13,9 @@ from vllm.compilation.passes.fusion.sequence_parallelism import (
 class TestGetSequenceParallelismThreshold:
     """Tests for get_sequence_parallelism_threshold function."""
 
-    def test_non_cuda_returns_none(self, mock_cuda_platform):
-        """Non-CUDA platforms should return None."""
-        with mock_cuda_platform(is_cuda=False):
+    def test_non_cuda_alike_returns_none(self, mock_cuda_platform):
+        """Non-CUDA-alike platforms should return None."""
+        with mock_cuda_platform(is_cuda=False, is_cuda_alike=False):
             result = get_sequence_parallelism_threshold(
                 hidden_size=8192, tp_size=2, element_size=2
             )
@@ -108,3 +108,101 @@ class TestGetSequenceParallelismThreshold:
                 element_size=2,
             )
             assert result is not None
+
+
+class TestGetSequenceParallelismThresholdROCm:
+    """Tests for get_sequence_parallelism_threshold on ROCm platforms."""
+
+    def test_mi300x_gfx942_returns_threshold(self, mock_cuda_platform):
+        """MI300X (gfx942, capability 9.4) should return a calculated threshold."""
+        with mock_cuda_platform(is_cuda=False, is_cuda_alike=True, capability=(9, 4)):
+            hidden_size = 7168
+            tp_size = 8
+            element_size = 2
+
+            result = get_sequence_parallelism_threshold(
+                hidden_size=hidden_size,
+                tp_size=tp_size,
+                element_size=element_size,
+            )
+
+            MiB = 1024 * 1024
+            expected = int(
+                (SP_MIN_PER_GPU_SIZE_MB[94] * tp_size * MiB)
+                // (hidden_size * element_size)
+            )
+            assert result == expected
+
+    def test_mi355x_gfx950_returns_threshold(self, mock_cuda_platform):
+        """MI355X (gfx950, capability 9.5) should return a calculated threshold."""
+        with mock_cuda_platform(is_cuda=False, is_cuda_alike=True, capability=(9, 5)):
+            hidden_size = 7168
+            tp_size = 4
+            element_size = 2
+
+            result = get_sequence_parallelism_threshold(
+                hidden_size=hidden_size,
+                tp_size=tp_size,
+                element_size=element_size,
+            )
+
+            MiB = 1024 * 1024
+            expected = int(
+                (SP_MIN_PER_GPU_SIZE_MB[95] * tp_size * MiB)
+                // (hidden_size * element_size)
+            )
+            assert result == expected
+
+    def test_mi355x_small_hidden_size_returns_none(self, mock_cuda_platform):
+        """MI355X with hidden_size below threshold should return None."""
+        with mock_cuda_platform(is_cuda=False, is_cuda_alike=True, capability=(9, 5)):
+            result = get_sequence_parallelism_threshold(
+                hidden_size=4096,
+                tp_size=4,
+                element_size=2,
+            )
+            assert result is None
+
+    def test_mi355x_hidden_size_boundary(self, mock_cuda_platform):
+        """Test boundary at the exact hidden_size threshold for MI355X."""
+        with mock_cuda_platform(is_cuda=False, is_cuda_alike=True, capability=(9, 5)):
+            # Just below threshold
+            result = get_sequence_parallelism_threshold(
+                hidden_size=SP_MIN_HIDDEN_SIZE[95] - 1,
+                tp_size=4,
+                element_size=2,
+            )
+            assert result is None
+
+            # Exactly at threshold
+            result = get_sequence_parallelism_threshold(
+                hidden_size=SP_MIN_HIDDEN_SIZE[95],
+                tp_size=4,
+                element_size=2,
+            )
+            assert result is not None
+
+    @pytest.mark.parametrize(
+        "capability,cap_int",
+        [
+            ((9, 4), 94),
+            ((9, 5), 95),
+        ],
+    )
+    def test_rocm_tp_scaling(self, mock_cuda_platform, capability, cap_int):
+        """Verify threshold scales with TP size on ROCm."""
+        with mock_cuda_platform(
+            is_cuda=False, is_cuda_alike=True, capability=capability
+        ):
+            hidden_size = SP_MIN_HIDDEN_SIZE[cap_int]
+            element_size = 2
+
+            result_tp2 = get_sequence_parallelism_threshold(
+                hidden_size=hidden_size, tp_size=2, element_size=element_size
+            )
+            result_tp8 = get_sequence_parallelism_threshold(
+                hidden_size=hidden_size, tp_size=8, element_size=element_size
+            )
+            assert result_tp2 is not None
+            assert result_tp8 is not None
+            assert result_tp8 == 4 * result_tp2

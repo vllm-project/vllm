@@ -44,7 +44,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static(untested)\*                   |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | FP16/BF16†                               |
 | `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
 | `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
@@ -54,8 +54,8 @@ The table below lists the quantization schemes supported by each fusion on each 
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
 for per-backend details.
 
-† `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
-other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
+† `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 and ROCm MI300X/MI325X/MI355X today;
+other architectures require setting `PassConfig.sp_min_token_num` explicitly.
 SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
 
 ## Enabling / Disabling Fusions
@@ -192,9 +192,9 @@ pass can fuse the reduce-scatter / all-gather with the surrounding GEMMs.
 
 Sequence Parallelism itself does not directly improve performance; it is a prerequisite for the
 AsyncTP pass (`fuse_gemm_comms`). SP is only applied above a minimum token threshold that is
-autoconfigured based on device capability and model `hidden_size`. Currently only active on
-H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable via
-`PassConfig.sp_min_token_num`.
+autoconfigured based on device capability and model `hidden_size`. Currently autoconfigured on
+H100/SM90 (models with `hidden_size >= 8192`) and ROCm MI300X/MI325X/MI355X (models with
+`hidden_size >= 7168`). The threshold is configurable via `PassConfig.sp_min_token_num`.
 
 The general transformation:
 
@@ -213,7 +213,7 @@ Patterns covered:
 Requires: `use_inductor_graph_partition=True` **or** piecewise compilation with static sizes
 divisible by `tensor_parallel_size`.
 
-Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-gather requires sm90+.
+Supported hardware: NVIDIA CUDA (SM80+) and ROCm (MI300X/MI325X/MI355X). FP8 all-gather requires sm90+.
 
 **Code locations.**
 

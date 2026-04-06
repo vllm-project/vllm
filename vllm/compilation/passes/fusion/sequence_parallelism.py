@@ -29,15 +29,21 @@ logger = init_logger(__name__)
 
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
+# CUDA: capability 90 = H100, 100 = B200
+# ROCm: capability 94 = MI300X (gfx942), 95 = MI325X/MI355X (gfx950)
 SP_MIN_HIDDEN_SIZE: dict[int, int] = {
-    90: 8192,  # H100: only for models with hidden_size >= 8192
+    90: 8192,
+    94: 7168,
+    95: 7168,
 }
 
 # Min size per GPU per device capability for sequence parallelism
 # Total min size = min_per_gpu_size * tp_size
 # This ensures the threshold scales appropriately with tensor parallelism
 SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
-    90: 8,  # 8MB per GPU for H100
+    90: 8,
+    94: 8,
+    95: 8,
 }
 
 
@@ -58,10 +64,12 @@ def get_sequence_parallelism_threshold(
 
     Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
              (hidden_size * element_size)
+
+    Supported platforms: CUDA (H100+) and ROCm (MI300X/MI325X/MI355X).
     """
     from vllm.platforms import current_platform
 
-    if not current_platform.is_cuda():
+    if not current_platform.is_cuda_alike():
         return None
 
     capability = current_platform.get_device_capability()
@@ -402,7 +410,6 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             FirstAllReduceRMSNormPattern(
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
-
             MiddleAllReduceRMSNormPattern(
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
