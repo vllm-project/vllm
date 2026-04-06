@@ -65,7 +65,7 @@ logger = init_logger(__name__)
 
 
 def get_moe_quant_method(
-    config: "GPTQMarlinConfig",
+    config: "AutoGPTQConfig",
     layer: torch.nn.Module,
     prefix: str,
     moe_method_cls: type,
@@ -91,8 +91,8 @@ def get_moe_quant_method(
     return None
 
 
-class GPTQMarlinConfig(QuantizationConfig):
-    """Config class for GPTQ Marlin"""
+class AutoGPTQConfig(QuantizationConfig):
+    """Config class for AutoGPTQ quantization using Marlin kernels."""
 
     # (num_bits, is_sym) -> quant_type
     TYPE_MAP = {
@@ -164,7 +164,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def __repr__(self) -> str:
         return (
-            f"GPTQMarlinConfig(quant_type={self.quant_type}, "
+            f"AutoGPTQConfig(quant_type={self.quant_type}, "
             f"group_size={self.group_size}, "
             f"desc_act={self.desc_act}, "
             f"lm_head_quantized={self.lm_head_quantized}, "
@@ -174,7 +174,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
-        return "gptq_marlin"
+        return "auto_gptq"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
@@ -182,14 +182,14 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "GPTQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AutoGPTQConfig":
         dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
         dynamic = {} if dynamic is None else dynamic
 
@@ -216,27 +216,18 @@ class GPTQMarlinConfig(QuantizationConfig):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
+        """Override to use AutoGPTQ for compatible GPTQ models."""
         can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
-        is_valid_user_quant = (
-            user_quant is None or user_quant == "marlin" or user_quant == "gptq_marlin"
+        # Accept: no user quant, or user explicitly requested gptq/gptq_marlin/auto_gptq
+        is_valid_user_quant = user_quant is None or user_quant in (
+            "gptq", "gptq_marlin", "auto_gptq", "marlin"
         )
 
         if can_convert and is_valid_user_quant:
-            msg = (
-                "The model is convertible to {} during runtime."
-                " Using {} kernel.".format(cls.get_name(), cls.get_name())
-            )
-            logger.info(msg)
+            logger.info("Using AutoGPTQ quantization with Marlin kernels.")
             return cls.get_name()
 
-        if can_convert and user_quant == "gptq":
-            logger.info(
-                "Detected that the model can run with gptq_marlin"
-                ", however you specified quantization=gptq explicitly,"
-                " so forcing gptq. Use quantization=gptq_marlin for"
-                " faster inference"
-            )
         return None
 
     def get_quant_method(
@@ -329,15 +320,15 @@ class GPTQMarlinConfig(QuantizationConfig):
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
-    """Linear method for GPTQ Marlin.
+    """Linear method for AutoGPTQ using Marlin kernels.
 
     Args:
-        quant_config: The GPTQ Marlin quantization config.
+        quant_config: The AutoGPTQ quantization config.
     """
 
     _kernel_backends_being_used: set[str] = set()
 
-    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+    def __init__(self, quant_config: AutoGPTQConfig) -> None:
         self.quant_config = quant_config
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
@@ -494,7 +485,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
     def __init__(
         self,
-        quant_config: GPTQMarlinConfig,
+        quant_config: AutoGPTQConfig,
         moe: FusedMoEConfig,
     ) -> None:
         super().__init__(moe)
