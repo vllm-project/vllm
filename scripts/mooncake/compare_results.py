@@ -18,7 +18,7 @@ import argparse
 import json
 import os
 
-ALL_BACKENDS = ["baseline", "native", "simple", "mooncake"]
+ALL_BACKENDS = ["baseline", "native", "simple", "mooncake_mem", "mooncake"]
 
 METRICS = [
     ("Output throughput (tok/s)", "output_throughput", ".1f"),
@@ -31,7 +31,7 @@ METRICS = [
     ("Mean E2EL (ms)", "mean_e2el_ms", ".2f"),
 ]
 
-COL_W = 14
+COL_W = 20
 
 
 def pct(old, new):

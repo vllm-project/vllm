@@ -11,10 +11,6 @@
 #   --disk-size    <GB>  Enable disk offloading with the given quota in GB (optional)
 #   --disk-path    <dir> SSD directory for disk offloading (default: /mnt/data/mooncake_offload)
 #
-# Environment variables:
-#   MOONCAKE_LOCAL_BUFFER_GIB  Private Mooncake request buffer in GiB
-#                              (default: 1)
-
 set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,12 +42,6 @@ if [[ -z "$CPU_MEM_GB" ]]; then
     return 1 2>/dev/null || exit 1
 fi
 
-LOCAL_BUFFER_GIB="${MOONCAKE_LOCAL_BUFFER_GIB:-4}"
-if ! [[ "$LOCAL_BUFFER_GIB" =~ ^[0-9]+$ ]] || [[ "$LOCAL_BUFFER_GIB" -lt 1 ]]; then
-    echo "Error: MOONCAKE_LOCAL_BUFFER_GIB must be a positive integer" >&2
-    return 4 2>/dev/null || exit 1
-fi
-
 # --- Mooncake connection pool -----------------------------------------------
 export MC_TCP_ENABLE_CONNECTION_POOL=1
 
@@ -61,20 +51,18 @@ export MOONCAKE_CONFIG_PATH="${MOONCAKE_CONFIG_PATH:-${SCRIPTS_DIR}/mooncake_con
 python3 -c "
 import json, sys
 
-cfg_path, global_size_gb, local_buffer_gb = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg_path, global_size_gb = sys.argv[1], sys.argv[2]
 with open(cfg_path) as f:
     cfg = json.load(f)
 cfg['global_segment_size'] = global_size_gb + 'GB'
-cfg['local_buffer_size'] = local_buffer_gb + 'GB'
 with open(cfg_path, 'w') as f:
     json.dump(cfg, f, indent=2)
     f.write('\n')
-" "$MOONCAKE_CONFIG_PATH" "$CPU_MEM_GB" "$LOCAL_BUFFER_GIB"
+" "$MOONCAKE_CONFIG_PATH" "$CPU_MEM_GB"
 
 echo "Mooncake env configured:"
 echo "  Config:   $MOONCAKE_CONFIG_PATH"
 echo "  CPU mem:  ${CPU_MEM_GB} GB (global segment)"
-echo "  Local buf: ${LOCAL_BUFFER_GIB} GB"
 
 # --- Disk offloading (client-side env vars) ---------------------------------
 if [[ -n "$DISK_GB" ]]; then
@@ -90,7 +78,7 @@ if [[ -n "$DISK_GB" ]]; then
     export MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR="${MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR:-bucket_storage_backend}"
     export MOONCAKE_BUCKET_EVICTION_POLICY="${MOONCAKE_BUCKET_EVICTION_POLICY:-lru}"
     export MOONCAKE_USE_URING="${MOONCAKE_USE_URING:-true}"
-    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES="${MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES:-4294967296}"  # 4 GB staging buffer
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES="${MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES:-1073741824}"  # 1 GB staging buffer
 
     export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES="$DISK_BYTES"
     export MOONCAKE_BUCKET_MAX_TOTAL_SIZE=$(( DISK_BYTES - 42949672960 ))  # 40 GB headroom

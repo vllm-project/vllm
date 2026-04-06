@@ -2,7 +2,7 @@
   "metadata_server": "http://127.0.0.1:8080/metadata",
   "master_server_address": "127.0.0.1:50051",
   "global_segment_size": "600GB",
-  "local_buffer_size": "1GB",
+  "local_buffer_size": "4GB",
   "protocol": "rdma",
   "device_name": ""
 }
