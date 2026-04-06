@@ -76,6 +76,7 @@ ENV UV_LINK_MODE="copy"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/test/xpu.txt,target=/workspace/vllm/requirements/test/xpu.txt \
     uv pip install --upgrade pip && \
     uv pip install -r requirements/xpu.txt && \
     uv pip install grpcio-tools protobuf nanobind && \
