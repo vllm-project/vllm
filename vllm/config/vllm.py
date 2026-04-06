@@ -801,6 +801,15 @@ class VllmConfig:
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
 
+        if (
+            self.speculative_config is not None
+            and self.structured_outputs_config.enable_jump_decoding
+        ):
+            raise ValueError(
+                "Jump-forward decoding cannot be used together with "
+                "speculative decoding."
+            )
+
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (

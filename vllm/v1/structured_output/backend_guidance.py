@@ -161,18 +161,27 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if self.ll_matcher.is_stopped():
             return True
 
-        # TODO - Add jump decoding support in the future:
-        # self.ll_matcher.compute_ff_bytes() - this should always work
-        # self.ll_matcher.compute_ff_tokens() - this only works for
-        #   "canonical" tokenizers
-        # For conversion between the two, see
-        # https://github.com/guidance-ai/llguidance/blob/main/docs/fast_forward.md
-
         r = self.ll_matcher.consume_tokens(tokens)
 
         self.check_error()
 
         return r
+
+    def advance_ff_tokens(self) -> list[int]:
+        """Compute deterministic fast-forward tokens from the grammar.
+
+        After accepting a token, the grammar may force a sequence of
+        tokens that don't require model inference. This returns those
+        tokens and advances the matcher past them.
+        """
+        if self.ll_matcher.is_stopped():
+            return []
+
+        ff_tokens = self.ll_matcher.compute_ff_tokens()
+        if ff_tokens:
+            self.ll_matcher.consume_tokens(ff_tokens)
+            self.check_error()
+        return ff_tokens
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         """Checks if the list of tokens are accepted by the parser in sequence.
