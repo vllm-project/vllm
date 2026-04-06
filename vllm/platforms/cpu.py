@@ -77,7 +77,7 @@ class CpuPlatform(Platform):
     device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
     omp_process_manager = None
     # Simultaneous Multithreading (SMT) level for OpenMP:
-    # 4 on PowerPC, 1 on others (x86/ARM/RISC-V)
+    # 4 on PowerPC, 1 on non-PowerPC architectures
     smt = 1
     global_cpu_mask = None
     simulate_numa = int(os.environ.get("_SIM_MULTI_NUMA", 0))
