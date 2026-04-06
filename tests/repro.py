@@ -10,6 +10,7 @@ from vllm.config.compilation import (
     CompilationMode,
     CUDAGraphMode,
 )
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL = "deepseek-ai/DeepSeek-V2-Lite"
 PROMPTS = ["The capital of France is"]
@@ -77,6 +78,7 @@ def test_mla_numerical_accuracy_eager():
 
     # Clean up first instance to free GPU memory
     del llm_custom
+    cleanup_dist_env_and_memory()
     gc.collect()
     torch.accelerator.empty_cache()
     time.sleep(2)  # Give time for cleanup
@@ -95,7 +97,12 @@ def test_mla_numerical_accuracy_eager():
 
     assert len(expected_result) == len(actual_result)
     for expected, actual in zip(expected_result, actual_result):
+        # breakpoint()
         assert expected.outputs[0].text == actual.outputs[0].text
+
+    # Clean up second instance
+    del llm_exposed
+    cleanup_dist_env_and_memory()
 
 
 def test_mla_numerical_accuracy_compile():
@@ -124,6 +131,7 @@ def test_mla_numerical_accuracy_compile():
 
     # Clean up first instance to free GPU memory
     del llm_custom
+    cleanup_dist_env_and_memory()
     gc.collect()
     torch.accelerator.empty_cache()
     time.sleep(2)  # Give time for cleanup
@@ -147,6 +155,10 @@ def test_mla_numerical_accuracy_compile():
     assert len(expected_result) == len(actual_result)
     for expected, actual in zip(expected_result, actual_result):
         assert expected.outputs[0].text == actual.outputs[0].text
+
+    # Clean up second instance
+    del llm_exposed
+    cleanup_dist_env_and_memory()
 
 
 def test_mla_numerical_accuracy_compile_cuda_graphs():
@@ -175,6 +187,7 @@ def test_mla_numerical_accuracy_compile_cuda_graphs():
 
     # Clean up first instance to free GPU memory
     del llm_custom
+    cleanup_dist_env_and_memory()
     gc.collect()
     torch.accelerator.empty_cache()
     time.sleep(2)  # Give time for cleanup
@@ -198,3 +211,7 @@ def test_mla_numerical_accuracy_compile_cuda_graphs():
     assert len(expected_result) == len(actual_result)
     for expected, actual in zip(expected_result, actual_result):
         assert expected.outputs[0].text == actual.outputs[0].text
+
+    # Clean up second instance
+    del llm_exposed
+    cleanup_dist_env_and_memory()
