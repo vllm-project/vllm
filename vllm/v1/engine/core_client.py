@@ -589,8 +589,19 @@ class MPClient(EngineCoreClient):
                         f"timeout, set the environment variable: "
                         f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                     )
-                identity, _ = sync_input_socket.recv_multipart()
+                identity, payload = sync_input_socket.recv_multipart()
                 identities.remove(identity)
+                if payload:
+                    try:
+                        metadata = msgspec.msgpack.decode(payload)
+                        if isinstance(metadata, dict):
+                            max_model_len = metadata.get("max_model_len")
+                            if max_model_len is not None:
+                                vllm_config.model_config.max_model_len = int(
+                                    max_model_len)
+                    except Exception:
+                        # Backward compatibility: old engine sends empty marker.
+                        pass
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
