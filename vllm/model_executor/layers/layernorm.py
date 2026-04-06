@@ -207,7 +207,7 @@ class RMSNorm(CustomOp):
             x = x + residual
             residual = x.to(orig_dtype)
 
-        if x.shape[-1] != hidden_size:
+        if weight is not None and x.shape[-1] != hidden_size:
             raise ValueError(
                 f"Expected hidden_size to be {hidden_size}, but found: {x.shape[-1]}"
             )
