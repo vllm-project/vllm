@@ -334,8 +334,11 @@ def get_streamable_parser_for_assistant() -> StreamableParser:
 
 def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     parser = get_streamable_parser_for_assistant()
+    stop_tokens = set(get_stop_tokens_for_assistant_actions())
     for token_id in token_ids:
         parser.process(token_id)
+        if token_id in stop_tokens:
+            break
     return parser
 
 
