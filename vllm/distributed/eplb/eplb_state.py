@@ -48,7 +48,7 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
-    RecvMetadata,
+    TransferMetadata,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -207,7 +207,7 @@ class EplbModelState:
     """
     EPLB stats for the model.
     """
-    recv_metadata: RecvMetadata
+    transfer_metadata: TransferMetadata
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     """
@@ -472,7 +472,7 @@ class EplbState:
             rebalanced=False,
             pending_global_ready_check=False,
             eplb_stats=None,
-            recv_metadata=RecvMetadata(
+            transfer_metadata=TransferMetadata(
                 is_unchanged=np.array([]),
                 is_received_locally=np.array([]),
                 recv_primary_mask=np.array([]),
@@ -913,7 +913,7 @@ class EplbState:
             move_from_buffer(
                 expert_weights=expert_weights,
                 expert_weights_buffers=expert_weights_buffer,
-                recv_metadata=model_state.recv_metadata,
+                transfer_metadata=model_state.transfer_metadata,
                 new_indices=new_indices,
                 ep_rank=ep_group.rank(),
             )
