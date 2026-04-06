@@ -6,6 +6,7 @@ from typing import ClassVar
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -181,7 +182,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             causal=causal,
             sliding_window_size=self.window_size,
             isa=self.isa,
-            enable_kv_split=True,
+            enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
         )
 
         attn_metadata = CPUAttentionMetadata(

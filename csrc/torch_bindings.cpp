@@ -2,7 +2,6 @@
 #include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
-
 #include <torch/library.h>
 #include <torch/version.h>
 
@@ -74,7 +73,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor prefix_lse,"
       "    Tensor suffix_output,"
       "    Tensor suffix_lse,"
-      "    int!? prefill_tokens_with_context) -> ()");
+      "    int!? prefill_tokens_with_context,"
+      "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 #ifndef USE_ROCM
   ops.def(
@@ -233,6 +233,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization ops
 #ifndef USE_ROCM
+  // Fused SiLU+Mul + per-block quantization
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
+           &silu_and_mul_per_block_quant);
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
@@ -496,6 +507,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "swap_blocks(Tensor src, Tensor! dst,"
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
+
+  // Batch swap: submit all block copies in a single driver call.
+  cache_ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes) -> ()");
+  cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
 
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
