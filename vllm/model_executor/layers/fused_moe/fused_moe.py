@@ -2073,8 +2073,10 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
-        # Mirror the legacy fused_experts_impl fast path for decode-like
-        # batches where only a small fraction of experts are active.
+        # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
+        # activates only a small fraction of total experts
+        # Skips moe_align_block_size and activates the `sorted_token_ids is None`
+        # path of the fused_moe_kernel kernel
         SPARSITY_FACTOR = 4
         naive_block_assignment = (
             expert_map is None
