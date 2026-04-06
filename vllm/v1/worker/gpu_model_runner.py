@@ -6611,8 +6611,19 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    # Mamba tensors are allocated with real (unpadded)
+                    # page sizes — padding only applies to shared-pool
+                    # block indexing, not to actual tensor layout.
+                    assert raw_tensor.numel() % kv_cache_spec.real_page_size_bytes == 0
+                    num_blocks = (
+                        raw_tensor.numel() // kv_cache_spec.real_page_size_bytes
+                    )
+                else:
+                    raise NotImplementedError
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -6657,11 +6668,10 @@ class GPUModelRunner(
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
+                    mamba_page = kv_cache_spec.real_page_size_bytes
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size
-                        )
+                        num_element_per_page = mamba_page // dtype_size
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])

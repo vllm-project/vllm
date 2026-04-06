@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NewType, TypeAlias, overload
+from typing import Any, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -804,18 +805,45 @@ def get_max_concurrency_for_kv_cache_config(
 ) -> float:
     """
     Get the maximum concurrency for the given KV cache configuration.
+
+    For mixed Mamba+attention models (e.g. Qwen3.5), each group's cost is
+    summed independently so that constant-cost Mamba groups don't inflate
+    the per-request estimate via the uniform multiplier.
     """
-    num_layer_per_group = max(
-        len(group.layer_names) for group in kv_cache_config.kv_cache_groups
-    )
-    max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
-        vllm_config, (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups)
-    )
-    memory_per_block = (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        * num_layer_per_group
-    )
-    num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
+    groups = kv_cache_config.kv_cache_groups
+    if _has_mixed_mamba_attention(groups):
+        if kv_cache_config.mamba_num_blocks is not None:
+            # Compact allocation: concurrency = min(attention, mamba)
+            attn_groups = [
+                g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)
+            ]
+            mamba_groups = [g for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
+            attn_blocks_per_req = _max_blocks_per_request(vllm_config, attn_groups)
+            mamba_slots_per_req = _max_blocks_per_request(vllm_config, mamba_groups)
+            attn_concurrency = kv_cache_config.num_blocks / attn_blocks_per_req
+            mamba_concurrency = kv_cache_config.mamba_num_blocks / mamba_slots_per_req
+            return min(attn_concurrency, mamba_concurrency)
+        # "all" mode: standard mixed formula
+        max_memory_usage_per_request = sum(
+            len(group.layer_names)
+            * group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+            for group in groups
+        )
+        total_page_size_per_block = sum(
+            len(group.layer_names) * group.kv_cache_spec.page_size_bytes
+            for group in groups
+        )
+        num_block_per_request = cdiv(
+            max_memory_usage_per_request, total_page_size_per_block
+        )
+    else:
+        num_layer_per_group = max(len(group.layer_names) for group in groups)
+        max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
+            vllm_config,
+            (group.kv_cache_spec for group in groups),
+        )
+        memory_per_block = groups[0].kv_cache_spec.page_size_bytes * num_layer_per_group
+        num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
     max_concurrency = kv_cache_config.num_blocks / num_block_per_request
     return max_concurrency
 
@@ -949,6 +977,31 @@ def unify_kv_cache_spec_page_size(
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
+
+
+def _has_mixed_mamba_attention(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    """Check if groups contain both MambaSpec and non-MambaSpec layers."""
+    has_mamba = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups)
+    has_attention = any(
+        not isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
+    )
+    return has_mamba and has_attention
+
+
+def _max_blocks_per_request(
+    vllm_config: VllmConfig,
+    groups: Iterable[KVCacheGroupSpec],
+) -> int:
+    """Max blocks any single group in ``groups`` needs per request."""
+    return max(
+        cdiv(
+            g.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            g.kv_cache_spec.page_size_bytes,
+        )
+        for g in groups
+    )
 
 
 def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
@@ -1122,6 +1175,108 @@ def get_kv_cache_config_from_groups(
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]
+    elif _has_mixed_mamba_attention(kv_cache_groups):
+        # Mixed Mamba+attention (e.g. Qwen3.5): handle allocation based on
+        # mamba_cache_mode. Mamba layers keep their small page size instead
+        # of being padded to match attention.
+        mamba_groups = [
+            g for g in kv_cache_groups if isinstance(g.kv_cache_spec, MambaSpec)
+        ]
+        attention_groups_list = [
+            g for g in kv_cache_groups if not isinstance(g.kv_cache_spec, MambaSpec)
+        ]
+        mamba_cache_mode = vllm_config.cache_config.mamba_cache_mode
+
+        all_layers: dict[str, KVCacheSpec] = {}
+        for group in kv_cache_groups:
+            for layer_name in group.layer_names:
+                all_layers[layer_name] = group.kv_cache_spec
+
+        if mamba_cache_mode == "all":
+            # "all" mode: Mamba scales with tokens (prefix caching).
+            # Use standard per-layer allocation with shared block count.
+            total_page_size = sum(spec.page_size_bytes for spec in all_layers.values())
+            num_blocks = int(available_memory // total_page_size)
+            num_blocks = max(num_blocks, 0)
+            num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+            kv_cache_tensors = [
+                KVCacheTensor(
+                    size=(
+                        spec.real_page_size_bytes
+                        if isinstance(spec, MambaSpec)
+                        else spec.page_size_bytes
+                    )
+                    * num_blocks,
+                    shared_by=[layer_name],
+                )
+                for layer_name, spec in all_layers.items()
+            ]
+            mamba_num_blocks = None  # shared pool
+        else:
+            # Compact Mamba allocation: Mamba state is O(1) per request,
+            # so decouple it from the shared attention block pool.
+            attention_page_total = sum(
+                len(g.layer_names) * g.kv_cache_spec.page_size_bytes
+                for g in attention_groups_list
+            )
+            mamba_page_cost = sum(
+                len(g.layer_names)
+                * cast(MambaSpec, g.kv_cache_spec).real_page_size_bytes
+                for g in mamba_groups
+            )
+            # Mamba blocks per request varies by mode:
+            # "none" = 1 (+speculative), "align" = 2 (+speculative)
+            mamba_blocks_per_req = _max_blocks_per_request(vllm_config, mamba_groups)
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+
+            # Mamba state is O(1) per request and a hard constraint
+            # (no preemption). Size for max_num_seqs so Mamba never
+            # bottlenecks the scheduler.
+            # Cap: compact Mamba must never exceed what a shared pool
+            # would cost (guarantees attention_num_blocks >= shared pool).
+            num_shared_blocks = int(
+                available_memory // (attention_page_total + mamba_page_cost)
+            )
+            num_concurrent = max(
+                1,
+                min(max_num_seqs, num_shared_blocks // mamba_blocks_per_req),
+            )
+
+            # Size compact pool: total blocks = requests * blocks_per_request
+            mamba_blocks = num_concurrent * mamba_blocks_per_req
+            mamba_total = mamba_blocks * mamba_page_cost
+            remaining = available_memory - mamba_total
+            attention_num_blocks = max(0, int(remaining // attention_page_total))
+            attention_num_blocks = may_override_num_blocks(
+                vllm_config, attention_num_blocks
+            )
+
+            # Build per-layer tensors with different block counts
+            kv_cache_tensors = []
+            for layer_name, spec in all_layers.items():
+                if isinstance(spec, MambaSpec):
+                    kv_cache_tensors.append(
+                        KVCacheTensor(
+                            size=spec.real_page_size_bytes * mamba_blocks,
+                            shared_by=[layer_name],
+                        )
+                    )
+                else:
+                    kv_cache_tensors.append(
+                        KVCacheTensor(
+                            size=spec.page_size_bytes * attention_num_blocks,
+                            shared_by=[layer_name],
+                        )
+                    )
+            num_blocks = attention_num_blocks  # Pool only serves attention
+            mamba_num_blocks = mamba_blocks
+
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            mamba_num_blocks=mamba_num_blocks,
+        )
     else:
         # General case:
         # We will have group_size memory pools, each is shared by one layer from
@@ -1251,6 +1406,16 @@ def get_kv_cache_groups(
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
 
+    # For mixed Mamba+attention, skip page size unification — the dedicated
+    # allocation path in get_kv_cache_config_from_groups handles non-uniform
+    # page sizes by giving each layer its own tensor.
+    has_mamba = any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values())
+    has_non_mamba = any(
+        not isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()
+    )
+    if has_mamba and has_non_mamba:
+        return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+
     # As KVCacheManager can only allocate memory of one size, we need to unify
     # the page size of the layers. For cases cannot be unified, this function
     # will raise an error.
@@ -1269,7 +1434,14 @@ def generate_scheduler_kv_cache_config(
     Generate the KV cache configuration for the scheduler.
     """
     assert all(
-        [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
+        cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs
+    )
+    assert all(
+        cfg.mamba_num_blocks == kv_cache_configs[0].mamba_num_blocks
+        for cfg in kv_cache_configs
+    ), (
+        "mamba_num_blocks must be consistent across workers: "
+        f"{[cfg.mamba_num_blocks for cfg in kv_cache_configs]}"
     )
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
@@ -1299,11 +1471,21 @@ def _report_kv_cache_config(
     )
 
     # Log the KV cache size and maximum concurrency.
-    num_tokens = (
-        kv_cache_config.num_blocks
-        // len(kv_cache_config.kv_cache_groups)
-        * min_block_size
+    # For hybrid models, Mamba groups only contribute token capacity when
+    # mamba_cache_mode="all" (prefix caching). In default "none" and "align"
+    # modes, Mamba state is constant-size and doesn't scale with tokens.
+    mamba_cache_mode = vllm_config.cache_config.mamba_cache_mode
+    attention_groups = [
+        g
+        for g in kv_cache_config.kv_cache_groups
+        if not isinstance(g.kv_cache_spec, MambaSpec) or mamba_cache_mode == "all"
+    ]
+    num_attention_groups = (
+        len(attention_groups)
+        if attention_groups
+        else len(kv_cache_config.kv_cache_groups)
     )
+    num_tokens = kv_cache_config.num_blocks // num_attention_groups * min_block_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     if pcp_size * dcp_size > 1:
@@ -1353,18 +1535,28 @@ def _max_memory_usage_bytes_from_groups(
             for spec in per_layer_specs.values()
         )
 
-    # General case: group_size pools, each shared by one layer per group
-    # Memory = group_size * page_size * blocks_for_max_len
-    group_size = max(len(group.layer_names) for group in kv_cache_groups)
-    page_size = get_uniform_page_size(
-        [group.kv_cache_spec for group in kv_cache_groups]
-    )
-    blocks_needed = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
+    # Mixed Mamba+attention with "all" mode: all layers share the same block
+    # count, so the per-request cost is max_blocks × total_page_size.
+    # This is consistent with the "all" mode allocation path.
+    if _has_mixed_mamba_attention(kv_cache_groups):
+        mamba_mode = vllm_config.cache_config.mamba_cache_mode
+        if mamba_mode == "all":
+            max_blocks = _max_blocks_per_request(vllm_config, kv_cache_groups)
+            total_page = sum(
+                len(g.layer_names) * g.kv_cache_spec.page_size_bytes
+                for g in kv_cache_groups
+            )
+            return max_blocks * total_page
+
+    # General case: sum each group's actual memory usage independently.
+    # This handles hybrid models (e.g. Mamba+attention) where groups have
+    # different scaling characteristics and potentially different page sizes.
+    # For compact Mamba allocation (non-"all" mode), this correctly returns
+    # the per-request cost: attention O(n) + Mamba O(1).
+    return sum(
+        len(group.layer_names) * group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
         for group in kv_cache_groups
     )
-
-    return group_size * page_size * blocks_needed
 
 
 def _estimate_max_model_len_from_groups(
@@ -1602,14 +1794,40 @@ def get_kv_cache_configs(
     min_num_blocks = min(
         kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
     )
+
+    # Sync mamba_num_blocks separately if compact allocation is active.
+    min_mamba_num_blocks: int | None = None
+    if any(cfg.mamba_num_blocks is not None for cfg in kv_cache_configs):
+        min_mamba_num_blocks = min(
+            cfg.mamba_num_blocks
+            for cfg in kv_cache_configs
+            if cfg.mamba_num_blocks is not None
+        )
+
     for kv_cache_config in kv_cache_configs:
         num_blocks_old = kv_cache_config.num_blocks
+        mamba_num_blocks_old = kv_cache_config.mamba_num_blocks
         kv_cache_config.num_blocks = min_num_blocks
+        if min_mamba_num_blocks is not None:
+            kv_cache_config.mamba_num_blocks = min_mamba_num_blocks
 
-        # Shrink tensor size proportionally
+        # Shrink tensor size proportionally — handle Mamba and attention
+        # separately when compact allocation is active.
+        mamba_layer_names = {
+            name
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+            for name in group.layer_names
+        }
         for tensor in kv_cache_config.kv_cache_tensors:
-            assert tensor.size % num_blocks_old == 0
-            tensor.size = tensor.size // num_blocks_old * min_num_blocks
+            is_mamba = tensor.shared_by[0] in mamba_layer_names
+            if is_mamba and mamba_num_blocks_old is not None:
+                assert tensor.size % mamba_num_blocks_old == 0
+                assert min_mamba_num_blocks is not None
+                tensor.size = tensor.size // mamba_num_blocks_old * min_mamba_num_blocks
+            else:
+                assert tensor.size % num_blocks_old == 0
+                tensor.size = tensor.size // num_blocks_old * min_num_blocks
 
         if len(kv_cache_config.kv_cache_groups) > 0:
             _report_kv_cache_config(vllm_config, kv_cache_config)
