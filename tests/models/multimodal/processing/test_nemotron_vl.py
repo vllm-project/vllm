@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Nemotron-Nano-VL's multimodal preprocessing kwargs."""
 
+from contextlib import nullcontext
 from collections.abc import Mapping
 from types import SimpleNamespace
 
@@ -146,7 +147,6 @@ def test_processor_override(
 def test_use_audio_in_video_with_prepopulated_audio(monkeypatch: pytest.MonkeyPatch):
     from vllm.model_executor.models.nano_nemotron_vl import (
         AUDIO_CONTEXT,
-        NanoNemotronBaseVLMultiModalProcessor,
         NanoNemotronVLMultiModalProcessor,
     )
     from vllm.multimodal.processing.inputs import ProcessorInputs
@@ -177,13 +177,13 @@ def test_use_audio_in_video_with_prepopulated_audio(monkeypatch: pytest.MonkeyPa
         raise AssertionError("Expected Nemotron use_audio_in_video fast-path")
 
     monkeypatch.setattr(
-        NanoNemotronBaseVLMultiModalProcessor,
+        BaseMultiModalProcessor,
         "apply",
         fail_super_apply,
     )
 
     def fake_apply_hf_processor(processor_inputs, timing_ctx=None):
-        assert processor_inputs.prompt == f"This is a video:\n<video>{AUDIO_CONTEXT}"
+        assert processor_inputs.prompt == f"<video>{AUDIO_CONTEXT}"
         return (
             [1, 2, 3],
             SimpleNamespace(kwargs={}, prompt_updates={}, hashes={}),
@@ -193,6 +193,10 @@ def test_use_audio_in_video_with_prepopulated_audio(monkeypatch: pytest.MonkeyPa
     class _Placeholder:
         def to_range(self):
             return None
+
+    class _TimingCtx:
+        def record(self, _name: str):
+            return nullcontext()
 
     def fake_maybe_apply_prompt_updates(
         mm_items, prompt_ids, mm_kwargs, mm_prompt_updates, is_update_applied
@@ -210,7 +214,8 @@ def test_use_audio_in_video_with_prepopulated_audio(monkeypatch: pytest.MonkeyPa
             prompt="<video>",
             mm_data_items=mm_items,
             hf_processor_mm_kwargs={"use_audio_in_video": True},
-        )
+        ),
+        timing_ctx=_TimingCtx(),
     )
 
     assert processed_inputs["prompt_token_ids"] == [1, 2, 3]
