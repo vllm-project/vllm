@@ -74,6 +74,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         self.kv_cache_dtype = kv_cache_dtype
         self.device = device
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
 
         # Create kv_b_proj (ColumnParallelLinear) on device.
         # Reuse weights from prior model instance when available, because
@@ -190,6 +191,7 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             device=self.device,
+            input_dtype=self.dtype,
         )
 
         w = kwargs.get("w")

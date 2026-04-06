@@ -10,7 +10,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -45,13 +45,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    maybe_post_process_fp8_weight_block,
     process_fp8_input_tensor_strategy_moe,
-    process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
@@ -61,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    create_fp8_quant_key,
     is_layer_skipped,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
@@ -273,12 +271,13 @@ class Fp8LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.marlin_input_dtype = None
+        self.use_marlin = False
 
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
         if self.quant_config.use_deep_gemm is not None:
             self.use_deep_gemm = self.quant_config.use_deep_gemm
         else:
@@ -288,37 +287,26 @@ class Fp8LinearMethod(LinearMethodBase):
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
 
-        # Use per-token quantization for better perf if dynamic and cutlass
-        if self.act_q_static:
-            activation_quant_key = kFp8StaticTensorSym
-        elif cutlass_fp8_supported():
-            activation_quant_key = kFp8DynamicTokenSym
-        else:
-            activation_quant_key = kFp8DynamicTensorSym
-
         if self.block_quant:
-            weight_quant_key = kFp8Static128BlockSym
-        else:
-            weight_quant_key = kFp8StaticTensorSym
-
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=activation_quant_key,
-            weight_quant_key=weight_quant_key,
-            out_dtype=torch.get_default_dtype(),
-            module_name=self.__class__.__name__,
-        )
-        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
-
-        if self.block_quant and not self.use_marlin:
             assert not self.act_q_static
             assert self.weight_block_size is not None
-            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-                weight_group_shape=GroupShape(*self.weight_block_size),
-                act_quant_group_shape=GroupShape(1, self.weight_block_size[0]),
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-                use_deep_gemm=self.use_deep_gemm,
+
+            self.activation_quant_key = create_fp8_quant_key(
+                static=self.act_q_static,
+                group_shape=GroupShape(1, self.weight_block_size[0]),
             )
+            self.weight_quant_key = create_fp8_quant_key(
+                static=True, group_shape=GroupShape(*self.weight_block_size)
+            )
+        else:
+            self.weight_quant_key = kFp8StaticTensorSym
+            # Use per-token quantization for better perf if dynamic and cutlass
+            if self.act_q_static:
+                self.activation_quant_key = kFp8StaticTensorSym
+            elif cutlass_fp8_supported():
+                self.activation_quant_key = kFp8DynamicTokenSym
+            else:
+                self.activation_quant_key = kFp8DynamicTensorSym
 
     def create_weights(
         self,
@@ -384,6 +372,17 @@ class Fp8LinearMethod(LinearMethodBase):
             set_weight_attrs(scale, {"scale_type": "input_scale"})
             layer.register_parameter("input_scale", scale)
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if self.use_marlin:
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
@@ -398,13 +397,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert not self.act_q_static
 
-            weight, weight_scale_inv = process_fp8_weight_block_strategy(
-                layer.weight, layer.weight_scale_inv
-            )
-
-            # Update layer with new values
-            replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
+            self.fp8_linear.process_weights_after_loading(layer)
 
         # If checkpoint not serialized fp8, quantize the weights.
         else:
@@ -435,9 +428,6 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             layer.input_scale = None
 
-        if self.block_quant and self.use_deep_gemm:
-            maybe_post_process_fp8_weight_block(layer)
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -449,12 +439,10 @@ class Fp8LinearMethod(LinearMethodBase):
         if envs.VLLM_BATCH_INVARIANT:
             if self.block_quant:
                 assert self.weight_block_size is not None
-                return self.w8a8_block_fp8_linear.apply(
-                    input=x,
-                    weight=layer.weight,
-                    weight_scale=layer.weight_scale_inv,
-                    input_scale=layer.input_scale,
-                    bias=bias,
+                return self.fp8_linear.apply_weights(
+                    layer,
+                    x,
+                    bias,
                 )
             else:
                 # per-tensor/channel: dequant to BF16 and run GEMM
@@ -482,17 +470,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.use_marlin:
             return self.fp8_linear.apply_weights(layer, x, bias)
-
-        if self.block_quant:
-            assert self.weight_block_size is not None
-
-            return self.w8a8_block_fp8_linear.apply(
-                input=x,
-                weight=layer.weight,
-                weight_scale=layer.weight_scale_inv,
-                input_scale=layer.input_scale,
-                bias=bias,
-            )
 
         return self.fp8_linear.apply_weights(layer, x, bias)
 
@@ -536,6 +513,23 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         )
         layer.register_parameter("weight", weight)
 
+        # TODO: remove this check once the following RFC is resolved.
+        # https://github.com/vllm-project/vllm/issues/33314
+        # This check is required because Mxfp8OnlineLinearMethod inherits from
+        # Fp8OnlineLinearMethod but only calls super().create_weights(), so we must
+        # skip the fp8_linear kernel creation.
+        if hasattr(self, "mxfp8_linear"):
+            return
+
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
         initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:

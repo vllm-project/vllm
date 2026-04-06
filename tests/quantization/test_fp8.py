@@ -13,6 +13,7 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
+from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
@@ -406,6 +407,8 @@ def test_fp8_reloading(
             "If this is your use case, consider using a restore function like #26327"
         )
 
+    # Set model config as model_config.dtype is required in Fp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with torch.device("cuda:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
