@@ -34,6 +34,9 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
+from vllm.config.quantization import (
+    OnlineQuantizationConfigArgs,
+)
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -247,6 +250,9 @@ class LLM:
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
+        quantization_config: dict[str, Any]
+        | OnlineQuantizationConfigArgs
+        | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -367,6 +373,7 @@ class LLM:
             profiler_config=profiler_config_instance,
             attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
+            quantization_config=quantization_config,
             logits_processors=logits_processors,
             **kwargs,
         )

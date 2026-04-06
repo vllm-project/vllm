@@ -42,6 +42,7 @@ dflash_target_dir = "Qwen/Qwen3-8B"
 dflash_dir = "z-lab/Qwen3-8B-DFlash-b16"
 
 BLOCK_SIZE = 16
+DEVICE_TYPE = current_platform.device_type
 
 
 def _create_proposer(
@@ -92,7 +93,7 @@ def _create_proposer(
         # Overwrite pard_token to avoid crash during init
         speculative_config.draft_model_config.hf_config.pard_token = 0
 
-    device = current_platform.device_type
+    device = DEVICE_TYPE
     vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=CacheConfig(block_size=16),
@@ -124,7 +125,7 @@ def test_prepare_next_token_ids():
     either the GPU tensor of sampled_token_ids with -1 for rejected tokens,
     or the CPU python list[list[int]] with the rejected tokens removed.
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_requests = 4
     num_speculative_tokens = 4
@@ -207,7 +208,7 @@ def test_prepare_inputs():
                     a, a + 1, ..., a + b - n2 - 1,
                     a + b, a + b + 1, ..., a + b + c - n3 - 1]
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     # q1 = 4, q2 = 7, q3 = 5
     # n1 = 1, n2 = 3, n3 = 2
@@ -300,7 +301,7 @@ def test_prepare_inputs_padded():
             from the original indices to sample from.
     """
 
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     expected_token_indices_to_sample = torch.tensor(
         [1, 5, 6], dtype=torch.int32, device=device
@@ -370,7 +371,7 @@ def test_set_inputs_first_pass_default_eagle():
     - After inserting next_tokens [100, 200, 300]:
         [a2, a3, 100, b2, 200, c2, c3, c4, 300]
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_speculative_tokens = 3
     proposer = _create_proposer("eagle", num_speculative_tokens)
@@ -471,7 +472,7 @@ def test_set_inputs_first_pass_draft_model():
       - idx 5: token 21, pos 1
       - idx 6: token 200, pos 2 (bonus token)
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_speculative_tokens = 2
     block_size = BLOCK_SIZE
@@ -609,7 +610,7 @@ def test_set_inputs_first_pass_parallel_drafting():
       - idx 9: bonus token 200
       - idx 10-11: parallel_drafting_tokens, is_masked=True
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_speculative_tokens = 3
     block_size = BLOCK_SIZE
@@ -859,7 +860,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Use GPU device
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     # Setup test parameters
     batch_size = 2
@@ -1030,7 +1031,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 )
 def test_propose_tree(spec_token_tree):
     # Get GPU device.
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     # Setup test parameters.
     batch_size = 2
