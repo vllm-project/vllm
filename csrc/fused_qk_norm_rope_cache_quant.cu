@@ -3,19 +3,25 @@
 //
 // Fused QK RMSNorm + RoPE + KV Cache Write + FP8 Per-Tensor Quantisation
 //
-// v3 – Warp-per-head design (based on fused_qknorm_rope_kernel.cu skeleton):
-//   Each warp independently processes one (token, head) pair.
-//   Q warp:  RMSNorm → RoPE → write back to qkv in-place
-//   KV warp: V fire-and-forget store → K RMSNorm → RoPE → store k_cache
+// v4 – Optimized warp-per-head with unified scheduling:
+//   Grid: 2D (num_tokens, num_heads_kv) — one block per (token, KV group)
+//   Block: dynamic warp count = min(2 + gqa_ratio, 5) * 32
+//   Scheduling: V/K/Q ops distributed round-robin across warps
 //
-//   V stores overlap with K's warp-shuffle RMSNorm reduction,
-//   hiding V's store latency.  No shared memory needed.
+//   NeoX path (!interleave): interleaved thread mapping
+//     Lane j holds elements [j, j+32, j+64, j+96] for head_dim=128.
+//     RoPE pairs (j, j+HALF) in same thread → zero shuffle, zero syncwarp.
 //
-// Build (standalone, for rapid testing):
-//   torch.utils.cpp_extension.load(
-//       name="fused_qknrc",
-//       sources=["csrc/fused_qk_norm_rope_cache_quant.cu"],
-//       extra_cuda_cflags=["-O3", "--use_fast_math"])
+//   GPT-J path (interleave): contiguous thread mapping
+//     Lane j holds elements [j*EPT .. j*EPT+EPT-1].
+//     RoPE pairs (2i, 2i+1) in same lane → zero shuffle.
+//
+//   Key optimizations over v3:
+//     1. Interleaved thread mapping for NeoX RoPE (zero cross-thread comm)
+//     2. Unified warp scheduling (V/K/Q round-robin, no phase split)
+//     3. 2D grid (token × kv_group parallelism)
+//     4. Dynamic warp count (5 warps optimal for GQA ratio=4)
+//     5. Lazy K weight loading (only in the warp that processes K)
 
 #include <cmath>
 #include <cuda_runtime.h>
@@ -92,8 +98,7 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val) {
 #endif
 }
 
-// ── FP8 vectorized store type ────────────────────────────────────────
-// Maps numElemsPerThread (= byte count for FP8) to a vector store type.
+// ── FP8 vectorized store type (for GPT-J contiguous path) ───────────
 template <int N>
 struct fp8_store_type;
 template <>
@@ -109,7 +114,7 @@ struct fp8_store_type<8> {
   using type = uint2;
 };
 
-// ── Main fused kernel (v3 – warp-per-head) ──────────────────────────
+// ── Main fused kernel (v4 – unified warp scheduling) ────────────────
 //
 // Template params:
 //   scalar_t_in    – model dtype (c10::BFloat16 or c10::Half)
@@ -118,8 +123,8 @@ struct fp8_store_type<8> {
 //   interleave     – true = GPT-J style RoPE, false = GPT-NeoX style
 //   IS_FP8         – true = write KV cache as FP8 E4M3
 //
-// Grid: divUp(num_tokens * (num_heads_q + num_heads_kv), warpsPerBlock)
-// Block: 256 threads = 8 warps
+// Grid: dim3(num_tokens, num_heads_kv)
+// Block: min(2 + gqa_ratio, 5) * 32 threads
 // Shared memory: 0
 
 template <typename scalar_t_in, typename scalar_t_cache, int head_dim,
@@ -148,6 +153,7 @@ __global__ void fused_kernel(
   } else {
 #endif
 
+    // ── Type aliases ──
     using Converter = vllm::_typeConvert<scalar_t_in>;
     static_assert(Converter::exists,
                   "Input data type is not supported for this CUDA architecture");
@@ -165,234 +171,460 @@ __global__ void fused_kernel(
     T_cache const* cos_sin_cache =
         reinterpret_cast<T_cache const*>(cos_sin_cache_void);
 
-    // ── Warp / lane indices ──
-    int const warpsPerBlock = blockDim.x / 32;
-    int const warpId = threadIdx.x / 32;
-    int const laneId = threadIdx.x % 32;
-    int const globalWarpIdx = blockIdx.x * warpsPerBlock + warpId;
+    // ── 2D grid indexing ──
+    int const token_idx = blockIdx.x;
+    int const kv_head = blockIdx.y;
+    if (token_idx >= num_tokens) return;
 
-    // ── Warp → (token, head) mapping ──
-    int const total_qk_heads = num_heads_q + num_heads_kv;
-    int const tokenIdx = globalWarpIdx / total_qk_heads;
-    int const localHeadIdx = globalWarpIdx % total_qk_heads;
-    if (tokenIdx >= num_tokens) return;
+    // ── Warp / lane ──
+    int const warp_id = threadIdx.x / 32;
+    int const lane = threadIdx.x & 31;
+    int const num_warps = blockDim.x / 32;
 
-    bool const isQ = localHeadIdx < num_heads_q;
-    int const headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
-
-    // ── Per-thread element count & vectorized types ──
-    static_assert(head_dim % (32 * 2) == 0,
-                  "head_dim must be divisible by 64 (warp of 32, even elems)");
-    constexpr int numElemsPerThread = head_dim / 32;
-    constexpr int elemSizeBytes = numElemsPerThread * sizeof(T_in);
-    static_assert(elemSizeBytes % 4 == 0,
-                  "elemSizeBytes must be a multiple of 4");
-    constexpr int vecSize = elemSizeBytes / 4;
-    using vec_T = typename packed_as<uint, vecSize>::type;
-    constexpr int num_packed = elemSizeBytes / sizeof(T2_in);
+    // ── GQA scheduling ──
+    int const gqa_ratio = num_heads_q / num_heads_kv;
+    int const total_ops = 2 + gqa_ratio;  // V + K + Q heads
+    int const q_start = kv_head * gqa_ratio;
 
     // ── QKV layout: [T, (nq + 2*nkv) * hd] ──
     int const q_size = num_heads_q * head_dim;
     int const kv_size = num_heads_kv * head_dim;
     int const total_qkv = q_size + 2 * kv_size;
 
-    // ==============================================================
-    //  Issue loads: KV warp issues V and K back-to-back;
-    //  Q warp issues Q only.
-    //  Both LDGs enter the memory pipeline simultaneously so
-    //  K's load latency is hidden behind V processing.
-    // ==============================================================
+    // ── Token pointers ──
+    T_in* tok_base = qkv + (int64_t)token_idx * total_qkv;
+    T_in const* q_in = tok_base;
+    T_in const* k_in = tok_base + q_size;
+    T_in const* v_in = tok_base + q_size + kv_size;
 
-    // Q/K source offset
-    int const qk_offset =
-        isQ ? (tokenIdx * total_qkv + headIdx * head_dim)
-            : (tokenIdx * total_qkv + q_size + headIdx * head_dim);
-    int const qk_thread_offset = qk_offset + laneId * numElemsPerThread;
+    // ── Cos/sin cache ──
+    int64_t const pos = positions[token_idx];
+    int const embed_dim = rotary_dim / 2;
+    T_cache const* cos_ptr = cos_sin_cache + pos * rotary_dim;
+    T_cache const* sin_ptr = cos_ptr + embed_dim;
 
-    // KV warp: issue V load first (LDG #1)
-    vec_T v_vec;
-    if (!isQ) {
-      int const v_offset = tokenIdx * total_qkv + q_size + kv_size +
-                           headIdx * head_dim + laneId * numElemsPerThread;
-      v_vec = *reinterpret_cast<vec_T const*>(&qkv[v_offset]);
+    // ── Cache address setup ──
+    int64_t const slot_idx = slot_mapping[token_idx];
+    int64_t cache_head_offset = 0;
+    bool const valid_slot = (slot_idx >= 0);
+    if (valid_slot) {
+      int64_t const blk_idx = slot_idx / block_size;
+      int64_t const blk_off = slot_idx % block_size;
+      cache_head_offset =
+          blk_idx * (int64_t)block_size * num_heads_kv * head_dim +
+          blk_off * (int64_t)num_heads_kv * head_dim +
+          (int64_t)kv_head * head_dim;
     }
 
-    // All warps: issue Q or K load (LDG #2 for KV warps)
-    // For KV warps, both V and K loads are now in-flight.
-    vec_T qk_vec = *reinterpret_cast<vec_T const*>(&qkv[qk_thread_offset]);
-
     // ==============================================================
-    //  KV warp: process V (stalls on v_vec; K load continues in bg)
+    //  Compile-time branch: NeoX vs GPT-J mapping
     // ==============================================================
-    if (!isQ) {
-      int64_t const slot_idx = slot_mapping[tokenIdx];
-      if (slot_idx >= 0) {
-        int64_t const blk_idx = slot_idx / block_size;
-        int64_t const blk_off = slot_idx % block_size;
-        int64_t const v_cache_offset =
-            (blk_idx * block_size + blk_off) *
-                (int64_t)num_heads_kv * head_dim +
-            headIdx * head_dim + laneId * numElemsPerThread;
 
-        if constexpr (IS_FP8) {
-          uint8_t* v_cache = reinterpret_cast<uint8_t*>(v_cache_void);
-          uint8_t fp8_vals[numElemsPerThread];
+    if constexpr (!interleave) {
+      // ============================================================
+      //  NeoX PATH: Interleaved thread mapping
+      //  Lane j holds: r_lo[p] = elem[j + p*32]
+      //                r_hi[p] = elem[j + p*32 + HALF]
+      //  RoPE pair (r_lo[p], r_hi[p]) → same thread, zero shuffle
+      // ============================================================
+
+      static_assert(head_dim % 64 == 0,
+                    "head_dim must be divisible by 64 for interleaved mapping");
+      constexpr int HALF = head_dim / 2;
+      constexpr int PAIRS_PER_THREAD = HALF / 32;
+
+      // Pre-load cos/sin into registers
+      float r_cos[PAIRS_PER_THREAD], r_sin[PAIRS_PER_THREAD];
+#pragma unroll
+      for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+        int const dim = lane + p * 32;
+        if (dim < embed_dim) {
+          r_cos[p] = CacheConverter::convert(VLLM_LDG(cos_ptr + dim));
+          r_sin[p] = CacheConverter::convert(VLLM_LDG(sin_ptr + dim));
+        }
+      }
+
+      // Pre-load Q weights (most warps process Q heads)
+      float w_q_lo[PAIRS_PER_THREAD], w_q_hi[PAIRS_PER_THREAD];
+#pragma unroll
+      for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+        int const lo_idx = lane + p * 32;
+        w_q_lo[p] = Converter::convert(q_weight[lo_idx]);
+        w_q_hi[p] = Converter::convert(q_weight[lo_idx + HALF]);
+      }
+
+      // ── Unified round-robin scheduling ──
+      for (int op = warp_id; op < total_ops; op += num_warps) {
+        if (op == 0) {
+          // ── V: fire-and-forget cache write ──
+          if (valid_slot) {
+            T_in const* v_head = v_in + kv_head * head_dim;
+            if constexpr (IS_FP8) {
+              uint8_t* v_cache =
+                  reinterpret_cast<uint8_t*>(v_cache_void);
+#pragma unroll
+              for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+                int const lo_idx = lane + p * 32;
+                float lo = Converter::convert(v_head[lo_idx]);
+                float hi = Converter::convert(v_head[lo_idx + HALF]);
+                v_cache[cache_head_offset + lo_idx] =
+                    float_to_fp8_e4m3(lo / v_scale);
+                v_cache[cache_head_offset + lo_idx + HALF] =
+                    float_to_fp8_e4m3(hi / v_scale);
+              }
+            } else {
+              T_in* v_cache = reinterpret_cast<T_in*>(v_cache_void);
+#pragma unroll
+              for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+                int const lo_idx = lane + p * 32;
+                v_cache[cache_head_offset + lo_idx] = v_head[lo_idx];
+                v_cache[cache_head_offset + lo_idx + HALF] =
+                    v_head[lo_idx + HALF];
+              }
+            }
+          }
+
+        } else if (op == 1) {
+          // ── K: RMSNorm + RoPE + cache write ──
+          if (valid_slot) {
+            // Lazy load K weights (only this warp needs them)
+            float w_k_lo[PAIRS_PER_THREAD], w_k_hi[PAIRS_PER_THREAD];
+#pragma unroll
+            for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+              int const lo_idx = lane + p * 32;
+              w_k_lo[p] = Converter::convert(k_weight[lo_idx]);
+              w_k_hi[p] = Converter::convert(k_weight[lo_idx + HALF]);
+            }
+
+            // Load K
+            T_in const* k_head = k_in + kv_head * head_dim;
+            float k_lo[PAIRS_PER_THREAD], k_hi[PAIRS_PER_THREAD];
+#pragma unroll
+            for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+              int const lo_idx = lane + p * 32;
+              k_lo[p] = Converter::convert(k_head[lo_idx]);
+              k_hi[p] = Converter::convert(k_head[lo_idx + HALF]);
+            }
+
+            // RMSNorm
+            float var = 0.f;
+#pragma unroll
+            for (int p = 0; p < PAIRS_PER_THREAD; ++p)
+              var += k_lo[p] * k_lo[p] + k_hi[p] * k_hi[p];
+            float const inv_rms = rsqrtf(
+                warpReduceSum(var) / static_cast<float>(head_dim) + epsilon);
+#pragma unroll
+            for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+              k_lo[p] *= inv_rms * w_k_lo[p];
+              k_hi[p] *= inv_rms * w_k_hi[p];
+            }
+
+            // RoPE (NeoX: purely local, zero shuffle)
+#pragma unroll
+            for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+              int const dim = lane + p * 32;
+              if (dim < embed_dim) {
+                float const new_lo =
+                    k_lo[p] * r_cos[p] - k_hi[p] * r_sin[p];
+                float const new_hi =
+                    k_hi[p] * r_cos[p] + k_lo[p] * r_sin[p];
+                k_lo[p] = new_lo;
+                k_hi[p] = new_hi;
+              }
+            }
+
+            // Store K to cache
+            if constexpr (IS_FP8) {
+              uint8_t* k_cache =
+                  reinterpret_cast<uint8_t*>(k_cache_void);
+#pragma unroll
+              for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+                int const lo_idx = lane + p * 32;
+                k_cache[cache_head_offset + lo_idx] =
+                    float_to_fp8_e4m3(k_lo[p] / k_scale);
+                k_cache[cache_head_offset + lo_idx + HALF] =
+                    float_to_fp8_e4m3(k_hi[p] / k_scale);
+              }
+            } else {
+              T_in* k_cache = reinterpret_cast<T_in*>(k_cache_void);
+#pragma unroll
+              for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+                int const lo_idx = lane + p * 32;
+                k_cache[cache_head_offset + lo_idx] =
+                    Converter::convert(k_lo[p]);
+                k_cache[cache_head_offset + lo_idx + HALF] =
+                    Converter::convert(k_hi[p]);
+              }
+            }
+          }
+
+        } else {
+          // ── Q: RMSNorm + RoPE + in-place writeback ──
+          int const q_head = q_start + (op - 2);
+          T_in const* q_head_ptr = q_in + q_head * head_dim;
+
+          // Load Q
+          float q_lo[PAIRS_PER_THREAD], q_hi[PAIRS_PER_THREAD];
+#pragma unroll
+          for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+            int const lo_idx = lane + p * 32;
+            q_lo[p] = Converter::convert(q_head_ptr[lo_idx]);
+            q_hi[p] = Converter::convert(q_head_ptr[lo_idx + HALF]);
+          }
+
+          // RMSNorm
+          float var = 0.f;
+#pragma unroll
+          for (int p = 0; p < PAIRS_PER_THREAD; ++p)
+            var += q_lo[p] * q_lo[p] + q_hi[p] * q_hi[p];
+          float const inv_rms = rsqrtf(
+              warpReduceSum(var) / static_cast<float>(head_dim) + epsilon);
+#pragma unroll
+          for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+            q_lo[p] *= inv_rms * w_q_lo[p];
+            q_hi[p] *= inv_rms * w_q_hi[p];
+          }
+
+          // RoPE (NeoX: purely local, zero shuffle)
+#pragma unroll
+          for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+            int const dim = lane + p * 32;
+            if (dim < embed_dim) {
+              float const new_lo =
+                  q_lo[p] * r_cos[p] - q_hi[p] * r_sin[p];
+              float const new_hi =
+                  q_hi[p] * r_cos[p] + q_lo[p] * r_sin[p];
+              q_lo[p] = new_lo;
+              q_hi[p] = new_hi;
+            }
+          }
+
+          // Write Q back in-place to qkv
+          T_in* q_dst = tok_base + q_head * head_dim;
+#pragma unroll
+          for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
+            int const lo_idx = lane + p * 32;
+            q_dst[lo_idx] = Converter::convert(q_lo[p]);
+            q_dst[lo_idx + HALF] = Converter::convert(q_hi[p]);
+          }
+        }
+      }
+
+    } else {
+      // ============================================================
+      //  GPT-J PATH: Contiguous thread mapping
+      //  Lane j holds elements [j*EPT .. j*EPT+EPT-1]
+      //  RoPE pairs (2i, 2i+1) already in same lane
+      // ============================================================
+
+      static_assert(head_dim % (32 * 2) == 0,
+                    "head_dim must be divisible by 64");
+      constexpr int numElemsPerThread = head_dim / 32;
+      constexpr int elemSizeBytes = numElemsPerThread * sizeof(T_in);
+      static_assert(elemSizeBytes % 4 == 0,
+                    "elemSizeBytes must be a multiple of 4");
+      constexpr int vecSize = elemSizeBytes / 4;
+      using vec_T = typename packed_as<uint, vecSize>::type;
+      constexpr int num_packed = elemSizeBytes / sizeof(T2_in);
+      int const rotary_lanes = rotary_dim / numElemsPerThread;
+
+      // Pre-load Q weights (contiguous layout)
+      float w_q[numElemsPerThread];
+#pragma unroll
+      for (int i = 0; i < num_packed; i++) {
+        T2_in packed =
+            *(reinterpret_cast<T2_in const*>(
+                  &q_weight[lane * numElemsPerThread]) +
+              i);
+        float2 vals = Converter::convert(packed);
+        w_q[2 * i] = vals.x;
+        w_q[2 * i + 1] = vals.y;
+      }
+
+      // ── Unified round-robin scheduling ──
+      for (int op = warp_id; op < total_ops; op += num_warps) {
+        if (op == 0) {
+          // ── V: vectorized load + cache write ──
+          if (valid_slot) {
+            T_in const* v_head = v_in + kv_head * head_dim;
+            int const thr_off = lane * numElemsPerThread;
+            vec_T v_vec =
+                *reinterpret_cast<vec_T const*>(&v_head[thr_off]);
+
+            if constexpr (IS_FP8) {
+              uint8_t* v_cache =
+                  reinterpret_cast<uint8_t*>(v_cache_void);
+              uint8_t fp8_vals[numElemsPerThread];
+#pragma unroll
+              for (int i = 0; i < num_packed; i++) {
+                T2_in packed =
+                    *(reinterpret_cast<T2_in const*>(&v_vec) + i);
+                float2 vals = Converter::convert(packed);
+                fp8_vals[2 * i] =
+                    float_to_fp8_e4m3(vals.x / v_scale);
+                fp8_vals[2 * i + 1] =
+                    float_to_fp8_e4m3(vals.y / v_scale);
+              }
+              using fp8_vec_t =
+                  typename fp8_store_type<numElemsPerThread>::type;
+              *reinterpret_cast<fp8_vec_t*>(
+                  &v_cache[cache_head_offset + thr_off]) =
+                  *reinterpret_cast<fp8_vec_t const*>(fp8_vals);
+            } else {
+              T_in* v_cache =
+                  reinterpret_cast<T_in*>(v_cache_void);
+              *reinterpret_cast<vec_T*>(
+                  &v_cache[cache_head_offset + thr_off]) = v_vec;
+            }
+          }
+
+        } else if (op == 1) {
+          // ── K: RMSNorm + GPT-J RoPE + cache write ──
+          if (valid_slot) {
+            // Lazy load K weights
+            float w_k[numElemsPerThread];
+#pragma unroll
+            for (int i = 0; i < num_packed; i++) {
+              T2_in packed =
+                  *(reinterpret_cast<T2_in const*>(
+                        &k_weight[lane * numElemsPerThread]) +
+                    i);
+              float2 vals = Converter::convert(packed);
+              w_k[2 * i] = vals.x;
+              w_k[2 * i + 1] = vals.y;
+            }
+
+            // Load K
+            T_in const* k_head = k_in + kv_head * head_dim;
+            vec_T k_vec = *reinterpret_cast<vec_T const*>(
+                &k_head[lane * numElemsPerThread]);
+            float elements[numElemsPerThread];
+            float sumSq = 0.f;
+#pragma unroll
+            for (int i = 0; i < num_packed; i++) {
+              T2_in packed =
+                  *(reinterpret_cast<T2_in const*>(&k_vec) + i);
+              float2 vals = Converter::convert(packed);
+              sumSq += vals.x * vals.x + vals.y * vals.y;
+              elements[2 * i] = vals.x;
+              elements[2 * i + 1] = vals.y;
+            }
+
+            // RMSNorm
+            float const inv_rms = rsqrtf(
+                warpReduceSum(sumSq) / static_cast<float>(head_dim) +
+                epsilon);
+#pragma unroll
+            for (int i = 0; i < numElemsPerThread; i++)
+              elements[i] *= inv_rms * w_k[i];
+
+            // GPT-J RoPE: pairs (2i, 2i+1) in same lane
+            if (lane < rotary_lanes) {
+#pragma unroll
+              for (int i = 0; i < numElemsPerThread / 2; ++i) {
+                int const idx0 = 2 * i;
+                int const idx1 = 2 * i + 1;
+                int const dim_idx = lane * numElemsPerThread + idx0;
+                int const half_dim = dim_idx / 2;
+                float const cos_val = CacheConverter::convert(
+                    VLLM_LDG(cos_ptr + half_dim));
+                float const sin_val = CacheConverter::convert(
+                    VLLM_LDG(sin_ptr + half_dim));
+                float const v0 = elements[idx0];
+                float const v1 = elements[idx1];
+                elements[idx0] = v0 * cos_val - v1 * sin_val;
+                elements[idx1] = v0 * sin_val + v1 * cos_val;
+              }
+            }
+
+            // Store K to cache
+            int const thr_off = lane * numElemsPerThread;
+            if constexpr (IS_FP8) {
+              uint8_t* k_cache =
+                  reinterpret_cast<uint8_t*>(k_cache_void);
+              uint8_t fp8_vals[numElemsPerThread];
+#pragma unroll
+              for (int i = 0; i < numElemsPerThread; i++)
+                fp8_vals[i] =
+                    float_to_fp8_e4m3(elements[i] / k_scale);
+              using fp8_vec_t =
+                  typename fp8_store_type<numElemsPerThread>::type;
+              *reinterpret_cast<fp8_vec_t*>(
+                  &k_cache[cache_head_offset + thr_off]) =
+                  *reinterpret_cast<fp8_vec_t const*>(fp8_vals);
+            } else {
+              T_in* k_cache =
+                  reinterpret_cast<T_in*>(k_cache_void);
+              vec_T vec;
+#pragma unroll
+              for (int i = 0; i < num_packed; i++) {
+                T2_in packed = Converter::convert(
+                    make_float2(elements[2 * i], elements[2 * i + 1]));
+                *(reinterpret_cast<T2_in*>(&vec) + i) = packed;
+              }
+              *reinterpret_cast<vec_T*>(
+                  &k_cache[cache_head_offset + thr_off]) = vec;
+            }
+          }
+
+        } else {
+          // ── Q: RMSNorm + GPT-J RoPE + in-place writeback ──
+          int const q_head = q_start + (op - 2);
+          T_in const* q_head_ptr = q_in + q_head * head_dim;
+          int const thr_off = lane * numElemsPerThread;
+
+          // Load Q
+          vec_T q_vec = *reinterpret_cast<vec_T const*>(
+              &q_head_ptr[thr_off]);
+          float elements[numElemsPerThread];
+          float sumSq = 0.f;
 #pragma unroll
           for (int i = 0; i < num_packed; i++) {
-            T2_in packed_val =
-                *(reinterpret_cast<T2_in const*>(&v_vec) + i);
-            float2 vals = Converter::convert(packed_val);
-            fp8_vals[2 * i] = float_to_fp8_e4m3(vals.x / v_scale);
-            fp8_vals[2 * i + 1] = float_to_fp8_e4m3(vals.y / v_scale);
+            T2_in packed =
+                *(reinterpret_cast<T2_in const*>(&q_vec) + i);
+            float2 vals = Converter::convert(packed);
+            sumSq += vals.x * vals.x + vals.y * vals.y;
+            elements[2 * i] = vals.x;
+            elements[2 * i + 1] = vals.y;
           }
-          using fp8_vec_t =
-              typename fp8_store_type<numElemsPerThread>::type;
-          *reinterpret_cast<fp8_vec_t*>(&v_cache[v_cache_offset]) =
-              *reinterpret_cast<fp8_vec_t const*>(fp8_vals);
-        } else {
-          T_in* v_cache = reinterpret_cast<T_in*>(v_cache_void);
-          *reinterpret_cast<vec_T*>(&v_cache[v_cache_offset]) = v_vec;
-        }
-        // V stores are fire-and-forget.
-      }
-    }
 
-    // ==============================================================
-    //  Unpack Q/K from qk_vec & compute RMSNorm
-    //  For KV warps, K load likely completed during V processing.
-    // ==============================================================
-    float elements[numElemsPerThread];
-    float sumOfSquares = 0.0f;
-
-    {
+          // RMSNorm
+          float const inv_rms = rsqrtf(
+              warpReduceSum(sumSq) / static_cast<float>(head_dim) +
+              epsilon);
 #pragma unroll
-      for (int i = 0; i < num_packed; i++) {
-        T2_in packed_val =
-            *(reinterpret_cast<T2_in const*>(&qk_vec) + i);
-        float2 vals = Converter::convert(packed_val);
-        sumOfSquares += vals.x * vals.x + vals.y * vals.y;
-        elements[2 * i] = vals.x;
-        elements[2 * i + 1] = vals.y;
-      }
-    }
+          for (int i = 0; i < numElemsPerThread; i++)
+            elements[i] *= inv_rms * w_q[i];
 
-    // Warp-level RMSNorm reduction (no shared memory)
-    sumOfSquares = warpReduceSum(sumOfSquares);
-    float const rms_rcp =
-        rsqrtf(sumOfSquares / static_cast<float>(head_dim) + epsilon);
-
-    // Normalise & apply weight
-    T_in const* weight = isQ ? q_weight : k_weight;
+          // GPT-J RoPE: pairs (2i, 2i+1) in same lane
+          if (lane < rotary_lanes) {
 #pragma unroll
-    for (int i = 0; i < numElemsPerThread; i++) {
-      int dim = laneId * numElemsPerThread + i;
-      float w = Converter::convert(weight[dim]);
-      elements[i] *= rms_rcp * w;
-    }
-
-    // ==============================================================
-    //  RoPE  (identical to fused_qknorm_rope_kernel.cu skeleton)
-    // ==============================================================
-    int64_t const pos_id = positions[tokenIdx];
-    T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
-    int const embed_dim = rotary_dim / 2;
-    T_cache const* cos_ptr = cache_ptr;
-    T_cache const* sin_ptr = cache_ptr + embed_dim;
-    int const rotary_lanes = rotary_dim / numElemsPerThread;
-
-    if (laneId < rotary_lanes) {
-      if constexpr (interleave) {
-        // GPT-J style: pairs are (2i, 2i+1) within each lane's elements
-#pragma unroll
-        for (int i = 0; i < numElemsPerThread / 2; ++i) {
-          int const idx0 = 2 * i;
-          int const idx1 = 2 * i + 1;
-          int const dim_idx = laneId * numElemsPerThread + idx0;
-
-          float const val0 = elements[idx0];
-          float const val1 = elements[idx1];
-
-          int const half_dim = dim_idx / 2;
-          float const cos_val =
-              CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
-          float const sin_val =
-              CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
-
-          elements[idx0] = val0 * cos_val - val1 * sin_val;
-          elements[idx1] = val0 * sin_val + val1 * cos_val;
-        }
-      } else {
-        // GPT-NeoX style: pairs across warp halves via shuffle
-        __syncwarp();
-        int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
-        float elements2[numElemsPerThread];
-#pragma unroll
-        for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] =
-              __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
-          if (laneId < pairOffset) elements2[i] = -elements2[i];
-
-          int dim_idx = laneId * numElemsPerThread + i;
-          dim_idx = (dim_idx * 2) % rotary_dim;
-          int const half_dim = dim_idx / 2;
-          float const cos_val =
-              CacheConverter::convert(VLLM_LDG(cos_ptr + half_dim));
-          float const sin_val =
-              CacheConverter::convert(VLLM_LDG(sin_ptr + half_dim));
-
-          elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
-        }
-        __syncwarp();
-      }
-    }
-
-    // ==============================================================
-    //  Store results
-    // ==============================================================
-    if (isQ) {
-      // Q: write back in-place to qkv
-      int const q_offset = tokenIdx * total_qkv + headIdx * head_dim +
-                           laneId * numElemsPerThread;
-      vec_T vec;
-#pragma unroll
-      for (int i = 0; i < num_packed; i++) {
-        T2_in packed_val = Converter::convert(
-            make_float2(elements[2 * i], elements[2 * i + 1]));
-        *(reinterpret_cast<T2_in*>(&vec) + i) = packed_val;
-      }
-      *reinterpret_cast<vec_T*>(&qkv[q_offset]) = vec;
-    } else {
-      // K: write to paged k_cache
-      int64_t const slot_idx = slot_mapping[tokenIdx];
-      if (slot_idx >= 0) {
-        int64_t const blk_idx = slot_idx / block_size;
-        int64_t const blk_off = slot_idx % block_size;
-        int64_t const k_cache_offset =
-            (blk_idx * block_size + blk_off) *
-                (int64_t)num_heads_kv * head_dim +
-            headIdx * head_dim + laneId * numElemsPerThread;
-
-        if constexpr (IS_FP8) {
-          uint8_t* k_cache = reinterpret_cast<uint8_t*>(k_cache_void);
-          uint8_t fp8_vals[numElemsPerThread];
-#pragma unroll
-          for (int i = 0; i < numElemsPerThread; i++) {
-            fp8_vals[i] = float_to_fp8_e4m3(elements[i] / k_scale);
+            for (int i = 0; i < numElemsPerThread / 2; ++i) {
+              int const idx0 = 2 * i;
+              int const idx1 = 2 * i + 1;
+              int const dim_idx = lane * numElemsPerThread + idx0;
+              int const half_dim = dim_idx / 2;
+              float const cos_val = CacheConverter::convert(
+                  VLLM_LDG(cos_ptr + half_dim));
+              float const sin_val = CacheConverter::convert(
+                  VLLM_LDG(sin_ptr + half_dim));
+              float const v0 = elements[idx0];
+              float const v1 = elements[idx1];
+              elements[idx0] = v0 * cos_val - v1 * sin_val;
+              elements[idx1] = v0 * sin_val + v1 * cos_val;
+            }
           }
-          using fp8_vec_t =
-              typename fp8_store_type<numElemsPerThread>::type;
-          *reinterpret_cast<fp8_vec_t*>(&k_cache[k_cache_offset]) =
-              *reinterpret_cast<fp8_vec_t const*>(fp8_vals);
-        } else {
-          T_in* k_cache = reinterpret_cast<T_in*>(k_cache_void);
+
+          // Write Q back in-place to qkv
+          T_in* q_dst = tok_base + q_head * head_dim;
           vec_T vec;
 #pragma unroll
           for (int i = 0; i < num_packed; i++) {
-            T2_in packed_val = Converter::convert(
+            T2_in packed = Converter::convert(
                 make_float2(elements[2 * i], elements[2 * i + 1]));
-            *(reinterpret_cast<T2_in*>(&vec) + i) = packed_val;
+            *(reinterpret_cast<T2_in*>(&vec) + i) = packed;
           }
-          *reinterpret_cast<vec_T*>(&k_cache[k_cache_offset]) = vec;
+          *reinterpret_cast<vec_T*>(&q_dst[thr_off]) = vec;
         }
       }
     }
@@ -434,14 +666,19 @@ void launchFusedKernel(void* qkv, void* k_cache, void* v_cache,
                        int num_heads_kv, int head_dim, int block_size,
                        int num_tokens, int rotary_dim, bool interleave,
                        bool is_fp8, cudaStream_t stream) {
-  constexpr int blockSize = 256;
-  int const warpsPerBlock = blockSize / 32;
-  int const totalWarps = num_tokens * (num_heads_q + num_heads_kv);
-  int const gridSize = divUp(totalWarps, warpsPerBlock);
+  // 2D grid: one block per (token, KV group)
+  dim3 const grid(num_tokens, num_heads_kv);
+
+  // Dynamic warp count: enough to cover all ops in ~1 round
+  int const gqa_ratio = num_heads_q / num_heads_kv;
+  int const total_ops = 2 + gqa_ratio;
+  constexpr int MAX_WARPS = 5;
+  int const warps_per_block = total_ops < MAX_WARPS ? total_ops : MAX_WARPS;
+  int const blockSize = warps_per_block * 32;
 
 #define LAUNCH_KERNEL(HD, INTERLEAVE, IS_FP8)                               \
   fused_kernel<scalar_t_in, scalar_t_cache, HD, INTERLEAVE, IS_FP8>        \
-      <<<gridSize, blockSize, 0, stream>>>(                                 \
+      <<<grid, blockSize, 0, stream>>>(                                     \
           qkv, k_cache, v_cache, q_weight, k_weight, cos_sin_cache,        \
           positions, slot_mapping, k_scale, v_scale, epsilon, num_heads_q,  \
           num_heads_kv, block_size, num_tokens, rotary_dim)
