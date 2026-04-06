@@ -485,6 +485,9 @@ class ReLUSquaredActivation(CustomOp):
         self.op(out, x)
         return out
 
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_cuda(x)
+
 
 # --8<-- [start:xielu]
 @CustomOp.register("xielu")
