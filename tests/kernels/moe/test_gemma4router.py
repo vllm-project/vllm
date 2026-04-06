@@ -45,15 +45,15 @@ def test_gemma4_routing_kernel_triton(
     ref_ws, ref_is = sort_by_id(ref_w, ref_ids)
     tri_ws, tri_is = sort_by_id(tri_w, tri_ids)
 
-    ids_ok = (ref_is == tri_is).all().item()
-    weights_ok = torch.allclose(ref_ws, tri_ws, atol=1e-2, rtol=1e-2)
-    ok = ids_ok and weights_ok
+    ids_match = (ref_is == tri_is).all().item()
+    weights_match = torch.allclose(ref_ws, tri_ws, atol=1e-2, rtol=1e-2)
+    all_match = ids_match and weights_match
     max_err = (ref_ws - tri_ws).abs().max().item()
     print(
         f"T={num_tokens:5d} E={num_experts:4d} K={topk} "
-        f"{str(dtype).split('.')[-1]:7s} ids={ids_ok} max_Δweight={max_err:.2e}"
+        f"{str(dtype).split('.')[-1]:7s} ids={ids_match} max_Δweight={max_err:.2e}"
     )
-    if not ok:
+    if not all_match:
         bad = (ref_is != tri_is).any(dim=-1).nonzero(as_tuple=True)[0]
         if len(bad):
             r = bad[0].item()
@@ -61,4 +61,4 @@ def test_gemma4_routing_kernel_triton(
                 f"  first bad row {r}: ref_ids={ref_ids[r].tolist()} "
                 f"tri_ids={tri_ids[r].tolist()}"
             )
-        assert ok
+        assert all_match
