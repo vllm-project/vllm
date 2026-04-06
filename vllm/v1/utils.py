@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import socket
 import threading
 import time
 import weakref
@@ -177,6 +178,8 @@ class APIServerProcessManager:
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
+        held_input_sockets: Sequence[socket.socket | None] | None = None,
+        held_output_sockets: Sequence[socket.socket | None] | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -190,6 +193,8 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+            held_input_sockets: Reserved input sockets to transfer to workers
+            held_output_sockets: Reserved output sockets to transfer to workers
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -198,28 +203,78 @@ class APIServerProcessManager:
         # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
+        # Keep synchronization primitives alive until workers finish unpickling
+        # their startup config. Dropping the last parent-side reference too soon
+        # can make spawned children fail rebuilding the underlying SemLock.
+        self._held_socket_ready_events: list[Any] = []
+        held_input_sockets = (
+            list(held_input_sockets)
+            if held_input_sockets
+            else [None] * num_servers
+        )
+        held_output_sockets = (
+            list(held_output_sockets)
+            if held_output_sockets
+            else [None] * num_servers
+        )
+        if len(held_input_sockets) != num_servers:
+            raise ValueError("held_input_sockets must match num_servers")
+        if len(held_output_sockets) != num_servers:
+            raise ValueError("held_output_sockets must match num_servers")
 
-        for i, in_addr, out_addr in zip(
-            range(num_servers), input_addresses, output_addresses
-        ):
-            client_config = {
-                "input_address": in_addr,
-                "output_address": out_addr,
-                "client_count": num_servers,
-                "client_index": i,
-            }
-            if stats_update_address is not None:
-                client_config["stats_update_address"] = stats_update_address
-            if tensor_queue is not None:
-                client_config["tensor_queue"] = tensor_queue
+        try:
+            for i, in_addr, out_addr, held_in_sock, held_out_sock in zip(
+                range(num_servers),
+                input_addresses,
+                output_addresses,
+                held_input_sockets,
+                held_output_sockets,
+            ):
+                client_config = {
+                    "input_address": in_addr,
+                    "output_address": out_addr,
+                    "client_count": num_servers,
+                    "client_index": i,
+                }
+                if stats_update_address is not None:
+                    client_config["stats_update_address"] = stats_update_address
+                if tensor_queue is not None:
+                    client_config["tensor_queue"] = tensor_queue
 
-            proc = spawn_context.Process(
-                target=target_server_fn or run_api_server_worker_proc,
-                name=f"ApiServer_{i}",
-                args=(listen_address, sock, args, client_config),
-            )
-            self.processes.append(proc)
-            proc.start()
+                held_socket_ready = None
+                if held_in_sock is not None or held_out_sock is not None:
+                    held_socket_ready = spawn_context.Event()
+                    self._held_socket_ready_events.append(held_socket_ready)
+                    client_config["held_socket_ready"] = held_socket_ready
+                if held_in_sock is not None:
+                    client_config["held_input_socket"] = held_in_sock
+                if held_out_sock is not None:
+                    client_config["held_output_socket"] = held_out_sock
+
+                proc = spawn_context.Process(
+                    target=target_server_fn or run_api_server_worker_proc,
+                    name=f"ApiServer_{i}",
+                    args=(listen_address, sock, args, client_config),
+                )
+                self.processes.append(proc)
+                proc.start()
+
+                if held_in_sock is not None:
+                    with contextlib.suppress(OSError):
+                        held_in_sock.close()
+                if held_out_sock is not None:
+                    with contextlib.suppress(OSError):
+                        held_out_sock.close()
+                if held_socket_ready is not None:
+                    held_socket_ready.set()
+        except Exception:
+            for held_sock in (*held_input_sockets, *held_output_sockets):
+                if held_sock is None:
+                    continue
+                with contextlib.suppress(OSError):
+                    held_sock.close()
+            shutdown(self.processes)
+            raise
 
         logger.info("Started %d API server processes", len(self.processes))
 

@@ -107,7 +107,7 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> "AsyncMPClient":
@@ -456,6 +456,14 @@ class ElasticScalingCache:
     pending_notifications: dict[EEPNotificationType, set[int]]
 
 
+def _close_held_socket(sock: Any) -> None:
+    if sock is None:
+        return
+
+    with contextlib.suppress(OSError):
+        sock.close()
+
+
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.
@@ -475,7 +483,7 @@ class MPClient(EngineCoreClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
     ):
         self.vllm_config = vllm_config
 
@@ -507,19 +515,35 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 # Tensor queues passed via client_addresses for multi-API-server case
                 tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
-                self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx,
-                    input_address,
-                    zmq.ROUTER,
-                    bind=True,
-                    router_handover=enable_input_socket_handover,
-                )
-                self.resources.output_socket = make_zmq_socket(
-                    self.ctx, output_address, zmq.PULL
-                )
+                held_socket_ready = client_addresses.get("held_socket_ready")
+                held_input_socket = client_addresses.get("held_input_socket")
+                held_output_socket = client_addresses.get("held_output_socket")
+                if held_socket_ready is not None:
+                    held_socket_ready.wait()
+
+                try:
+                    _close_held_socket(held_input_socket)
+                    held_input_socket = None
+                    self.input_socket = self.resources.input_socket = make_zmq_socket(
+                        self.ctx,
+                        input_address,
+                        zmq.ROUTER,
+                        bind=True,
+                        router_handover=enable_input_socket_handover,
+                    )
+
+                    _close_held_socket(held_output_socket)
+                    held_output_socket = None
+                    self.resources.output_socket = make_zmq_socket(
+                        self.ctx, output_address, zmq.PULL
+                    )
+                finally:
+                    _close_held_socket(held_input_socket)
+                    _close_held_socket(held_output_socket)
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
+                addresses.release_held_ports()
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     addresses.inputs[0],
@@ -865,7 +889,7 @@ class AsyncMPClient(MPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1115,7 +1139,7 @@ class DPAsyncMPClient(AsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1295,7 +1319,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
