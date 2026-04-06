@@ -62,7 +62,7 @@ def _prepare_kv_tile(
       them after the dot product for better numerical efficiency.
     - ``KV_QUANT_MODE == 4`` (INT4 packed): handled entirely by the
       caller via split-dot product with asymmetric zero-point correction.
-    - ``KV_QUANT_MODE == 5`` (INT2 WHT + Lloyd-Max): 4-way split-dot with
+    - ``KV_QUANT_MODE == 5`` (INT2 Hadamard + Lloyd-Max): 4-way split-dot with
       Lloyd-Max centroid lookup.  Handled by caller.
       This function is NOT called for modes 4, 5.
 
@@ -72,7 +72,7 @@ def _prepare_kv_tile(
     """
     # KV_QUANT_MODE values: 0=none, 1=fp8 per-tensor,
     #                       2=int8 per-token-head, 3=fp8 per-token-head,
-    #                       4=int4 packed (RHT + asymmetric), 5=int2 (WHT + Lloyd-Max)
+    #                       4=int4 (RHT + asymmetric), 5=int2 (Hadamard)
 
     # Placeholder scales (float32) — never read when KV_QUANT_MODE < 2.
     unused_scales = tile_mask.to(tl.float32)
@@ -185,7 +185,7 @@ def kernel_unified_attention_2d(
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
     # KV cache quantization: 0=none, 1=fp8, 2+=per-token-head,
-    # 4=int4 (RHT + asymmetric), 5=int2 (WHT + Lloyd-Max)
+    # 4=int4 (RHT + asymmetric), 5=int2 (Hadamard + Lloyd-Max)
     KV_QUANT_MODE: tl.constexpr = 0,
     HALF_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 2 (for INT4)
     QUARTER_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 4 (for INT2)
@@ -247,7 +247,7 @@ def kernel_unified_attention_2d(
 
     # Split-dot prologue: split Q for packed quantization modes.
     # Mode 4 (INT4 RHT + asymmetric): 2-way split.
-    # Mode 5 (INT2 WHT + Lloyd-Max): 4-way split.
+    # Mode 5 (INT2 Hadamard + Lloyd-Max): 4-way split.
     if KV_QUANT_MODE == 4:
         half_offs = tl.arange(0, HALF_HEAD_PADDED)
         even_head_offs = half_offs * 2
@@ -850,7 +850,7 @@ def kernel_unified_attention_3d(
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
     # KV cache quantization: 0=none, 1=fp8, 2+=per-token-head,
-    # 4=int4 (RHT + asymmetric), 5=int2 (WHT + Lloyd-Max)
+    # 4=int4 (RHT + asymmetric), 5=int2 (Hadamard + Lloyd-Max)
     KV_QUANT_MODE: tl.constexpr = 0,
     HALF_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 2 (for INT4)
     QUARTER_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 4 (for INT2)
@@ -1623,7 +1623,7 @@ def unified_attention(
     assert q_descale is None, "Q scales not supported"
 
     # Transform Q to match stored KV domain.
-    # INT2: plain WHT + Lloyd-Max (scale norm/d^1.5 absorbs d factor).
+    # INT2: plain Hadamard + Lloyd-Max (scale norm/d^1.5 absorbs d factor).
     # INT4: single RHT + asymmetric (softmax_scale/d compensates).
     is_rotated_kv = kv_quant_mode in (
         KVQuantMode.INT2_PER_TOKEN_HEAD,

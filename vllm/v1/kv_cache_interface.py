@@ -39,7 +39,7 @@ class KVQuantMode(IntEnum):
     INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
     INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
-    INT2_PER_TOKEN_HEAD = 5  # WHT + Lloyd-Max 4 centroids, 4×int2/byte
+    INT2_PER_TOKEN_HEAD = 5  # Hadamard + Lloyd-Max 4 centroids, 4×int2/byte
 
     @property
     def is_per_token_head(self) -> bool:

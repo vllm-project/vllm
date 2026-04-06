@@ -95,7 +95,7 @@ INT2_CONFIG = QuantConfig(
     quant_max=3.0,
     quant_min=0.0,
     kv_quant_mode=KVQuantMode.INT2_PER_TOKEN_HEAD,
-    uses_trunc=False,  # WHT + Lloyd-Max
+    uses_trunc=False,  # Hadamard + Lloyd-Max
 )
 QUANT_CONFIGS = [INT2_CONFIG, INT4_CONFIG, INT8_CONFIG, FP8_CONFIG]
 
@@ -246,7 +246,7 @@ def test_reshape_and_cache_per_token_head(
         kv_quant_mode=qcfg.kv_quant_mode,
     )
 
-    # INT2 (WHT + Lloyd-Max), INT4 (RHT + asymmetric), INT8/FP8 have different
+    # INT2 (Hadamard + Lloyd-Max), INT4 (RHT + asymmetric), INT8/FP8 have different
     # dequant paths.  Only INT8/FP8 can be compared to a PyTorch reference.
     if not is_int4 and not is_int2:
         ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, qcfg)
@@ -291,7 +291,7 @@ def test_reshape_and_cache_per_token_head(
                 full[:, 1::4] = _LM4[b1]
                 full[:, 2::4] = _LM4[b2]
                 full[:, 3::4] = _LM4[b3]
-                # IWHT(centroids × scale) ≈ original
+                # inverse_hadamard(centroids × scale) ≈ original
                 deq = fast_hadamard_transform(full * stored_scale[:, None])
                 ref_deq = data[i].float()
                 torch.testing.assert_close(deq, ref_deq, atol=deq_atol, rtol=deq_rtol)
@@ -420,7 +420,7 @@ def test_per_token_head_round_trip_accuracy(
     else:
         rt_atol = 0.1
 
-    # INT2 round-trip: IWHT(centroids × scale) ≈ original
+    # INT2 round-trip: inverse_hadamard(centroids × scale) ≈ original
     if is_int2:
         from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
             fast_hadamard_transform,
@@ -462,7 +462,7 @@ def test_per_token_head_round_trip_accuracy(
                     orig = data[i, h].float()
                     actual_sc = sc[blk, off, h]
                     if is_int4:
-                        from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+                        from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (  # noqa: E501
                             _single_rht,
                         )
 

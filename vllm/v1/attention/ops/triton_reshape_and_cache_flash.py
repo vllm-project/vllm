@@ -455,9 +455,9 @@ def _reshape_cache_int4_packed(
 
 
 # ---------------------------------------------------------------------------
-# INT2 WHT + Lloyd-Max quantization (KV_QUANT_MODE=5)
+# INT2 Hadamard + Lloyd-Max quantization (KV_QUANT_MODE=5)
 # ---------------------------------------------------------------------------
-# The Walsh-Hadamard Transform gaussianizes any distribution.
+# The Walsh-Hadamard transform gaussianizes any distribution.
 # After rotation, all values follow a predictable N(0, σ) distribution.
 # Lloyd-Max centroids are placed optimally for N(0,1).
 # The vector norm is stored separately (float32 per head) as norm/d^1.5
@@ -490,7 +490,7 @@ def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
 
 
 # Deterministic ±1 signs for Randomized Hadamard Transform.
-# RHT = H × D × x  (sign flip + WHT).  Breaks residual structure
+# RHT = H × D × x  (sign flip + Hadamard).  Breaks residual structure
 # in KV vectors, improving quantization quality.
 _RHT_SIGNS_CACHE: dict[tuple[int, int, str], torch.Tensor] = {}
 
@@ -535,9 +535,9 @@ def _lloyd_max_quantize_4(z):
 
 
 @triton.jit
-def _reshape_cache_int2_wht(
-    key_ptr,  # [num_tokens, num_kv_heads, head_size]  (WHT-transformed)
-    value_ptr,  # [num_tokens, num_kv_heads, head_size_v] (WHT-transformed)
+def _reshape_cache_int2_hadamard(
+    key_ptr,  # [num_tokens, num_kv_heads, head_size]  (Hadamard-rotated)
+    value_ptr,  # [num_tokens, num_kv_heads, head_size_v] (Hadamard-rotated)
     key_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size//4] uint8
     value_cache_ptr,
     k_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32 (norm/d)
@@ -564,7 +564,7 @@ def _reshape_cache_int2_wht(
     head_size_v: tl.constexpr,
     QUARTER_HEAD_PADDED: tl.constexpr,
 ):
-    """INT2 WHT + Lloyd-Max 4-centroid quantization.
+    """INT2 Hadamard + Lloyd-Max 4-centroid quantization.
 
     Packs 4 × 2-bit indices per byte → head_size/4 bytes per head.
     """
@@ -740,28 +740,28 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     head_size_v = value.shape[2]
     block_size = key_cache.shape[1]
 
-    # INT2: WHT + Lloyd-Max 4 centroids.
+    # INT2: Hadamard + Lloyd-Max 4 centroids.
     if kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
-        key_wht = fast_hadamard_transform(key.float()).to(key.dtype)
-        value_wht = fast_hadamard_transform(value.float()).to(value.dtype)
+        key_had = fast_hadamard_transform(key.float()).to(key.dtype)
+        value_had = fast_hadamard_transform(value.float()).to(value.dtype)
         assert head_size % 4 == 0 and head_size_v % 4 == 0
         qtr_head_padded = triton.next_power_of_2(max(head_size, head_size_v) // 4)
         if current_platform.is_rocm() or current_platform.is_xpu():
             num_warps = 4
         else:
             num_warps = min(16, max(1, qtr_head_padded // 32))
-        _reshape_cache_int2_wht[(num_tokens, num_kv_heads)](
-            key_ptr=key_wht,
-            value_ptr=value_wht,
+        _reshape_cache_int2_hadamard[(num_tokens, num_kv_heads)](
+            key_ptr=key_had,
+            value_ptr=value_had,
             key_cache_ptr=key_cache,
             value_cache_ptr=value_cache,
             k_scale_cache_ptr=k_scale_cache,
             v_scale_cache_ptr=v_scale_cache,
             slot_mapping_ptr=slot_mapping,
-            stride_key_tok=key_wht.stride(0),
-            stride_key_head=key_wht.stride(1),
-            stride_val_tok=value_wht.stride(0),
-            stride_val_head=value_wht.stride(1),
+            stride_key_tok=key_had.stride(0),
+            stride_key_head=key_had.stride(1),
+            stride_val_tok=value_had.stride(0),
+            stride_val_head=value_had.stride(1),
             stride_kc_blk=key_cache.stride(0),
             stride_kc_slot=key_cache.stride(1),
             stride_kc_head=key_cache.stride(2),
