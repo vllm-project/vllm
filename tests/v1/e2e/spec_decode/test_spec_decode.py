@@ -1100,10 +1100,7 @@ def assert_draft_model_correctness(args: ArgsTest):
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
     )
-    # draft_model auto-enables async scheduling; assert it is active.
-    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
-        "Expected async_scheduling=True for draft_model spec decode, got False."
-    )
+    
     # we don't check the outputs, only check the metrics
     spec_llm.chat(test_prompts, args.sampling_config)
     metrics = spec_llm.get_metrics()
@@ -1128,6 +1125,10 @@ def assert_draft_model_correctness(args: ArgsTest):
 
     assert acceptance_rate >= args.expected_acceptance_rate
     assert acceptance_len >= args.expected_acceptance_len
+    # draft_model auto-enables async scheduling; assert it is active.
+    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
+        "Expected async_scheduling=True for draft_model spec decode, got False."
+    )
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
