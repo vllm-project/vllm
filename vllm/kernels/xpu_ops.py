@@ -18,9 +18,7 @@ def is_xpu_kernels_found() -> bool:
 XPU_KERNELS_SUPPORTED = is_xpu_kernels_found()
 """Kernels in this file are supported if vLLM XPU kernels are installed."""
 
-rms_no_var = lambda x, weight, epsilon, variance_size=None: variance_size is None and (
-    weight is None or weight.dtype == x.dtype
-)
+rms_no_var = lambda x, weight, epsilon, variance_size=None: variance_size is None
 
 
 @ir.ops.rms_norm.register_impl(

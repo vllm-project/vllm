@@ -36,11 +36,13 @@ AITER_SUPPORTED = is_aiter_found()
 
 rms_no_var_16bit_only = (
     lambda x, weight, epsilon, variance_size=None: variance_size is None
-    and x.dtype in (torch.float16, torch.bfloat16)
-    and (weight is None or weight.dtype == x.dtype)
+    and x.dtype
+    in (
+        torch.float16,
+        torch.bfloat16,
+    )
 )
-"""AITER rms_norm only supports float16 and bfloat16 acts, no var_size override,
-and requires weight dtype to match x dtype."""
+"""AITER rms_norm only supports float16 and bfloat16 acts and no var_size override."""
 
 
 @ir.ops.rms_norm.register_impl(
