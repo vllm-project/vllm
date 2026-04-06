@@ -372,11 +372,6 @@ class DeepseekV2MoE(nn.Module):
         if self.shared_experts is None:
             assert shared_output is None
 
-        # When skip_scale_and_add is set, return raw outputs so the
-        # caller can fuse scale + add with subsequent ops.
-        if getattr(self, "skip_scale_and_add", False):
-            return (shared_output, final_hidden_states)
-
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
@@ -390,18 +385,15 @@ class DeepseekV2MoE(nn.Module):
             assert shared_output is not None
             final_hidden_states += shared_output
 
-        if not getattr(self, "skip_final_allreduce", False):
-            if self.is_sequence_parallel:
-                final_hidden_states = tensor_model_parallel_all_gather(
-                    final_hidden_states, 0
-                )
-                final_hidden_states = final_hidden_states[:num_tokens]
-            elif self.tp_size > 1:
-                final_hidden_states = (
-                    self.experts.maybe_all_reduce_tensor_model_parallel(
-                        final_hidden_states
-                    )
-                )
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states
+            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
