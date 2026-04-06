@@ -150,6 +150,7 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
 
         self.use_mha = False
         self.fuse_qkv_a_proj = True
+        self.is_fp4_ckpt = False
         loaded = DeepseekV2ForCausalLM.load_weights(self, _remap_weights())
 
         # Fuse indexer linear weights after loading.
