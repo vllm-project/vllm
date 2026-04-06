@@ -751,6 +751,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
@@ -2035,7 +2036,6 @@ steps:
   timeout_in_minutes: 38
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
