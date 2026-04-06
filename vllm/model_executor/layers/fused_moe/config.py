@@ -6,7 +6,7 @@ from typing import Union
 
 import torch
 
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -1174,7 +1174,7 @@ class FusedMoEConfig:
     intermediate_size_per_partition_unpadded: int | None = None
 
     moe_backend: str = "auto"
-    max_num_tokens: int = 0
+    max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
