@@ -409,6 +409,7 @@ class RocmPlatform(Platform):
         "mxfp4",
         "torchao",
         "bitsandbytes",
+        "modelopt_fp4",
     ]
 
     @classmethod
