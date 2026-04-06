@@ -23,13 +23,13 @@ else:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
-@pytest.mark.xfail(
-    not current_platform.is_rocm(),
-    reason="EAGLE + DP > 1 produces wrong outputs when async spec decode "
-    "correction is active. Root cause under investigation. "
-    "See: https://github.com/vllm-project/vllm/issues/31913",
-    strict=False,
-)
+# @pytest.mark.xfail(
+#     not current_platform.is_rocm(),
+#     reason="EAGLE + DP > 1 produces wrong outputs when async spec decode "
+#     "correction is active. Root cause under investigation. "
+#     "See: https://github.com/vllm-project/vllm/issues/31913",
+#     strict=False,
+# )
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="Test may fail on ROCm until batch invariance is enabled. "
@@ -107,5 +107,14 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
     token_ids_with_eagle = await engine_create_and_generate(eagle_engine_args)
     token_ids_no_eagle = await engine_create_and_generate(engine_args)
 
-    # Test for correctness
+    if token_ids_with_eagle != token_ids_no_eagle:
+        for i, (a, b) in enumerate(zip(token_ids_with_eagle, token_ids_no_eagle)):
+            if a != b:
+                print(f"\n=== DIVERGENCE at token index {i} ===")
+                print(f"  EAGLE:    ...{token_ids_with_eagle[max(0, i - 2) : i + 5]}")
+                print(f"  NO_EAGLE: ...{token_ids_no_eagle[max(0, i - 2) : i + 5]}")
+                break
+        print(f"\nFull EAGLE:    {token_ids_with_eagle}")
+        print(f"Full NO_EAGLE: {token_ids_no_eagle}")
+
     assert token_ids_with_eagle == token_ids_no_eagle

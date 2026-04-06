@@ -1381,6 +1381,19 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
+                    logger.info(
+                        "[spec_decode_debug][sched.update_from_output.spec] "
+                        "req=%s generated=%s spec_scheduled=%s "
+                        "accepted=%d rejected=%d "
+                        "computed_after=%d placeholders_after=%d",
+                        req_id,
+                        generated_token_ids[:10],
+                        scheduled_spec_token_ids[:5],
+                        num_accepted,
+                        num_rejected,
+                        request.num_computed_tokens,
+                        request.num_output_placeholders,
+                    )
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -1401,6 +1414,16 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
+                if new_token_ids:
+                    logger.info(
+                        "[spec_decode_debug][sched.update_from_output.tokens] "
+                        "req=%s final_new_tokens=%s "
+                        "all_output_tokens=%s num_output=%d",
+                        req_id,
+                        new_token_ids[:10],
+                        request._output_token_ids[-10:],
+                        request.num_output_tokens,
+                    )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
