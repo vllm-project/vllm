@@ -7,6 +7,7 @@ Copyright (c) 2026 Cambridge Greys Ltd
 
 import json
 import os
+import platform
 import subprocess
 
 
@@ -38,10 +39,37 @@ def parse_mask(mask):
     return set(result)
 
 
+def _get_default_affinity() -> set[int]:
+    """Get the set of CPUs the process is allowed to run on."""
+    if hasattr(os, "sched_getaffinity"):
+        return os.sched_getaffinity(0)
+    # macOS does not support sched_getaffinity; fall back to cpu_count
+    cpu_count = os.cpu_count() or 1
+    return set(range(cpu_count))
+
+
+def _get_cpu_topology_json() -> bytes:
+    """Get CPU topology as JSON.
+
+    On Linux this uses ``lscpu -Je``.  On other platforms (e.g. macOS) we
+    synthesize a simple topology where every logical CPU is its own core
+    on NUMA node 0, which is sufficient for the OMP place-list builder.
+    """
+    if platform.system() == "Linux":
+        return subprocess.run(["lscpu", "-Je"], check=True, capture_output=True).stdout
+
+    # Fallback for non-Linux (macOS, etc.)
+    cpu_count = os.cpu_count() or 1
+    cpus = []
+    for i in range(cpu_count):
+        cpus.append({"cpu": str(i), "core": str(i), "node": "0"})
+    return json.dumps({"cpus": cpus}).encode()
+
+
 def enumerate_resources(resource_map, mask=None, allowed=None):
     """Enumerate system resources"""
     if allowed is None:
-        allowed = os.sched_getaffinity(0)
+        allowed = _get_default_affinity()
     if mask is not None:
         allowed = allowed & mask
 
@@ -140,9 +168,7 @@ class OMPProcessManager:
             else:
                 masks = [None]
             if mock is None:
-                data = subprocess.run(
-                    ["lscpu", "-Je"], check=True, capture_output=True
-                ).stdout
+                data = _get_cpu_topology_json()
             else:
                 with open(mock, mode="rb") as jf:
                     data = jf.read()
