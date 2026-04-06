@@ -130,7 +130,8 @@ def can_initialize(
         # Step1ForCausalLM requires TRITON_ATTN for use_alibi_sqrt support.
         attention_config = (
             {"backend": "TRITON_ATTN"}
-            if model_arch in ("GptOssForCausalLM", "Step1ForCausalLM")
+            if model_arch
+            in ("GptOssForCausalLM", "GptOssPuzzleForCausalLM", "Step1ForCausalLM")
             else None
         )
         if model_arch == "WhisperForConditionalGeneration":
