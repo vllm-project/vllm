@@ -65,10 +65,7 @@ async def create_transcriptions(
 ):
     handler = transcription(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Transcriptions API"
-        )
+        raise NotImplementedError("The model does not support Transcriptions API")
 
     audio_data = await request.file.read()
 
@@ -101,10 +98,7 @@ async def create_translations(
 ):
     handler = translation(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Translations API"
-        )
+        raise NotImplementedError("The model does not support Translations API")
 
     audio_data = await request.file.read()
 

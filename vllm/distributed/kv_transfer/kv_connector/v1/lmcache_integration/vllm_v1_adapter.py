@@ -483,9 +483,9 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     local_rank = parallel_config.rank % num_gpus
-    torch.cuda.set_device(local_rank)
+    torch.accelerator.set_device_index(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
@@ -778,9 +778,7 @@ class LMCacheConnectorV1Impl:
                 continue
 
             if layer_name not in self.kv_caches:
-                self.kv_caches[layer_name] = attn_layer.kv_cache[
-                    forward_context.virtual_engine
-                ]
+                self.kv_caches[layer_name] = attn_layer.kv_cache
 
     ####################
     # Worker side APIs

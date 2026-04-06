@@ -11,6 +11,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform
 
@@ -89,7 +90,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is RowParallelLinear
+        return type(source_layer) is maybe_get_oot_by_class(RowParallelLinear)
 
 
 # The following layer is based on the tensor parallelism strategy given in

@@ -8,7 +8,7 @@ from tests.conftest import VllmRunner
 from tests.utils import create_new_process_for_each_test
 
 
-@create_new_process_for_each_test()  # Memory is not cleaned up properly otherwise
+@create_new_process_for_each_test()  # Hangs otherwise
 @pytest.mark.parametrize(
     "model",
     [

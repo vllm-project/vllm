@@ -108,7 +108,7 @@ def pooler_for_classify(
     *,
     pooling: SequencePoolingMethod | SequencePoolingFn | None = None,
     classifier: ClassifierFn | None = None,
-    act_fn: PoolerActivation | str | None = None,
+    act_fn: PoolerActivation | None = None,
 ):
     if pooling is None:
         pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())

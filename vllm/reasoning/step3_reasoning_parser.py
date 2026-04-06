@@ -3,16 +3,18 @@
 
 from collections.abc import Iterable, Sequence
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
 
@@ -37,12 +39,13 @@ class Step3ReasoningParser(ReasoningParser):
                 "constructor during construction."
             )
 
-        self.think_end_token_id = self.vocab.get(self.think_end_token)
-        if self.think_end_token_id is None:
+        think_end_token_id = self.vocab.get(self.think_end_token)
+        if think_end_token_id is None:
             raise RuntimeError(
                 "Step3 reasoning parser could not locate think end "
                 "token in the tokenizer!"
             )
+        self.think_end_token_id: int = think_end_token_id
 
     def extract_reasoning_streaming(
         self,
@@ -82,7 +85,7 @@ class Step3ReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         # Check if the model output contains the </think> token
         if self.think_end_token not in model_output:
@@ -94,10 +97,7 @@ class Step3ReasoningParser(ReasoningParser):
             reasoning = model_output[:end_index]
 
             # Content after </think> token
-            content = model_output[end_index + len(self.think_end_token) :]
-
-            if len(content) == 0:
-                content = None
+            content = model_output[end_index + len(self.think_end_token) :] or None
 
             return reasoning, content
 

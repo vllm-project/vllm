@@ -36,11 +36,6 @@ steps:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - pytest -v -s entrypoints/openai/chat_completion/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
-  mirror:
-    amd:
-      device: mi325_2
-      depends_on:
-      - image-build-amd

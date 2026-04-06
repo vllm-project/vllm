@@ -137,6 +137,3 @@ llm = LLM("facebook/opt-125m", quantization="fp8")
 result = llm.generate("Hello, my name is")
 print(result[0].outputs[0].text)
 ```
-
-!!! warning
-    Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.

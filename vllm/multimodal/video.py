@@ -952,7 +952,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_recovery=frame_recovery,
         )
 
-        # Use transformers transformers.video_utils.VideoMetadata format
+        # Use transformers.video_utils.VideoMetadata format
         metadata = cls.create_hf_metadata(
             source=source,
             video_backend="opencv_dynamic",
