@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: vLLM IR Tests
   timeout_in_minutes: 10
+  device: h200_18gb
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
     - vllm/ir
