@@ -1,6 +1,4 @@
 #!/bin/bash
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 set -xe
 
 # Parse command line arguments
