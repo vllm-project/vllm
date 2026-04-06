@@ -675,10 +675,11 @@ class Gemma4ToolParser(ToolParser):
         current_args_json = json.dumps(current_args, ensure_ascii=False)
 
         # Withhold trailing closing characters that may shift as more
-        # tokens arrive. Strip trailing '}', '"', and ']' sequences
-        # to get the "safe prefix".
+        # tokens arrive. Strip trailing '}', '"', ']' and partial
+        # STRING_DELIM fragments ('<', '|', '\\', '>') to get the
+        # "safe prefix".
         safe_json = current_args_json
-        while safe_json and safe_json[-1] in ("}", '"', "]"):
+        while safe_json and safe_json[-1] in ("}", '"', "]", "<", "|", "\\", ">"):
             safe_json = safe_json[:-1]
 
         prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
