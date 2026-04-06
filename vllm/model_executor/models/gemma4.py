@@ -65,9 +65,111 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+import triton
+import triton.language as tl
+
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+
+@triton.jit
+def _gemma4_routing_kernel(
+    gating_ptr,
+    per_expert_scale_ptr,
+    topk_weights_ptr,
+    topk_ids_ptr,
+    E:       tl.constexpr,
+    K:       tl.constexpr,
+    BLOCK_E: tl.constexpr,
+):
+    """
+    Sort-v3: eliminates the K serial masked-sum reductions after sort.
+
+    Vs sort_v2: instead of K independent tl.sum(tl.where(offs_e==i, sorted_p, 0))
+    reductions (K LDS ops), extract all BLOCK_E elements vectorized in one pass:
+      • Compute exp for ALL BLOCK_E sorted elements  (2 VALU clocks, vectorized)
+      • Sum only top-K for renorm with ONE masked tl.sum  (1 LDS op)
+      • Load scales for top-K with ONE masked gather (→ all in L1 after 1st token)
+      • Write ids + weights with TWO masked tl.store  (no K-loop)
+
+    ISA savings: ~5-6 total LDS ops (vs 12 in sort_v2), trading 1 extra VALU clock
+    for the additional BLOCK_E-K exp ops.
+    """
+    pid    = tl.program_id(0)
+    offs_e = tl.arange(0, BLOCK_E)
+    valid  = offs_e < E
+
+    logits = tl.load(
+        gating_ptr + pid * E + offs_e,
+        mask=valid,
+        other=-float("inf"),
+    ).to(tl.float32)
+
+    max_l = tl.max(logits, axis=0)
+
+    # Float32 → ascending-sortable bijection (same as sort_v2)
+    MIN32      = -2147483648
+    logit_bits = logits.to(tl.int32, bitcast=True)
+    sign_b     = logit_bits >> 31
+    key        = tl.where(sign_b == 0, logit_bits ^ -1, logit_bits ^ MIN32)
+    key        = tl.where(valid, key, 0x7FFFFFFF)
+    sk64       = key.to(tl.int64) & 0x00000000FFFFFFFF
+    packed     = (sk64 << 32) | offs_e.to(tl.int64)
+    sorted_p   = tl.sort(packed, descending=False)
+
+    # Vectorized extraction of ALL sorted elements — no K-loop, no cross-lane reductions
+    all_keys  = ((sorted_p >> 32) & 0x00000000FFFFFFFF).to(tl.int32)
+    all_ids   = (sorted_p & 0x00000000FFFFFFFF).to(tl.int32)
+
+    # Inverse bijection: recover original logit bits
+    sign_k    = all_keys >> 31
+    all_bits  = tl.where(sign_k < 0, all_keys ^ -1, all_keys ^ MIN32)
+    all_logits = all_bits.to(tl.float32, bitcast=True)
+
+    # Compute raw_exp for ALL BLOCK_E elements — vectorized, ~2 VALU clocks
+    all_raw_exp = tl.math.exp2((all_logits - max_l) * 1.4426950408889634)
+
+    # Sum only top-K for renorm — ONE masked reduction (vs K serial reductions in sort_v2)
+    top_mask   = offs_e < K
+    renorm_raw = tl.sum(tl.where(top_mask, all_raw_exp, 0.0), axis=0)
+    renorm_raw = tl.where(renorm_raw > 0.0, renorm_raw, 1.0)
+    inv_renorm = 1.0 / renorm_raw
+
+    # Load scales for top-K only (masked gather; scale array is tiny → L1 cached)
+    all_scales = tl.load(
+        per_expert_scale_ptr + all_ids.to(tl.int64),
+        mask=top_mask,
+        other=1.0,
+    ).to(tl.float32)
+
+    # Final weights: vectorized multiply (only top-K will be stored)
+    all_weights = (all_raw_exp * inv_renorm * all_scales).to(tl.float32)
+
+    # Write results with TWO masked stores — replaces K × 2 serial scalar stores
+    base_off = pid * K + offs_e
+    tl.store(topk_ids_ptr     + base_off, all_ids,     mask=top_mask)
+    tl.store(topk_weights_ptr + base_off, all_weights, mask=top_mask)
+
+
+def gemma4_routing_kernel(
+    gating_output: torch.Tensor,
+    topk: int,
+    per_expert_scale: torch.Tensor,
+    num_warps: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sort-v3: sort + vectorized extraction. See _routing_kernel_sort_v3."""
+    gating_output    = gating_output.contiguous()
+    per_expert_scale = per_expert_scale.contiguous()
+    T, E    = gating_output.shape
+    weights = torch.empty(T, topk, dtype=torch.float32, device=gating_output.device)
+    ids     = torch.empty(T, topk, dtype=torch.int32,   device=gating_output.device)
+    BLOCK_E = triton.next_power_of_2(E)
+    _gemma4_routing_kernel[(T,)](
+        gating_output, per_expert_scale, weights, ids,
+        E, topk, BLOCK_E, num_warps=num_warps,
+    )
+    return weights, ids
 
 def _get_text_config(config):
     """Dereference text_config if config is a nested Gemma4Config.
@@ -206,6 +308,10 @@ class Gemma4MoE(nn.Module):
             topk: int,
             renormalize: bool,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+
+            if (current_platform.is_cuda_alike() and current_platform.is_xpu()):
+                return gemma4_routing_kernel(gating_output, topk, per_expert_scale)
+
             _, topk_ids = torch.topk(gating_output, k=topk, dim=-1)
             router_probabilities = torch.nn.functional.softmax(gating_output, dim=-1)
             indicator = torch.nn.functional.one_hot(
