@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 from collections import deque
+from ctypes.util import find_library
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
 from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
+from vllm.v1.kv_offload.worker.shared_mmap_region import SharedMmapRegion
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
@@ -60,6 +64,91 @@ def expand_block_ids(
         output_end_idx = output_idx + len(indices)
         output[output_idx:output_end_idx] = base_block_id + indices
         output_idx = output_end_idx
+
+
+def compute_sub_block_ptrs(
+    block_ids: np.ndarray,
+    block_size_factor: int,
+    output: np.ndarray,
+    tensor: torch.Tensor,
+    skip_count: int = 0,
+):
+    """
+    Compute byte pointers for sub-blocks of the given block IDs.
+
+    Each block in block_ids contains block_size_factor sub-blocks.
+    The pointer for sub-block j of block b is:
+        base_ptr + b * row_stride + j * sub_block_size
+
+    where sub_block_size = tensor.shape[1] // block_size_factor (gpu page size).
+
+    This handles tensors where row_stride != block_size_factor * sub_block_size
+    (e.g. non-contiguous CPU tensors).
+
+    Args:
+        block_ids: array of block IDs at the tensor's native granularity.
+        block_size_factor: number of sub-blocks per block.
+        output: pre-allocated int64 array to write pointers into.
+        tensor: the source or destination tensor.
+        skip_count: sub-blocks to skip in the first block.
+    """
+    assert skip_count < block_size_factor
+
+    num_sub_blocks = len(output)
+    base_ptr = tensor.data_ptr()
+    row_stride = tensor.stride(0)
+
+    if block_size_factor == 1:
+        # Fast path: 1:1 mapping, no sub-block expansion needed.
+        output[:] = base_ptr + block_ids[:num_sub_blocks] * row_stride
+        return
+
+    # Vectorized expansion for block_size_factor > 1.
+    assert tensor.shape[1] % block_size_factor == 0
+    sub_block_size = tensor.shape[1] // block_size_factor
+    sub_offsets = np.arange(block_size_factor, dtype=np.int64) * sub_block_size
+    # (num_blocks, 1) + (1, block_size_factor) -> (num_blocks, block_size_factor)
+    all_ptrs = (
+        base_ptr + block_ids.astype(np.int64)[:, np.newaxis] * row_stride
+    ) + sub_offsets[np.newaxis, :]
+    # Flatten and apply skip_count / truncation
+    flat = all_ptrs.ravel()
+    output[:] = flat[skip_count : skip_count + num_sub_blocks]
+
+
+def pin_mmap_region(region: SharedMmapRegion) -> None:
+    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    tp_rank = get_tensor_model_parallel_rank()
+    libcudart = find_library("cudart") or "libcudart.so"
+    cuda = ctypes.CDLL(libcudart)
+    cuda.cudaHostRegister.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_uint,
+    ]
+    cuda.cudaHostRegister.restype = ctypes.c_int
+
+    mv = memoryview(region.mmap_obj)
+    base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(mv))
+
+    result = cuda.cudaHostRegister(
+        ctypes.c_void_p(base_ptr),
+        ctypes.c_size_t(region.total_size_bytes),
+        ctypes.c_uint(0),
+    )
+    if result != 0:
+        logger.warning(
+            "cudaHostRegister failed for tp_rank=%d (code=%d) — "
+            "falling back to standard pin_memory allocation",
+            tp_rank,
+            result,
+        )
+    else:
+        logger.info(
+            "Pinned mmap region for tp_rank=%d: %.2f GB",
+            tp_rank,
+            region.total_size_bytes / 1e9,
+        )
 
 
 class SingleDirectionOffloadingHandler(OffloadingHandler):
@@ -149,13 +238,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
-        # Pre-compute base pointers and block sizes for batch copies.
-        self._src_base_ptrs = np.array(
-            [t.data_ptr() for t in self.src_tensors], dtype=np.int64
-        )
-        self._dst_base_ptrs = np.array(
-            [t.data_ptr() for t in self.dst_tensors], dtype=np.int64
-        )
+        # Pre-compute block sizes for batch copies.
         self._block_size_in_bytes_arr = np.array(
             self.tensor_block_size_in_bytes, dtype=np.int64
         )
@@ -176,17 +259,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
-        src_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
-        dst_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
-        expand_block_ids(
-            src_blocks,
-            self.src_block_size_factor,
-            src_block_ids,
-            skip_count=src_sub_blocks_to_skip,
-        )
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, dst_block_ids)
-
-        # Build flat pointer arrays for all tensors × all block pairs.
         num_pairs = dst_sub_block_count
         num_tensors = len(self.src_tensors)
         total = num_pairs * num_tensors
@@ -195,11 +267,23 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         all_dst = np.empty(total, dtype=np.int64)
         all_sizes = np.empty(total, dtype=np.int64)
 
-        for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
+        for t_idx in range(num_tensors):
+            bsz = self._block_size_in_bytes_arr[t_idx]
             start = t_idx * num_pairs
             end = start + num_pairs
-            all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
-            all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
+            compute_sub_block_ptrs(
+                block_ids=src_blocks,
+                block_size_factor=self.src_block_size_factor,
+                output=all_src[start:end],
+                tensor=self.src_tensors[t_idx],
+                skip_count=src_sub_blocks_to_skip,
+            )
+            compute_sub_block_ptrs(
+                block_ids=dst_blocks,
+                block_size_factor=self.dst_block_size_factor,
+                output=all_dst[start:end],
+                tensor=self.dst_tensors[t_idx],
+            )
             all_sizes[start:end] = bsz
 
         batch_src = torch.from_numpy(all_src)
@@ -281,9 +365,14 @@ class CpuGpuOffloadingHandlers:
         kv_caches: CanonicalKVCaches,
         block_size_factor: int,
         num_cpu_blocks: int,
+        mmap_region: SharedMmapRegion | None = None,
     ):
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
+        self._mmap_region = mmap_region
+        if mmap_region is not None and pin_memory:
+            pin_mmap_region(mmap_region)
+
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
@@ -292,12 +381,16 @@ class CpuGpuOffloadingHandlers:
                 (-1, gpu_page_size_bytes)
             )
             cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
-            cpu_tensor = torch.zeros(
-                (num_cpu_blocks, cpu_page_size_bytes),
-                dtype=torch.int8,
-                device="cpu",
-                pin_memory=pin_memory,
-            )
+
+            if mmap_region is not None:
+                cpu_tensor = mmap_region.alloc_tensor(cpu_page_size_bytes)
+            else:
+                cpu_tensor = torch.zeros(
+                    (num_cpu_blocks, cpu_page_size_bytes),
+                    dtype=torch.int8,
+                    device="cpu",
+                    pin_memory=pin_memory,
+                )
 
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
@@ -309,7 +402,6 @@ class CpuGpuOffloadingHandlers:
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
         )
-
         self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
