@@ -175,6 +175,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
+        # Pre-compute integer indices on CPU to avoid GPU-CPU sync during indexing
+        spec_indices: torch.Tensor | None = None
+        non_spec_indices: torch.Tensor | None = None
+
         if (
             not self.use_spec_decode
             or num_decode_draft_tokens_cpu is None
@@ -186,13 +190,34 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
-            spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+            # Use pin_memory() for true async DMA transfer
+            spec_sequence_masks_cpu = (num_decode_draft_tokens_cpu >= 0).pin_memory()
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:
                 spec_sequence_masks = spec_sequence_masks_cpu.to(
+                    query_start_loc.device, non_blocking=True
+                )
+                # Pre-compute integer indices on CPU to eliminate
+                # synchronization during indexing with boolean masks
+                spec_indices_cpu = (
+                    torch.nonzero(spec_sequence_masks_cpu, as_tuple=True)[0]
+                    .to(torch.int32)
+                    .pin_memory()
+                )
+                non_spec_indices_cpu = (
+                    torch.nonzero(~spec_sequence_masks_cpu, as_tuple=True)[0]
+                    .to(torch.int32)
+                    .pin_memory()
+                )
+
+                # Async transfer to device with non_blocking=True
+                spec_indices = spec_indices_cpu.to(
+                    query_start_loc.device, non_blocking=True
+                )
+                non_spec_indices = non_spec_indices_cpu.to(
                     query_start_loc.device, non_blocking=True
                 )
 
@@ -210,7 +235,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc_cpu = query_start_loc_cpu
             num_accepted_tokens = None
         else:
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
             assert spec_sequence_masks_cpu is not None
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -251,9 +275,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_token_indx = torch.empty(
                     0, dtype=torch.int32, device=query_start_loc.device
                 )
-                # Filter by spec_sequence_masks to exclude padded sequences
+                # Use pre-computed integer indices instead of boolean masks
+                # to eliminate synchronization during indexing
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_indices, : self.num_spec + 1
                 ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
@@ -263,51 +288,64 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
-                spec_token_masks = torch.repeat_interleave(
-                    spec_sequence_masks, query_lens
+                # Move repeat_interleave and argsort to CPU to avoid
+                # synchronization during the shuffle phase
+                spec_token_masks_cpu = torch.repeat_interleave(
+                    spec_sequence_masks_cpu, query_lens_cpu
                 )
-                index = torch.argsort(spec_token_masks, stable=True)
+                index_cpu = torch.argsort(spec_token_masks_cpu, stable=True)
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
-                non_spec_token_indx = index[:num_non_spec_tokens]
-                spec_token_indx = index[num_non_spec_tokens:]
 
+                # Async transfer to device after CPU slicing is complete
+                non_spec_token_indx = (
+                    index_cpu[:num_non_spec_tokens]
+                    .to(torch.int32)
+                    .pin_memory()
+                    .to(query_start_loc.device, non_blocking=True)
+                )
+                spec_token_indx = (
+                    index_cpu[num_non_spec_tokens:]
+                    .to(torch.int32)
+                    .pin_memory()
+                    .to(query_start_loc.device, non_blocking=True)
+                )
+
+                # Use pre-computed integer indices for block table slicing
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_indices, : self.num_spec + 1
                 ]
-                non_spec_state_indices_tensor = block_table_tensor[
-                    ~spec_sequence_masks, 0
-                ]
+                non_spec_state_indices_tensor = block_table_tensor[non_spec_indices, 0]
 
-                spec_query_start_loc = torch.zeros(
-                    num_spec_decodes + 1,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
+                # Move cumsum operations to CPU, then async transfer to device
+                spec_query_start_loc_cpu = torch.zeros(
+                    num_spec_decodes + 1, dtype=torch.int32, pin_memory=True
                 )
                 torch.cumsum(
-                    query_lens[spec_sequence_masks], dim=0, out=spec_query_start_loc[1:]
-                )
-                non_spec_query_start_loc = torch.zeros(
-                    query_lens.size(0) - num_spec_decodes + 1,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                torch.cumsum(
-                    query_lens[~spec_sequence_masks],
+                    query_lens_cpu[spec_sequence_masks_cpu],
                     dim=0,
-                    out=non_spec_query_start_loc[1:],
+                    out=spec_query_start_loc_cpu[1:],
                 )
+                spec_query_start_loc = spec_query_start_loc_cpu.to(
+                    query_start_loc.device, non_blocking=True
+                )
+
                 non_spec_query_start_loc_cpu = torch.zeros(
                     query_lens_cpu.size(0) - num_spec_decodes + 1,
                     dtype=torch.int32,
+                    pin_memory=True,
                 )
                 torch.cumsum(
                     query_lens_cpu[~spec_sequence_masks_cpu],
                     dim=0,
                     out=non_spec_query_start_loc_cpu[1:],
                 )
+                non_spec_query_start_loc = non_spec_query_start_loc_cpu.to(
+                    query_start_loc.device, non_blocking=True
+                )
 
             assert num_accepted_tokens is not None
-            num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
+            # Use pre-computed integer indices for indexing
+            num_accepted_tokens = num_accepted_tokens[spec_indices]
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
@@ -332,7 +370,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
-                has_initial_state = has_initial_state[~spec_sequence_masks]
+                # Use pre-computed integer indices for indexing
+                has_initial_state = has_initial_state[non_spec_indices]
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
