@@ -83,19 +83,6 @@ def _gemma4_routing_kernel(
     K:       tl.constexpr,
     BLOCK_E: tl.constexpr,
 ):
-    """
-    Sort-v3: eliminates the K serial masked-sum reductions after sort.
-
-    Vs sort_v2: instead of K independent tl.sum(tl.where(offs_e==i, sorted_p, 0))
-    reductions (K LDS ops), extract all BLOCK_E elements vectorized in one pass:
-      • Compute exp for ALL BLOCK_E sorted elements  (2 VALU clocks, vectorized)
-      • Sum only top-K for renorm with ONE masked tl.sum  (1 LDS op)
-      • Load scales for top-K with ONE masked gather (→ all in L1 after 1st token)
-      • Write ids + weights with TWO masked tl.store  (no K-loop)
-
-    ISA savings: ~5-6 total LDS ops (vs 12 in sort_v2), trading 1 extra VALU clock
-    for the additional BLOCK_E-K exp ops.
-    """
     pid    = tl.program_id(0)
     offs_e = tl.arange(0, BLOCK_E)
     valid  = offs_e < E
