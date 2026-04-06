@@ -634,7 +634,9 @@ class OpenAISpeechToText(OpenAIServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
-                    if beginning_of_chunk:
+
+                    # dont add separator to the first chunk
+                    if result_generator is not list_result_generator[0] and beginning_of_chunk:
                         output.text = separator + output.text
                         beginning_of_chunk = False
 
