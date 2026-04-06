@@ -31,6 +31,18 @@ class IrOpPriorityConfig:
     rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.rms_norm"""
 
+    static_quant_fp8: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.static_quant_fp8"""
+
+    static_group_quant_fp8: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.static_group_quant_fp8"""
+
+    dynamic_quant_fp8: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.dynamic_quant_fp8"""
+
+    dynamic_group_quant_fp8: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.dynamic_group_quant_fp8"""
+
     def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.

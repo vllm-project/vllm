@@ -942,4 +942,16 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+            quant_fp8 = ["aiter"] + default
+        else:
+            quant_fp8 = default
+
+        return IrOpPriorityConfig.with_default(
+            default,
+            rms_norm=rms_norm,
+            static_quant_fp8=quant_fp8,
+            static_group_quant_fp8=quant_fp8,
+            dynamic_quant_fp8=quant_fp8,
+            dynamic_group_quant_fp8=quant_fp8,
+        )
