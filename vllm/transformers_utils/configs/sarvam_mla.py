@@ -86,6 +86,7 @@ class SarvamMLAConfig(PretrainedConfig):
         self.use_qk_norm = use_qk_norm
         self.rope_scaling = rope_scaling
         self.default_theta = 10000.0
+        self.attn_implementation = attn_implementation
 
         if self.rope_scaling is None:
             self.rope_scaling = {
@@ -101,6 +102,16 @@ class SarvamMLAConfig(PretrainedConfig):
         # Normalize legacy "type" key to "rope_type"
         if "type" in self.rope_scaling and "rope_type" not in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling.pop("type")
+
+        # Tell Transformers v5 RoPE validation to ignore MLA-specific
+        # keys that are not standard RoPE parameters.
+        kwargs.setdefault("ignore_keys_at_rope_validation", set())
+        kwargs["ignore_keys_at_rope_validation"] |= {
+            "beta_fast",
+            "beta_slow",
+            "mscale",
+            "mscale_all_dim",
+        }
 
         super().__init__(
             pad_token_id=pad_token_id,
