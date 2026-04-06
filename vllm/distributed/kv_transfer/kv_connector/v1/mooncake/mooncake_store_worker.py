@@ -714,6 +714,15 @@ class MooncakeStoreWorker:
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
 
+    def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
+        """Register a cross-layers KV cache tensor.
+
+        Wraps the unified tensor in a single-entry dict so that the
+        existing stride-based logic in register_kv_caches() produces
+        the correct single-segment result (block_len = page_size * num_layers).
+        """
+        self.register_kv_caches({"__cross_layer__": kv_cache})
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV cache tensors and start transfer threads."""
         # TODO(yifan): we haven't supported hybrid HMA yet.

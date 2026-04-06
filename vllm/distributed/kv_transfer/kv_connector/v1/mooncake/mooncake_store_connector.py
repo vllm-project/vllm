@@ -76,6 +76,14 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 class MooncakeStoreConnector(KVConnectorBase_V1):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        extra_config = self._kv_transfer_config.kv_connector_extra_config
+        return (
+            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
+            == "true"
+        )
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -169,6 +177,12 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type
+    ):
+        assert self.connector_worker is not None
+        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         # No-op: loads are issued in get_finished() for compute overlap.
