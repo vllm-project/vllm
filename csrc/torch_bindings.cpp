@@ -80,7 +80,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "convert_vertical_slash_indexes("
       "   Tensor! block_count, Tensor! block_offset, "
       "   Tensor! column_count, Tensor! column_index, "
-      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor q_seqlens, Tensor kv_seqlens, "
       "   Tensor vertical_indexes, Tensor slash_indexes, "
       "   int context_size, int block_size_M, int block_size_N, "
       "   bool causal) -> ()");
@@ -91,7 +91,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "convert_vertical_slash_indexes_mergehead("
       "   Tensor! block_count, Tensor! block_offset, "
       "   Tensor! column_count, Tensor! column_index, "
-      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor q_seqlens, Tensor kv_seqlens, "
       "   Tensor vertical_indexes, Tensor slash_indexes, "
       "   Tensor vertical_indices_count, Tensor slash_indices_count, "
       "   int context_size, int block_size_M, int block_size_N, "
