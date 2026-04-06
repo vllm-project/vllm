@@ -39,8 +39,9 @@ PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
-CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [
+    f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
@@ -103,8 +104,8 @@ class LogitsProcsRequestParams:
 class MockReasoningConfig:
     """Mock reasoning config for testing ThinkingTokenBudgetLogitsProcessor."""
 
-    think_start_token_ids = [THINK_START_TOKEN_ID]
-    think_end_token_ids = [THINK_END_TOKEN_ID]
+    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
+    reasoning_end_token_ids = [THINK_END_TOKEN_ID]
 
 
 def _generate_fake_sampling_metadata(
@@ -491,7 +492,7 @@ def _thinking_budget_validate(
 
         # Find if thinking has started in output tokens
         thinking_started = False
-        start_tokens = tb_processor.think_start_token_ids
+        start_tokens = tb_processor.reasoning_start_token_ids
 
         if len(start_tokens) > 0:
             for i in range(len(output_tokens) - len(start_tokens) + 1):
@@ -518,7 +519,7 @@ def _thinking_budget_validate(
                     )
 
                 # Validate that only end tokens are allowed
-                end_tokens = tb_processor.think_end_token_ids
+                end_tokens = tb_processor.reasoning_end_token_ids
                 if len(end_tokens) > 0:
                     expected_end_token_id = end_tokens[
                         min(state["end_count"], len(end_tokens) - 1)
@@ -801,7 +802,7 @@ def _assert_valid(
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("reqs_per_logitproc", [REQS_PER_LOGITPROC])
 @pytest.mark.parametrize("logitsprocs_under_test", _get_test_cases())
 def test_logitsprocs(
