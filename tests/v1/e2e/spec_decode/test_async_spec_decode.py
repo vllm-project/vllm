@@ -118,8 +118,7 @@ def test_no_sync_with_spec_decode(
 
     # Assert async scheduling is actually active before running inference.
     assert llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
-        "Expected async_scheduling=True for spec decode, got False. "
-        f"method={method}"
+        f"Expected async_scheduling=True for spec decode, got False. method={method}"
     )
 
     outputs = llm.generate(
