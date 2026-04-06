@@ -25,7 +25,7 @@ NUM_HEADS = [
     (8, 2),
     (9, 3),
 ]
-HEAD_SIZES = [96, 128]
+HEAD_SIZES = [96, 128, 512]
 HEAD_SIZES_VEC16 = [96, 80, 112, 128]
 QTYPES = [torch.bfloat16, torch.half, torch.float32]
 SLIDING_WINDOWS = [None, 256]

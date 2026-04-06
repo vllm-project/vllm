@@ -121,7 +121,7 @@ class PassConfig:
     fuse_act_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = None  # type: ignore[assignment]
-    """Fuse the custom attention + quant ops."""
+    """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = None  # type: ignore[assignment]
@@ -466,6 +466,15 @@ class CompilationConfig:
     disabled when running with Inductor: mode>CompilationMode.NONE and
     backend="inductor".
     Inductor generates (fused) Triton kernels for disabled custom ops."""
+
+    ir_enable_torch_wrap: bool = None  # type: ignore[assignment]
+    """If True, enable vllm_ir torch custom op wrapping during the forward pass.
+    When False, torch custom op wrapping is disabled, allowing Dynamo to trace the
+    selected implementation directly or avoiding torch custom op overhead in eager mode.
+    Defaults to True when using Inductor with vllm-compile
+    (backend=="inductor" and mode == VLLM_COMPILE), False otherwise.
+    """
+
     splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
@@ -486,9 +495,10 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models
-    on selected platforms. Disabled by default until more models
-    are supported/tested to work."""
+    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models on selected
+    platforms. It may also work for models loaded with the Transformers modeling backend
+    if the encoder is compilable. Disabled by default until more models are
+    supported/tested to work."""
 
     # Vision encoder CUDA graph
     cudagraph_mm_encoder: bool = False
@@ -830,6 +840,7 @@ class CompilationConfig:
         "cudagraph_mode",
         "max_cudagraph_capture_size",
         "use_inductor_graph_partition",
+        "ir_enable_torch_wrap",
         mode="wrap",
     )
     @classmethod
@@ -1042,13 +1053,6 @@ class CompilationConfig:
                 self.splitting_ops = []
             return
 
-        # NOTE: this function needs to be called only when mode is
-        # CompilationMode.VLLM_COMPILE
-        assert self.mode == CompilationMode.VLLM_COMPILE, (
-            "set_splitting_ops_for_v1 should only be called when "
-            "mode is CompilationMode.VLLM_COMPILE"
-        )
-
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
         else:
@@ -1069,6 +1073,16 @@ class CompilationConfig:
                 # that doesn't seem to affect performance.
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
+                    if self.pass_config.fuse_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_rope_kvcache is enabled, but splitting_ops is None "
+                            "and Inductor graph partition is not enabled."
+                            "Disabling fuse_rope_kvcache."
+                            "Please either set splitting_ops to an empty list []"
+                            "or set use_inductor_graph_partition to True "
+                            "to enable RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
@@ -1140,6 +1154,29 @@ class CompilationConfig:
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops
+        )
+
+    def splitting_ops_contain_kv_cache_update(self) -> bool:
+        # when using Dynamo partition while splitting ops is None
+        # and attn+quant fusion disabled, the kv_cache_update_ops are
+        # appended to splitting_ops in set_splitting_ops_for_v1 due to
+        # https://github.com/vllm-project/vllm/issues/33267
+        # In this case, we return True if the kv_cache_update_ops
+        # are not in the splitting_ops yet, but will subsequently
+        # be added to splitting_ops.
+        if (
+            not self.use_inductor_graph_partition
+            and self.splitting_ops is None
+            and not self.pass_config.fuse_attn_quant
+        ):
+            return True
+
+        kv_cache_update_ops = [
+            "vllm::unified_kv_cache_update",
+            "vllm::unified_mla_kv_cache_update",
+        ]
+        return self.splitting_ops is not None and all(
+            op in self.splitting_ops for op in kv_cache_update_ops
         )
 
     def is_attention_compiled_piecewise(self) -> bool:
@@ -1252,58 +1289,6 @@ class CompilationConfig:
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
-
-    def adjust_cudagraph_sizes_for_mamba_cache(
-        self, num_mamba_cache_blocks: int
-    ) -> None:
-        """Cap cudagraph capture sizes to available Mamba cache blocks.
-
-        For hybrid Mamba/attention models, the Mamba conv_state and
-        ssm_state tensors have their first dimension equal to num_blocks
-        (from KVCacheConfig). During CUDA graph capture the decode batch
-        size equals num_tokens, so capture sizes exceeding num_blocks
-        would cause out-of-bounds access in Mamba kernels.
-
-        See: https://github.com/vllm-project/vllm/issues/34094
-        """
-        if not self.cudagraph_capture_sizes or num_mamba_cache_blocks <= 0:
-            return
-
-        assert self.max_cudagraph_capture_size is not None
-
-        if num_mamba_cache_blocks >= self.max_cudagraph_capture_size:
-            return
-
-        capped_sizes = [
-            s for s in self.cudagraph_capture_sizes if s <= num_mamba_cache_blocks
-        ]
-
-        if len(capped_sizes) == 0:
-            logger.warning(
-                "No valid cudagraph capture sizes remain after capping "
-                "to Mamba cache blocks (%d). The smallest capture size "
-                "was %d. Disabling cudagraph capture. Consider reducing "
-                "max_num_seqs or increasing available GPU memory.",
-                num_mamba_cache_blocks,
-                self.cudagraph_capture_sizes[0],
-            )
-            self.cudagraph_capture_sizes = []
-            self.max_cudagraph_capture_size = 0
-            return
-
-        logger.warning(
-            "Capping cudagraph capture sizes from max %d to %d to fit "
-            "Mamba cache blocks (%d blocks available). This limits the "
-            "maximum batch size that can use CUDA graphs. To increase "
-            "this limit, reduce max_num_seqs or increase available GPU "
-            "memory.",
-            self.max_cudagraph_capture_size,
-            capped_sizes[-1],
-            num_mamba_cache_blocks,
-        )
-
-        self.max_cudagraph_capture_size = capped_sizes[-1]
-        self.cudagraph_capture_sizes = capped_sizes
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""

@@ -890,3 +890,64 @@ def test_extract_tool_calls_streaming_pre_v11_tokenizer_one_chunk(
         assert expected_content == ""
     else:
         assert delta_message.content == expected_content
+
+
+def test_fast_detokenization_text_detection(mistral_tool_parser):
+    """Regression: bot_token in text but not token_ids (PR #37209)."""
+    model_output = '[TOOL_CALLS]add{"a": 1, "b": 2}'
+    # Token IDs that do NOT contain bot_token_id.
+    fake_token_ids = list(range(99, 99 + 20))
+
+    # First delta: pure content, no bot token yet
+    delta_message_before = mistral_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text="Hello",
+        delta_text="Hello",
+        previous_token_ids=[],
+        current_token_ids=[99],
+        delta_token_ids=[99],
+        request=None,
+    )
+    assert delta_message_before is not None
+    assert delta_message_before.content == "Hello"
+    assert not delta_message_before.tool_calls
+
+    # Second delta: bot token in text but NOT in token_ids
+    delta_message = mistral_tool_parser.extract_tool_calls_streaming(
+        previous_text="Hello",
+        current_text="Hello" + model_output,
+        delta_text=model_output,
+        previous_token_ids=[99],
+        current_token_ids=fake_token_ids,
+        delta_token_ids=fake_token_ids[1:],
+        request=None,
+    )
+    assert delta_message is not None
+    assert delta_message.tool_calls is not None
+    assert len(delta_message.tool_calls) > 0
+    assert delta_message.tool_calls[0].function is not None
+    assert delta_message.tool_calls[0].function.name == "add"
+
+
+def test_fast_detokenization_text_detection_pre_v11(
+    mistral_pre_v11_tool_parser,
+):
+    """Regression: bot_token text detection for pre-v11 tokenizer (PR #37209)."""
+    model_output = '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 1, "b": 2}}]'
+
+    fake_token_ids = list(range(99, 99 + 30))
+
+    delta_message = mistral_pre_v11_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=model_output,
+        delta_text=model_output,
+        previous_token_ids=[],
+        current_token_ids=fake_token_ids,
+        delta_token_ids=fake_token_ids,
+        request=None,
+    )
+    assert delta_message is not None
+    assert delta_message.tool_calls is not None
+    assert len(delta_message.tool_calls) > 0
+    assert delta_message.tool_calls[0].function is not None
+    assert delta_message.tool_calls[0].function.name == "add"

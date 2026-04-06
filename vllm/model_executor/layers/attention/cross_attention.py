@@ -18,7 +18,11 @@ from vllm.v1.attention.backend import (
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    CrossAttentionSpec,
+    KVCacheSpec,
+    get_kv_quant_mode,
+)
 
 logger = init_logger(__name__)
 
@@ -220,4 +224,5 @@ class CrossAttention(Attention):
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )

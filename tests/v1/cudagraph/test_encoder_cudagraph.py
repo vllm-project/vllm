@@ -16,10 +16,10 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
+from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
 )
-from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers,
