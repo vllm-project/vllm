@@ -95,6 +95,14 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
 
         return {"thinking": thinking, "answer": answer}
 
+    # Handle truncated thinking: start tag present but end tag missing
+    # (model hit max_tokens before completing the chain-of-thought).
+    if _THINKING_START_TAG in text:
+        thinking = text.split(_THINKING_START_TAG, 1)[1]
+        thinking = _strip_thought_label(thinking.strip())
+        thinking = thinking.strip()
+        return {"thinking": thinking + "\n[truncated]", "answer": ""}
+
     # No thinking delimiters found.
     # Strip spurious "thought\n" role label that some Gemma4 models sometimes
     # emit even without thinking mode enabled, then clean trailing tokens.

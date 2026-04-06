@@ -39,6 +39,19 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    def adjust_request(
+        self, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> "ChatCompletionRequest | ResponsesRequest":
+        """Adjust request parameters before inference.
+
+        Subclasses can override this to modify request settings
+        (e.g. forcing ``skip_special_tokens=False`` when the parser
+        relies on special-token delimiters surviving detokenization).
+
+        The default implementation is a no-op.
+        """
+        return request
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
