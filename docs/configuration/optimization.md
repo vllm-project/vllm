@@ -159,10 +159,11 @@ GPU-to-NUMA detection is currently implemented for CUDA/NVML-based platforms;
 other GPU backends must provide explicit binding lists if they use these
 options.
 
-`--numa-bind-nodes` takes one non-negative NUMA node index per visible GPU.
-`--numa-bind-cpus` takes one `numactl` CPU list per visible GPU. Each CPU list
-must use `numactl --physcpubind` syntax such as `0-3`, `0,2,4-7`, or
-`16-31,48-63`.
+`--numa-bind-nodes` takes one non-negative NUMA node index per visible GPU, in
+the same order as the GPU indices.
+`--numa-bind-cpus` takes one `numactl` CPU list per visible GPU, in the same
+order as the GPU indices. Each CPU list must use
+`numactl --physcpubind` syntax such as `0-3`, `0,2,4-7`, or `16-31,48-63`.
 
 ```bash
 # Auto-detect NUMA nodes for visible GPUs
@@ -190,24 +191,28 @@ Notes:
 - Automatic detection relies on NVML and NUMA support from the host. If it cannot determine the mapping reliably, pass `--numa-bind-nodes` explicitly.
 - Explicit `--numa-bind-nodes` and `--numa-bind-cpus` values must be valid `numactl` inputs. vLLM does a small amount of validation, but the effective binding semantics are still determined by `numactl`.
 - The current implementation binds GPU execution processes such as `EngineCore` and multiprocessing workers. It does not apply NUMA binding to frontend API server processes or the DP coordinator.
-- In containerized environments, NUMA policy syscalls may require extra permissions such as `--cap-add SYS_NICE`.
+- In containerized environments, NUMA policy syscalls may require extra permissions, such as `--cap-add SYS_NICE` when running via `docker run`.
 
 ### CPU Backend Thread Affinity
 
 The CPU backend uses a different mechanism from `--numa-bind`. CPU execution is
-handled by `CPUWorker`, which binds its OpenMP worker threads during
-initialization instead of wrapping the whole worker process with `numactl`.
+configured through CPU-specific environment variables such as
+`VLLM_CPU_OMP_THREADS_BIND`, `VLLM_CPU_NUM_OF_RESERVED_CPU`, and
+`CPU_VISIBLE_MEMORY_NODES`, rather than the GPU-oriented `--numa-bind*` CLI
+options.
 
-By default, `VLLM_CPU_OMP_THREADS_BIND=auto` selects CPU cores from the local
-allowed NUMA node for each CPU worker. The binding is applied through
-`torch.ops._C.init_cpu_threads_env(...)`, which also sets the corresponding
-memory policy for the selected NUMA node set.
+By default, `VLLM_CPU_OMP_THREADS_BIND=auto` derives OpenMP placement from the
+available CPU and NUMA topology for each CPU worker. To override the automatic
+policy, set `VLLM_CPU_OMP_THREADS_BIND` explicitly using the CPU list format
+documented for the CPU backend, or use `nobind` to disable this behavior.
 
-To override the automatic policy, set `VLLM_CPU_OMP_THREADS_BIND` explicitly
-using the CPU list format expected by the CPU backend. Use `nobind` to disable
-this thread binding behavior entirely. The GPU-only `--numa-bind`,
-`--numa-bind-nodes`, and `--numa-bind-cpus` options do not configure CPUWorker
-thread affinity.
+For the current CPU backend setup and tuning guidance, see:
+
+- [Related runtime environment variables](../getting_started/installation/cpu.md#related-runtime-environment-variables)
+- [How to decide `VLLM_CPU_OMP_THREADS_BIND`](../getting_started/installation/cpu.md#how-to-decide-vllm_cpu_omp_threads_bind)
+
+The GPU-only `--numa-bind`, `--numa-bind-nodes`, and `--numa-bind-cpus` options
+do not configure CPU worker affinity.
 
 ### Batch-level DP for Multi-Modal Encoders
 
