@@ -73,7 +73,7 @@ def query_marlin_supported_quant_types(
         return [scalar_types.uint4]
     else:
         # GPTQ style, unsigned + symmetric bias
-        res = [scalar_types.uint4b8, scalar_types.uint8b128]
+        res = [scalar_types.uint4b8, scalar_types.uint8b128, scalar_types.int4]
         if include_fp_type:
             res += [scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f]
         return res
@@ -533,11 +533,15 @@ def apply_gptq_marlin_linear(
 
     a_scales = None
     if input_dtype == torch.int8:
-        assert wtype == scalar_types.uint4b8, (
-            "W8A8-INT8 is not supported by marlin kernel."
+        # `int4` weights are repacked to Marlin's `uint4b8` kernel layout during
+        # weight processing, so this path normally sees `wtype=uint4b8`.
+        # Keep `int4` for defensive compatibility with alternate call paths.
+        assert wtype in (scalar_types.uint4b8, scalar_types.int4), (
+            "W4A8-INT8 with marlin kernel only supports uint4b8 or int4 weights."
         )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
-        a_scales = a_scales * input_global_scale
+        if input_global_scale is not None:
+            a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
         assert wtype == scalar_types.uint4b8, (
             "INT8 weight + FP8 activation is not supported."
@@ -603,7 +607,8 @@ def apply_awq_marlin_linear(
             "W8A8-INT8 is not supported by marlin kernel."
         )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
-        a_scales = a_scales * input_global_scale
+        if input_global_scale is not None:
+            a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
         assert quant_type == scalar_types.uint4, (
             "INT8 weight + FP8 activation is not supported."
