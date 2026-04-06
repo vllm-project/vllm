@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    from vllm.model_executor.layers.quantization.input_quant_fp8 import (
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
         quantize_fp8_pad_head_dim_triton,
     )
 
@@ -60,9 +60,7 @@ def test_quantize_contiguous(
 
     # Compare unpadded portion against reference
     ref = _naive_fp8_quantize(tensor, scale, skip_scale=False)
-    torch.testing.assert_close(
-        result[:, :, :head_dim].float(), ref.float()
-    )
+    torch.testing.assert_close(result[:, :, :head_dim].float(), ref.float())
 
     # Padded region should be zero
     if padded_dim > head_dim:
@@ -91,9 +89,7 @@ def test_quantize_non_contiguous(head_dim: int) -> None:
 
     # Compare against contiguous reference
     ref = _naive_fp8_quantize(q.contiguous(), scale, skip_scale=False)
-    torch.testing.assert_close(
-        result[:, :, :head_dim].float(), ref.float()
-    )
+    torch.testing.assert_close(result[:, :, :head_dim].float(), ref.float())
 
 
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
@@ -110,9 +106,7 @@ def test_skip_scale() -> None:
 
     # skip_scale should just cast, not divide
     ref_cast = _naive_fp8_quantize(tensor, scale, skip_scale=True)
-    torch.testing.assert_close(
-        result_skip[:, :, :head_dim].float(), ref_cast.float()
-    )
+    torch.testing.assert_close(result_skip[:, :, :head_dim].float(), ref_cast.float())
 
     # With scale != 1.0, skip and no-skip should differ
     assert not torch.equal(result_skip.float(), result_noskip.float())

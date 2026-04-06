@@ -9,11 +9,13 @@ import numpy as np
 import torch
 
 from vllm.config import get_current_vllm_config_or_none
+from vllm.kernels.triton.qkv_padded_fp8_quant import (
+    quantize_fp8_pad_head_dim_triton,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, maybe_get_oot_by_class
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
     QuantFP8,
-    quantize_fp8_pad_head_dim_triton,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -47,8 +49,8 @@ def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     Expected format example (keys like ``q_scale`` also accepted)::
 
         {
-            "visual.blocks.0.attn": {"q": 224.0, "k": 198.0, "v": 210.0},
-            "visual.blocks.1.attn": {"q": 218.0, "k": 195.0, "v": 207.0},
+            "visual.blocks.0.attn.attn": {"q": 224.0, "k": 198.0, "v": 210.0},
+            "visual.blocks.1.attn.attn": {"q": 218.0, "k": 195.0, "v": 207.0},
             ...
         }
 

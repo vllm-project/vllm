@@ -18,8 +18,8 @@ from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
 
-LAYER_0 = "visual.blocks.0.attn"
-LAYER_1 = "visual.blocks.1.attn"
+LAYER_0 = "visual.blocks.0.attn.attn"
+LAYER_1 = "visual.blocks.1.attn.attn"
 NUM_HEADS = 16
 HEAD_DIM = 72
 
