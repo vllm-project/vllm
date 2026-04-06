@@ -213,7 +213,10 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
                 _place_kernel_tensors(layer, info)
                 _reload_attention_scales(layer, info)
             elif info.load_numel > 0 or info.kernel_tensors is None:
-                _layerwise_process(layer, info)
+                raise ValueError(
+                    "Layerwise loading of attention layers is not supported. "
+                    "Attention must always process after linears."
+                )
             else:
                 _place_kernel_tensors(layer, info)
             layer.process_weights_after_loading(model_config.dtype)
@@ -263,15 +266,7 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
 
     quant_method.process_weights_after_loading(layer)
 
-    # Some quant methods replace buffers via assignment, leaving them on CPU
-    target_device = info.restore_device
-    for name, tensor in get_layer_tensors(layer).items():
-        if tensor.device != target_device:
-            data = tensor.data.to(target_device)
-            if isinstance(tensor, torch.nn.Parameter):
-                tensor.data = data
-            else:
-                setattr(layer, name, data)
+    _copy_and_restore_kernel_tensors(layer, info)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -310,13 +305,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
-        parameters, buffers = info.kernel_tensors
-        for name, param in parameters.items():
-            param.data.copy_(getattr(layer, name))
-        for name, buffer in buffers.items():
-            buffer.data.copy_(getattr(layer, name))
-
-        _place_kernel_tensors(layer, info)
+        _copy_and_restore_kernel_tensors(layer, info)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
@@ -333,6 +322,19 @@ def _get_original_loader(tensor: torch.Tensor) -> Callable:
 
 def _get_weight_loader(tensor: torch.Tensor):
     return getattr(tensor, "weight_loader", default_weight_loader)
+
+
+def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """Copy processed values into original kernel tensor storage and restore
+    kernel tensor references on the layer. Preserves cudagraph references."""
+    assert info.kernel_tensors is not None
+    parameters, buffers = info.kernel_tensors
+    for name, param in parameters.items():
+        param.data.copy_(getattr(layer, name))
+    for name, buffer in buffers.items():
+        buffer.data.copy_(getattr(layer, name))
+
+    _place_kernel_tensors(layer, info)
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
