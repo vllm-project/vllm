@@ -61,6 +61,23 @@ from vllm.v1.attention.backend import AttentionType
 logger = init_logger(__name__)
 
 
+def _get_image_size_tuple(image_size: int | Iterable[int]) -> tuple[int, int]:
+    """Normalize image_size to a (height, width) tuple.
+
+    Transformers v5 may return a scalar int instead of a tuple.
+    """
+    if isinstance(image_size, int):
+        return (image_size, image_size)
+    size = tuple(image_size)
+    if len(size) == 0:
+        raise ValueError(
+            f"image_size must not be empty, got {image_size!r}"
+        )
+    if len(size) == 1:
+        return (size[0], size[0])
+    return (size[0], size[1])
+
+
 class BartScaledWordEmbedding(VocabParallelEmbedding):
     """
     This module overrides VocabParallelEmbedding's
@@ -379,7 +396,7 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
 
     def get_num_image_tokens(self) -> int:
         config = self.get_hf_config()
-        final_size = config.image_size
+        final_size = _get_image_size_tuple(config.image_size)
         patch_size = config.encoder.patch_size
 
         return (final_size[0] // patch_size) * ((final_size[1] // patch_size) // 4) + 1
@@ -407,7 +424,9 @@ class NemotronParseDummyInputsBuilder(
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.info.get_hf_config().image_size
+        target_height, target_width = _get_image_size_tuple(
+            self.info.get_hf_config().image_size
+        )
 
         return {
             "image": self._get_dummy_images(
@@ -626,7 +645,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
             raise ValueError("Both pixel values and image embeds are provided.")
 
         if pixel_values is not None:
-            h, w = self.config.image_size
+            h, w = _get_image_size_tuple(self.config.image_size)
             return NemotronParsePixelInputs(
                 type="pixel_values",
                 data=pixel_values,
