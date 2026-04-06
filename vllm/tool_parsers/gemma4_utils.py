@@ -236,6 +236,11 @@ def parse_gemma4_array(arr_str: str) -> list:
             sub_start = i + 1
             i += 1
             while i < n and depth > 0:
+                if arr_str[i:].startswith(_ESCAPE_TOKEN):
+                    i += len(_ESCAPE_TOKEN)
+                    nd = arr_str.find(_ESCAPE_TOKEN, i)
+                    i = nd + len(_ESCAPE_TOKEN) if nd != -1 else n
+                    continue
                 if arr_str[i] == "[":
                     depth += 1
                 elif arr_str[i] == "]":
