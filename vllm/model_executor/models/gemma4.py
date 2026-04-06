@@ -1370,7 +1370,6 @@ class Gemma4Model(nn.Module):
                     if is_pp_missing_parameter(moe_name, self):
                         continue
                     param = params_dict[moe_name]
-                    expert_suffix = moe_name.removeprefix(param_name_prefix)
                     # Expert weights are already in the correct
                     # orientation for FusedMoE after _weight_iterator:
                     #   gate/up: [I, H] → w1/w3 expects [I, H]
