@@ -15,6 +15,7 @@ from vllm.model_executor.layers.activation import (
     MulAndSilu,
     NewGELU,
     QuickGELU,
+    ReLUSquaredActivation,
     SiluAndMul,
     SwigluOAIAndMul,
     SwigluStepAndMul,
@@ -122,6 +123,7 @@ def test_act_and_mul(
         (FastGELU, torch.ops._C.gelu_fast),
         (NewGELU, torch.ops._C.gelu_new),
         (QuickGELU, torch.ops._C.gelu_quick),
+        (ReLUSquaredActivation, torch.ops._C.relu_squared),
     ],
 )
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
