@@ -8,9 +8,9 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark Tree Decoding vs Normal Decoding in vLLM")
     parser.add_argument("--model", type=str, default="/inspire/hdd/global_public/public_models/Qwen/Qwen2.5-7B-Instruct",
                         help="Model to use for benchmarking")
-    parser.add_argument("--num-prompts-mc", type=int, default=100,
+    parser.add_argument("--num-prompts-mc", type=int, default=270,
                         help="Number of prompts to process in batch")
-    parser.add_argument("--num-prompts-hs", type=int, default=100,
+    parser.add_argument("--num-prompts-hs", type=int, default=10,
                         help="Number of prompts to process in batch")
     parser.add_argument("--max-tokens", type=int, default=1024,
                         help="Maximum number of tokens to generate per prompt")
@@ -55,7 +55,7 @@ def main():
     normal_params = SamplingParams(
         temperature=0.8,
         max_tokens=args.max_tokens,
-        n=27,
+        # n=27,
         # tree_search_params=TreeSearchParams(enable_tree_search=False)
     )
     
