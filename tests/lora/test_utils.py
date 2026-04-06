@@ -205,6 +205,7 @@ def test_get_adapter_absolute_path_huggingface_error(
 # Regression tests for MoE expert LoRA module name parsing (gh-38522)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "module_name, expected_last_component",
     [
@@ -237,7 +238,7 @@ def test_moe_expert_module_name_last_component(
 
         # Old (buggy) logic for comparison
         expert_idx = module_name.find(".experts")
-        old_suffix = module_name[expert_idx + 1:]
+        old_suffix = module_name[expert_idx + 1 :]
 
         assert suffix == expected_last_component, (
             f"New logic returned {suffix!r}, expected {expected_last_component!r}"
