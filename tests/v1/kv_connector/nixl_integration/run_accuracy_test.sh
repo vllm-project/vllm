@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 set -xe
 
 # Parse command line arguments
@@ -85,8 +87,11 @@ DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
-# Find the git repository root directory
-GIT_ROOT=$(git rev-parse --show-toplevel)
+# Resolve the repository root from the script location instead of `.git`.
+# The ROCm CI image copies `/vllm-workspace` without the Git metadata, so
+# `git rev-parse --show-toplevel` is not reliable at runtime.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 

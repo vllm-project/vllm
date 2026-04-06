@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 set -xe
 
 # Parse command line arguments
@@ -33,8 +35,9 @@ MODELS=(
     "Qwen/Qwen3-0.6B"
 )
 
-# Find the git repository root directory
-GIT_ROOT=$(git rev-parse --show-toplevel)
+# Resolve the repository root from the script location instead of `.git`.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT

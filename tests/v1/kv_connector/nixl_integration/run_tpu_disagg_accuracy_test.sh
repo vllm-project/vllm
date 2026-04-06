@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 set -xe
 
 # Hosts / ports
@@ -20,7 +22,8 @@ BLOCK_SIZE=${BLOCK_SIZE:-32}
 
 
 # execution env
-GIT_ROOT=$(git rev-parse --show-toplevel)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 EXP_ROOT="${GIT_ROOT}/tests/v1/kv_connector/nixl_integration"
 CONDA_PATH=${CONDA_PATH:-"/home/${USER}/anaconda3"}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-"nixl"}
