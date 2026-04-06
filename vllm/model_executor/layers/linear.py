@@ -60,7 +60,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptFp8PbWoLinearMethod",
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
-    "PetitNvFp4LinearMethod",
 ]
 
 
