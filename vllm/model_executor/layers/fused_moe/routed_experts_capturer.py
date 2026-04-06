@@ -220,15 +220,15 @@ class RoutedExpertsCapturer:
 
         num_tokens = len(indices)
 
-        if layer_range is not None:
-            ls, le = layer_range
-            data = self._device_buffer[:num_tokens, ls:le, :].cpu().numpy()
-            with _file_lock(self._lock_file):
-                self._host_buffer_view[indices, ls:le, :] = data
-        else:
-            data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
-            with _file_lock(self._lock_file):
-                self._host_buffer_view[indices, :, :] = data
+        ls, le = (
+            layer_range
+            if layer_range is not None
+            else (0, self._device_buffer.shape[1])
+        )
+        data = self._device_buffer[:num_tokens, ls:le, :].cpu().numpy()
+
+        with _file_lock(self._lock_file):
+            self._host_buffer_view[indices, ls:le, :] = data
 
     def cleanup(self) -> None:
         """Explicitly clean up shared memory resources."""
