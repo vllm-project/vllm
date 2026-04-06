@@ -561,7 +561,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # Default path: use unified MLA attention ops
             # Use kv_cache as dummy dependency to prevent DCE
-            kv_cache_dummy_dep = self.kv_cache
+            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                self.layer_name,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
