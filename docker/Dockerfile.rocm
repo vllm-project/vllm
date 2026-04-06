@@ -2,6 +2,7 @@
 ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
+ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -16,11 +17,15 @@ FROM ${BASE_IMAGE} AS base
 ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
-# Install some basic utilities
+# Install build dependencies and utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
-    apt-transport-https ca-certificates wget curl
-RUN python3 -m pip install --upgrade pip
+    apt-transport-https ca-certificates wget curl \
+    ccache mold
+# Note: mold is installed but NOT set as the system default linker because
+# some packages (e.g. aiter) use JIT compilation at runtime with flags
+# that mold doesn't support (--cref). Build stages opt in via CMAKE_LINKER_TYPE
+# or LDFLAGS="-fuse-ld=mold".
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
 RUN if [ "$USE_SCCACHE" != "1" ]; then \
@@ -29,11 +34,8 @@ RUN if [ "$USE_SCCACHE" != "1" ]; then \
         rm -f "$(which sccache)" || true; \
     fi
 
-# Install UV — download first, then run, so a curl failure is not masked by the pipe
-RUN curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh \
-    && env UV_INSTALL_DIR="/usr/local/bin" sh /tmp/uv-install.sh \
-    && rm -f /tmp/uv-install.sh \
-    && uv --version
+# Install UV
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -41,6 +43,13 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+# ccache directory — persisted across layer rebuilds via --mount=type=cache
+ENV CCACHE_DIR=/root/.cache/ccache
+# Compilation parallelism — overridable via --build-arg max_jobs=N.
+# Default to 64 to avoid race conditions with hipify at very high core counts
+# (e.g. 256-core machines where -j=256 can start compiling before hipify finishes).
+ARG max_jobs=64
+ENV MAX_JOBS=${max_jobs}
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
@@ -100,11 +109,14 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
-# Build vLLM (setup.py auto-detects sccache in PATH)
-RUN cd vllm \
-    && python3 -m pip install -r requirements/rocm.txt \
-    && python3 setup.py clean --all  \
-    && python3 setup.py bdist_wheel --dist-dir=dist
+# Build vLLM wheel (setup.py auto-detects ccache/sccache in PATH)
+# Use mold linker for faster linking of large C++ extensions
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    cd vllm \
+    && uv pip install --system -r requirements/rocm.txt \
+    && python3 setup.py clean --all \
+    && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
@@ -146,12 +158,14 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
 
 RUN uv pip install --system meson auditwheel patchelf tomlkit
 
-RUN cd /usr/local/src && \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd /usr/local/src && \
     git clone ${UCX_REPO} &&  \
     cd ucx  && \
     git checkout ${UCX_BRANCH} && \
     ./autogen.sh && \
     mkdir build && cd build && \
+    CC="ccache gcc" CXX="ccache g++" \
     ../configure \
         --prefix=/usr/local/ucx \
         --enable-shared \
@@ -163,20 +177,22 @@ RUN cd /usr/local/src && \
         --with-verbs \
         --with-dm \
         --enable-mt && \
-    make -j && \
+    make -j$(nproc) && \
     make install
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
-RUN git clone ${RIXL_REPO} /opt/rixl && \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    git clone ${RIXL_REPO} /opt/rixl && \
     cd /opt/rixl && \
     git checkout ${RIXL_BRANCH} && \
+    CC="ccache gcc" CXX="ccache g++" \
     meson setup build --prefix=${RIXL_HOME} \
                      -Ducx_path=${UCX_HOME} \
                      -Drocm_path=${ROCM_PATH} && \
     cd build && \
-    ninja && \
+    ninja -j$(nproc) && \
     ninja install
 
 # Generate RIXL wheel
@@ -187,34 +203,49 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
         --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
 
-# DeepEP build stage
-FROM base AS build_deep
+# -----------------------
+# ROCShmem build stage — split from DeepEP so changing DEEPEP_BRANCH
+# does not invalidate the slow cmake+make ROCSHMEM build.
+FROM base AS build_rocshmem
 ARG ROCSHMEM_BRANCH="ba0bf0f3"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG DEEPEP_BRANCH="e84464ec"
-ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
-ARG DEEPEP_NIC="cx7"
 ENV ROCSHMEM_DIR=/opt/rocshmem
 
-RUN git clone ${ROCSHMEM_REPO} \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    git clone ${ROCSHMEM_REPO} \
  && cd rocm-systems \
  && git checkout ${ROCSHMEM_BRANCH} \
  && mkdir -p projects/rocshmem/build \
  && cd projects/rocshmem/build \
- && cmake .. \
+ && CC="ccache gcc" CXX="ccache g++" cmake .. \
     -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
     -DROCM_PATH=/opt/rocm \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DUSE_EXTERNAL_MPI=OFF \
- && make -j \
+    -DAMDGPU_TARGETS="${PYTORCH_ROCM_ARCH}" \
+    -DBUILD_TESTS=OFF \
+    -DBUILD_EXAMPLES=OFF \
+ && make -j$(nproc) \
  && make install
 
-# Build DeepEP wheel.
-# DeepEP looks for rocshmem at ROCSHMEM_DIR.
-RUN git clone ${DEEPEP_REPO} \
+# -----------------------
+# DeepEP build stage — depends on ROCShmem, builds the HIP kernel wheel.
+# Kept separate so the ROCShmem layer above is reused when only DEEPEP_BRANCH changes.
+FROM build_rocshmem AS build_deepep
+ARG DEEPEP_BRANCH="e84464ec"
+ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
+ARG DEEPEP_NIC="cx7"
+
+# Build DeepEP wheel. DeepEP looks for rocshmem at ROCSHMEM_DIR (inherited from build_rocshmem).
+# DeepEP only supports gfx942 and gfx950 — override PYTORCH_ROCM_ARCH to avoid
+# the gfx90a in the default list causing a build failure.
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    export PYTORCH_ROCM_ARCH="gfx942;gfx950" \
+ && git clone ${DEEPEP_REPO} \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
- && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
+ && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
+
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
@@ -255,8 +286,9 @@ RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
 # Extract version from git BEFORE any modifications (pin_rocm_dependencies.py modifies requirements/rocm.txt)
 # This ensures setuptools_scm sees clean repo state for version detection
 RUN --mount=type=bind,source=.git,target=vllm/.git \
+    --mount=type=cache,target=/root/.cache/uv \
     cd vllm \
-    && pip install setuptools_scm regex \
+    && uv pip install --system setuptools_scm regex \
     && VLLM_VERSION=$(python3 -c "import setuptools_scm; print(setuptools_scm.get_version())") \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
@@ -292,18 +324,19 @@ RUN echo "Pinning vLLM dependencies to custom wheel versions..." \
     && python3 /tmp/pin_rocm_dependencies.py /install ${COMMON_WORKDIR}/vllm/requirements/rocm.txt
 
 # Install dependencies using custom wheels from /install
-RUN cd vllm \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd vllm \
     && echo "Building vLLM with custom wheels from /install" \
-    && python3 -m pip install --find-links /install -r requirements/rocm.txt \
-    && python3 setup.py clean --all
+    && uv pip install --system --find-links /install -r requirements/rocm.txt
 
 # Build wheel using pre-extracted version to avoid dirty state from modified requirements/rocm.txt
-# (setup.py auto-detects sccache in PATH)
+# (setup.py auto-detects ccache/sccache in PATH)
 RUN --mount=type=bind,source=.git,target=vllm/.git \
+    --mount=type=cache,target=/root/.cache/ccache \
     cd vllm \
     && export SETUPTOOLS_SCM_PRETEND_VERSION=$(cat /tmp/vllm_version.txt) \
     && echo "Building wheel with version: ${SETUPTOOLS_SCM_PRETEND_VERSION}" \
-    && python3 setup.py bdist_wheel --dist-dir=dist
+    && MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py bdist_wheel --dist-dir=dist
 
 FROM scratch AS export_vllm_wheel_release
 ARG COMMON_WORKDIR
@@ -317,94 +350,96 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/.buildkite /.buildki
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
-# Test vLLM image
-FROM base AS test
+# CI base image (Tier 1) — stable, rarely-changing CI dependencies.
+# Rebuilt weekly (or when RIXL/DeepEP/ROCSHMEM branch ARGs change).
+# Per-PR test builds pull this as CI_BASE_IMAGE instead of rebuilding
+# these slow layers from scratch every commit.
+FROM base AS ci_base
 
-RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
-
-# Install vLLM using uv (inherited from base stage)
-# Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
-RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
-    --mount=type=cache,target=/root/.cache/uv \
-    cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
-    && uv pip install --system -r requirements/rocm-test.txt \
-    && pip uninstall -y vllm \
-    && uv pip install --system *.whl
-
-# Verify that PyTorch is the ROCm build, not CUDA
-RUN python3 -c "import torch; assert torch.version.hip is not None, \
-    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
-    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
-
-# Install RIXL wheel
+# Install RIXL + DeepEP wheels (pre-built in earlier stages)
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
-    uv pip install --system /rixl_install/*.whl
+    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
+    uv pip install --system /rixl_install/*.whl /deep_install/*.whl
 
-# Install DeepEP wheel
-RUN --mount=type=bind,from=build_deep,src=/app/deep_install,target=/deep_install \
-    uv pip install --system /deep_install/*.whl
-COPY --from=build_deep /opt/rocshmem /opt/rocshmem
+# Copy rocshmem runtime libraries
+COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 
-# RIXL/MoRIIO runtime dependencies (RDMA userspace libraries)
-RUN apt-get update -q -y && apt-get install -q -y \
+# RDMA userspace libraries (RIXL/MoRIIO runtime) + FFmpeg dev libs (torchcodec
+# links against libav* at runtime, so the -dev packages must stay installed).
+RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
     librdmacm1 \
     libibverbs1 \
     ibverbs-providers \
     ibverbs-utils \
+    pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
+    libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Install torchcodec from source (ROCm/torch version mismatch prevents PyPI install).
+COPY tools/install_torchcodec_rocm.sh /tmp/install_torchcodec.sh
+RUN bash /tmp/install_torchcodec.sh \
+    && rm /tmp/install_torchcodec.sh \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# hf_transfer for fast model downloads (pytest-shard is in rocm-test.txt lockfile)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# Pre-install vLLM test dependencies (stable between PRs).
+# rocm-test.txt is a fully-resolved lockfile (no relative -r includes).
+# The per-PR test stage re-runs the same install, but uv resolves in <100ms
+# because 99% of packages are already present from ci_base.
+COPY requirements/rocm-test.txt /tmp/rocm-test-reqs.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r /tmp/rocm-test-reqs.txt \
+    && rm /tmp/rocm-test-reqs.txt
+
+# Suppress MIOpen 3D convolution performance regressions
+# See: https://github.com/pytorch/pytorch/issues/169857
+ENV MIOPEN_DEBUG_CONV_DIRECT=0
+ENV MIOPEN_DEBUG_CONV_GEMM=0
+
+# -----------------------
+# Test vLLM image (Tier 2) — thin per-PR layer on top of ci_base.
+# Only rebuilds vLLM wheel + workspace, which change every PR.
+FROM ${CI_BASE_IMAGE} AS test
+
+# Workaround for ROCm profiler limits
+RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
+ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
+RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt
+
+# Install the vLLM wheel.
+# Runtime + test deps are already in ci_base (rocm-test.txt lockfile is
+# compiled with -c rocm.txt, so all runtime packages are covered).
+RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    --mount=type=cache,target=/root/.cache/uv \
+    cd /install \
+    && uv pip install --system *.whl
+
+# Store the vLLM wheel in the image for python_only_compile_rocm.sh.
+# The wheel is only available via bind mount during the RUN above; we need it
+# accessible at test runtime so the python-only compile test can reinstall
+# vLLM without a compiler (no wheels.vllm.ai equivalent exists for ROCm).
+COPY --from=export_vllm /*.whl /opt/vllm-wheels/
 
 WORKDIR /vllm-workspace
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 
 # install development dependencies (for testing)
-RUN cd /vllm-workspace \
-    && python3 -m pip install -e tests/vllm_test_utils \
-    && python3 -m pip install pytest-shard
-
-# enable fast downloads from hf (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
-
-# install audio decode package `torchcodec` from source (required due to 
-# ROCm and torch version mismatch) for tests with datasets package
-COPY tools/install_torchcodec_rocm.sh /tmp/install_torchcodec.sh
-RUN bash /tmp/install_torchcodec.sh \
-    && rm /tmp/install_torchcodec.sh \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    cd /vllm-workspace \
+    && uv pip install --system -e tests/vllm_test_utils
 
 # Copy in the v1 package (for python-only install test group)
 COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
-
-# Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel
-# See: https://github.com/pytorch/pytorch/issues/169857
-ENV MIOPEN_DEBUG_CONV_DIRECT=0
-ENV MIOPEN_DEBUG_CONV_GEMM=0
 
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src && mv vllm src/vllm
-
-# This is a workaround to ensure pytest exits with the correct status code in CI tests.
-RUN printf '%s\n' \
-    'import os' \
-    '' \
-    '_exit_code = 1' \
-    '' \
-    'def pytest_sessionfinish(session, exitstatus):' \
-    '    global _exit_code' \
-    '    _exit_code = int(exitstatus)' \
-    '' \
-    'def pytest_unconfigure(config):' \
-    '    import sys' \
-    '    sys.stdout.flush()' \
-    '    sys.stderr.flush()' \
-    '    os._exit(_exit_code)' \
-    > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image
@@ -442,6 +477,13 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
+
+# Install DeepEP wheel
+RUN --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
+    uv pip install --system /deep_install/*.whl
+
+# Copy rocshmem runtime libraries
+COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
