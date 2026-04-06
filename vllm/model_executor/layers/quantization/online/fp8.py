@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
@@ -28,13 +28,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
-    maybe_post_process_fp8_weight_block,
-    process_fp8_weight_block_strategy,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    create_fp8_quant_key,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -42,7 +38,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
     cutlass_fp8_supported,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -51,7 +46,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported, per_block_cast_to_fp8
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
@@ -63,6 +58,10 @@ class _Fp8OnlineLinearBase(LinearMethodBase):
     weights onto meta device and materializes them just-in-time."""
 
     uses_meta_device: bool = True
+
+    def __init__(self):
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
         self,
@@ -103,18 +102,41 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     def __init__(self):
-        self.out_dtype = torch.get_default_dtype()
+        super().__init__()
 
+        self.weight_quant_key = kFp8StaticTensorSym
         # Use per-token quantization for better perf if dynamic and cutlass
         if cutlass_fp8_supported():
-            activation_quant_key = kFp8DynamicTokenSym
+            self.activation_quant_key = kFp8DynamicTokenSym
         else:
-            activation_quant_key = kFp8DynamicTensorSym
+            self.activation_quant_key = kFp8DynamicTensorSym
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
 
         self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=activation_quant_key,
-            weight_quant_key=kFp8StaticTensorSym,
-            out_dtype=torch.get_default_dtype(),
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
 
@@ -166,19 +188,14 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
     Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
     def __init__(self):
-        self.out_dtype = torch.get_default_dtype()
+        super().__init__()
         self.weight_block_size = [128, 128]
-
-        self.use_deep_gemm = is_deep_gemm_supported()
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(*self.weight_block_size),
-            act_quant_group_shape=GroupShape(1, self.weight_block_size[0]),
-            cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-            use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-            use_deep_gemm=self.use_deep_gemm,
+        self.activation_quant_key = create_fp8_quant_key(
+            static=self.act_q_static,
+            group_shape=GroupShape(1, self.weight_block_size[0]),
+        )
+        self.weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(*self.weight_block_size)
         )
 
     def create_weights(
@@ -202,6 +219,15 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         )
         layer.weight_block_size = self.weight_block_size
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -213,14 +239,10 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
             layer.weight, block_size=block_size, use_ue8m0=False
         )
 
-        qweight, weight_scale_inv = process_fp8_weight_block_strategy(
-            qweight, weight_scale_inv
-        )
-
         replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
 
-        maybe_post_process_fp8_weight_block(layer)
+        self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -234,12 +256,10 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         assert self.weight_block_size is not None
 
         # Note: batch invariance already handled in the function below
-        return self.w8a8_block_fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale_inv,
-            input_scale=layer.input_scale,
-            bias=bias,
+        return self.fp8_linear.apply_weights(
+            layer,
+            x,
+            bias,
         )
 
 
