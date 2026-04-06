@@ -989,6 +989,56 @@ class StreamingXMLToolCallParser:
 
         return None
 
+    @staticmethod
+    def _first_non_null_type(type_value: Any) -> str | None:
+        """Extract the first non-null type from a type value.
+
+        Handles both scalar types ("integer") and type-as-array
+        (["integer", "null"]) per JSON Schema spec.
+        """
+        if isinstance(type_value, list):
+            return next(
+                (
+                    str(t).strip().lower()
+                    for t in type_value
+                    if t is not None and str(t).lower() != "null"
+                ),
+                None,
+            )
+        if type_value is not None and str(type_value).lower() != "null":
+            return str(type_value).strip().lower()
+        return None
+
+    def _resolve_param_type_str(self, param_def: dict) -> str:
+        """Resolve the effective type string from a parameter definition.
+
+        Handles direct "type" fields (including type-as-array),
+        anyOf/oneOf schemas emitted by Pydantic v2 for Optional[T],
+        and $ref schemas from Pydantic model inputs.
+        """
+        if "type" in param_def:
+            resolved = self._first_non_null_type(param_def["type"])
+            return resolved or "string"
+
+        if "anyOf" in param_def or "oneOf" in param_def:
+            variants = param_def.get("anyOf") or param_def.get("oneOf", [])
+            for v in variants:
+                if not isinstance(v, dict):
+                    continue
+                if "$ref" in v:
+                    return "object"
+                resolved = self._first_non_null_type(v.get("type"))
+                if resolved:
+                    return resolved
+
+        # $ref points to a schema definition (e.g. a Pydantic model).
+        # The referenced type is almost always an object, so treat it
+        # as such to route through json.loads.
+        if "$ref" in param_def:
+            return "object"
+
+        return "string"
+
     def _get_param_type(self, param_name: str) -> str:
         """Get parameter type based on tool configuration, defaults to string
         Args:
@@ -1018,13 +1068,13 @@ class StreamingXMLToolCallParser:
                         properties[param_name], dict
                     ):
                         return self.repair_param_type(
-                            str(properties[param_name].get("type", "string"))
+                            self._resolve_param_type_str(properties[param_name])
                         )
                 elif isinstance(params, dict) and param_name in params:
                     param_config = params[param_name]
                     if isinstance(param_config, dict):
                         return self.repair_param_type(
-                            str(param_config.get("type", "string"))
+                            self._resolve_param_type_str(param_config)
                         )
                 break
         return "string"

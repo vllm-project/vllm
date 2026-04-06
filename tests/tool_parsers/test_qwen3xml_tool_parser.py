@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 
 import pytest
 
@@ -8,6 +9,10 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
+from vllm.tool_parsers.qwen3xml_tool_parser import StreamingXMLToolCallParser
 
 
 class TestQwen3xmlToolParser(ToolParserTests):
@@ -73,3 +78,134 @@ class TestQwen3xmlToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+
+def test_get_param_type_anyof_type_conversion():
+    """Test _get_param_type resolves anyOf/oneOf/type-as-array/$ref correctly.
+
+    Pydantic v2 emits anyOf for Optional[T] fields. The previous implementation
+    fell back to "string" for any param_def without a direct "type" key,
+    causing incorrect type routing for nullable params and $ref schemas.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "test_anyof",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "anyof_int": {
+                            "anyOf": [{"type": "integer"}, {"type": "null"}],
+                            "default": 5,
+                        },
+                        "anyof_str": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                        },
+                        "anyof_array": {
+                            "anyOf": [
+                                {"type": "array", "items": {"type": "string"}},
+                                {"type": "null"},
+                            ],
+                        },
+                        "anyof_obj": {
+                            "anyOf": [{"type": "object"}, {"type": "null"}],
+                        },
+                        "oneof_float": {
+                            "oneOf": [{"type": "number"}, {"type": "null"}],
+                        },
+                        "type_as_array": {
+                            "type": ["integer", "null"],
+                        },
+                        "multi_non_null": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "ref_param": {
+                            "$ref": "#/$defs/ToolInput",
+                        },
+                        "anyof_ref": {
+                            "anyOf": [
+                                {"$ref": "#/$defs/ToolInput"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    parser = StreamingXMLToolCallParser()
+    parser.set_tools(tools)
+    parser.current_function_name = "test_anyof"
+
+    assert parser._get_param_type("anyof_int") == "integer"
+    assert parser._get_param_type("anyof_str") == "string"
+    assert parser._get_param_type("anyof_array") == "array"
+    assert parser._get_param_type("anyof_obj") == "object"
+    assert parser._get_param_type("oneof_float") == "number"
+    assert parser._get_param_type("type_as_array") == "integer"
+    # Multi non-null: first non-null type is "string"
+    assert parser._get_param_type("multi_non_null") == "string"
+    # $ref: treated as object
+    assert parser._get_param_type("ref_param") == "object"
+    # anyOf[$ref, null]: Optional[BaseModel] pattern → object
+    assert parser._get_param_type("anyof_ref") == "object"
+
+
+def test_xml_parser_anyof_end_to_end():
+    """End-to-end test: StreamingXMLToolCallParser converts anyOf params correctly.
+
+    Verifies that parse_single_streaming_chunks produces properly typed argument
+    values when the tool schema uses anyOf (Pydantic v2 Optional[T] pattern).
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "search_web",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                        },
+                        "count": {
+                            "anyOf": [{"type": "integer"}, {"type": "null"}],
+                            "default": 5,
+                        },
+                        "filters": {
+                            "$ref": "#/$defs/SearchFilters",
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = (
+        "<tool_call>\n"
+        "<function=search_web>\n"
+        "<parameter=query>vllm tool parser</parameter>\n"
+        "<parameter=count>10</parameter>\n"
+        '<parameter=filters>{"site": "github.com"}</parameter>\n'
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    parser = StreamingXMLToolCallParser()
+    parser.set_tools(tools)
+    result = parser.parse_single_streaming_chunks(model_output)
+
+    assert result.tool_calls
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["query"] == "vllm tool parser"
+    assert isinstance(args["query"], str)
+    assert args["count"] == 10
+    assert isinstance(args["count"], int)
+    assert args["filters"] == {"site": "github.com"}
+    assert isinstance(args["filters"], dict)
