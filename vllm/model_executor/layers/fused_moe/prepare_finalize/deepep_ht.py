@@ -234,12 +234,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
-                # TODO: support per_act_token_quant,
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
                     a1_scale,
                     quant_dtype=quant_config.quant_dtype,
-                    per_act_token_quant=False,
+                    per_act_token_quant=quant_config.per_act_token_quant,
                     block_shape=quant_config.block_shape,
                     is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
                 )

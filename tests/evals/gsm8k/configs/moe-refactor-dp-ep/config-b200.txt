@@ -8,5 +8,6 @@ Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm-deepep-ll.yaml
 Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm.yaml
 Qwen3-30B-A3B-Fp8-CT-Block-deepgemm-deepep-ht.yaml
 Qwen3-30B-A3B-Fp8-CT-Block-deepgemm-deepep-ll.yaml
+Qwen3-30B-A3B-Fp8-CT-Dynamic-deepgemm-deepep-ht.yaml
 Qwen3-30B-A3B-Fp8-CT-Block-deepgemm.yaml
 Qwen3-30B-A3B-BF16-triton.yaml
