@@ -63,6 +63,10 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
+    chunk_indices: torch.Tensor | None = None
+    chunk_offsets: torch.Tensor | None = None
+
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
@@ -305,6 +309,26 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
+        chunk_indices: torch.Tensor | None = None
+        chunk_offsets: torch.Tensor | None = None
+        if num_prefills > 0:
+            # Only prefill batches use FLA chunk ops.
+            # Pre-compute on CPU and async-copy to GPU to avoid
+            # GPU→CPU sync (.tolist()) in prepare_chunk_indices.
+            from vllm.model_executor.layers.fla.ops.index import (
+                prepare_chunk_indices,
+                prepare_chunk_offsets,
+            )
+            from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
+
+            gpu_device = query_start_loc.device
+            chunk_indices = prepare_chunk_indices(
+                non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
+            ).to(device=gpu_device, non_blocking=True)
+            chunk_offsets = prepare_chunk_offsets(
+                non_spec_query_start_loc_cpu, FLA_CHUNK_SIZE
+            ).to(device=gpu_device, non_blocking=True)
+
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
@@ -405,6 +429,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
