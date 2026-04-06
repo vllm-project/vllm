@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: EPLB Algorithm
   timeout_in_minutes: 15
-  device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb

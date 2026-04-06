@@ -7,7 +7,6 @@ steps:
   # If this fails, it means the PR introduces a dependency that
   # conflicts with Ray's dependency constraints.
   # See https://github.com/vllm-project/vllm/issues/33599
-  device: h200_18gb
   soft_fail: true
   timeout_in_minutes: 10
   source_file_dependencies:
