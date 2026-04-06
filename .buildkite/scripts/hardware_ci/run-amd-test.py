@@ -632,8 +632,22 @@ CI_BASE_IMAGE = os.environ.get(
 )
 
 # Maximum number of PIDs allowed inside the test container.
-# Prevents fork-bomb scenarios from killing the K8s node.
-CONTAINER_PIDS_LIMIT = 4096
+#
+# Docker's ``--pids-limit`` caps the number of tasks in the container. On
+# Linux, that budget covers both processes and threads, so thread-heavy
+# runtimes such as Ray can hit it even when they do not spawn thousands of
+# child processes. Keep a finite default to avoid fork-bombing the node, but
+# leave more headroom than the previous 4096-task cap.
+#
+# Override env var:
+#   VLLM_CI_DOCKER_PIDS_LIMIT   Positive integer, or ``-1`` for unlimited.
+#
+# Official docs:
+#   https://docs.docker.com/reference/cli/docker/container/run/
+CONTAINER_PIDS_LIMIT = os.environ.get(
+    "VLLM_CI_DOCKER_PIDS_LIMIT",
+    "16384",
+).strip()
 
 # Docker IPC/shm configuration for the single-node test container.
 #
@@ -925,6 +939,42 @@ def _container_uses_private_shm(ipc_mode):
     return ipc_mode in {"private", "shareable"}
 
 
+def _parse_container_pids_limit(limit):
+    # type: (str) -> int | None
+    """Parse the Docker PIDs limit env var.
+
+    Docker accepts positive integers and ``-1`` (unlimited). ``0`` is not a
+    useful runtime value for this runner and is treated as invalid.
+    """
+    try:
+        parsed = int(limit)
+    except (TypeError, ValueError):
+        return None
+    if parsed == -1 or parsed > 0:
+        return parsed
+    return None
+
+
+def _format_container_pids_limit(limit):
+    # type: (str) -> str
+    """Render the configured PID budget in operator-friendly form."""
+    parsed = _parse_container_pids_limit(limit)
+    if parsed == -1:
+        return "unlimited (-1)"
+    return limit if parsed is None else str(parsed)
+
+
+def validate_container_pids_config():
+    # type: () -> None
+    """Validate the Docker PID budget configuration."""
+    if _parse_container_pids_limit(CONTAINER_PIDS_LIMIT) is None:
+        error(
+            "Unsupported VLLM_CI_DOCKER_PIDS_LIMIT="
+            f"'{CONTAINER_PIDS_LIMIT}'. Expected a positive integer or -1."
+        )
+        sys.exit(1)
+
+
 def validate_container_ipc_config():
     # type: () -> None
     """Validate the single-node Docker IPC/shared-memory configuration."""
@@ -1197,7 +1247,10 @@ def log_effective_config():
         f"  CONTAINER_TIMEOUT_S:       {CONTAINER_TIMEOUT_S}s "
         f"({CONTAINER_TIMEOUT_S // 60}min)"
     )
-    info(f"  CONTAINER_PIDS_LIMIT:      {CONTAINER_PIDS_LIMIT}")
+    info(
+        "  CONTAINER_PIDS_LIMIT:      "
+        f"{_format_container_pids_limit(CONTAINER_PIDS_LIMIT)}"
+    )
     info(f"  CONTAINER_IPC_MODE:        {CONTAINER_IPC_MODE}")
     if _container_uses_private_shm(CONTAINER_IPC_MODE):
         info(f"  CONTAINER_SHM_SIZE:        {CONTAINER_SHM_SIZE}")
@@ -1442,7 +1495,7 @@ def diagnose_container_exit(container_name, log_file=None):
         Dict with keys:
           "oom_killed" (bool), "exit_code" (int), "error" (str),
           "pids_exhausted" (bool), "shm_exhausted" (bool),
-          "shm_error" (str), "pytest_ran" (bool),
+          "pid_error" (str), "shm_error" (str), "pytest_ran" (bool),
           "pre_pytest_traceback" (bool),
           "pre_pytest_crash" (str).
     """
@@ -1451,6 +1504,7 @@ def diagnose_container_exit(container_name, log_file=None):
         "exit_code": -1,
         "error": "",
         "pids_exhausted": False,
+        "pid_error": "",
         "shm_exhausted": False,
         "shm_error": "",
         "pytest_ran": True,
@@ -1571,10 +1625,16 @@ def diagnose_container_exit(container_name, log_file=None):
             "OSError: [Errno 11]",  # EAGAIN from os.fork()
             "BlockingIOError: [Errno 11]",  # EAGAIN
             "RuntimeError: can't start new thread",
+            "pthread_create failed: Resource temporarily unavailable",
+            "thread: Resource temporarily unavailable",
         ]
         for pattern in pid_patterns:
             if pattern in tail:
                 diag["pids_exhausted"] = True
+                for line in reversed(tail.splitlines()):
+                    if pattern in line:
+                        diag["pid_error"] = line.strip()
+                        break
                 break
 
         # Shared-memory exhaustion patterns. Keep this narrower than the PID
@@ -1616,19 +1676,32 @@ def diagnose_container_exit(container_name, log_file=None):
         )
 
     if diag["pids_exhausted"]:
+        pid_limit_display = _format_container_pids_limit(CONTAINER_PIDS_LIMIT)
+        pid_excerpt = diag["pid_error"] or "(no matching log line captured)"
+        fix_lines = [
+            "    - Check for process/thread leaks (for example repeated Ray",
+            "      workers or daemons surviving between pytest invocations)",
+        ]
+        if _parse_container_pids_limit(CONTAINER_PIDS_LIMIT) == -1:
+            fix_lines += [
+                "    - The Docker PIDs cgroup is unlimited; inspect the",
+                "      container's `ulimit -u` / nproc limit and host pressure",
+            ]
+        else:
+            fix_lines += [
+                "    - Increase VLLM_CI_DOCKER_PIDS_LIMIT "
+                f"(currently {pid_limit_display})",
+            ]
         error(
-            f"{_DIAG_PREFIX} PID LIMIT EXHAUSTED\n"
-            f"  What happened: The container hit the\n"
-            f"    --pids-limit={CONTAINER_PIDS_LIMIT}.\n"
-            f"    New process/thread creation failed with\n"
-            f"                 'fork: Resource temporarily unavailable' or similar.\n"
+            f"{_DIAG_PREFIX} PID / THREAD BUDGET EXHAUSTED\n"
+            f"  What happened: New process/thread creation failed inside the\n"
+            f"                 container. In Docker this usually means the\n"
+            f"                 container exhausted its task budget.\n"
             f"  Container:     {container_name}\n"
             f"  Exit code:     {code}\n"
-            f"  How to fix:\n"
-            f"    - Increase CONTAINER_PIDS_LIMIT in run-amd-test.py\n"
-            f"      (currently {CONTAINER_PIDS_LIMIT})\n"
-            f"    - Check if test spawns too many workers\n"
-            f"    - Check for process leaks (zombie processes accumulating)"
+            f"  PID budget:    {pid_limit_display}\n"
+            f"  Log excerpt:   {pid_excerpt}\n"
+            f"  How to fix:\n" + "\n".join(fix_lines)
         )
 
     if diag["shm_exhausted"]:
@@ -5119,6 +5192,7 @@ class _HealthWatchdog:
       - Disk usage (Docker root and cache root partitions)
       - GPU VRAM (via amd-smi/rocm-smi, best-effort)
       - Container status (running, OOMKilled, exited)
+      - Container PID usage (via ``docker stats --no-stream``)
 
     Active duties (when two-tier cache is enabled):
       - Incremental model sync: rsyncs new files from L1 (NVMe) to L2
@@ -5273,6 +5347,23 @@ class _HealthWatchdog:
                 )
                 if r.returncode == 0:
                     f.write(f"{ts} | container | {r.stdout.strip()}\n")
+            except (OSError, subprocess.SubprocessError):
+                pass
+            try:
+                r = sh(
+                    [
+                        "docker",
+                        "stats",
+                        "--no-stream",
+                        "--format",
+                        "{{.PIDs}}",
+                        self._container,
+                    ],
+                    capture=True,
+                    timeout=10,
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    f.write(f"{ts} | container_pids | {r.stdout.strip()}\n")
             except (OSError, subprocess.SubprocessError):
                 pass
 
@@ -5545,6 +5636,39 @@ def log_container_ipc_runtime(container_name):
             info(f"  {line}")
 
 
+def log_container_pid_runtime(container_name):
+    # type: (str) -> None
+    """Log the effective Docker PID budget and current task usage."""
+    r = sh(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "PidsLimit={{.HostConfig.PidsLimit}}",
+            container_name,
+        ],
+        capture=True,
+        timeout=10,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        info(f"Container PID config: {r.stdout.strip()}")
+
+    r = sh(
+        [
+            "docker",
+            "stats",
+            "--no-stream",
+            "--format",
+            "PIDs={{.PIDs}}",
+            container_name,
+        ],
+        capture=True,
+        timeout=10,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        info(f"Container PID usage: {r.stdout.strip()}")
+
+
 def run_container(
     *,
     image,  # type: str
@@ -5647,6 +5771,8 @@ def run_container(
     info(f"Container started: {container_id[:12]} (full ID: {container_id})")
     with best_effort("container IPC runtime logging"):
         log_container_ipc_runtime(name)
+    with best_effort("container PID runtime logging"):
+        log_container_pid_runtime(name)
 
     # -- Step 2: Stream logs to stdout (Buildkite) AND a file (artifact) --
     log_file = results_dir / "container.log"
@@ -5746,6 +5872,7 @@ def run_container(
             "exit_code": exit_code,
             "error": "",
             "pids_exhausted": False,
+            "pid_error": "",
             "shm_exhausted": False,
             "shm_error": "",
             "pytest_ran": True,
@@ -5766,8 +5893,8 @@ def run_container(
 
     if diag["pids_exhausted"]:
         annotate_build(
-            "### :no_entry: PID Limit Exhausted "
-            f"(--pids-limit={CONTAINER_PIDS_LIMIT})\n\n"
+            "### :no_entry: PID / Thread Budget Exhausted "
+            f"({_format_container_pids_limit(CONTAINER_PIDS_LIMIT)})\n\n"
             "The container could not fork new processes/threads.\n"
             "See `[run-amd-test.py diagnostics]` in the build log for details.",
             style="error",
@@ -6960,6 +7087,7 @@ def main():
     # -- Phase 1: Environment + config --
     section("Environment")
     normalize_cache_root()
+    validate_container_pids_config()
     validate_container_ipc_config()
     with best_effort("K8s context logging"):
         log_k8s_context()
