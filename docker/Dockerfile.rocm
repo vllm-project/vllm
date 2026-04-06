@@ -390,20 +390,21 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 RUN mkdir src && mv vllm src/vllm
 
 # This is a workaround to ensure pytest exits with the correct status code in CI tests.
-RUN cat << 'EOF' > /vllm-workspace/conftest.py
-import os
-
-_exit_code = 1
-
-def pytest_sessionfinish(session, exitstatus):
-    global _exit_code
-    _exit_code = int(exitstatus)
-
-def pytest_unconfigure(config):
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(_exit_code)
-EOF
+RUN printf '%s\n' \
+    'import os' \
+    '' \
+    '_exit_code = 1' \
+    '' \
+    'def pytest_sessionfinish(session, exitstatus):' \
+    '    global _exit_code' \
+    '    _exit_code = int(exitstatus)' \
+    '' \
+    'def pytest_unconfigure(config):' \
+    '    import sys' \
+    '    sys.stdout.flush()' \
+    '    sys.stderr.flush()' \
+    '    os._exit(_exit_code)' \
+    > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image
