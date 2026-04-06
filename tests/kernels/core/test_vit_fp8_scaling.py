@@ -196,3 +196,44 @@ def test_static_scales_missing_layer(tmp_path) -> None:
             head_size=HEAD_DIM,
             prefix=LAYER_0,
         )
+
+
+def test_dynamic_scales_auto_save(tmp_path) -> None:
+    """Verify scales are saved to disk after the amax buffer fills."""
+    import vllm.model_executor.layers.attention.mm_encoder_attention as _mod
+    from vllm.config.multimodal import MultiModalConfig
+
+    if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
+        pytest.skip("FlashInfer cuDNN not available")
+
+    save_file = tmp_path / "auto_scales.json"
+    attn = _build_attention(
+        MultiModalConfig(
+            mm_encoder_attn_dtype="fp8",
+            mm_encoder_fp8_scale_save_path=str(save_file),
+        )
+    )
+    if attn is None or not attn.fp8_enabled:
+        pytest.skip("FP8 attention not available")
+
+    attn = attn.to("cuda")
+    S, H, D = 16, NUM_HEADS, HEAD_DIM
+
+    # Run exactly _FP8_AMAX_HISTORY_LEN forward passes.
+    for i in range(_FP8_AMAX_HISTORY_LEN):
+        mag = float(i + 1)
+        q = torch.full((S, H, D), mag, device="cuda", dtype=torch.bfloat16)
+        k = torch.full((S, H, D), mag * 0.5, device="cuda", dtype=torch.bfloat16)
+        v = torch.full((S, H, D), mag * 0.3, device="cuda", dtype=torch.bfloat16)
+        attn._record_amax_and_update_scales(q, k, v)
+
+    # File should have been written on the 16th call (buffer wrap).
+    assert save_file.is_file(), "Scale file was not saved"
+    scales = json.loads(save_file.read_text())
+    assert LAYER_0 in scales
+    assert set(scales[LAYER_0].keys()) == {"q", "k", "v"}
+    for val in scales[LAYER_0].values():
+        assert isinstance(val, float) and val > 0
+
+    # Module-level save path should be cleared (one-shot).
+    assert _mod._fp8_scale_save_path is None

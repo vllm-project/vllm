@@ -168,6 +168,15 @@ class MultiModalConfig:
     """Path to a JSON file containing per-layer FP8 Q/K/V scales for ViT
     encoder attention. When provided (with ``mm_encoder_attn_dtype="fp8"``),
     static scaling is used. When omitted, dynamic scaling is used."""
+    mm_encoder_fp8_scale_save_path: str | None = None
+    """When set with dynamic FP8 scaling (``mm_encoder_attn_dtype="fp8"``
+    and no ``mm_encoder_fp8_scale_path``), saves the calibrated scales to
+    this file after the amax history buffer is full. The saved file can
+    then be used as ``mm_encoder_fp8_scale_path`` in subsequent runs."""
+    mm_encoder_fp8_scale_save_margin: float = Field(default=1.5, gt=0.0)
+    """Safety margin multiplied onto scales when auto-saving. A value > 1
+    leaves headroom so that inputs with larger activations than the
+    calibration set do not overflow FP8 range. Default 1.5."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -264,6 +273,22 @@ class MultiModalConfig:
             p = Path(self.mm_encoder_fp8_scale_path).expanduser()
             if not p.is_file():
                 raise FileNotFoundError(f"FP8 scale file not found: {p}")
+        if self.mm_encoder_fp8_scale_save_path is not None:
+            if self.mm_encoder_attn_dtype != "fp8":
+                raise ValueError(
+                    "'mm_encoder_fp8_scale_save_path' requires "
+                    "'mm_encoder_attn_dtype' to be 'fp8'."
+                )
+            if self.mm_encoder_fp8_scale_path is not None:
+                raise ValueError(
+                    "'mm_encoder_fp8_scale_save_path' cannot be used with "
+                    "'mm_encoder_fp8_scale_path' (saving requires dynamic scaling)."
+                )
+            p = Path(self.mm_encoder_fp8_scale_save_path).expanduser().parent
+            if not p.is_dir():
+                raise FileNotFoundError(
+                    f"Parent directory for FP8 scale save path not found: {p}"
+                )
         return self
 
     def compute_hash(self) -> str:

@@ -41,6 +41,13 @@ logger = init_logger(__name__)
 _, _FP8_MAX = get_fp8_min_max()
 _FP8_AMAX_HISTORY_LEN = 16
 
+_FP8_SCALE_SAVE_MARGIN_DEFAULT = 1.5
+
+# Module-level state for auto-saving dynamic scales.
+_fp8_scale_save_path: str | None = None
+_fp8_scale_save_margin: float = _FP8_SCALE_SAVE_MARGIN_DEFAULT
+_fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
 
 @functools.cache
 def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
@@ -101,18 +108,24 @@ def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     return scales
 
 
-def _get_mm_encoder_fp8_config() -> tuple[str | None, str | None]:
+def _get_mm_encoder_fp8_config() -> tuple[str | None, str | None, str | None, float]:
     """Read FP8 encoder config from multimodal_config, if available.
 
-    Returns (mm_encoder_attn_dtype, mm_encoder_fp8_scale_path).
+    Returns (mm_encoder_attn_dtype, mm_encoder_fp8_scale_path,
+             mm_encoder_fp8_scale_save_path, mm_encoder_fp8_scale_save_margin).
     """
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
-        return None, None
+        return None, None, None, _FP8_SCALE_SAVE_MARGIN_DEFAULT
     mm_config = vllm_config.model_config.multimodal_config
     if mm_config is None:
-        return None, None
-    return mm_config.mm_encoder_attn_dtype, mm_config.mm_encoder_fp8_scale_path
+        return None, None, None, _FP8_SCALE_SAVE_MARGIN_DEFAULT
+    return (
+        mm_config.mm_encoder_attn_dtype,
+        mm_config.mm_encoder_fp8_scale_path,
+        mm_config.mm_encoder_fp8_scale_save_path,
+        mm_config.mm_encoder_fp8_scale_save_margin,
+    )
 
 
 # Batch buckets for cuDNN graph caching.
@@ -352,7 +365,9 @@ class MMEncoderAttention(CustomOp):
         self._fp8_dynamic_scale = False
         self.fp8_quant: QuantFP8 | None = None
 
-        attn_dtype, fp8_scale_path = _get_mm_encoder_fp8_config()
+        attn_dtype, fp8_scale_path, fp8_save_path, fp8_save_margin = (
+            _get_mm_encoder_fp8_config()
+        )
         if attn_dtype == "fp8":
             if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
                 raise ValueError(
@@ -362,6 +377,10 @@ class MMEncoderAttention(CustomOp):
                     "e.g.: pip install -U nvidia-cudnn-cu13==9.18.1"
                 )
             self._init_fp8_attention(prefix, fp8_scale_path)
+            if fp8_save_path is not None and self._fp8_dynamic_scale:
+                global _fp8_scale_save_path, _fp8_scale_save_margin
+                _fp8_scale_save_path = fp8_save_path
+                _fp8_scale_save_margin = fp8_save_margin
 
     def _init_fp8_attention(self, layer_name: str, scale_path: str | None) -> None:
         """Initialize FP8 quantization state for this layer.
@@ -612,6 +631,36 @@ class MMEncoderAttention(CustomOp):
             scale_buf.fill_(
                 torch.clamp(max_amax, min=torch.finfo(torch.float32).tiny) / _FP8_MAX
             )
+
+        # Auto-save scales once the amax buffer wraps for the first time.
+        # We store tensor references (no GPU->CPU sync) on every call, and
+        # only call .item() at the single save point to avoid stalling.
+        global _fp8_scale_save_path
+        if _fp8_scale_save_path is not None:
+            _fp8_saved_scale_refs[self.layer_name] = (
+                self._fp8_q_scale,
+                self._fp8_k_scale,
+                self._fp8_v_scale,
+            )
+            if self._fp8_amax_pos == 0 and pos == _FP8_AMAX_HISTORY_LEN - 1:
+                m = _fp8_scale_save_margin
+                scales = {
+                    name: {
+                        "q": q.item() * m,
+                        "k": k.item() * m,
+                        "v": v.item() * m,
+                    }
+                    for name, (q, k, v) in _fp8_saved_scale_refs.items()
+                }
+                path = _fp8_scale_save_path
+                _fp8_scale_save_path = None
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(scales, f, indent=2)
+                logger.info(
+                    "Saved FP8 scales (%d layers) to %s",
+                    len(scales),
+                    path,
+                )
 
     def _forward_flashinfer(
         self,
