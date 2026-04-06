@@ -1174,7 +1174,7 @@ class FusedMoEConfig:
     intermediate_size_per_partition_unpadded: int | None = None
 
     moe_backend: str = "auto"
-    max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS
+    max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
