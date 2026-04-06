@@ -4,6 +4,9 @@
 import pytest
 
 from tests.reasoning.utils import run_reasoning_extraction
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 # Using mistral tokenizer as a generic mock since the actual model is not on HF
@@ -100,6 +103,32 @@ NEW_LINE_STREAMING = {
     "is_reasoning_end": True,
 }
 
+THOUGHT_PREFIX = {
+    "output": "<|channel>thought\nActual reasoning here<channel|>Final answer",
+    "reasoning": "Actual reasoning here",
+    "content": "Final answer",
+    "is_reasoning_end": True,
+}
+THOUGHT_PREFIX_ONLY = {
+    "output": "<|channel>thought\n<channel|>",
+    "reasoning": "",
+    "content": None,
+    "is_reasoning_end": True,
+}
+THOUGHT_PREFIX_MULTILINE = {
+    "output": "<|channel>thought\nLine1\nLine2<channel|>Answer",
+    "reasoning": "Line1\nLine2",
+    "content": "Answer",
+    "is_reasoning_end": True,
+}
+# "thousand" starts like "thought" but diverges — exercises Case 2→3 in streaming.
+THOUGHT_PREFIX_DIVERGE = {
+    "output": "<|channel>thousand reasons<channel|>Done",
+    "reasoning": "thousand reasons",
+    "content": "Done",
+    "is_reasoning_end": True,
+}
+
 TEST_CASES = [
     pytest.param(False, INVALID_SIMPLE_NONSTREAMING, id="invalid_simple"),
     pytest.param(True, INVALID_SIMPLE_STREAMING, id="invalid_simple_streaming"),
@@ -120,6 +149,16 @@ TEST_CASES = [
     pytest.param(False, EMPTY, id="empty"),
     pytest.param(False, NEW_LINE_NONSTREAMING, id="new_line"),
     pytest.param(True, NEW_LINE_STREAMING, id="new_line_streaming"),
+    pytest.param(False, THOUGHT_PREFIX, id="thought_prefix"),
+    pytest.param(True, THOUGHT_PREFIX, id="thought_prefix_streaming"),
+    pytest.param(False, THOUGHT_PREFIX_ONLY, id="thought_prefix_only"),
+    pytest.param(True, THOUGHT_PREFIX_ONLY, id="thought_prefix_only_streaming"),
+    pytest.param(False, THOUGHT_PREFIX_MULTILINE, id="thought_prefix_multiline"),
+    pytest.param(
+        True, THOUGHT_PREFIX_MULTILINE, id="thought_prefix_multiline_streaming"
+    ),
+    pytest.param(False, THOUGHT_PREFIX_DIVERGE, id="thought_prefix_diverge"),
+    pytest.param(True, THOUGHT_PREFIX_DIVERGE, id="thought_prefix_diverge_streaming"),
 ]
 
 
@@ -194,3 +233,16 @@ def test_gemma4_reasoning(
     # Test is_reasoning_end
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
     assert is_reasoning_end == param_dict["is_reasoning_end"]
+
+
+def test_gemma4_adjust_request(generic_tokenizer):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    assert request.skip_special_tokens is True
+
+    result = parser.adjust_request(request)
+    assert result.skip_special_tokens is False
+    assert result is request

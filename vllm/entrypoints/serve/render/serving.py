@@ -44,6 +44,7 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.parser import ParserManager
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -74,6 +75,7 @@ class OpenAIServingRender:
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
+        reasoning_parser: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -93,6 +95,11 @@ class OpenAIServingRender:
             tool_parser_name=tool_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=model_config.model,
+        )
+        self.reasoning_parser: type[ReasoningParser] | None = (
+            ParserManager.get_reasoning_parser(
+                reasoning_parser_name=reasoning_parser,
+            )
         )
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
@@ -245,6 +252,7 @@ class OpenAIServingRender:
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 tool_parser=tool_parser,
+                reasoning_parser=self.reasoning_parser,
             )
         else:
             # For GPT-OSS.
@@ -503,6 +511,7 @@ class OpenAIServingRender:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: type[ToolParser] | None = None,
+        reasoning_parser: type[ReasoningParser] | None = None,
         *,
         skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
@@ -538,6 +547,10 @@ class OpenAIServingRender:
             },
             skip_mm_cache=skip_mm_cache,
         )
+
+        if reasoning_parser is not None:
+            tokenizer = renderer.get_tokenizer()
+            request = reasoning_parser(tokenizer).adjust_request(request=request)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser

@@ -53,6 +53,13 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self._reasoning_text: str = ""
         self._prefix_stripped: bool = False
 
+    def adjust_request(
+        self, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> "ChatCompletionRequest | ResponsesRequest":
+        """Disable special-token stripping to preserve boundary tokens."""
+        request.skip_special_tokens = False
+        return request
+
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
@@ -159,11 +166,10 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
                     result.reasoning = stripped
                     return result
                 else:
-                    # This entire delta was prefix — suppress it.
-                    # Don't set _prefix_stripped yet; there may be more
-                    # prefix chars to consume in the next delta.
                     if len(self._reasoning_text) >= prefix_len:
                         self._prefix_stripped = True
+                        result.reasoning = ""
+                        return result
                     return None
 
         # Case 2: Accumulated text is a strict prefix of
