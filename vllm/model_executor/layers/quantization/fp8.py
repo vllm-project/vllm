@@ -513,6 +513,8 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         )
         layer.register_parameter("weight", weight)
 
+        initialize_online_processing(layer)
+
         # TODO: remove this check once the following RFC is resolved.
         # https://github.com/vllm-project/vllm/issues/33314
         # This check is required because Mxfp8OnlineLinearMethod inherits from
@@ -530,7 +532,6 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             module_name=self.__class__.__name__,
         )
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
-        initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
