@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
     KernelConfig,
     ModelConfig,
@@ -1122,6 +1123,35 @@ def test_scheduler_config_init():
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
+
+
+def test_attentionpack_cache_config_requires_rank(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="kv_compression_rank must be set"):
+        CacheConfig(
+            enable_prefix_caching=False,
+            kv_compression_mode="attentionpack",
+        )
+
+
+def test_attentionpack_cache_config_rejects_prefix_caching(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="does not yet support prefix caching"):
+        CacheConfig(
+            kv_compression_mode="attentionpack",
+            kv_compression_rank=8,
+        )
+
+
+def test_attentionpack_cache_config_rejects_offloading(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="does not yet support KV offloading"):
+        CacheConfig(
+            enable_prefix_caching=False,
+            kv_compression_mode="attentionpack",
+            kv_compression_rank=8,
+            kv_offloading_size=1.0,
+        )
 
 
 @pytest.mark.parametrize(

@@ -37,6 +37,7 @@ from vllm.v1.core.kv_cache_utils import (
     tensor_data,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionPackFullAttentionSpec,
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
@@ -119,6 +120,30 @@ def new_kv_cache_spec(
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
+    )
+
+
+def test_attentionpack_spec_keeps_dense_page_accounting():
+    spec = AttentionPackFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.float32,
+        rank=8,
+        reconstruct_tokens=32,
+    )
+
+    assert spec.uses_dense_storage
+    assert spec.rank == 8
+    assert spec.reconstruct_tokens == 32
+    assert (
+        spec.page_size_bytes
+        == FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=64,
+            dtype=torch.float32,
+        ).page_size_bytes
     )
 
 

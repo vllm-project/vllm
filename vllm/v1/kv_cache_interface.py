@@ -246,6 +246,25 @@ class FullAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AttentionPackFullAttentionSpec(FullAttentionSpec):
+    """Experimental AttentionPack-style KV metadata.
+
+    This spec intentionally inherits the dense page-size accounting from
+    ``FullAttentionSpec`` for now. That keeps allocation and runtime behavior
+    identical to the baseline dense KV path while letting the rest of the
+    stack carry compression metadata in a type-safe way.
+    """
+
+    rank: int
+    reconstruct_tokens: int
+    safe_fallback: bool = True
+
+    @property
+    def uses_dense_storage(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
