@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Monolithic decoder layer for DeepSeek V3.2 on SM100 (Blackwell).
-Direct kernel calls, no module wrappers for norms.
-Gate weight inlined, FusedMoE kept for quantized expert kernels.
 """
 
 from __future__ import annotations
@@ -11,24 +9,161 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
-from .allreduce_rms import AllReduceRMSParams, allreduce_add_rms_norm
 from .attention import MonolithicMLAAttention
-from .ops import fused_norm_rope, fused_q, rms_norm
+from .ops import fused_norm_rope, fused_q
 from .sparse_indexer import sparse_attn_indexer
 
-_side_stream: torch.cuda.Stream | None = None
+
+def monolithic_attn(
+    positions: torch.Tensor,
+    q_c: torch.Tensor,
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    index_k: torch.Tensor,
+    index_weights: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    attn = layer.attn
+    mla = attn.mla_attn
+
+    attn_metadata = get_forward_context().attn_metadata
+    if not isinstance(attn_metadata, dict):
+        output.zero_()
+        return output
+
+    mla_attn_metadata = attn_metadata.get(mla.layer_name)
+    if mla_attn_metadata is None:
+        output.zero_()
+        return output
+
+    num_actual_toks = mla_attn_metadata.num_actual_tokens
+    if num_actual_toks == 0:
+        output.zero_()
+        return output
+
+    # Step 2. fused norm + rope + cache writes
+    slot_mapping = None
+    indexer_k_cache = None
+    mla_kv_cache = None
+    mla_k_scale = None
+    idx_meta = attn_metadata.get(attn.indexer_k_cache.prefix)
+    if idx_meta is not None:
+        slot_mapping = idx_meta.slot_mapping
+        indexer_k_cache = attn.indexer_k_cache.kv_cache
+        mla_kv_cache = attn.mla_attn.kv_cache
+        mla_k_scale = attn.mla_attn._k_scale
+
+    q_c = fused_norm_rope(
+        positions,
+        q_c,
+        attn.q_a_layernorm_weight,
+        layer.rms_norm_eps,
+        kv_c,
+        attn.kv_a_layernorm_weight,
+        attn.rms_norm_eps,
+        k_pe,
+        attn.rotary_emb.cos_sin_cache,
+        index_k,
+        attn.indexer_k_norm.weight,
+        attn.indexer_k_norm.bias,
+        attn.rms_norm_eps,
+        attn.indexer_rope_emb.cos_sin_cache,
+        attn.topk_indices_buffer,
+        slot_mapping=slot_mapping,
+        indexer_k_cache=indexer_k_cache,
+        mla_kv_cache=mla_kv_cache,
+        mla_kv_cache_dtype=attn.mla_attn.kv_cache_dtype,
+        mla_k_scale=mla_k_scale,
+    )
+
+    # Step 3. q_c -> index_q, q
+    step3_out = torch.mm(q_c, layer._fused_step3_q_w.T)
+    index_q, q = step3_out.split(
+        [layer._step3_index_q_dim, step3_out.shape[-1] - layer._step3_index_q_dim],
+        dim=-1,
+    )
+    index_q = index_q.view(-1, attn.index_n_heads, attn.index_head_dim)
+    q = q.view(-1, attn.num_local_heads, attn.qk_head_dim)
+
+    # Step 4. Q RoPE + W_UK_T absorption + FP8 packing
+    q_nope, q_pe = q.split(
+        [mla.qk_nope_head_dim, mla.qk_rope_head_dim],
+        dim=-1,
+    )
+    q_nope = q_nope.transpose(0, 1)
+    ql_nope = torch.bmm(q_nope, mla.W_UK_T)
+    ql_nope = ql_nope.transpose(0, 1)
+
+    index_q_fp8, index_weights, mqa_q = fused_q(
+        positions,
+        q_pe,
+        attn.rotary_emb.cos_sin_cache,
+        index_q,
+        attn.indexer_rope_emb.cos_sin_cache,
+        ql_nope,
+        mla._q_scale,
+        index_weights,
+        attn.indexer_softmax_scale,
+        attn.index_n_heads**-0.5,
+    )
+
+    # Steps 5-6. Sparse indexer + MLA sparse decode attention
+    sparse_attn_indexer(
+        attn.indexer_k_cache.prefix,
+        attn.indexer_k_cache.kv_cache,
+        index_q_fp8,
+        index_weights,
+        attn.topk_tokens,
+        attn.index_head_dim,
+        layer.max_model_len,
+        layer.indexer_workspace_size,
+        attn.topk_indices_buffer,
+    )
+
+    mqa_q = mqa_q[:num_actual_toks]
+    kv_cache = mla.kv_cache
+    if mla.kv_cache_dtype.startswith("fp8") and mla.kv_cache_dtype != "fp8_ds_mla":
+        kv_cache = kv_cache.view(torch.float8_e4m3fn)
+    attn_out, _ = mla.impl.forward_mqa(mqa_q, kv_cache, mla_attn_metadata, mla)
+    x = attn_out.view(-1, mla.num_heads, mla.kv_lora_rank).transpose(0, 1)
+
+    out = output[:num_actual_toks].view(-1, mla.num_heads, mla.v_head_dim)
+    out = out.transpose(0, 1)
+    torch.bmm(x, mla.W_UV, out=out)
+    return output
 
 
-def _get_side_stream() -> torch.cuda.Stream:
-    """Lazily created CUDA stream shared by all decoder layers."""
-    global _side_stream
-    if _side_stream is None:
-        _side_stream = torch.cuda.Stream()
-    return _side_stream
+def monolithic_attn_fake(
+    positions: torch.Tensor,
+    q_c: torch.Tensor,
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    index_k: torch.Tensor,
+    index_weights: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    del positions, q_c, kv_c, k_pe, index_k, index_weights, layer_name
+    return output
+
+
+direct_register_custom_op(
+    op_name="monolithic_attn",
+    op_func=monolithic_attn,
+    fake_impl=monolithic_attn_fake,
+    mutates_args=["output"],
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 class MonolithicDecoderLayer(nn.Module):
@@ -45,9 +180,14 @@ class MonolithicDecoderLayer(nn.Module):
         layer_idx: int,
         topk_indices_buffer: torch.Tensor,
         prefix: str = "",
-        fi_params: AllReduceRMSParams | None = None,
     ) -> None:
         super().__init__()
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+        self.layer_name = prefix
         self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
@@ -55,7 +195,6 @@ class MonolithicDecoderLayer(nn.Module):
         self.kv_lora_rank = config.kv_lora_rank
         self.qk_rope_head_dim = config.qk_rope_head_dim
         self.tp_size = get_tensor_model_parallel_world_size()
-        self._fi_params = fi_params
 
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -63,13 +202,18 @@ class MonolithicDecoderLayer(nn.Module):
         self.indexer_workspace_size = get_max_prefill_buffer_size(vllm_config)
         self.max_model_len = vllm_config.model_config.max_model_len
 
-        # LayerNorm weights (raw)
+        # Use the regular vLLM RMSNorm modules so the compiler sees the
+        # canonical residual-add + RMSNorm pattern.
         dtype = torch.get_default_dtype()
-        self.input_layernorm_weight = nn.Parameter(
-            torch.ones(config.hidden_size, dtype=dtype)
+        self.input_layernorm = RMSNorm(
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=dtype,
         )
-        self.post_attention_layernorm_weight = nn.Parameter(
-            torch.ones(config.hidden_size, dtype=dtype)
+        self.post_attention_layernorm = RMSNorm(
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=dtype,
         )
 
         # Fused QKV A-projection lives inside self_attn namespace
@@ -103,7 +247,6 @@ class MonolithicDecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             prefix=f"{prefix}.self_attn",
         )
-        self.attn.o_proj.reduce_results = False
 
         # MoE or Dense MLP
         moe_layer_freq = getattr(config, "moe_layer_freq", 1)
@@ -126,15 +269,12 @@ class MonolithicDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            self.mlp.skip_final_allreduce = True
-            self.mlp.skip_scale_and_add = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
                 prefix=f"{prefix}.mlp",
             )
 
@@ -183,56 +323,11 @@ class MonolithicDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm.forward_context import get_forward_context
-
-        fwd_ctx = get_forward_context()
-        attn_metadata = fwd_ctx.attn_metadata
-        mla = self.attn.mla_attn
-        mla_attn_metadata = None
-        slot_mapping = None
-        if isinstance(attn_metadata, dict):
-            idx_meta = attn_metadata[self.attn.indexer_k_cache.prefix]
-            mla_attn_metadata = attn_metadata[mla.layer_name]
-            # Indexer and MLA caches share the same block_size and track
-            # the same requests, so their slot_mappings are identical.
-            slot_mapping = idx_meta.slot_mapping
-
-        if slot_mapping is not None:
-            indexer_k_cache = self.attn.indexer_k_cache.kv_cache
-            mla_kv_cache = mla.kv_cache
-            mla_k_scale = mla._k_scale
-        else:
-            indexer_k_cache = None
-            mla_kv_cache = None
-            mla_k_scale = None
-
-        # Input norm + residual
-        # When fused_allreduce_rms is enabled, hidden_states arriving from
-        # the previous layer is the *unreduced* MLP/MoE output. We fuse
-        # AllReduce + residual-add + RMSNorm into a single kernel.
         if residual is None:
-            # First layer: hidden_states is from embed_tokens (already
-            # fully materialised), no allreduce needed.
             residual = hidden_states
-            hidden_states = rms_norm(
-                hidden_states, self.input_layernorm_weight, self.rms_norm_eps
-            )
+            hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = allreduce_add_rms_norm(
-                hidden_states,
-                residual,
-                self.input_layernorm_weight,
-                self.rms_norm_eps,
-                self._fi_params,
-            )
-
-        if not hasattr(self, "_fused_step1_hidden_w") or not hasattr(
-            self, "_fused_step3_q_w"
-        ):
-            raise RuntimeError(
-                "Monolithic decoder fused weights are not initialized. "
-                "Call fuse_indexer_weights() after weight loading."
-            )
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # Step 1. hidden_states -> q_c, kv_c, k_pe, index_k, index_weights
         step1_out = torch.mm(hidden_states, self._fused_step1_hidden_w.T)
@@ -241,202 +336,27 @@ class MonolithicDecoderLayer(nn.Module):
             dim=-1,
         )
 
-        # Step 2. Q RMS norm
-        #         + KV RMS norm + KV RoPE + MLA cache write
-        #         + Index K layer norm + RoPE + FP8 quant + cache write
-        #         + Init topk indices
-        q_c = fused_norm_rope(
-            positions,
-            # Q RMS norm
-            q_c,
-            self.attn.q_a_layernorm_weight,
-            self.rms_norm_eps,
-            # KV RMS norm
-            kv_c,
-            self.attn.kv_a_layernorm_weight,
-            self.attn.rms_norm_eps,
-            # KV RoPE
-            k_pe,
-            self.attn.rotary_emb.cos_sin_cache,
-            # Index K layer norm + RoPE
-            index_k,
-            self.attn.indexer_k_norm.weight,
-            self.attn.indexer_k_norm.bias,
-            self.attn.rms_norm_eps,
-            self.attn.indexer_rope_emb.cos_sin_cache,
-            # Top k indices
-            self.attn.topk_indices_buffer,
-            # Fused cache writes (single slot_mapping for both caches)
-            slot_mapping=slot_mapping,
-            indexer_k_cache=indexer_k_cache,
-            mla_kv_cache=mla_kv_cache,
-            mla_kv_cache_dtype=self.attn.mla_attn.kv_cache_dtype,
-            mla_k_scale=mla_k_scale,
-        )
-
-        # Step 3. q_c -> index_q, q
-        step3_out = torch.mm(q_c, self._fused_step3_q_w.T)
-        index_q, q = step3_out.split(
-            [self._step3_index_q_dim, step3_out.shape[-1] - self._step3_index_q_dim],
-            dim=-1,
-        )
-        index_q = index_q.view(-1, self.attn.index_n_heads, self.attn.index_head_dim)
-        q = q.view(-1, self.attn.num_local_heads, self.attn.qk_head_dim)
-
-        # Step 4. Second fused stage:
-        #   Q RoPE + Index Q RoPE + Index Q FP8 + index-weight scaling
-        #   + W_UK_T absorption + MQA FP8 query packing.
-        q_nope, q_pe = q.split([mla.qk_nope_head_dim, mla.qk_rope_head_dim], dim=-1)
-        q_nope = q_nope.transpose(0, 1)
-        ql_nope = torch.bmm(q_nope, mla.W_UK_T)
-        ql_nope = ql_nope.transpose(0, 1)
-
-        assert mla.kv_cache_dtype.startswith("fp8")
-        assert mla.impl.supports_quant_query_input
-
-        index_q_fp8, index_weights, mqa_q = fused_q(
-            positions,
-            q_pe,
-            self.attn.rotary_emb.cos_sin_cache,
-            index_q,
-            self.attn.indexer_rope_emb.cos_sin_cache,
-            ql_nope,
-            mla._q_scale,
-            index_weights,
-            self.attn.indexer_softmax_scale,
-            self.attn.index_n_heads**-0.5,
-        )
-
-        # Step 5. Sparse indexer.
-        # The FP8 quant + cache write for index_k is already done in
-        # fused_norm_rope (step 2) when slot_mapping is available.
-        sparse_attn_indexer(
-            self.attn.indexer_k_cache.prefix,
-            self.attn.indexer_k_cache.kv_cache,
-            index_q_fp8,
-            index_weights,
-            self.attn.topk_tokens,
-            self.attn.index_head_dim,
-            self.max_model_len,
-            self.indexer_workspace_size,
-            self.attn.topk_indices_buffer,
-        )
-
-        # Step 6. MLA sparse decode attention (inlined).
-        # The KV cache update was already done in fused_norm_rope (step 2).
+        # Steps 2-6. Combined: fused norm/rope + Q projections + sparse MLA.
+        mla = self.attn.mla_attn
         output_shape = (hidden_states.shape[0], mla.num_heads * mla.v_head_dim)
         output_dtype = mla.W_UV.dtype
-        if mla_attn_metadata is None or slot_mapping is None:
-            attn_out = torch.zeros(
-                output_shape,
-                dtype=output_dtype,
-                device=hidden_states.device,
-            )
-        else:
-            num_actual_toks = mla_attn_metadata.num_actual_tokens
-            mqa_q = mqa_q[:num_actual_toks]
-            kv_cache = mla.kv_cache
-            if (
-                mla.kv_cache_dtype.startswith("fp8")
-                and mla.kv_cache_dtype != "fp8_ds_mla"
-            ):
-                kv_cache = kv_cache.view(torch.float8_e4m3fn)
+        attn_out = torch.empty(
+            output_shape,
+            dtype=output_dtype,
+            device=hidden_states.device,
+        )
+        attn_out = torch.ops.vllm.monolithic_attn(
+            positions,
+            q_c,
+            kv_c,
+            k_pe,
+            index_k,
+            index_weights,
+            attn_out,
+            self.layer_name,
+        )
 
-            attn_out, _ = mla.impl.forward_mqa(
-                mqa_q,
-                kv_cache,
-                mla_attn_metadata,
-                mla,
-            )
-
-            output = torch.empty(
-                output_shape,
-                dtype=output_dtype,
-                device=kv_cache.device,
-            )
-            x = attn_out.view(-1, mla.num_heads, mla.kv_lora_rank).transpose(0, 1)
-            out = output[:num_actual_toks].view(-1, mla.num_heads, mla.v_head_dim)
-            out = out.transpose(0, 1)
-            torch.bmm(x, mla.W_UV, out=out)
-            attn_out = output
-
-        # Step 7. Output projection (AllReduce disabled when fused).
         hidden_states, _ = self.attn.o_proj(attn_out)
-
-        # Post-attn norm + residual
-        # Fuse the o_proj AllReduce with post-attention RMSNorm.
-        hidden_states, residual = allreduce_add_rms_norm(
-            hidden_states,
-            residual,
-            self.post_attention_layernorm_weight,
-            self.rms_norm_eps,
-            self._fi_params,
-        )
-
-        # MLP / MoE
-        # When fused_allreduce_rms is enabled, the MLP/MoE AllReduce is
-        # deferred — it will be fused with the next layer's input norm.
-        if self.is_moe:
-            # MoE returns raw (shared_output, routed_output) without
-            # applying scale + add. torch.compile fuses the elementwise ops.
-            shared_output, routed_output = self.mlp(hidden_states)
-            hidden_states = scale_and_add(
-                routed_output, self.routed_scaling_factor, shared_output
-            )
-        else:
-            hidden_states = self.mlp(hidden_states)
-
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
-
-    def fuse_shared_expert_act_quant(self) -> None:
-        """Fuse SiLU-and-Mul + NVFP4 quantize in the shared expert MLP.
-
-        Replaces the shared expert forward so that the activation and the
-        FP4 input quantisation happen in a single kernel.  The monolithic
-        path always runs on Blackwell with FLASHINFER_CUTLASS for linear
-        NVFP4, so we hard-code that backend.
-        """
-        if not self.is_moe:
-            return
-        shared_experts = self.mlp.shared_experts
-        if shared_experts is None:
-            return
-
-        from vllm.model_executor.layers.quantization.modelopt import (
-            ModelOptNvFp4LinearMethod,
-        )
-
-        if not isinstance(
-            shared_experts.down_proj.quant_method, ModelOptNvFp4LinearMethod
-        ):
-            return
-
-        from vllm._custom_ops import silu_and_mul_nvfp4_quant
-        from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
-
-        dp = shared_experts.down_proj
-
-        def _fused_forward(x: torch.Tensor) -> torch.Tensor:
-            gate_up, _ = shared_experts.gate_up_proj(x)
-            x_fp4, x_bs = silu_and_mul_nvfp4_quant(gate_up, dp.input_global_scale_inv)
-            out = flashinfer_scaled_fp4_mm(
-                x_fp4,
-                dp.weight,
-                x_bs,
-                dp.weight_scale,
-                dp.alpha,
-                gate_up.dtype,
-                backend="cutlass",
-            )
-            return out
-
-        shared_experts.forward = _fused_forward
-
-
-@torch.compile
-def scale_and_add(x: torch.Tensor, scale: float, y: torch.Tensor) -> torch.Tensor:
-    orig_dtype = x.dtype
-    x = x.to(torch.float32)
-    x = x * scale
-    z = x + y.to(torch.float32)
-    return z.to(orig_dtype)

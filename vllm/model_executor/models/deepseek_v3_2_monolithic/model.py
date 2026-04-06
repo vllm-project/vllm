@@ -10,28 +10,24 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
-)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
 
-from .allreduce_rms import (
-    AllReduceRMSParams,
-    allreduce_add_rms_norm,
-    should_use_allreduce_rms,
-)
 from .decoder_layer import MonolithicDecoderLayer
 
 logger = init_logger(__name__)
 
 
+@support_torch_compile
 class MonolithicDeepseekV32Model(nn.Module):
     """Transformer backbone."""
 
@@ -43,13 +39,6 @@ class MonolithicDeepseekV32Model(nn.Module):
         quant_config = vllm_config.quant_config
         self.config = config
         self.device = current_platform.device_type
-        self.fi_params: AllReduceRMSParams | None = None
-        if should_use_allreduce_rms():
-            self.fi_params = AllReduceRMSParams(vllm_config, config.hidden_size)
-            logger.info(
-                "Enabling fused AllReduce + RMSNorm in monolithic "
-                "DeepSeek V3.2 decoder layers."
-            )
 
         topk_tokens = config.index_topk
         self.topk_indices_buffer = torch.empty(
@@ -74,16 +63,16 @@ class MonolithicDeepseekV32Model(nn.Module):
                     layer_idx=i,
                     topk_indices_buffer=self.topk_indices_buffer,
                     prefix=f"{prefix}.layers.{i}",
-                    fi_params=self.fi_params,
                 )
                 for i in range(config.num_hidden_layers)
             ]
         )
 
-        self.norm_weight = nn.Parameter(
-            torch.ones(config.hidden_size, dtype=torch.get_default_dtype())
+        self.norm = RMSNorm(
+            hidden_size=config.hidden_size,
+            eps=config.rms_norm_eps,
+            dtype=torch.get_default_dtype(),
         )
-        self.rms_norm_eps = config.rms_norm_eps
 
     def forward(
         self,
@@ -94,15 +83,7 @@ class MonolithicDeepseekV32Model(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
-        # After the last layer, hidden_states is unreduced when fused.
-        # AllReduce before the final norm.
-        hidden_states, _ = allreduce_add_rms_norm(
-            hidden_states,
-            residual,
-            self.norm_weight,
-            self.rms_norm_eps,
-            self.fi_params,
-        )
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -134,6 +115,7 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.lm_head" if prefix else "lm_head",
         )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.num_redundant_experts = 0
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -149,10 +131,7 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
         return self.model(input_ids, positions)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        logits = self.lm_head.quant_method.apply(self.lm_head, hidden_states)
-        logits = tensor_model_parallel_all_gather(logits)
-        logits = logits[..., : self.config.vocab_size]
-        return logits
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Delegate to the original DeepSeek V2 weight loader.
@@ -176,21 +155,15 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
         # Fuse indexer linear weights after loading.
         for layer in self.model.layers:
             layer.fuse_indexer_weights()
-            layer.fuse_shared_expert_act_quant()
 
         return loaded
 
     def _remap(self, name: str) -> str:
         """Remap only names that differ from original model structure."""
-        # Only remap layernorms (raw params) and indexer (underscore prefix).
+        # Only remap layernorms and indexer (underscore prefix).
         # Everything else (fused_qkv_a_proj, experts, gate, etc.) uses the
         # same module paths as the original model.
         replacements = [
-            ("input_layernorm.weight", "input_layernorm_weight"),
-            (
-                "post_attention_layernorm.weight",
-                "post_attention_layernorm_weight",
-            ),
             (
                 "self_attn.q_a_layernorm.weight",
                 "attn.q_a_layernorm_weight",
@@ -203,7 +176,6 @@ class DeepseekV32MonolithicForCausalLM(nn.Module):
             ("self_attn.kv_b_proj", "attn.kv_b_proj"),
             ("self_attn.o_proj", "attn.o_proj"),
             ("self_attn.indexer.", "attn.indexer_"),
-            ("model.norm.weight", "model.norm_weight"),
         ]
         for old, new in replacements:
             if old in name:
