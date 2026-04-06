@@ -54,6 +54,9 @@ class MambaConfig:
         return value
 
     def __post_init__(self):
+        if self.backend is None:
+            self.backend = MambaBackendEnum.TRITON
+
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 
@@ -64,7 +67,7 @@ class MambaConfig:
                     "`--enable-mamba-cache-stochastic-rounding`."
                 )
             if (
-                self.backend == "triton"
+                self.backend == MambaBackendEnum.TRITON
                 and not current_platform.is_device_capability_family(100)
             ):
                 raise ValueError(

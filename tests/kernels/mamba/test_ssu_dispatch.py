@@ -12,6 +12,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
     selective_state_update,
 )
+from vllm.utils.torch_utils import set_random_seed
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -59,6 +60,7 @@ def test_flashinfer_import_error():
 
 
 def test_triton_basic_call():
+    set_random_seed(0)
     initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum.TRITON))
     device = "cuda"
     batch_size = 2

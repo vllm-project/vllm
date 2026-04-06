@@ -121,7 +121,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
             raise ImportError(
                 "FlashInfer is required for the flashinfer Mamba SSU backend. "
                 "Please install flashinfer (>= 0.6.4): "
-                "pip install flashinfer"
+                "pip install flashinfer-python"
             ) from e
         self._kernel = _fi_ssu
 
