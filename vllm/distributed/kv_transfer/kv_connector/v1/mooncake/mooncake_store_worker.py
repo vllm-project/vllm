@@ -44,6 +44,10 @@ logger = init_logger(__name__)
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
+DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE = 1280 * 1024 * 1024
+DISK_OFFLOAD_USABLE_BUDGET_RATIO = 0.9
+_DIRECT_IO_ALIGNMENT = 4096
+_DIRECT_IO_PADDING_BYTES = 2 * _DIRECT_IO_ALIGNMENT
 
 
 @dataclass
@@ -89,6 +93,15 @@ class MooncakeStoreConfig:
         return MooncakeStoreConfig.from_file(config_path)
 
 
+def _get_disk_offload_buffer_budget_bytes(enable_offload: bool) -> int | None:
+    if not enable_offload:
+        return None
+    value = os.getenv("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES")
+    if value is None:
+        return DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE
+    return _parse_size(value)
+
+
 def _parse_size(value: Any) -> int:
     """Parse storage size strings with units: GB, MB, KB, B."""
     if isinstance(value, int):
@@ -122,6 +135,65 @@ def _parse_size(value: Any) -> int:
     except ValueError as exc:
         raise ValueError(f"Invalid numeric value '{number_str}' in: '{value}'") from exc
     return int(numeric_value * multiplier)
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def _estimate_disk_offload_staging_bytes(size_list: list[int]) -> int:
+    data_size = sum(size_list)
+    return _align_up(data_size, _DIRECT_IO_ALIGNMENT) + _DIRECT_IO_PADDING_BYTES
+
+
+def _get_usable_disk_offload_buffer_budget_bytes(raw_budget_bytes: int) -> int:
+    return max(1, int(raw_budget_bytes * DISK_OFFLOAD_USABLE_BUDGET_RATIO))
+
+
+def _get_usable_disk_offload_batch_key_count(num_keys: int) -> int:
+    return max(1, int(num_keys * DISK_OFFLOAD_USABLE_BUDGET_RATIO))
+
+
+def _split_disk_offload_load_batches(
+    keys: list[str],
+    addrs: list[list[int]],
+    sizes: list[list[int]],
+    usable_budget_bytes: int,
+    raw_budget_bytes: int,
+) -> tuple[list[tuple[list[str], list[list[int]], list[list[int]]]], str | None]:
+    max_batch_keys = _get_usable_disk_offload_batch_key_count(len(keys))
+    batches: list[tuple[list[str], list[list[int]], list[list[int]]]] = []
+    batch_keys: list[str] = []
+    batch_addrs: list[list[int]] = []
+    batch_sizes: list[list[int]] = []
+    batch_bytes = 0
+
+    for key, addr, size in zip(keys, addrs, sizes, strict=True):
+        key_bytes = _estimate_disk_offload_staging_bytes(size)
+        if key_bytes > raw_budget_bytes:
+            return [], key
+        if key_bytes > usable_budget_bytes:
+            if batch_keys:
+                batches.append((batch_keys, batch_addrs, batch_sizes))
+                batch_keys, batch_addrs, batch_sizes = [], [], []
+                batch_bytes = 0
+            batches.append(([key], [addr], [size]))
+            continue
+        if batch_keys and (
+            batch_bytes + key_bytes > usable_budget_bytes
+            or len(batch_keys) >= max_batch_keys
+        ):
+            batches.append((batch_keys, batch_addrs, batch_sizes))
+            batch_keys, batch_addrs, batch_sizes = [], [], []
+            batch_bytes = 0
+        batch_keys.append(key)
+        batch_addrs.append(addr)
+        batch_sizes.append(size)
+        batch_bytes += key_bytes
+
+    if batch_keys:
+        batches.append((batch_keys, batch_addrs, batch_sizes))
+    return batches, None
 
 
 # ============================================================
@@ -409,6 +481,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_size: int,
         tp_rank: int,
         ready_event: threading.Event,
+        disk_offload_buffer_budget_bytes: int | None = None,
     ):
         super().__init__(
             store,
@@ -417,6 +490,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             tp_rank,
             ready_event,
             name="KVCacheStoreRecvingThread",
+        )
+        self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
+        self.usable_disk_offload_buffer_budget_bytes = (
+            None
+            if disk_offload_buffer_budget_bytes is None
+            else _get_usable_disk_offload_buffer_budget_bytes(
+                disk_offload_buffer_budget_bytes
+            )
         )
 
     def _handle_request(self, req_meta: ReqMeta):
@@ -455,23 +536,70 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             + size_list[: self.tp_rank % len(size_list)]
         )
 
-        try:
-            res = self.store.batch_get_into_multi_buffers(
-                key_list_c, addr_list_c, size_list_c
+        load_batches = [(key_list_c, addr_list_c, size_list_c)]
+        if self.usable_disk_offload_buffer_budget_bytes is not None:
+            total_staging_bytes = sum(
+                _estimate_disk_offload_staging_bytes(size) for size in size_list_c
             )
-            failed = [
-                (key, value)
-                for key, value in zip(key_list_c, res, strict=False)
-                if value < 0
-            ]
-            if failed:
-                logger.error(
-                    "Failed to get %d Mooncake keys, first failures: %s",
-                    len(failed),
-                    failed[:3],
+            usable_batch_keys = _get_usable_disk_offload_batch_key_count(
+                len(key_list_c)
+            )
+            if (
+                total_staging_bytes > self.usable_disk_offload_buffer_budget_bytes
+                or len(key_list_c) > usable_batch_keys
+            ):
+                assert self.disk_offload_buffer_budget_bytes is not None
+                load_batches, oversized_key = _split_disk_offload_load_batches(
+                    key_list_c,
+                    addr_list_c,
+                    size_list_c,
+                    self.usable_disk_offload_buffer_budget_bytes,
+                    self.disk_offload_buffer_budget_bytes,
                 )
+                if oversized_key is not None:
+                    oversized_key_index = key_list_c.index(oversized_key)
+                    oversized_key_bytes = _estimate_disk_offload_staging_bytes(
+                        size_list_c[oversized_key_index]
+                    )
+                    logger.warning(
+                        "Skipping Mooncake load for request %s because key %s "
+                        "requires %d staging bytes, exceeding budget %d",
+                        req_id,
+                        oversized_key,
+                        oversized_key_bytes,
+                        self.disk_offload_buffer_budget_bytes,
+                    )
+                    self.set_finished_request(req_id)
+                    self.request_queue.task_done()
+                    return
+
+        current_batch_keys: list[str] = key_list_c
+        try:
+            for batch_keys, batch_addrs, batch_sizes in load_batches:
+                current_batch_keys = batch_keys
+                res = self.store.batch_get_into_multi_buffers(
+                    batch_keys, batch_addrs, batch_sizes
+                )
+                failed = [
+                    (key, value)
+                    for key, value in zip(batch_keys, res, strict=True)
+                    if value < 0
+                ]
+                if failed:
+                    logger.warning(
+                        "Failed to get %d Mooncake keys from sub-batch "
+                        "(batch_keys=%d, first_failures=%s)",
+                        len(failed),
+                        len(batch_keys),
+                        failed[:3],
+                    )
+                    break
         except Exception as e:
-            logger.error("Failed to get key %s, error: %s", key_list_c[:3], e)
+            logger.warning(
+                "Failed to get Mooncake sub-batch %s, error: %s",
+                current_batch_keys[:3],
+                e,
+            )
 
         self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -572,6 +700,10 @@ class MooncakeStoreWorker:
             msg = "Initialize MooncakeDistributedStore failed."
             logger.error(msg)
             raise RuntimeError(msg)
+
+        self.disk_offload_buffer_budget_bytes = _get_disk_offload_buffer_budget_bytes(
+            store_config.enable_offload
+        )
 
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
@@ -685,6 +817,7 @@ class MooncakeStoreWorker:
             self.block_size,
             self.tp_rank,
             ready_event_recving,
+            disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
         )
         self.kv_recv_thread.start()
         ready_event_recving.wait()
