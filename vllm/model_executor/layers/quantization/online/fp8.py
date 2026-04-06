@@ -191,7 +191,7 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         super().__init__()
         self.weight_block_size = [128, 128]
         self.activation_quant_key = create_fp8_quant_key(
-            static=self.act_q_static,
+            static=False,
             group_shape=GroupShape(1, self.weight_block_size[0]),
         )
         self.weight_quant_key = create_fp8_quant_key(
