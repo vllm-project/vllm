@@ -27,6 +27,7 @@ CacheDType = Literal[
     "int8_per_token_head",
     "fp8_per_token_head",
 ]
+KVCompressionMode = Literal["none", "attentionpack"]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
@@ -167,6 +168,22 @@ class CacheConfig:
     """The backend to use for KV cache offloading. Supported backends include
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
+    kv_compression_mode: KVCompressionMode = "none"
+    """Experimental KV compression mode.
+
+    - "none": standard dense paged KV cache.
+    - "attentionpack": reserve an AttentionPack-style experimental path.
+      The current implementation only plumbs metadata and keeps dense storage
+      with safe fallback semantics until dedicated kernels land.
+    """
+    kv_compression_rank: int | None = Field(default=None, gt=0)
+    """Rank parameter for experimental low-rank KV compaction modes."""
+    kv_compression_reconstruct_tokens: int = Field(default=64, gt=0)
+    """Upper bound for the number of tokens to reconstruct at higher fidelity
+    in experimental KV compression paths."""
+    kv_compression_safe_fallback: bool = True
+    """Whether unsupported or unsafe experimental compression situations should
+    fall back to dense behavior instead of proceeding aggressively."""
 
     def compute_hash(self) -> str:
         """
@@ -259,7 +276,50 @@ class CacheConfig:
             )
         return cache_dtype
 
+    @model_validator(mode="after")
+    def _validate_kv_compression_config(self) -> "CacheConfig":
+        if self.kv_compression_mode == "none":
+            if self.kv_compression_rank is not None:
+                raise ValueError(
+                    "kv_compression_rank requires kv_compression_mode to be "
+                    "set to 'attentionpack'."
+                )
+            return self
+
+        if self.kv_compression_rank is None:
+            raise ValueError(
+                "kv_compression_rank must be set when kv_compression_mode is "
+                "'attentionpack'."
+            )
+
+        logger.warning(
+            "Experimental KV compression mode '%s' is enabled. The current "
+            "implementation only wires metadata and keeps dense KV storage "
+            "with safe fallback semantics until dedicated kernels land.",
+            self.kv_compression_mode,
+        )
+        return self
+
     def __post_init__(self):
+        if self.kv_compression_mode == "attentionpack":
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "Experimental AttentionPack KV compression is only "
+                    "supported on NVIDIA CUDA platforms."
+                )
+            if self.enable_prefix_caching:
+                raise ValueError(
+                    "Experimental AttentionPack KV compression does not yet "
+                    "support prefix caching."
+                )
+            if self.kv_offloading_size is not None:
+                raise ValueError(
+                    "Experimental AttentionPack KV compression does not yet "
+                    "support KV offloading."
+                )
+
         if self.enable_mamba_cache_stochastic_rounding:
             from vllm.platforms import current_platform
 

@@ -35,6 +35,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
+    AttentionPackFullAttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
@@ -544,6 +545,11 @@ class Attention(nn.Module, AttentionLayerBase):
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:
+            if vllm_config.cache_config.kv_compression_mode == "attentionpack":
+                raise NotImplementedError(
+                    "Experimental AttentionPack KV compression does not yet "
+                    "support sliding-window attention."
+                )
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
             )
@@ -556,6 +562,18 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window=self.sliding_window,
             )
         else:
+            if vllm_config.cache_config.kv_compression_mode == "attentionpack":
+                return AttentionPackFullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    dtype=self.kv_cache_torch_dtype,
+                    kv_quant_mode=quant_mode,
+                    rank=vllm_config.cache_config.kv_compression_rank,
+                    reconstruct_tokens=vllm_config.cache_config.kv_compression_reconstruct_tokens,
+                    safe_fallback=vllm_config.cache_config.kv_compression_safe_fallback,
+                )
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,

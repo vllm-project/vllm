@@ -9,9 +9,10 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, config
+from vllm.config import AttentionConfig, CacheConfig, CompilationConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
+    _validate_kv_compression_compatibility,
     contains_type,
     get_kwargs,
     get_type,
@@ -218,6 +219,39 @@ def test_media_io_kwargs_parser(arg, expected):
         args = parser.parse_args(["--media-io-kwargs", arg])
 
     assert args.media_io_kwargs == expected
+
+
+def test_kv_compression_cli_args_are_registered():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--kv-compression-mode",
+            "attentionpack",
+            "--kv-compression-rank",
+            "16",
+            "--kv-compression-reconstruct-tokens",
+            "32",
+        ]
+    )
+
+    assert args.kv_compression_mode == "attentionpack"
+    assert args.kv_compression_rank == 16
+    assert args.kv_compression_reconstruct_tokens == 32
+
+
+def test_validate_kv_compression_compatibility_rejects_spec_decode(monkeypatch):
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    cache_config = CacheConfig(
+        enable_prefix_caching=False,
+        kv_compression_mode="attentionpack",
+        kv_compression_rank=8,
+    )
+
+    with pytest.raises(ValueError, match="speculative decoding"):
+        _validate_kv_compression_compatibility(
+            cache_config,
+            object(),  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(

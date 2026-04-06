@@ -64,6 +64,7 @@ from vllm.config import (
 )
 from vllm.config.cache import (
     CacheDType,
+    KVCompressionMode,
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
@@ -370,6 +371,19 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+def _validate_kv_compression_compatibility(
+    cache_config: CacheConfig,
+    speculative_config: SpeculativeConfig | None,
+) -> None:
+    if cache_config.kv_compression_mode != "attentionpack":
+        return
+    if speculative_config is not None:
+        raise ValueError(
+            "Experimental AttentionPack KV compression does not yet support "
+            "speculative decoding."
+        )
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -469,6 +483,12 @@ class EngineArgs:
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    kv_compression_mode: KVCompressionMode = CacheConfig.kv_compression_mode
+    kv_compression_rank: int | None = CacheConfig.kv_compression_rank
+    kv_compression_reconstruct_tokens: int = (
+        CacheConfig.kv_compression_reconstruct_tokens
+    )
+    kv_compression_safe_fallback: bool = CacheConfig.kv_compression_safe_fallback
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
@@ -1006,6 +1026,20 @@ class EngineArgs:
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
         )
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])
+        cache_group.add_argument(
+            "--kv-compression-mode", **cache_kwargs["kv_compression_mode"]
+        )
+        cache_group.add_argument(
+            "--kv-compression-rank", **cache_kwargs["kv_compression_rank"]
+        )
+        cache_group.add_argument(
+            "--kv-compression-reconstruct-tokens",
+            **cache_kwargs["kv_compression_reconstruct_tokens"],
+        )
+        cache_group.add_argument(
+            "--kv-compression-safe-fallback",
+            **cache_kwargs["kv_compression_safe_fallback"],
+        )
         cache_group.add_argument(
             "--num-gpu-blocks-override", **cache_kwargs["num_gpu_blocks_override"]
         )
@@ -1603,6 +1637,10 @@ class EngineArgs:
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
+            kv_compression_mode=self.kv_compression_mode,
+            kv_compression_rank=self.kv_compression_rank,
+            kv_compression_reconstruct_tokens=self.kv_compression_reconstruct_tokens,
+            kv_compression_safe_fallback=self.kv_compression_safe_fallback,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
@@ -1620,6 +1658,7 @@ class EngineArgs:
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
+        _validate_kv_compression_compatibility(cache_config, self.speculative_config)
 
         ray_runtime_env = None
         if is_ray_initialized():
