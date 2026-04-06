@@ -62,7 +62,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         format = scheme_dict.get("format")
 
         if quant_config._is_mxfp4(weight_quant):
-            from .compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (
+            from .compressed_tensors_moe_w4a4_mxfp4 import (
                 CompressedTensorsW4A4Mxfp4MoEMethod,
             )
 
@@ -91,7 +91,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 not check_moe_marlin_supports_layer(layer, group_size)
                 or current_platform.is_rocm()
             ):
-                from .compressed_tensors_moe.compressed_tensors_moe_wna16 import (
+                from .compressed_tensors_moe_wna16 import (
                     CompressedTensorsWNA16MoEMethod,
                 )
 
@@ -108,7 +108,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     weight_quant, input_quant, layer.moe_config
                 )
             else:
-                from .compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
+                from .compressed_tensors_moe_wna16_marlin import (
                     CompressedTensorsWNA16MarlinMoEMethod,
                 )
 
@@ -117,7 +117,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     weight_quant, input_quant, layer.moe_config
                 )
         elif quant_config._is_nvfp4_format(weight_quant):
-            from .compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (
+            from .compressed_tensors_moe_w4a4_nvfp4 import (
                 CompressedTensorsW4A4Nvfp4MoEMethod,
             )
 
@@ -137,7 +137,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8(weight_quant, input_quant)
         ):
-            from .compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (
+            from .compressed_tensors_moe_w8a8_fp8 import (
                 CompressedTensorsW8A8Fp8MoEMethod,
             )
 
@@ -145,7 +145,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_dynamic_token_w8a8(weight_quant, input_quant):
-            from .compressed_tensors_moe.compressed_tensors_moe_w8a8_int8 import (
+            from .compressed_tensors_moe_w8a8_int8 import (
                 CompressedTensorsW8A8Int8MoEMethod,
             )
 
@@ -153,7 +153,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
-            from .compressed_tensors_moe.compressed_tensors_moe_w4a8_fp8 import (
+            from .compressed_tensors_moe_w4a8_fp8 import (
                 CompressedTensorsW4A8Fp8MoEMethod,
             )
 
@@ -162,7 +162,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
-            from .compressed_tensors_moe.compressed_tensors_moe_w4a8_int8 import (
+            from .compressed_tensors_moe_w4a8_int8 import (
                 CompressedTensorsW4A8Int8MoEMethod,
             )
 
