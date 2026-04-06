@@ -15,7 +15,6 @@ reason about temporal order.
 """
 
 import math
-import sys
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
@@ -480,12 +479,10 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             val = merged_kwargs.get("images_kwargs", {}).get("max_soft_tokens")
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
-            logger.error(
-                "Unsupported max_soft_tokens value: %d. Valid values are %s. Exiting.",
-                val,
-                _SUPPORTED_SOFT_TOKENS,
+            raise ValueError(
+                f"Unsupported max_soft_tokens value: {val}. "
+                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
             )
-            sys.exit(1)
 
         mm_data = dict(mm_data)
 
