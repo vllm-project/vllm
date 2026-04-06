@@ -49,6 +49,7 @@ def _lora_shrink_expand(
     Fused shrink + expand: launches both Triton kernels back-to-back
     from a single custom op for PDL overlap.
     """
+    num_active_loras = num_active_loras.item()
     assert no_lora_flag_cpu.numel() == 1
     if no_lora_flag_cpu.item():
         return
@@ -82,7 +83,7 @@ def _lora_shrink_expand(
     shrink_grid = (
         S_SK * triton.cdiv(M, S_BM) * triton.cdiv(N_s, S_BN),
         NUM_SLICES,
-        num_active_loras.item(),
+        num_active_loras,
     )
 
     # -- Expand setup --
@@ -121,7 +122,7 @@ def _lora_shrink_expand(
     expand_grid = (
         triton.cdiv(M, E_BM) * triton.cdiv(MAX_N, E_BN),
         NUM_SLICES,
-        num_active_loras.item(),
+        num_active_loras,
     )
 
     # -- Back-to-back kernel launch (enables PDL overlap) --
