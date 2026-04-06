@@ -114,7 +114,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        hidden_states = residual + hidden_states
+        hidden_states = hidden_states + residual
+        hidden_states = self.shared_head.norm(hidden_states)
         return hidden_states
 
 
