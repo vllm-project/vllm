@@ -426,63 +426,25 @@ class KVConnectorModelRunnerMixin:
                 canonical_kv_caches is the CanonicalKVCaches wrapping
                     for the connector.
         """
-        kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        assert isinstance(kv_cache_spec, AttentionSpec)
+        first_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        assert isinstance(first_spec, AttentionSpec)
 
         tensor_sizes = set(t.size for t in kv_cache_config.kv_cache_tensors)
         assert len(tensor_sizes) == 1
         tensor_size = tensor_sizes.pop()
 
-        page_size = kv_cache_spec.page_size_bytes
+        page_size = first_spec.page_size_bytes
         assert tensor_size % page_size == 0
         num_blocks = tensor_size // page_size
         group_size = len(kv_cache_config.kv_cache_tensors)
         total_size = tensor_size * group_size
 
-        kernel_block_size = kernel_block_sizes[0]
-        num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
-        kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-
-        attn_backend = attn_groups[0][0].backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            kernel_num_blocks,
-            kernel_block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
-
-        # prepend a group_size dimension into the shape
-        kv_cache_shape = (group_size,) + kv_cache_shape
-
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
-            assert len(kv_cache_stride_order) == len(kv_cache_shape)
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-
-        physical_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        assert physical_shape[0] == kernel_num_blocks
-
         logger.info("Allocating canonical KV cache: group_size=%d", group_size)
 
-        # allocate one contiguous buffer in physical layout
-        contiguous_buffer = (
-            torch.zeros(total_size, dtype=torch.int8, device=device)
-            .view(kv_cache_spec.dtype)
-            .view(physical_shape)
+        # allocate one flat contiguous buffer
+        contiguous_buffer_bytes = torch.zeros(
+            total_size, dtype=torch.int8, device=device
         )
-
-        # Maintain original KV shape view.
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-        permuted = contiguous_buffer.permute(*inv_order)
-
-        # group_size position in the physical layout
-        group_dim = kv_cache_stride_order.index(0)
 
         # build layer_name -> group_idx mapping
         layer_to_group_idx: dict[str, int] = {}
@@ -496,13 +458,57 @@ class KVConnectorModelRunnerMixin:
             [] for _ in kv_cache_config.kv_cache_groups
         ]
 
+        kernel_block_size = kernel_block_sizes[0]
+
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            # logical view for the attention backend
+            # Per-layer reshape: compute shape from each layer's own
+            # spec and backend, then view the flat buffer accordingly.
+            typed_buffer = None
+            kv_cache_stride_order: tuple[int, ...] | None = None
             for layer_name in kv_cache_tensor.shared_by:
-                kv_caches[layer_name] = permuted[i]
+                gid = layer_to_group_idx[layer_name]
+                spec = kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+                assert isinstance(spec, AttentionSpec)
+
+                attn_backend = attn_groups[gid][0].backend
+                num_blocks_per_kv_block = spec.block_size // kernel_block_size
+                kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+
+                kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    kernel_num_blocks,
+                    kernel_block_size,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    cache_dtype_str=cache_dtype,
+                )
+
+                # prepend a group_size dimension into the shape
+                full_shape = (group_size,) + kv_cache_shape
+
+                try:
+                    kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                        include_num_layers_dimension=True
+                    )
+                    assert len(kv_cache_stride_order) == len(full_shape)
+                except (AttributeError, NotImplementedError):
+                    kv_cache_stride_order = tuple(range(len(full_shape)))
+
+                physical_shape = tuple(full_shape[j] for j in kv_cache_stride_order)
+                inv_order = [
+                    kv_cache_stride_order.index(j)
+                    for j in range(len(kv_cache_stride_order))
+                ]
+
+                typed_buffer = contiguous_buffer_bytes.view(spec.dtype).view(
+                    physical_shape
+                )
+                kv_caches[layer_name] = typed_buffer.permute(*inv_order)[i]
 
             # canonical view: num_blocks is the leading physical dim
-            block_tensor = contiguous_buffer.select(group_dim, i)
+            assert typed_buffer is not None
+            assert kv_cache_stride_order is not None
+            group_dim = kv_cache_stride_order.index(0)
+            block_tensor = typed_buffer.select(group_dim, i)
             tensor_idx = len(block_tensors)
             page_bytes = block_tensor[0].numel() * block_tensor.element_size()
             block_tensors.append(
@@ -510,8 +516,8 @@ class KVConnectorModelRunnerMixin:
             )
 
             for layer_name in kv_cache_tensor.shared_by:
-                gid = layer_to_group_idx[layer_name]
-                group_data_refs[gid].append(
+                layer_gid = layer_to_group_idx[layer_name]
+                group_data_refs[layer_gid].append(
                     KVCacheBlockDataRef(
                         tensor_idx=tensor_idx,
                         page_size_bytes=page_bytes,
