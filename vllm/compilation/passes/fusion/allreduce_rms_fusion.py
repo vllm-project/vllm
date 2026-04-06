@@ -20,6 +20,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -280,10 +281,12 @@ class AllReduceRMSNormPattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        use_gemma_rms_norm: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
+        self.use_gemma_rms_norm = use_gemma_rms_norm
 
     def get_inputs(self) -> list[torch.Tensor]:
         # input, weight
@@ -294,7 +297,12 @@ class AllReduceRMSNormPattern(BasePattern):
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            if self.use_gemma_rms_norm:
+                rms = GemmaRMSNorm.forward_static(
+                    allreduce_output, self.epsilon, weight
+                )
+            else:
+                rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
 
             return rms, allreduce_output
 
@@ -303,6 +311,7 @@ class AllReduceRMSNormPattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
             rms_result = torch.empty_like(input)
+            rms_gamma = weight + 1 if self.use_gemma_rms_norm else weight
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -311,7 +320,7 @@ class AllReduceRMSNormPattern(BasePattern):
                 norm_out=rms_result,
                 quant_out=None,
                 scale_out=None,
-                rms_gamma=weight,
+                rms_gamma=rms_gamma,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -337,10 +346,12 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        use_gemma_rms_norm: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
+        self.use_gemma_rms_norm = use_gemma_rms_norm
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -354,12 +365,21 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
+            if self.use_gemma_rms_norm:
+                rms, residual = GemmaRMSNorm.forward_static(
+                    allreduce_output,
+                    self.epsilon,
+                    weight,
+                    residual,
+                )
+            else:
+                rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
             return rms, residual
 
         def replacement(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            rms_gamma = weight + 1 if self.use_gemma_rms_norm else weight
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -368,7 +388,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
                 norm_out=None,
                 quant_out=None,
                 scale_out=None,
-                rms_gamma=weight,
+                rms_gamma=rms_gamma,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -407,12 +427,14 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        use_gemma_rms_norm: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
         self.quant_dtype = torch.float8_e4m3fn
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
+        self.use_gemma_rms_norm = use_gemma_rms_norm
 
     def get_inputs(self) -> list[torch.Tensor]:
         _, scale = self.quant_matcher.inputs()
@@ -427,7 +449,10 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            if self.use_gemma_rms_norm:
+                rms = GemmaRMSNorm.forward_static(all_reduce, self.epsilon, weight)
+            else:
+                rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -437,6 +462,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             residual = torch.zeros_like(input)
             result_rms = torch.empty_like(input)
             result_quant = torch.empty_like(input, dtype=self.quant_dtype)
+            rms_gamma = weight + 1 if self.use_gemma_rms_norm else weight
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -445,7 +471,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
                 norm_out=result_rms,
                 quant_out=result_quant,
                 scale_out=None,
-                rms_gamma=weight,
+                rms_gamma=rms_gamma,
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
@@ -477,11 +503,13 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        use_gemma_rms_norm: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
         self.quant_dtype = torch.float8_e4m3fn
+        self.use_gemma_rms_norm = use_gemma_rms_norm
 
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
@@ -501,7 +529,15 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, res = self.rmsnorm_matcher(allreduce_output, weight, residual)
+            if self.use_gemma_rms_norm:
+                rms, res = GemmaRMSNorm.forward_static(
+                    allreduce_output,
+                    self.epsilon,
+                    weight,
+                    residual,
+                )
+            else:
+                rms, res = self.rmsnorm_matcher(allreduce_output, weight, residual)
             quant, _ = self.quant_matcher(rms, scale)
 
             return quant, res
@@ -513,6 +549,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             result_quant = torch.empty_like(input, dtype=self.quant_dtype)
+            rms_gamma = weight + 1 if self.use_gemma_rms_norm else weight
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -521,7 +558,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                 norm_out=None,
                 quant_out=result_quant,
                 scale_out=None,
-                rms_gamma=weight,
+                rms_gamma=rms_gamma,
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
@@ -552,10 +589,12 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        use_gemma_rms_norm: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
+        self.use_gemma_rms_norm = use_gemma_rms_norm
 
     def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty([1, 16, 16], device=self.device, dtype=self.dtype)
@@ -577,7 +616,10 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             output_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            if self.use_gemma_rms_norm:
+                rms = GemmaRMSNorm.forward_static(all_reduce, self.epsilon, weight)
+            else:
+                rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
                 input=rms,
@@ -599,6 +641,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
             result_rms = torch.empty_like(input)
+            rms_gamma = weight + 1 if self.use_gemma_rms_norm else weight
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -607,7 +650,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 norm_out=result_rms,
                 quant_out=quant_result,
                 scale_out=output_scale,
-                rms_gamma=weight,
+                rms_gamma=rms_gamma,
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
@@ -639,11 +682,13 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        use_gemma_rms_norm: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
+        self.use_gemma_rms_norm = use_gemma_rms_norm
 
     def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty([16, 16], device=self.device, dtype=self.dtype)
@@ -675,7 +720,15 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
+            if self.use_gemma_rms_norm:
+                rms, residual = GemmaRMSNorm.forward_static(
+                    allreduce_output,
+                    self.epsilon,
+                    weight,
+                    residual,
+                )
+            else:
+                rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
                 input=rms,
@@ -696,6 +749,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            rms_gamma = weight + 1 if self.use_gemma_rms_norm else weight
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -704,7 +758,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 norm_out=None,
                 quant_out=quant_result,
                 scale_out=output_scale,
-                rms_gamma=weight,
+                rms_gamma=rms_gamma,
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
                 pattern_code=(
@@ -806,44 +860,51 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
     @enable_fake_mode
     def register_patterns(self) -> None:
         for epsilon in [1e-5, 1e-6]:
-            if self.supports_quant_fusion:
-                AllReduceFusedRMSNormStaticQuantFP8Pattern(
-                    epsilon,
-                    self.model_dtype,
-                    self.device,
-                    self.allreduce_params,
-                ).register(self.patterns)
-                AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
-                    epsilon,
-                    self.model_dtype,
-                    self.device,
-                    self.allreduce_params,
-                ).register(self.patterns)
-                if current_platform.has_device_capability(100):
-                    AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
+            for use_gemma_rms_norm in (False, True):
+                if self.supports_quant_fusion:
+                    AllReduceFusedRMSNormStaticQuantFP8Pattern(
                         epsilon,
                         self.model_dtype,
                         self.device,
                         self.allreduce_params,
+                        use_gemma_rms_norm=use_gemma_rms_norm,
                     ).register(self.patterns)
-                    AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
+                    AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
                         epsilon,
                         self.model_dtype,
                         self.device,
                         self.allreduce_params,
+                        use_gemma_rms_norm=use_gemma_rms_norm,
                     ).register(self.patterns)
-            AllReduceRMSNormPattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-                self.allreduce_params,
-            ).register(self.patterns)
-            AllReduceFusedAddRMSNormPattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-                self.allreduce_params,
-            ).register(self.patterns)
+                    if current_platform.has_device_capability(100):
+                        AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
+                            epsilon,
+                            self.model_dtype,
+                            self.device,
+                            self.allreduce_params,
+                            use_gemma_rms_norm=use_gemma_rms_norm,
+                        ).register(self.patterns)
+                        AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
+                            epsilon,
+                            self.model_dtype,
+                            self.device,
+                            self.allreduce_params,
+                            use_gemma_rms_norm=use_gemma_rms_norm,
+                        ).register(self.patterns)
+                AllReduceRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                    self.allreduce_params,
+                    use_gemma_rms_norm=use_gemma_rms_norm,
+                ).register(self.patterns)
+                AllReduceFusedAddRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                    self.allreduce_params,
+                    use_gemma_rms_norm=use_gemma_rms_norm,
+                ).register(self.patterns)
 
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
@@ -864,7 +925,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             return
 
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
+        logger.info("Replaced %s patterns", self.matched_count)
 
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
