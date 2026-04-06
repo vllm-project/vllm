@@ -4,6 +4,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import jinja2
 import numpy as np
 import pytest
 import safetensors.torch
@@ -111,7 +112,11 @@ def test_kimi_audio_prompt_builder_supports_text_history():
     )
 
 
-def test_kimi_audio_chat_template_renders_service_messages():
+@pytest.mark.parametrize(
+    "input_style",
+    ["messages", "conversation", "conversations"],
+)
+def test_kimi_audio_chat_template_renders_service_messages(input_style):
     template_path = (
         Path(__file__).resolve().parents[4]
         / "vllm"
@@ -123,18 +128,30 @@ def test_kimi_audio_chat_template_renders_service_messages():
     content = KimiAudioPromptBuilder.build_user_audio_content(
         "Please answer the question in the audio.",
     )
+    assistant = "你能不能从一数到十？"
+    conversation = [
+        {"role": "user", "content": content},
+        {"role": "assistant", "content": assistant},
+    ]
 
-    rendered, _ = hf_chat_utils.render_jinja_template(
-        [[{"role": "user", "content": content}]],
-        chat_template=template,
-    )
+    if input_style == "conversations":
+        rendered, _ = hf_chat_utils.render_jinja_template(
+            [conversation],
+            chat_template=template,
+        )
+        prompt = rendered[0]
+    else:
+        prompt = jinja2.Environment().from_string(template).render(
+            **{input_style: conversation}
+        )
 
-    assert rendered == [
+    assert prompt == (
         "<|im_kimia_user_msg_start|>Please answer the question in the audio.\n"
         "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
         "<|im_kimia_speech_ct_id|><|im_msg_end|>"
-        "<|im_kimia_assistant_msg_start|>"
-    ]
+        "<|im_kimia_assistant_msg_start|>你能不能从一数到十？"
+        "<|im_kimia_text_eos|><|im_msg_end|>"
+    )
 
 
 def test_kimi_audio_tokenizer_wraps_single_conversation_for_template_render(

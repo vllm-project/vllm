@@ -21,11 +21,10 @@ other models.
   `moonshotai/Kimi-Audio-7B-Instruct`.
 - The discrete speech tokenizer is resolved from
   `THUDM/glm-4-voice-tokenizer` by default.
-- An optional local cache override is available through
-  `KIMI_AUDIO_SPEECH_TOKENIZER_PATH`.
-- Kimi-Audio does not require a model-specific attention backend override in
-  vLLM. It follows the same platform-default backend selection as other vLLM
-  models unless the caller explicitly configures a backend.
+- An optional local path override for the speech tokenizer is available
+  through `KIMI_AUDIO_SPEECH_TOKENIZER_PATH`.
+- An optional device override for the speech tokenizer is available through
+  `KIMI_AUDIO_SPEECH_TOKENIZER_DEVICE`.
 
 ## Required Prompt Shape
 
