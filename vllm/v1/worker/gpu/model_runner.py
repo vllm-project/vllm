@@ -163,12 +163,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
-        use_strict_rejection_sampling = False
         if self.speculative_config is not None:
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
-            use_strict_rejection_sampling = (
-                self.speculative_config.rejection_sample_method == "strict"
-            )
 
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -217,11 +213,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.num_speculative_steps + 1,
             )
-            self.rejection_sampler = RejectionSampler(
-                self.sampler,
-                num_speculative_steps=self.num_speculative_steps,
-                use_strict_rejection_sampling=use_strict_rejection_sampling,
-            )
+            if self.speculative_config is not None:
+                self.rejection_sampler = RejectionSampler(
+                    self.sampler,
+                    self.speculative_config,
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
             self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),

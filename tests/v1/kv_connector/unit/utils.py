@@ -100,6 +100,8 @@ def create_vllm_config(
     hf_overrides: dict[str, Any] | None = None,
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
+    kv_connector: str = "NixlConnector",
+    kv_role: str = "kv_both",
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -124,8 +126,8 @@ def create_vllm_config(
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
-        kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_connector=kv_connector,
+        kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
         kv_load_failure_policy=kv_load_failure_policy,
