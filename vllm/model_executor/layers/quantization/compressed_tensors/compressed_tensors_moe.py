@@ -37,31 +37,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> FusedMoEMethodBase:
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa E501
-            CompressedTensorsW4A4Mxfp4MoEMethod,
-        )
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa E501
-            CompressedTensorsW4A4Nvfp4MoEMethod,
-        )
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a8_fp8 import (  # noqa E501
-            CompressedTensorsW4A8Fp8MoEMethod,
-        )
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a8_int8 import (  # noqa E501
-            CompressedTensorsW4A8Int8MoEMethod,
-        )
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w8a8_fp8 import (  # noqa E501
-            CompressedTensorsW8A8Fp8MoEMethod,
-        )
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w8a8_int8 import (  # noqa E501
-            CompressedTensorsW8A8Int8MoEMethod,
-        )
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_wna16 import (  # noqa E501
-            CompressedTensorsWNA16MoEMethod,
-        )
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_wna16_marlin import (  # noqa E501
-            CompressedTensorsWNA16MarlinMoEMethod,
-        )
-
         # FusedMoE was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
@@ -92,6 +67,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         format = scheme_dict.get("format")
 
         if quant_config._is_mxfp4(weight_quant):
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa E501
+                CompressedTensorsW4A4Mxfp4MoEMethod,
+            )
+
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
@@ -117,6 +96,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 not check_moe_marlin_supports_layer(layer, group_size)
                 or current_platform.is_rocm()
             ):
+                from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_wna16 import (  # noqa E501
+                    CompressedTensorsWNA16MoEMethod,
+                )
+
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
                     and weight_quant.actorder
@@ -130,11 +113,19 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     weight_quant, input_quant, layer.moe_config
                 )
             else:
+                from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_wna16_marlin import (  # noqa E501
+                    CompressedTensorsWNA16MarlinMoEMethod,
+                )
+
                 logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                 return CompressedTensorsWNA16MarlinMoEMethod(
                     weight_quant, input_quant, layer.moe_config
                 )
         elif quant_config._is_nvfp4_format(weight_quant):
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa E501
+                CompressedTensorsW4A4Nvfp4MoEMethod,
+            )
+
             _is_valid_nvfp4_activations = (
                 quant_config._is_nvfp4_format(input_quant) or input_quant is None
             )
@@ -151,19 +142,35 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8(weight_quant, input_quant)
         ):
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w8a8_fp8 import (  # noqa E501
+                CompressedTensorsW8A8Fp8MoEMethod,
+            )
+
             return CompressedTensorsW8A8Fp8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_dynamic_token_w8a8(weight_quant, input_quant):
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w8a8_int8 import (  # noqa E501
+                CompressedTensorsW8A8Int8MoEMethod,
+            )
+
             return CompressedTensorsW8A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a8_fp8 import (  # noqa E501
+                CompressedTensorsW4A8Fp8MoEMethod,
+            )
+
             logger.info_once("Using CompressedTensorsW4A8Fp8MoEMethod")
             return CompressedTensorsW4A8Fp8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe_w4a8_int8 import (  # noqa E501
+                CompressedTensorsW4A8Int8MoEMethod,
+            )
+
             return CompressedTensorsW4A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
