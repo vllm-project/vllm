@@ -65,7 +65,7 @@ def test_per_token_head_kv_cache_accuracy(
         m.setenv("TOKENIZERS_PARALLELISM", "true")
 
         MAX_MODEL_LEN = 1024
-        
+
         NUM_LOG_PROBS = 20 if kv_cache_dtype == "int2_per_token_head" else 8
 
         with vllm_runner(

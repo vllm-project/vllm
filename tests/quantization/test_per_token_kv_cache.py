@@ -218,27 +218,40 @@ def test_reshape_and_cache_per_token_head(
     else:
         cache_head_size = head_size
 
-    key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16,
-                       device=device)
-    value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16,
-                         device=device)
+    key = torch.randn(
+        num_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
+    value = torch.randn(
+        num_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype,
+        num_blocks,
+        block_size,
+        num_heads,
+        cache_head_size,
+        dtype=qcfg.cache_dtype,
         device=device,
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype,
+        num_blocks,
+        block_size,
+        num_heads,
+        cache_head_size,
+        dtype=qcfg.cache_dtype,
         device=device,
     )
-    k_scale_cache = torch.ones(num_blocks, block_size, num_heads,
-                                dtype=torch.float32, device=device)
-    v_scale_cache = torch.ones(num_blocks, block_size, num_heads,
-                                dtype=torch.float32, device=device)
+    k_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads, dtype=torch.float32, device=device
+    )
+    v_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads, dtype=torch.float32, device=device
+    )
 
     num_slots = block_size * num_blocks
     slot_mapping = torch.tensor(
-        random.sample(range(num_slots), num_tokens), dtype=torch.long,
+        random.sample(range(num_slots), num_tokens),
+        dtype=torch.long,
         device=device,
     )
 
@@ -395,23 +408,41 @@ def test_per_token_head_round_trip_accuracy(
     else:
         cache_head_size = head_size
 
-    key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16,
-                       device=device) * 0.5
-    value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16,
-                         device=device) * 0.5
+    key = (
+        torch.randn(
+            num_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+        )
+        * 0.5
+    )
+    value = (
+        torch.randn(
+            num_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+        )
+        * 0.5
+    )
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype,
+        num_blocks,
+        block_size,
+        num_heads,
+        cache_head_size,
+        dtype=qcfg.cache_dtype,
         device=device,
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype,
+        num_blocks,
+        block_size,
+        num_heads,
+        cache_head_size,
+        dtype=qcfg.cache_dtype,
         device=device,
     )
-    k_scale_cache = torch.ones(num_blocks, block_size, num_heads,
-                                dtype=torch.float32, device=device)
-    v_scale_cache = torch.ones(num_blocks, block_size, num_heads,
-                                dtype=torch.float32, device=device)
+    k_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads, dtype=torch.float32, device=device
+    )
+    v_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads, dtype=torch.float32, device=device
+    )
 
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=device)
 
@@ -528,23 +559,35 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
     else:
         cache_head_size = head_size
 
-    key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16,
-                       device=device)
-    value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16,
-                         device=device)
+    key = torch.randn(
+        num_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
+    value = torch.randn(
+        num_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype,
+        num_blocks,
+        block_size,
+        num_heads,
+        cache_head_size,
+        dtype=qcfg.cache_dtype,
         device=device,
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype,
+        num_blocks,
+        block_size,
+        num_heads,
+        cache_head_size,
+        dtype=qcfg.cache_dtype,
         device=device,
     )
-    k_scale_cache = torch.ones(num_blocks, block_size, num_heads,
-                                dtype=torch.float32, device=device)
-    v_scale_cache = torch.ones(num_blocks, block_size, num_heads,
-                                dtype=torch.float32, device=device)
+    k_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads, dtype=torch.float32, device=device
+    )
+    v_scale_cache = torch.ones(
+        num_blocks, block_size, num_heads, dtype=torch.float32, device=device
+    )
 
     slot_mapping = torch.tensor([0, -1, 1, -1], dtype=torch.long, device=device)
 
@@ -657,12 +700,19 @@ def test_triton_unified_attention_per_token_head_scale(
     num_blocks = 2048
 
     query = torch.randn(
-        sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16,
+        sum(query_lens),
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
         device=device,
     )
 
     key_cache_bf16 = torch.randn(
-        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16,
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
         device=device,
     )
     value_cache_bf16 = torch.randn_like(key_cache_bf16)
@@ -706,8 +756,8 @@ def test_triton_unified_attention_per_token_head_scale(
             i1 = indices[..., 1::4]
             i2 = indices[..., 2::4]
             i3 = indices[..., 3::4]
-            packed = (i0 & 0x3) | ((i1 & 0x3) << 2) | ((i2 & 0x3) << 4) | (
-                (i3 & 0x3) << 6
+            packed = (
+                (i0 & 0x3) | ((i1 & 0x3) << 2) | ((i2 & 0x3) << 4) | ((i3 & 0x3) << 6)
             )
 
             # Scale = norm / d^1.5
@@ -723,9 +773,7 @@ def test_triton_unified_attention_per_token_head_scale(
 
             return packed, sc.to(torch.float32), deq.to(torch.bfloat16)
 
-        key_cache_q, k_scale_cache, key_cache_deq = _int2_quantize_cache(
-            key_cache_bf16
-        )
+        key_cache_q, k_scale_cache, key_cache_deq = _int2_quantize_cache(key_cache_bf16)
         value_cache_q, v_scale_cache, value_cache_deq = _int2_quantize_cache(
             value_cache_bf16
         )
@@ -800,13 +848,18 @@ def test_triton_unified_attention_per_token_head_scale(
         )
 
     cu_query_lens = torch.tensor(
-        [0] + query_lens, dtype=torch.int32, device=device,
+        [0] + query_lens,
+        dtype=torch.int32,
+        device=device,
     ).cumsum(dim=0, dtype=torch.int32)
     kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32, device=device)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(
-        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32,
+        0,
+        num_blocks,
+        (num_seqs, max_num_blocks_per_seq),
+        dtype=torch.int32,
         device=device,
     )
 
@@ -815,15 +868,18 @@ def test_triton_unified_attention_per_token_head_scale(
     num_par_softmax_segments = 16
     softmax_segm_output = torch.empty(
         (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
-        dtype=torch.float32, device=device,
+        dtype=torch.float32,
+        device=device,
     )
     softmax_segm_max = torch.empty(
         (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
-        dtype=torch.float32, device=device,
+        dtype=torch.float32,
+        device=device,
     )
     softmax_segm_expsum = torch.empty(
         (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
-        dtype=torch.float32, device=device,
+        dtype=torch.float32,
+        device=device,
     )
 
     output_q = torch.empty_like(query)
