@@ -278,10 +278,13 @@ class TorchProfilerWrapper(WorkerProfiler):
             if rank == 0:
                 print(table)
 
-        if self.dump_cpu_time_total and rank == 0:
+        if self.dump_cpu_time_total:
             table = self._build_profiler_table(sort_key="self_cpu_time_total", row_limit=50)
             self._write_profiler_table(rank, table)
-            logger.info("%s", table)
+
+            # only print profiler results on rank 0
+            if rank == 0:
+                print(table)
 
 
 
