@@ -12,7 +12,7 @@ from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
     helion_all_gather_fp8_gemm  # This triggers the direct_register_custom_op call
 )
-
+from torch._C._distributed_c10d import _SymmetricMemory
 from vllm.kernels.helion.utils import get_canonical_gpu_name
 platform = get_canonical_gpu_name()
 
@@ -87,17 +87,17 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
         (256, 1024, 1024),
         #medium shapes
         (2048, 1024, 2048),
-        #(2048, 4096, 4096), # currently failing OOM(symm memory allocated in base_search and in the parent kernel that calles helion)
-        #(4096, 2048, 4096), ##OOM fail
+        (2048, 4096, 4096),
+        (4096, 2048, 4096),
         #large shapes
-        #(4096, 5120, 5120),
-        #(8192, 8192, 8192),# failed probably due to OOM, if needed I need to investigate further
+        (4096, 5120, 5120),
+        (8192, 8192, 8192),
     ]
     #shapes_to_tune[(num_tokens, hidden_size, N)]
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    
+    _SymmetricMemory.signal_pad_size = 1024 * 1024 * 1024
     # Setup device - : each process gets its own GPU
     torch.manual_seed(42 + rank)
     device = torch.device(f"cuda:{local_rank}")

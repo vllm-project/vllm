@@ -9,6 +9,7 @@ from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
     helion_all_gather_fp8_gemm  # This triggers the direct_register_custom_op call
 )
+from vllm.kernels.helion.utils import get_canonical_gpu_name
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -133,7 +134,10 @@ def run_shape_test(M, K, N, rank, world_size, device, dist_group, world_group):
             atol=1e-1
         )
 
+"""
+VLLM_USE_HELION_BACKEND=1 torchrun --nproc_per_node=4 -m pytest tests/distributed/test_all_gather_gemm_fp8.py -v -s
 #TODO: if we run this test with one shape it will pass, if. we run multiple it will fail to intalize with nccl.
+"""
 @pytest.mark.parametrize("M,K,N", [
     #small shapes
     #(128, 32, 64),
@@ -153,10 +157,12 @@ def test_helion_fp8_all_gather_matmul(M, K, N):
     torch.cuda.empty_cache()
     import gc
     gc.collect()
-    
-    ConfigManager.reset_instance()
-    _ = ConfigManager()
+    platform = get_canonical_gpu_name()
+    config_manager = ConfigManager.get_instance()
 
+    configs = config_manager.get_platform_configs("helion_matmul_w_progress_fp8", platform)
+    if len(configs) == 0:
+        pytest.skip("Current GPU platform not supported for helion_matmul_w_progress_fp8 kernel")
     try:
         run_shape_test(M, K, N, rank, world_size, device, dist_group, world_group)
         torch.cuda.synchronize()

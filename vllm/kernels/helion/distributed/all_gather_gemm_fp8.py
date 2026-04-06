@@ -25,77 +25,32 @@ if not has_helion():
         "Install it with: pip install helion"
     )
 
-@register_kernel  # type: ignore[misc]
-def helion_matmul_w_progress_fp8(
-    a: torch.Tensor,  # [M, K] FP8 (full gathered)
-    a_shared: torch.Tensor,  # [M//world_size, K] FP8
-    scale_a: torch.Tensor,  # [M//world_size, 1] FP32
-    b: torch.Tensor,  # [K, N] FP8 (may be non-contig)
-    scale_b: torch.Tensor,  # [1, N] FP32
-    progress: torch.Tensor,
-    SPLITS_PER_RANK: int,
-    RANK: int,
-) -> torch.Tensor:
-    """
-    Performs matrix multiplication with FP8 tensors and tracks progress using Helion.
-    """
-    M, K = a.size()
-    K2, N = b.size()
-    assert K2 == K, f"size mismatch {K2} != {K}"
-    out = torch.empty(
-        [M, N], dtype=torch.bfloat16, device=a.device
-    )  # Output buffered as BF16 for performance.
-    M_per_rank = a_shared.size(0)
 
-    for tile_m, tile_n in hl.tile([M, N]):
-        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)  # Initialize accumulator in FP32.
-        # Once the progress is filled, we can start doing gemm
-        hl.triton_kernel(
-            _wait_progress_at_idx,
-            args=(
-                progress,
-                tile_m.begin // (M_per_rank // SPLITS_PER_RANK),
-            ),
-            output_like=None,
-        )
-        # Load scales once per tile
-        sa = scale_a[tile_m, :] # [tile_m, 1]
-        sb = scale_b[:, tile_n]  # [1, tile_n]
-
-        for tile_k in hl.tile(K):
-            x_tile = a[tile_m, tile_k]
-            y_tile = b[tile_k, tile_n]
-            acc = hl.dot(x_tile, y_tile, acc=acc) 
-
-        # Convert result back to bfloat16
-        out[tile_m, tile_n] = (acc * sa * sb).to(torch.bfloat16)
-
-    return out
-
-@helion_matmul_w_progress_fp8.register_config_picker  # type: ignore[misc]
 def pick_helion_matmul_w_progress_fp8_config(
     args: tuple, 
     config_keys: list[str],
 ) -> str | None:
+    """
+    Config picker for helion_matmul_w_progress_fp8.
+
+    Args:
+        args: tuple containing runtime kernel arguments:
+            a_shared: [M_per_rank, K] local input shard
+            b: [K, N] weight/projection matrix
+            scale_a: [M_per_rank, 1]
+            scale_b: [1, N]
+            world_size: int
+            splits_per_rank: int
+        config_keys: list of available pre-autotuned config keys
+
+    Returns:
+        str: best matching config key
+    """
+    # Unpack runtime arguments
     if not config_keys:
+        logger.warning("No configs available for helion_matmul_w_progress_fp8. Received args: %s", args)
         return None
-        """
-        Config picker for helion_matmul_w_progress_fp8.
 
-        Args:
-            args: tuple containing runtime kernel arguments:
-                a_shared: [M_per_rank, K] local input shard
-                b: [K, N] weight/projection matrix
-                scale_a: [M_per_rank, 1]
-                scale_b: [1, N]
-                world_size: int
-                splits_per_rank: int
-            config_keys: list of available pre-autotuned config keys
-
-        Returns:
-            str: best matching config key
-        """
-     # Unpack runtime arguments
     a, a_shared, _ ,b, _ , _, splits_per_rank, rank = args
 
     # Shapes
@@ -152,6 +107,56 @@ def pick_helion_matmul_w_progress_fp8_config(
 
     logger.warning("No suitable config found and no default available")
     return None
+
+
+@register_kernel(
+    config_picker=pick_helion_matmul_w_progress_fp8_config,
+)
+def helion_matmul_w_progress_fp8(
+    a: torch.Tensor,  # [M, K] FP8 (full gathered)
+    a_shared: torch.Tensor,  # [M//world_size, K] FP8
+    scale_a: torch.Tensor,  # [M//world_size, 1] FP32
+    b: torch.Tensor,  # [K, N] FP8 (may be non-contig)
+    scale_b: torch.Tensor,  # [1, N] FP32
+    progress: torch.Tensor,
+    SPLITS_PER_RANK: int,
+    RANK: int,
+) -> torch.Tensor:
+    """
+    Performs matrix multiplication with FP8 tensors and tracks progress using Helion.
+    """
+    M, K = a.size()
+    K2, N = b.size()
+    assert K2 == K, f"size mismatch {K2} != {K}"
+    out = torch.empty(
+        [M, N], dtype=torch.bfloat16, device=a.device
+    )  # Output buffered as BF16 for performance.
+    M_per_rank = a_shared.size(0)
+
+    for tile_m, tile_n in hl.tile([M, N]):
+        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)  # Initialize accumulator in FP32.
+        # Once the progress is filled, we can start doing gemm
+        hl.triton_kernel(
+            _wait_progress_at_idx,
+            args=(
+                progress,
+                tile_m.begin // (M_per_rank // SPLITS_PER_RANK),
+            ),
+            output_like=None,
+        )
+        # Load scales once per tile
+        sa = scale_a[tile_m, :] # [tile_m, 1]
+        sb = scale_b[:, tile_n]  # [1, tile_n]
+
+        for tile_k in hl.tile(K):
+            x_tile = a[tile_m, tile_k]
+            y_tile = b[tile_k, tile_n]
+            acc = hl.dot(x_tile, y_tile, acc=acc) 
+
+        # Convert result back to bfloat16
+        out[tile_m, tile_n] = (acc * sa * sb).to(torch.bfloat16)
+
+    return out
 
 
 def copy_engine_all_gather_w_progress(
