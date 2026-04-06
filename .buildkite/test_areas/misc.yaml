@@ -19,6 +19,7 @@ steps:
 
 - label: V1 Sample + Logits
   timeout_in_minutes: 30
+  device: h200_18gb
   source_file_dependencies:
     - vllm/
     - tests/v1/sample
@@ -86,6 +87,7 @@ steps:
 
 - label: Regression
   timeout_in_minutes: 20
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/test_regression
