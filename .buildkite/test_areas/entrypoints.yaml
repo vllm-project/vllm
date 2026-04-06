@@ -61,7 +61,6 @@ steps:
 
 - label: Entrypoints Integration (API Server openai - Part 3)
   timeout_in_minutes: 50
-  device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -106,7 +105,6 @@ steps:
 
 - label: OpenAI API Correctness
   timeout_in_minutes: 30
-  device: h200_18gb
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/

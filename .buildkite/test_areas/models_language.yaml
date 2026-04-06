@@ -67,7 +67,6 @@ steps:
 
 - label: Language Models Test (PPL)
   timeout_in_minutes: 110
-  device: h200_18gb
   optional: true
   source_file_dependencies:
   - vllm/
@@ -91,7 +90,6 @@ steps:
 
 - label: Language Models Test (MTEB)
   timeout_in_minutes: 110
-  device: h200_18gb
   optional: true
   source_file_dependencies:
   - vllm/

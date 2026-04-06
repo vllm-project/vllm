@@ -49,7 +49,6 @@ steps:
 
 - label: PyTorch Fullgraph
   timeout_in_minutes: 30
-  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -61,7 +60,6 @@ steps:
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
-  device: h200_18gb
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
