@@ -577,8 +577,6 @@ class TritonAttentionImpl(AttentionImpl):
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
-            # FP8 per-token-head stores uint8 that must be viewed as fp8.
-            # INT4 packed stores uint8 natively — do NOT reinterpret.
             if (
                 self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD
                 and key_cache.dtype == torch.uint8
@@ -718,8 +716,6 @@ class TritonAttentionImpl(AttentionImpl):
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
-            # FP8 per-token-head stores uint8 that must be viewed as fp8.
-            # INT4 packed stores uint8 natively — do NOT reinterpret.
             if (
                 self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD
                 and key_cache.dtype == torch.uint8
