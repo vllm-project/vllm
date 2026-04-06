@@ -14,6 +14,7 @@ from vllm.transformers_utils.utils import (
     is_azure,
     is_cloud_storage,
     is_gcs,
+    is_hub_model,
     is_s3,
 )
 
@@ -45,6 +46,22 @@ def test_is_cloud_storage():
     assert is_cloud_storage("az://model-container/path")
     assert not is_cloud_storage("/unix/local/path")
     assert not is_cloud_storage("nfs://nfs-fqdn.local")
+
+
+def test_is_hub_model():
+    # Valid HuggingFace Hub repo IDs
+    assert is_hub_model("meta-llama/Llama-3-8B")
+    assert is_hub_model("gpt2")
+    assert is_hub_model("Foo-BAR_foo.bar123")
+
+    # Local filesystem paths
+    assert not is_hub_model("/home/user/Models/my-model")
+    assert not is_hub_model("/opt/models/meta-llama--Llama-3-8B")
+
+    # Cloud storage URLs
+    assert not is_hub_model("s3://bucket/model")
+    assert not is_hub_model("gs://bucket/model")
+    assert not is_hub_model("az://container/model")
 
 
 class TestIsRemoteGGUF:

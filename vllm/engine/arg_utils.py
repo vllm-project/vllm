@@ -102,7 +102,7 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
-from vllm.transformers_utils.utils import is_cloud_storage
+from vllm.transformers_utils.utils import is_hub_model
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -1556,10 +1556,10 @@ class EngineArgs:
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
-        # Skip speculator detection for cloud storage models (eg: S3, GCS) since
-        # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
-        # use speculators with explicit --speculative-config.
-        if not is_cloud_storage(self.model):
+        # Only attempt speculator auto-detection for HuggingFace Hub models.
+        # Non-Hub models (local paths, cloud storage URLs, etc.) can still use
+        # speculators with explicit --speculative-config.
+        if is_hub_model(self.model):
             (self.model, self.tokenizer, self.speculative_config) = (
                 maybe_override_with_speculators(
                     model=self.model,
