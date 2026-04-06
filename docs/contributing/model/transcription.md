@@ -206,8 +206,8 @@ Relevant server logic:
     async def _preprocess_speech_to_text(...):
         language = self.model_cls.validate_language(request.language)
         ...
-        y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
-        duration = librosa.get_duration(y=y, sr=sr)
+        y, sr = load_audio(bytes_, sr=self.asr_config.sample_rate)
+        duration = get_audio_duration(y=y, sr=sr)
         do_split_audio = (self.asr_config.allow_audio_chunking
                         and duration > self.asr_config.max_audio_clip_s)
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))

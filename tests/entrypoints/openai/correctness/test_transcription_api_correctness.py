@@ -84,7 +84,7 @@ async def process_dataset(model, client, data, concurrent_request):
         trust_remote_code=model_info.trust_remote_code,
     )
 
-    # Warmup call as the first `librosa.load` server-side is quite slow.
+    # Warmup call as the first `load_audio` server-side is quite slow.
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
     _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
