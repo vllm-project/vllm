@@ -21,7 +21,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner

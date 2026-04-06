@@ -20,7 +20,7 @@ def server():
         "--reasoning-parser",
         "qwen3",
         "--reasoning-config",
-        '{"think_start_str": "<think>", "think_end_str": "</think>"}',
+        '{"reasoning_start_str": "<think>", "reasoning_end_str": "</think>"}',
         "--max-model-len",
         "2048",
         "--enforce-eager",

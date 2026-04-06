@@ -9,7 +9,10 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.passes.fusion.attn_quant_fusion import ATTN_OP, AttnFusionPass
+from vllm.compilation.passes.fusion.attn_quant_fusion import (
+    ATTN_OP,
+    AttnQuantFusionPass,
+)
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -384,7 +387,7 @@ def test_attention_quant_pattern(
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
-        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
+        attn_pass = LazyInitPass(AttnQuantFusionPass, vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
         test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
@@ -434,7 +437,7 @@ def test_attention_quant_pattern(
     # Only output quant ops are fused into attention.
     test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
-    # access the underlying `AttnFusionPass` on the `LazyInitPass`
+    # access the underlying `AttnQuantFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
     # Check attention ops in the graph before and after fusion

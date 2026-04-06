@@ -91,6 +91,9 @@ def clear_kv_transfer():
     yield
     if has_kv_transfer_group():
         ensure_kv_transfer_shutdown()
+    # Reset any KV cache layout override set during tests so it doesn't
+    # leak into tests in other modules.
+    set_kv_cache_layout(None)
 
 
 def get_default_xfer_telemetry(
@@ -1583,10 +1586,18 @@ def test_register_kv_caches(
         expected_base_addrs: list[int]
         expected_num_entries: int
         kv_caches: dict[str, torch.Tensor]
-        assert str(enable_cross_layers).lower() != "true" or (
-            (attn_backend not in ("FLASH_ATTN", "FLASHINFER"))
-            or connector.prefer_cross_layer_blocks
+        if str(enable_cross_layers).lower() == "true":
+            assert connector.prefer_cross_layer_blocks == (
+                attn_backend in ("FLASH_ATTN", "FLASHINFER", "TRITON_ATTN")
+            )
+        else:
+            assert not connector.prefer_cross_layer_blocks
+
+        test_shape = backend_cls.get_kv_cache_shape(
+            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
+        is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
+
         if connector.prefer_cross_layer_blocks:
             with set_current_vllm_config(vllm_config):
                 _, cross_layers_kv_cache, _ = (
@@ -1602,7 +1613,7 @@ def test_register_kv_caches(
                                 )
                             ]
                         ],
-                        cache_dtype=torch.bfloat16,
+                        cache_dtype="bfloat16",
                         device=torch.accelerator.current_device_index(),
                         kernel_block_sizes=[block_size],
                     )
@@ -1616,7 +1627,7 @@ def test_register_kv_caches(
             ]
             expected_num_entries = 1
 
-            expected_blocks_count = 8
+            expected_blocks_count = num_blocks * (2 if is_blocks_first else 1)
 
             kv_caches = {"all-layers": cross_layers_kv_cache}
         else:
@@ -1636,12 +1647,6 @@ def test_register_kv_caches(
             }
 
             # Store tensor info for validation
-
-            test_shape = backend_cls.get_kv_cache_shape(
-                num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
-            )
-            is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
-
             if is_blocks_first:
                 expected_tensor_size = (
                     shared_tensor.element_size() * shared_tensor.numel()
@@ -1693,13 +1698,13 @@ def test_register_kv_caches(
 
         if connector.prefer_cross_layer_blocks:
             num_blocks = 8
-            expected_block_len = expected_tensor_size // num_blocks
         else:
             num_blocks = kv_cache_config.num_blocks
-            if is_blocks_first:
-                expected_block_len = expected_tensor_size // num_blocks // 2
-            else:
-                expected_block_len = expected_tensor_size // num_blocks
+
+        if is_blocks_first:
+            expected_block_len = expected_tensor_size // num_blocks // 2
+        else:
+            expected_block_len = expected_tensor_size // num_blocks
 
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry

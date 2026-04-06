@@ -7,7 +7,7 @@ import requests
 from tests.entrypoints.pooling.scoring.util import EncoderScoringHfRunner
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
-from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
+from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 from vllm.platforms import current_platform
 
 MODEL_NAME = "BAAI/bge-base-en-v1.5"

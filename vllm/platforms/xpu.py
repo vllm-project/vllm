@@ -21,6 +21,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -160,11 +161,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
-        # in V1(or with chunked prefill) block_size is 64
-        if cache_config and not cache_config.user_specified_block_size:
-            cache_config.block_size = 64
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
@@ -223,9 +220,54 @@ class XPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: XPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
+        super().update_block_size_for_backend(vllm_config)
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+        from vllm.utils.math_utils import cdiv
+
+        cache_config = vllm_config.cache_config
+        # special fix for GDN since kernel only supports block size dividable by 64
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+
+        kernel_block_size = None
+        for layer in attn_layers.values():
+            b = layer.get_attn_backend()
+            if b.get_name() == "GDN_ATTN":
+                kernel_block_size = 64
+                break
+
+        if kernel_block_size is None:
+            return
+        new_block_size = (
+            cdiv(cache_config.block_size, kernel_block_size) * kernel_block_size
+        )
+        if new_block_size == cache_config.block_size:
+            return
+
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.mamba_block_size = new_block_size
+        original_mamba_page_size_padded = cache_config.mamba_page_size_padded
+        if cache_config.mamba_page_size_padded is not None:
+            attn_page_size_1_token = (
+                cache_config.mamba_page_size_padded // cache_config.block_size
+            )
+            cache_config.mamba_page_size_padded = (
+                new_block_size * attn_page_size_1_token
+            )
+        cache_config.block_size = new_block_size
+        logger.info(
+            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d, "
+            "set mamba_page_size_padded to %d bytes accordingly, before was %d bytes.",
+            new_block_size,
+            kernel_block_size,
+            cache_config.mamba_page_size_padded,
+            original_mamba_page_size_padded,
+        )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -266,6 +308,21 @@ class XPUPlatform(Platform):
                 " is not available."
             )
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use fused kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+
+        return IrOpPriorityConfig.with_default(default)
 
     @classmethod
     def device_count(cls) -> int:

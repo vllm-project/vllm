@@ -13,6 +13,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -30,6 +31,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -47,6 +49,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -67,6 +70,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200 
         }
     }

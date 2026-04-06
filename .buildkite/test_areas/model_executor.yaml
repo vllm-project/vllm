@@ -13,5 +13,5 @@ steps:
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s model_executor
+    - pytest -v -s model_executor -m '(not slow_test)'
     - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py

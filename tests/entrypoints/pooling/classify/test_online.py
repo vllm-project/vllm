@@ -390,7 +390,7 @@ async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_score(server: RemoteOpenAIServer, model_name: str):
-    # score api is only enabled for num_labels == 1.
+    # Scoring API is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("score"),
         json={
@@ -405,7 +405,7 @@ async def test_score(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_rerank(server: RemoteOpenAIServer, model_name: str):
-    # rerank api is only enabled for num_labels == 1.
+    # Scoring API is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("rerank"),
         json={
