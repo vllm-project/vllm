@@ -1112,10 +1112,6 @@ def assert_draft_model_correctness(args: ArgsTest):
         spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
     )
 
-    del spec_llm  # CLEANUP
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
     print(
         f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
         f"temperature={args.sampling_config.temperature:.2f}, "
@@ -1129,6 +1125,9 @@ def assert_draft_model_correctness(args: ArgsTest):
     assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
         "Expected async_scheduling=True for draft_model spec decode, got False."
     )
+    del spec_llm  # CLEANUP
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
