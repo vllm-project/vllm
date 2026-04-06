@@ -104,6 +104,36 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('items:[<|"|>a<|"|>,<|"|>b<|"|>]')
         assert result == {"items": ["a", "b"]}
 
+    def test_string_with_internal_quotes(self):
+        """String values containing " must be preserved."""
+        result = _parse_gemma4_args('content:<|"|>She said "hello" loudly<|"|>')
+        assert result == {"content": 'She said "hello" loudly'}
+
+    def test_string_with_braces(self):
+        """String values containing { and } must be preserved."""
+        result = _parse_gemma4_args(
+            'content:<|"|><html><div>{test}</div></html><|"|>'
+        )
+        assert result == {"content": "<html><div>{test}</div></html>"}
+
+    def test_string_with_html_attributes(self):
+        """HTML attributes like class="main" inside string values."""
+        result = _parse_gemma4_args(
+            'path:<|"|>out.html<|"|>,'
+            'content:<|"|><div class="main">hello</div><|"|>'
+        )
+        assert result == {
+            "path": "out.html",
+            "content": '<div class="main">hello</div>',
+        }
+
+    def test_string_with_code_content(self):
+        """Code with braces and quotes in string values."""
+        result = _parse_gemma4_args(
+            'code:<|"|>function() { return "ok"; }<|"|>'
+        )
+        assert result == {"code": 'function() { return "ok"; }'}
+
     def test_unterminated_string(self):
         """Unterminated strings should take everything after the delimiter."""
         result = _parse_gemma4_args('key:<|"|>unterminated')

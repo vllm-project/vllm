@@ -49,45 +49,232 @@ _TOOL_RESPONSE_START_TAG = "<|tool_response>"
 _ESCAPE_TOKEN = '<|"|>'
 
 
+# ---------------------------------------------------------------------------
+# Shared Gemma4 argument parser
+# ---------------------------------------------------------------------------
+# This parser handles the Gemma4 custom key:value format natively,
+# without replacing <|"|> delimiters with quotes. It is used by both
+# the offline parser (this module) and the API server parser
+# (gemma4_tool_parser.py).
+
+
+def parse_gemma4_value(value_str: str) -> object:
+    """Parse a single Gemma4 value (after key:) into a Python object."""
+    value_str = value_str.strip()
+    if not value_str:
+        return value_str
+
+    # Boolean
+    if value_str == "true":
+        return True
+    if value_str == "false":
+        return False
+
+    # Number (int or float)
+    try:
+        if "." in value_str:
+            return float(value_str)
+        return int(value_str)
+    except ValueError:
+        pass
+
+    # Bare string (no <|"|> delimiters — shouldn't happen but be safe)
+    return value_str
+
+
+def parse_gemma4_args(args_str: str) -> dict:
+    """Parse Gemma4's custom key:value format into a Python dict.
+
+    Format examples::
+
+        location:<|"|>Tokyo<|"|>
+        location:<|"|>San Francisco<|"|>,unit:<|"|>celsius<|"|>
+        count:42,flag:true
+        nested:{inner_key:<|"|>val<|"|>}
+        items:[<|"|>a<|"|>,<|"|>b<|"|>]
+
+    Returns a dict ready for ``json.dumps()``.
+    """
+    if not args_str or not args_str.strip():
+        return {}
+
+    result: dict = {}
+    i = 0
+    n = len(args_str)
+
+    while i < n:
+        # Skip whitespace and commas
+        while i < n and args_str[i] in (" ", ",", "\n", "\t"):
+            i += 1
+        if i >= n:
+            break
+
+        # Parse key (unquoted, ends at ':')
+        key_start = i
+        while i < n and args_str[i] != ":":
+            i += 1
+        if i >= n:
+            break
+        key = args_str[key_start:i].strip()
+        i += 1  # skip ':'
+
+        # Parse value
+        if i >= n:
+            result[key] = ""
+            break
+
+        # Skip whitespace after ':'
+        while i < n and args_str[i] in (" ", "\n", "\t"):
+            i += 1
+        if i >= n:
+            result[key] = ""
+            break
+
+        # String value: <|"|>...<|"|>
+        if args_str[i:].startswith(_ESCAPE_TOKEN):
+            i += len(_ESCAPE_TOKEN)
+            val_start = i
+            end_pos = args_str.find(_ESCAPE_TOKEN, i)
+            if end_pos == -1:
+                # Unterminated string — take rest
+                result[key] = args_str[val_start:]
+                break
+            result[key] = args_str[val_start:end_pos]
+            i = end_pos + len(_ESCAPE_TOKEN)
+
+        # Nested object: {...}
+        elif args_str[i] == "{":
+            depth = 1
+            obj_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if args_str[i:].startswith(_ESCAPE_TOKEN):
+                    # Skip over string contents to avoid counting { inside strings
+                    i += len(_ESCAPE_TOKEN)
+                    next_delim = args_str.find(_ESCAPE_TOKEN, i)
+                    i = n if next_delim == -1 else next_delim + len(_ESCAPE_TOKEN)
+                    continue
+                if args_str[i] == "{":
+                    depth += 1
+                elif args_str[i] == "}":
+                    depth -= 1
+                i += 1
+            result[key] = parse_gemma4_args(args_str[obj_start : i - 1])
+
+        # Array: [...]
+        elif args_str[i] == "[":
+            depth = 1
+            arr_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if args_str[i:].startswith(_ESCAPE_TOKEN):
+                    i += len(_ESCAPE_TOKEN)
+                    next_delim = args_str.find(_ESCAPE_TOKEN, i)
+                    i = n if next_delim == -1 else next_delim + len(_ESCAPE_TOKEN)
+                    continue
+                if args_str[i] == "[":
+                    depth += 1
+                elif args_str[i] == "]":
+                    depth -= 1
+                i += 1
+            arr_content = args_str[arr_start : i - 1]
+            result[key] = parse_gemma4_array(arr_content)
+
+        # Bare value (number, boolean, etc.)
+        else:
+            val_start = i
+            while i < n and args_str[i] not in (",", "}", "]"):
+                i += 1
+            result[key] = parse_gemma4_value(args_str[val_start:i])
+
+    return result
+
+
+def parse_gemma4_array(arr_str: str) -> list:
+    """Parse a Gemma4 array content string into a Python list."""
+    items: list = []
+    i = 0
+    n = len(arr_str)
+
+    while i < n:
+        while i < n and arr_str[i] in (" ", ",", "\n", "\t"):
+            i += 1
+        if i >= n:
+            break
+
+        # String element
+        if arr_str[i:].startswith(_ESCAPE_TOKEN):
+            i += len(_ESCAPE_TOKEN)
+            end_pos = arr_str.find(_ESCAPE_TOKEN, i)
+            if end_pos == -1:
+                items.append(arr_str[i:])
+                break
+            items.append(arr_str[i:end_pos])
+            i = end_pos + len(_ESCAPE_TOKEN)
+
+        # Nested object
+        elif arr_str[i] == "{":
+            depth = 1
+            obj_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if arr_str[i:].startswith(_ESCAPE_TOKEN):
+                    i += len(_ESCAPE_TOKEN)
+                    nd = arr_str.find(_ESCAPE_TOKEN, i)
+                    i = nd + len(_ESCAPE_TOKEN) if nd != -1 else n
+                    continue
+                if arr_str[i] == "{":
+                    depth += 1
+                elif arr_str[i] == "}":
+                    depth -= 1
+                i += 1
+            items.append(parse_gemma4_args(arr_str[obj_start : i - 1]))
+
+        # Nested array
+        elif arr_str[i] == "[":
+            depth = 1
+            sub_start = i + 1
+            i += 1
+            while i < n and depth > 0:
+                if arr_str[i] == "[":
+                    depth += 1
+                elif arr_str[i] == "]":
+                    depth -= 1
+                i += 1
+            items.append(parse_gemma4_array(arr_str[sub_start : i - 1]))
+
+        # Bare value
+        else:
+            val_start = i
+            while i < n and arr_str[i] not in (",", "]"):
+                i += 1
+            items.append(parse_gemma4_value(arr_str[val_start:i]))
+
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Legacy wrapper (kept for backward compatibility)
+# ---------------------------------------------------------------------------
+
+
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:
     """Parse tool call arguments from the Gemma4 compact format.
 
-    Handles the ``key:<|"|>value<|"|>`` format used by Gemma4, with fallback
-    to heuristic key-value extraction. Also tolerates the slightly different
-    ``key: "value"`` format (space + plain quotes) that some chat templates
-    produce.
+    Handles the ``key:<|"|>value<|"|>`` format used by Gemma4, including
+    string values containing internal quotes, braces, and other special
+    characters.
 
     Args:
         args_str: Raw argument string from inside ``call:name{...}``.
 
     Returns:
-        Dictionary of argument name → value.
+        Dictionary of argument name → value (string).
     """
-    if not args_str or not args_str.strip():
-        return {}
-
-    # Replace Gemma4 escape tokens with standard quotes.
-    cleaned = args_str.replace(_ESCAPE_TOKEN, '"')
-
-    # Try JSON parsing first (handles nested values, arrays, etc.).
-    try:
-        parsed = json.loads("{" + cleaned + "}")
-        # Ensure all values are strings for consistency.
-        return {k: str(v) if not isinstance(v, str) else v for k, v in parsed.items()}
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # Fallback: extract key:"value" pairs (allow optional space after colon).
-    arguments = {}
-    for key, value in re.findall(r'(\w+):\s*"([^"]*)"', cleaned):
-        arguments[key] = value
-
-    if not arguments:
-        # Last resort: extract key:value pairs (unquoted).
-        for key, value in re.findall(r"(\w+):\s*([^,}]+)", args_str):
-            arguments[key] = value.strip().strip('"').replace(_ESCAPE_TOKEN, "")
-
-    return arguments
+    parsed = parse_gemma4_args(args_str)
+    # Convert all values to strings for backward compatibility
+    # with callers that expect dict[str, str].
+    return {k: str(v) if not isinstance(v, str) else v for k, v in parsed.items()}
 
 
 def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
