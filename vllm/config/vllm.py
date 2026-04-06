@@ -1248,6 +1248,18 @@ class VllmConfig:
                 # local attention.
                 need_disable_hybrid_kv_cache_manager = True
 
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_eagle()
+            and self.model_config is not None
+            and self.model_config.get_sliding_window() is not None
+        ):
+            # Hybrid KV cache manager splits sliding window and full
+            # attention layers into different KV cache groups, which
+            # breaks the eagle/MTP drafter validation that requires
+            # all drafting layers in the same group.
+            need_disable_hybrid_kv_cache_manager = True
+
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to disable HMA, but only if the user didn't express a preference.
             if self.kv_transfer_config is not None:
