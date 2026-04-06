@@ -131,9 +131,6 @@ def _init_kv_cache_quant(
         quant_config: Optional quantization configuration.
         prefix: Layer name prefix for quantization method lookup.
     """
-    quant_method = (
-        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
-    )
 
     # Note [Register q/k/v/prob scales in state dict]
     # When calling model.to(device), only parameters/buffers in state dict are
