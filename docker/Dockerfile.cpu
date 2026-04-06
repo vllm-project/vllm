@@ -107,10 +107,10 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
     fi
 
 # Copy build requirements
-COPY requirements/cpu-build.txt requirements/build.txt
+COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/build.txt
+    uv pip install -r requirements/build/cpu.txt
 
 COPY . .
 
@@ -127,26 +127,26 @@ FROM base AS vllm-test-deps
 WORKDIR /vllm-workspace
 
 # Copy test requirements
-COPY requirements/test.in requirements/cpu-test.in
+COPY requirements/test/cuda.in requirements/test/cpu.in
 
 RUN \
-    sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
+    sed -i '/mamba_ssm/d' requirements/test/cpu.in && \
     remove_packages_not_supported_on_aarch64() { \
     case "$(uname -m)" in \
     aarch64|arm64) \
-    sed -i '/decord/d' requirements/cpu-test.in; \
-    sed -i '/terratorch/d' requirements/cpu-test.in; \
+    sed -i '/decord/d' requirements/test/cpu.in; \
+    sed -i '/terratorch/d' requirements/test/cpu.in; \
     ;; \
     esac; \
     }; \
     remove_packages_not_supported_on_aarch64 && \
-    sed -i 's/^torch==.*/torch==2.10.0/g' requirements/cpu-test.in && \
-    sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
-    sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
-    uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
+    sed -i 's/^torch==.*/torch==2.10.0/g' requirements/test/cpu.in && \
+    sed -i 's/torchaudio.*/torchaudio/g' requirements/test/cpu.in && \
+    sed -i 's/torchvision.*/torchvision/g' requirements/test/cpu.in && \
+    uv pip compile requirements/test/cpu.in -o requirements/test/cpu.txt --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/cpu-test.txt
+    uv pip install -r requirements/test/cpu.txt
 
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
@@ -168,7 +168,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 
-COPY --from=vllm-test-deps /vllm-workspace/requirements/cpu-test.txt requirements/test.txt
+COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirements/test/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/dev.txt && \

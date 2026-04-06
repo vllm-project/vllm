@@ -26,6 +26,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!requirements/build/
 cmake-build-*/
 CMakeUserPresets.json
 develop-eggs/

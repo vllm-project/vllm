@@ -32,7 +32,7 @@ jobs:
 
       - name: Install dependencies and build vLLM
         run: |
-          uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match
+          uv pip install -r requirements/build/cpu.txt --index-strategy unsafe-best-match
           uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
           uv pip install -e . --no-build-isolation
         env:
