@@ -709,7 +709,11 @@ class RocmPlatform(Platform):
             compilation_config.custom_ops.append("+grouped_topk")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
-        compilation_config.custom_ops.append("+sparse_attn_indexer")
+        if (
+            "+sparse_attn_indexer" not in compilation_config.custom_ops
+            and "-sparse_attn_indexer" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+sparse_attn_indexer")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -762,7 +766,7 @@ class RocmPlatform(Platform):
                 "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                 " is not set, enabling VLLM_USE_TRITON_AWQ."
             )
-        os.environ["VLLM_USE_TRITON_AWQ"] = "1"
+            os.environ["VLLM_USE_TRITON_AWQ"] = "1"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
