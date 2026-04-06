@@ -10,7 +10,6 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -23,6 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
@@ -109,9 +109,7 @@ class Qwen3CoderToolParser(ToolParser):
         self.accumulated_params = {}
         self.streaming_request = None
 
-    def _get_arguments_config(
-        self, func_name: str, tools: list[ChatCompletionToolsParam] | None
-    ) -> dict:
+    def _get_arguments_config(self, func_name: str, tools: list[Tool] | None) -> dict:
         """Extract argument configuration for a function."""
         if tools is None:
             return {}
@@ -246,7 +244,7 @@ class Qwen3CoderToolParser(ToolParser):
             return param_value
 
     def _parse_xml_function_call(
-        self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
+        self, function_call_str: str, tools: list[Tool] | None
     ) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
@@ -316,7 +314,7 @@ class Qwen3CoderToolParser(ToolParser):
                 )
 
             tool_calls = [
-                self._parse_xml_function_call(function_call_str, request.tools)
+                self._parse_xml_function_call(function_call_str, self.tools)
                 for function_call_str in function_calls
             ]
             # Populate prev_tool_call_arr for serving layer to set finish_reason
@@ -609,7 +607,7 @@ class Qwen3CoderToolParser(ToolParser):
 
                 param_config = self._get_arguments_config(
                     self.current_function_name or "",
-                    self.streaming_request.tools if self.streaming_request else None,
+                    self.tools,
                 )
 
                 converted_value = self._convert_param_value(
@@ -668,9 +666,7 @@ class Qwen3CoderToolParser(ToolParser):
                     try:
                         parsed_tool = self._parse_xml_function_call(
                             func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request
-                            else None,
+                            self.tools,
                         )
                         if parsed_tool and self.current_tool_index < len(
                             self.prev_tool_call_arr

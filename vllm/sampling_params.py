@@ -12,6 +12,7 @@ from typing import Any
 import msgspec
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -169,6 +170,9 @@ class SamplingParams(
     n: int = 1
     """Number of outputs to return for the given prompt request.
 
+    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    environment variable (default: 16384).
+
     NOTE:
         `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
         are generated and streamed cumulatively per request. To see all `n`
@@ -228,6 +232,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    logprob_token_ids: list[int] | None = None
+    """Specific token IDs to return logprobs for. More efficient than
+    logprobs=-1 when you only need logprobs for a small set of tokens.
+    When set, logprobs for exactly these token IDs will be returned,
+    in addition to the sampled token. This is useful for scoring tasks
+    where you want to compare probabilities of specific label tokens."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -425,6 +435,13 @@ class SamplingParams(
             raise ValueError(f"n must be an int, but is of type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        max_n = envs.VLLM_MAX_N_SEQUENCES
+        if self.n > max_n:
+            raise ValueError(
+                f"n must be at most {max_n}, got {self.n}. "
+                "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
+                "environment variable."
+            )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."

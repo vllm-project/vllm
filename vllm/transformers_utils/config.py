@@ -80,6 +80,7 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     bagel="BagelConfig",
+    umm="CheersConfig",
     chatglm="ChatGLMConfig",
     colmodernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
@@ -105,7 +106,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
-    olmo3="Olmo3Config",
     olmo_hybrid="OlmoHybridConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
@@ -119,6 +119,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
 )
+
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -191,7 +193,7 @@ class HFConfigParser(ConfigParserBase):
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
 
-        if model_type in _CONFIG_REGISTRY:
+        if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
                 model,
@@ -201,6 +203,14 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
+            if model_type in _CONFIG_REGISTRY:
+                # Register the config class to AutoConfig to ensure it's used in future
+                # calls to `from_pretrained`
+                config_class = _CONFIG_REGISTRY[model_type]
+                config_class.model_type = model_type
+                AutoConfig.register(model_type, config_class, exist_ok=True)
+                # Now that it is registered, it is not considered remote code anymore
+                trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
