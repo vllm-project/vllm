@@ -57,6 +57,7 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
     parse_chat_output,
@@ -213,6 +214,7 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        request.skip_special_tokens = False
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -312,6 +314,8 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     reasoning_ended = None
 
+                with open("gemma_turns.log", "a", encoding="utf-8") as f:
+                    f.write(f"!!! input:\n{tokenizer.decode(prompt_token_ids)}\n")
                 generator = self.engine_client.generate(
                     engine_input,
                     sampling_params,
@@ -1308,6 +1312,9 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
+
+            with open("gemma_turns.log", "a", encoding="utf-8") as f:
+                f.write(f"!!! output:\n{tokenizer.decode(token_ids)}\n")
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"

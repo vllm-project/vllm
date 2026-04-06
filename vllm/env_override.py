@@ -532,3 +532,20 @@ if not is_torch_equal_or_newer("2.12.0"):
         return runtime_env
 
     GraphCaptureOutput.get_runtime_env = _patched_get_runtime_env
+
+
+# Register extra Jinja filters for chat templates (e.g. Gemma 4 tool JSON in
+# examples/tool_chat_template_gemma4.jinja). Must run before tokenizer chat
+# template compilation.
+def _maybe_patch_chat_template_jinja_json_filters() -> None:
+    try:
+        from vllm.transformers_utils.chat_template_json_filters import (
+            patch_transformers_chat_template_jinja_json_filters,
+        )
+
+        patch_transformers_chat_template_jinja_json_filters()
+    except Exception:
+        pass
+
+
+_maybe_patch_chat_template_jinja_json_filters()
