@@ -33,67 +33,145 @@ python scripts/mooncake/mooncake_example.py
 
 You should see `Hello, Mooncake Store!` printed. Stop the master with Ctrl-C.
 
-## Benchmarking CPU KV Cache Offloading
+## Running Benchmarks
 
 ### 1. Start the Master Server
 
 ```bash
+bash scripts/mooncake/start_mooncake_master.sh
+# With disk offloading support:
+bash scripts/mooncake/start_mooncake_master.sh --enable-offload
+# Start master and run it in background
 bash scripts/mooncake/start_mooncake_master.sh --bg
+# With disk offloading support and running in background:
+bash scripts/mooncake/start_mooncake_master.sh --enable-offload --bg
 ```
 
-This starts the master in the background with default ports (RPC: 50051, HTTP metadata: 8080). Logs are written to `scripts/mooncake/mooncake_master.log`. See the script header for environment variables to customize ports and eviction settings.
+This starts the master in the background. Logs go to `scripts/mooncake/mooncake_master.log`.
+
+Default ports:
+
+- RPC: 50051
+- HTTP metadata: 8080
+- Prometheus metrics: 9003
+
+See the script header for environment variables (`MC_RPC_PORT`, `MC_HTTP_PORT`, etc.) to customize ports and eviction settings. Mooncake master is launched cluster-wise, so we may get port conflict if someone else has already launched it. Typically we don't need to change this, and multiple users should be able to share the same master. One can freely change ports here, but also remember to update the `mooncake_config.json` for the client (vLLM) below.
 
 ### 2. Configure Mooncake
 
-Edit `scripts/mooncake/mooncake_config.json` to match your setup:
+Edit `scripts/mooncake/mooncake_config.json`:
 
 ```json
 {
   "metadata_server": "http://127.0.0.1:8080/metadata",
   "master_server_address": "127.0.0.1:50051",
-  "global_segment_size": "80GB",
-  "local_buffer_size": "80GB",
-  "protocol": "tcp",
+  "global_segment_size": "600GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
   "device_name": ""
 }
 ```
 
-- I haven't tried `protocol` and `device_name` yet, but "rdma" is worth a try, although not sure its benefits on a single node, we will need it anyway.
-- Adjust `global_segment_size` and `local_buffer_size` based on available memory.
-    - global_segment_size: Memory contributed to the distributed pool
-    - local_buffer_size: Private buffer for this node's own operations
-    - For now we use a single node so they don't differ much
-- Note: the benchmark script automatically updates `global_segment_size` and `local_buffer_size` to match `KV_OFFLOAD_GIB`.
+- `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback but performs poorly.
+- `global_segment_size`: CPU memory contributed to the distributed pool. Automatically updated by `setup_vllm_env.sh` to match `--cpu-mem-size`.
+- `local_buffer_size`: Private staging buffer for this node's transfer engine. I am not sure about this param, and maybe we don't need to manually set it at all.
+- `device_name`: Leave empty; Mooncake auto-picks RDMA devices when needed.
 
-### 3. Run the Benchmark
+### 3. Environment Setup (setup_vllm_env.sh)
 
-By default, the script runs two settings (`baseline,mooncake`) and builds a comparison table at the end. Backends with missing prerequisites are auto-skipped.
-`baseline` is no offloading.
+Before running benchmarks with the mooncake backend, source `setup_vllm_env.sh` to configure all necessary environment variables. The benchmark scripts do this automatically, but you can also use it directly:
+
+```bash
+# CPU offloading only (80 GB)
+source scripts/mooncake/setup_vllm_env.sh --cpu-mem-size 80
+
+# CPU + disk offloading (80 GB CPU, 400 GB disk)
+source scripts/mooncake/setup_vllm_env.sh --cpu-mem-size 80 --disk-size 400
+
+# Custom disk path
+source scripts/mooncake/setup_vllm_env.sh --cpu-mem-size 80 --disk-size 400 --disk-path /mnt/data/mooncake_offload
+```
+
+This script:
+
+- Sets `MOONCAKE_CONFIG_PATH` and updates `global_segment_size` in the config JSON
+- Enables `MC_TCP_ENABLE_CONNECTION_POOL`
+- When `--disk-size` is given, sets all disk offloading env vars (`MOONCAKE_ENABLE_OFFLOAD`, `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`, eviction policy, io_uring, etc.)
+
+### 4a. Single-Turn Benchmark (benchmark_cpu_offloading.sh)
+
+Measures raw KV offloading overhead using random (unique) prompts so no prefix cache is ever hit.
 
 ```bash
 MOONCAKE_CONFIG_PATH=scripts/mooncake/mooncake_config.json \
 bash scripts/mooncake/benchmark_cpu_offloading.sh [MODEL] [INPUT_LEN] [OUTPUT_LEN] [NUM_PROMPTS]
 ```
 
-Defaults: `meta-llama/Llama-3.1-8B`, input 8192 tokens, output 1024 tokens, 200 prompts.
+Defaults: `meta-llama/Llama-3.1-8B-Instruct`, input 8192, output 1024, 200 prompts.
 
-To run only specific backends, set `BACKENDS` (comma-separated):
+Supported backends (comma-separated via `BACKENDS`):
+
+- `baseline` - No offloading
+- `native` - Built-in vLLM KV offloading (`--kv-offloading-backend native`)
+- `simple` - Simple native offload (`VLLM_USE_SIMPLE_KV_OFFLOAD=1` + native backend)
+- `mooncake` - MooncakeStoreConnector via `--kv-transfer-config`
+
+Environment variables:
+
+- `CPU_OFFLOAD_GIB` - CPU offload buffer in GiB (default: 80)
+- `DISK_OFFLOAD_GIB` - Disk offload quota in GiB (default: 400)
+- `REQUEST_RATE` - Requests/s (default: 1)
+- `PORT` - Server port (default: 8192)
+- `RESULT_DIR` - Output directory (default: `./bench_results`)
+- `BACKENDS` - Comma-separated backends (default: `baseline,mooncake`)
+
+Example:
 
 ```bash
-# Only mooncake (no baseline)
+# Only mooncake with disk offloading
 BACKENDS=mooncake \
-MOONCAKE_CONFIG_PATH=scripts/mooncake/mooncake_config.json \
-bash scripts/mooncake/benchmark_cpu_offloading.sh
-
-# mooncake vs simple vs baseline
-BACKENDS=baseline,mooncake,simple \
+CPU_OFFLOAD_GIB=80 \
+DISK_OFFLOAD_GIB=400 \
 MOONCAKE_CONFIG_PATH=scripts/mooncake/mooncake_config.json \
 bash scripts/mooncake/benchmark_cpu_offloading.sh
 ```
 
-Results are saved to `./bench_results/` and a comparison table is printed at the end.
+### 4b. Multi-Turn Benchmark (benchmark_multi_turn.sh)
 
-### 4. Stop the Master
+Measures multi-turn chat performance with prefix sharing (global + conversation prefixes).
+
+```bash
+MOONCAKE_CONFIG_PATH=scripts/mooncake/mooncake_config.json \
+bash scripts/mooncake/benchmark_multi_turn.sh [MODEL] [INPUT_LEN] [OUTPUT_LEN] [NUM_PROMPTS]
+```
+
+Defaults: `meta-llama/Llama-3.1-8B-Instruct`, input 70000, output 200, 200 prompts.
+
+Additional backends:
+
+- `mooncake-mem` - MooncakeStoreConnector with CPU memory only (no disk)
+
+Additional environment variables:
+
+- `MULTI_TURN_NUM_TURNS` - Turns per conversation (default: 3)
+- `MULTI_TURN_CONCURRENCY` - Concurrent conversations (default: 16)
+- `MULTI_TURN_DELAY_MS` - Delay between turns in ms (default: 500)
+- `GLOBAL_PREFIX_RATIO` - Fraction of input as global prefix (default: 0.1)
+- `CONV_PREFIX_RATIO` - Fraction of input as conversation prefix (default: 0.8)
+
+### 5. Compare Results (compare_results.py)
+
+Both benchmark scripts automatically run the comparison at the end. To re-run manually:
+
+```bash
+# Single-turn results
+python scripts/mooncake/compare_results.py ./bench_results
+
+# Multi-turn results
+python scripts/mooncake/compare_results.py ./bench_results --prefix mt_
+```
+
+### 6. Stop the Master
 
 ```bash
 bash scripts/mooncake/start_mooncake_master.sh --stop
