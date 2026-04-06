@@ -1100,7 +1100,7 @@ def assert_draft_model_correctness(args: ArgsTest):
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
     )
-    
+
     # we don't check the outputs, only check the metrics
     spec_llm.chat(test_prompts, args.sampling_config)
     metrics = spec_llm.get_metrics()
@@ -1323,4 +1323,3 @@ def test_dflash_correctness(dflash_config):
     del spec_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
-
