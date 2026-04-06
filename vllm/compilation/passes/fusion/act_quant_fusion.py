@@ -45,7 +45,10 @@ silu_and_mul_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
 if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
-if current_platform.is_cuda():
+silu_and_mul_per_block_quant_supported = current_platform.is_cuda() and hasattr(
+    torch.ops._C, "silu_and_mul_per_block_quant"
+)
+if silu_and_mul_per_block_quant_supported:
     FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
     FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
 

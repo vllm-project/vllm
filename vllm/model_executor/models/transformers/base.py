@@ -221,6 +221,8 @@ class Base(
         # TODO(hmellor): Remove this when Transformers v4 support is dropped
         for sub_config_name in getattr(self.config, "sub_configs", {}):
             sub_config = getattr(self.config, sub_config_name)
+            if sub_config is None:
+                continue
             if sub_config.dtype != (dtype := self.config.dtype):
                 sub_config.dtype = dtype
 
@@ -558,15 +560,38 @@ class Base(
         pp_size = self.pp_group.world_size
         start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
 
+        # Some models (e.g. Gemma4) use a larger head_dim for non-sliding
+        # ("full") attention layers via a separate `global_head_dim` config
+        # attribute, paired with `num_global_key_value_heads`.
+        global_head_size = getattr(text_config, "global_head_dim", None)
+        num_global_kv_heads = getattr(text_config, "num_global_key_value_heads", None)
+        # layer_types may live on text_config (multimodal models) or on the
+        # top-level config (text-only models) — check both.
+        layer_types = getattr(text_config, "layer_types", None) or getattr(
+            self.config, "layer_types", None
+        )
+
         attention_instances = {}
         for i in range(start, end):
+            layer_type = layer_types[i] if layer_types is not None else None
+
             # Handle interleaved sliding window attention
             per_layer_sliding_window = None
-            if (
-                hasattr(self.config, "layer_types")
-                and self.config.layer_types[i] == "sliding_attention"
-            ):
-                per_layer_sliding_window = self.config.sliding_window
+            if layer_type == "sliding_attention":
+                per_layer_sliding_window = getattr(
+                    text_config, "sliding_window", None
+                ) or getattr(self.config, "sliding_window", None)
+
+            # For full-attention layers with a distinct global head dimension
+            # (e.g. Gemma4), use the larger head_size and the corresponding
+            # number of KV heads so that the attention output shape matches
+            # the o_proj weight dimensions.
+            layer_head_size = head_size
+            layer_num_kv_heads = num_kv_heads
+            if layer_type == "full_attention" and global_head_size is not None:
+                layer_head_size = global_head_size
+                if num_global_kv_heads is not None:
+                    layer_num_kv_heads = num_global_kv_heads
 
             attn_cls = (
                 EncoderOnlyAttention
@@ -575,11 +600,11 @@ class Base(
             )
             attention_instances[i] = attn_cls(
                 num_heads=num_heads,
-                head_size=head_size,
+                head_size=layer_head_size,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_flash_attention_forward
-                scale=head_size**-0.5,
-                num_kv_heads=num_kv_heads,
+                scale=layer_head_size**-0.5,
+                num_kv_heads=layer_num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 logits_soft_cap=logits_soft_cap,
