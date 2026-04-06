@@ -169,6 +169,7 @@ eles = "eles"
 datas = "datas"
 ser = "ser"
 ure = "ure"
+VALU = "VALU"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
