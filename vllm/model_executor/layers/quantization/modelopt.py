@@ -71,10 +71,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    NvFp4LinearBackend,
-    apply_nvfp4_linear,
-    convert_to_nvfp4_linear_kernel_format,
-    select_nvfp4_linear_backend,
+    Nvfp4LinearOp,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -1073,11 +1070,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
-        self.backend = select_nvfp4_linear_backend()
-
-        self.swizzle = None
-        if self.backend == NvFp4LinearBackend.EMULATION:
-            self.swizzle = False
+        self.nvfp4_op = Nvfp4LinearOp()
 
     def create_weights(
         self,
@@ -1184,7 +1177,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        self.nvfp4_op.process_weights(layer)
 
     def apply(
         self,
@@ -1192,13 +1185,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
-            swizzle=self.swizzle,
-        )
+        return self.nvfp4_op.apply(layer=layer, x=x, bias=bias)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):

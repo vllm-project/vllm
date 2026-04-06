@@ -151,61 +151,41 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     return selected_backend
 
 
-def prepare_weights_for_nvfp4_flashinfer_trtllm(
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Prepare weights and scales for FlashInfer TRTLLM FP4 GEMM."""
-    from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+class Nvfp4LinearOp:
+    """Handler for NVFP4 quantized linear operations.
 
-    epilogue_tile_m = 128
-    shuffled_weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
-    shuffled_weight_scale = (
-        shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
-        .reshape(weight_scale.shape)
-        .view(torch.float8_e4m3fn)
-    )
-
-    return shuffled_weight, shuffled_weight_scale
-
-
-def prepare_weights_for_nvfp4_cutlass(
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
+    Manages backend selection, weight processing, and inference dispatch
+    across multiple NVFP4 GEMM backends.
     """
-    Prepare weights and scales for CUTLASS/FlashInfer-CUTLASS FP4 GEMM.
-    This involves padding weights for alignment (K and N divisible by 32)
-    """
-    swizzled_weight_scale = swizzle_blockscale(weight_scale)
-    padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(weight)
-    return padded_weight, swizzled_weight_scale, weights_padding_cols
 
+    def __init__(self):
+        self.backend = select_nvfp4_linear_backend()
 
-def prepare_weights_for_nvfp4_fbgemm(
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Prepare weights and scales for FBGEMM FP4 GEMM."""
-    swizzled_weight_scale = swizzle_blockscale(weight_scale)
-    swizzled_weight_scale = swizzled_weight_scale.view(-1).view(torch.uint8)
-    return weight, swizzled_weight_scale
+    def process_weights(self, layer: torch.nn.Module) -> None:
+        """Process NVFP4 weights after loading into backend-specific format."""
+        assert layer.weight_scale.dtype == torch.float8_e4m3fn, (
+            "Weight Block scale must be represented as FP8-E4M3"
+        )
 
+        # Default to no padding
+        layer.weights_padding_cols = 0
 
-def convert_to_nvfp4_linear_kernel_format(
-    backend: NvFp4LinearBackend,
-    layer: torch.nn.Module,
-) -> None:
-    """Convert layer to NVFP4 linear kernel format."""
+        if self.backend == NvFp4LinearBackend.MARLIN:
+            self._process_weights_marlin(layer)
+        elif self.backend == NvFp4LinearBackend.FLASHINFER_TRTLLM:
+            self._process_weights_flashinfer_trtllm(layer)
+        elif self.backend == NvFp4LinearBackend.FBGEMM:
+            self._process_weights_fbgemm(layer)
+        elif self.backend in (
+            NvFp4LinearBackend.VLLM_CUTLASS,
+            NvFp4LinearBackend.FLASHINFER_CUTLASS,
+            NvFp4LinearBackend.FLASHINFER_CUDNN,
+        ):
+            self._process_weights_cutlass(layer)
+        elif self.backend == NvFp4LinearBackend.EMULATION:
+            self._process_weights_emulation(layer)
 
-    assert layer.weight_scale.dtype == torch.float8_e4m3fn, (
-        "Weight Block scale must be represented as FP8-E4M3"
-    )
-
-    # Default to no padding
-    layer.weights_padding_cols = 0
-
-    if backend == NvFp4LinearBackend.MARLIN:
+    def _process_weights_marlin(self, layer: torch.nn.Module) -> None:
         logger.warning_once(
             "Your GPU does not have native support for FP4 computation but "
             "FP4 quantization is being used. Weight-only FP4 compression "
@@ -213,131 +193,205 @@ def convert_to_nvfp4_linear_kernel_format(
             "performance for compute-heavy workloads."
         )
         prepare_fp4_layer_for_marlin(layer)
-    elif backend == NvFp4LinearBackend.FLASHINFER_TRTLLM:
-        weight, weight_scale = prepare_weights_for_nvfp4_flashinfer_trtllm(
-            layer.weight.data, layer.weight_scale.data
+
+    def _process_weights_flashinfer_trtllm(self, layer: torch.nn.Module) -> None:
+        from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+
+        weight = layer.weight.data
+        weight_scale = layer.weight_scale.data
+        epilogue_tile_m = 128
+
+        layer.weight = torch.nn.Parameter(
+            shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m),
+            requires_grad=False,
         )
-        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
-    elif backend == NvFp4LinearBackend.FBGEMM:
-        weight, weight_scale = prepare_weights_for_nvfp4_fbgemm(
-            layer.weight.data, layer.weight_scale.data
+        layer.weight_scale = torch.nn.Parameter(
+            shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
+            .reshape(weight_scale.shape)
+            .view(torch.float8_e4m3fn),
+            requires_grad=False,
         )
-        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
-    elif backend in (
-        NvFp4LinearBackend.VLLM_CUTLASS,
-        NvFp4LinearBackend.FLASHINFER_CUTLASS,
-        NvFp4LinearBackend.FLASHINFER_CUDNN,
-    ):
-        weight, weight_scale, weights_padding_cols = prepare_weights_for_nvfp4_cutlass(
-            layer.weight.data, layer.weight_scale.data
+
+    def _process_weights_fbgemm(self, layer: torch.nn.Module) -> None:
+        swizzled = swizzle_blockscale(layer.weight_scale.data)
+        layer.weight_scale = torch.nn.Parameter(
+            swizzled.view(-1).view(torch.uint8), requires_grad=False
         )
-        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+
+    def _process_weights_cutlass(self, layer: torch.nn.Module) -> None:
+        layer.weight_scale = torch.nn.Parameter(
+            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        )
+        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
+            layer.weight.data
+        )
+        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
         layer.weights_padding_cols = weights_padding_cols
-    elif backend == NvFp4LinearBackend.EMULATION:
-        # We can not call `.to(device)` during cuda graph capture - do it here instead.
+
+    def _process_weights_emulation(self, layer: torch.nn.Module) -> None:
+        # We can not call `.to(device)` during cuda graph capture - do it here.
         # (operation not permitted when stream is capturing)
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
 
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply NVFP4 linear transformation using the selected backend."""
+        weight = layer.weight
+        weight_scale = layer.weight_scale
+        weight_global_scale = layer.weight_global_scale
+        input_global_scale_inv = layer.input_global_scale_inv
+        alpha = layer.alpha
+        output_size = layer.output_size_per_partition
+        input_size = layer.input_size_per_partition
 
-def apply_nvfp4_linear(
-    backend: NvFp4LinearBackend,
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    swizzle: bool | None = None,
-) -> torch.Tensor:
-    """
-    Apply NVFP4 linear transformation using the specified backend.
-    """
-    weight = layer.weight
-    weight_scale = layer.weight_scale
-    weight_global_scale = layer.weight_global_scale
-    input_global_scale_inv = layer.input_global_scale_inv
-    alpha = layer.alpha
-    output_size = layer.output_size_per_partition
-    input_size = layer.input_size_per_partition
+        if self.backend == NvFp4LinearBackend.MARLIN:
+            return self._apply_marlin(
+                x,
+                weight,
+                weight_scale,
+                weight_global_scale,
+                layer.workspace,
+                output_size,
+                input_size,
+                bias,
+            )
 
-    if backend == NvFp4LinearBackend.MARLIN:
+        if self.backend == NvFp4LinearBackend.EMULATION:
+            return self._apply_emulation(
+                x,
+                weight,
+                weight_scale,
+                weight_global_scale,
+                input_global_scale_inv,
+                bias,
+            )
+
+        return self._apply_native(
+            x,
+            weight,
+            weight_scale,
+            input_global_scale_inv,
+            alpha,
+            output_size,
+            getattr(layer, "weights_padding_cols", 0),
+            bias,
+        )
+
+    def _apply_marlin(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        workspace: torch.Tensor,
+        size_n: int,
+        size_k: int,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         return apply_fp4_marlin_linear(
             input=x,
             weight=weight,
             weight_scale=weight_scale,
             weight_global_scale=weight_global_scale,
-            workspace=layer.workspace,
-            size_n=output_size,
-            size_k=input_size,
+            workspace=workspace,
+            size_n=size_n,
+            size_k=size_k,
             bias=bias,
         )
-    elif backend == NvFp4LinearBackend.EMULATION:
+
+    def _apply_emulation(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_global_scale: torch.Tensor,
+        input_global_scale_inv: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         out = run_nvfp4_emulations(
             x=x,
             input_global_scale=input_global_scale_inv,
             weight=weight,
             weight_scale_swizzled=weight_scale,
             weight_global_scale=weight_global_scale,
-            swizzle=swizzle,
+            swizzle=False,
         )
         if bias is not None:
             out = out + bias
         return out
 
-    output_dtype = x.dtype
-    output_shape = [*x.shape[:-1], output_size]
+    def _apply_native(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_global_scale_inv: torch.Tensor,
+        alpha: torch.Tensor,
+        output_size: int,
+        weights_padding_cols: int,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Apply using CUTLASS, FlashInfer, or FBGEMM backends."""
+        output_dtype = x.dtype
+        output_shape = [*x.shape[:-1], output_size]
 
-    # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
-    x_fp4, x_blockscale = scaled_fp4_quant(
-        x, input_global_scale_inv, is_sf_swizzled_layout=True, backend=backend.value
-    )
+        # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x,
+            input_global_scale_inv,
+            is_sf_swizzled_layout=True,
+            backend=self.backend.value,
+        )
 
-    # Validate dtypes
-    assert x_fp4.dtype == torch.uint8
-    assert weight.dtype == torch.uint8
-    assert x_blockscale.dtype == torch.float8_e4m3fn
-    # weight_scale is fp8 for most backends, but uint8 for fbgemm
-    assert weight_scale.dtype in (torch.float8_e4m3fn, torch.uint8)
-    assert alpha.dtype == torch.float32
+        # Validate dtypes
+        assert x_fp4.dtype == torch.uint8
+        assert weight.dtype == torch.uint8
+        assert x_blockscale.dtype == torch.float8_e4m3fn
+        # weight_scale is fp8 for most backends, but uint8 for fbgemm
+        assert weight_scale.dtype in (torch.float8_e4m3fn, torch.uint8)
+        assert alpha.dtype == torch.float32
 
-    # Pad activations to match weight K-dimension padding
-    weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
-    x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
+        # Pad activations to match weight K-dimension padding
+        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
 
-    # Prepare args for the matmul
-    mm_args = (
-        x_fp4,
-        weight,
-        x_blockscale,
-        weight_scale,
-        alpha,
-        output_dtype,
-    )
-
-    # Call the appropriate backend
-    if backend.value.startswith("flashinfer-"):
-        backend_name = backend.value[len("flashinfer-") :]
-        out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
-    elif backend == NvFp4LinearBackend.FBGEMM:
-        out = torch.ops.fbgemm.f4f4bf16(
+        # Prepare args for the matmul
+        mm_args = (
             x_fp4,
             weight,
-            x_blockscale.view(-1).view(torch.uint8),
+            x_blockscale,
             weight_scale,
             alpha,
-            use_mx=False,
-        ).to(output_dtype)
-    else:
-        assert backend == NvFp4LinearBackend.VLLM_CUTLASS
-        out = cutlass_scaled_fp4_mm(*mm_args)
+            output_dtype,
+        )
 
-    # Slice output to remove N-dimension padding
-    out = slice_nvfp4_output(out, output_size)
+        # Call the appropriate backend
+        if self.backend.value.startswith("flashinfer-"):
+            backend_name = self.backend.value[len("flashinfer-") :]
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
+        elif self.backend == NvFp4LinearBackend.FBGEMM:
+            out = torch.ops.fbgemm.f4f4bf16(
+                x_fp4,
+                weight,
+                x_blockscale.view(-1).view(torch.uint8),
+                weight_scale,
+                alpha,
+                use_mx=False,
+            ).to(output_dtype)
+        else:
+            assert self.backend == NvFp4LinearBackend.VLLM_CUTLASS
+            out = cutlass_scaled_fp4_mm(*mm_args)
 
-    if bias is not None:
-        out = out + bias
+        # Slice output to remove N-dimension padding
+        out = slice_nvfp4_output(out, output_size)
 
-    return out.view(*output_shape)
+        if bias is not None:
+            out = out + bias
+
+        return out.view(*output_shape)
 
 
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
