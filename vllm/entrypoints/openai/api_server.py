@@ -32,6 +32,9 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.request_stats_headers import (
+    request_stats_headers_middleware,
+)
 from vllm.entrypoints.openai.server_utils import (
     engine_error_handler,
     exception_handler,
@@ -279,6 +282,9 @@ def build_app(
         from vllm.entrypoints.openai.server_utils import XRequestIdMiddleware
 
         app.add_middleware(XRequestIdMiddleware)
+
+    if args.enable_request_stats_headers:
+        app.middleware("http")(request_stats_headers_middleware)
 
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)

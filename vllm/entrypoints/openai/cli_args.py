@@ -153,9 +153,12 @@ class BaseFrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    enable_request_stats_headers: bool = False
+    """If set to True, include per-request timing and compute stats as
+    x- response headers on non-streaming completion responses."""
 
     @classmethod
     def _customize_cli_kwargs(

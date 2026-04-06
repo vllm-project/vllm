@@ -554,6 +554,12 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        if last_final_res is not None:
+            # Known limitation: for multi-prompt batch requests, timing
+            # headers reflect only the last prompt's metrics, not the
+            # aggregate. Token counts in usage are correctly summed.
+            request_metadata.request_stats = last_final_res.metrics
+            request_metadata.num_cached_tokens = last_final_res.num_cached_tokens or 0
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
         return CompletionResponse(

@@ -19,6 +19,7 @@ from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
 
@@ -109,8 +110,12 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class RequestResponseMetadata(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     final_usage_info: UsageInfo | None = None
+    request_stats: RequestStateStats | None = None
+    num_cached_tokens: int = 0
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):
