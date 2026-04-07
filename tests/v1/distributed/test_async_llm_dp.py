@@ -365,10 +365,13 @@ async def test_dp_pause_keep_race_staggered_engines():
         async def staggered_pause_keep(method: str, *args) -> Any:
             if method != "pause_scheduler" or not args or args[0] != "keep":
                 return await original_call_utility(method, *args)
-            # Send pause(keep) to engine 0 first
-            await client._call_utility_async(
-                method, *args, engine=client.core_engines[0]
+            # Send pause(keep) to engine 0 — don't await, because with
+            # coordinated pause the response is deferred until ALL
+            # engines have acknowledged.
+            eng0_task = asyncio.create_task(
+                client._call_utility_async(method, *args, engine=client.core_engines[0])
             )
+            await asyncio.sleep(0.5)
             # In the middle: send two requests (race window)
             sp = SamplingParams(max_tokens=5, ignore_eos=True)
 
@@ -384,11 +387,12 @@ async def test_dp_pause_keep_race_staggered_engines():
             t2 = asyncio.create_task(consume_gen("race-2"))
             mid_pause_tasks.extend([t1, t2])
             await asyncio.sleep(3)
-            # Then send pause(keep) to engine 1
-            result = await client._call_utility_async(
-                method, *args, engine=client.core_engines[1]
+            # Then send pause(keep) to engine 1 — both engines will
+            # resolve together once the coordinator broadcasts ALL_PAUSED.
+            eng1_task = asyncio.create_task(
+                client._call_utility_async(method, *args, engine=client.core_engines[1])
             )
-            return result
+            await asyncio.gather(eng0_task, eng1_task)
 
         client.call_utility_async = staggered_pause_keep
 
