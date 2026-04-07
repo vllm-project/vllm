@@ -51,8 +51,6 @@ class WeightTransferUpdateInfo(ABC):
     pass
 ```
 
-Whether weights need layerwise processing (checkpoint format) or can be copied directly (kernel format) is controlled by the `is_checkpoint_format` flag passed to `start_weight_update`.
-
 ## Implementing a Custom Engine
 
 To create a custom weight transfer backend:
