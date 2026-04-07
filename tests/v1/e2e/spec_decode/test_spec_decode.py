@@ -1121,7 +1121,7 @@ def assert_draft_model_correctness(args: ArgsTest):
 
     assert acceptance_rate >= args.expected_acceptance_rate
     assert acceptance_len >= args.expected_acceptance_len
-    # draft_model auto-enables async scheduling; assert it is active.
+    # draft_model supports async scheduling; assert it is active by default.
     # Raise AsyncSchedulingNotEnabledError (a subclass of AssertionError) so that
     # @pytest.mark.xfail(raises=AsyncSchedulingNotEnabledError) catches only this
     # specific failure — leaving all other assertion failures (e.g. correctness or
