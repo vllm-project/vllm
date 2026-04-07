@@ -1086,7 +1086,7 @@ def nvmlStructToFriendlyObject(struct):
         key = x[0]
         value = getattr(struct, key)
         # only need to convert from bytes if bytes, no need to check python version.
-        d[key] = value.decode() if isinstance(value, bytes) else value
+        d[key] = value.decode('utf-8') if isinstance(value, bytes) else value
     obj = nvmlFriendlyObject(d)
     return obj
 
