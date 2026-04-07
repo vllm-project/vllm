@@ -361,10 +361,6 @@ class ElasticEPScalingExecutor:
         """
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
-        logger.debug(
-            "[Elastic EP] abort_and_switch: old EP %d → new EP %d",
-            old_ep_size, old_ep_size - 1,
-        )
         self._release_cuda_graphs()
         _abort_and_replace_active_groups(**pop_standby_groups())
         self._apply_new_config(old_dp_size, old_ep_size)
@@ -538,14 +534,6 @@ class ElasticEPScalingExecutor:
                     module.quant_method = module.quant_method.old_quant_method
                     module.runner = module._init_runner()
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
-
-        logger.debug(
-            "[Elastic EP] _apply_new_config: p2l=%s, "
-            "num_physical=%d, num_redundant=%d",
-            list(eplb_model_state.physical_to_logical_map.shape),
-            num_physical_experts,
-            parallel_config.eplb_config.num_redundant_experts,
-        )
 
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),

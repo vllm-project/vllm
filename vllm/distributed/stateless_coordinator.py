@@ -203,7 +203,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         )
 
         if self.device_communicator:
-            self.device_communicator.destroy()
+            self.device_communicator.abort()
         if self.device_group:
             stateless_abort_torch_distributed_process_group(self.device_group)
         if self.cpu_group:

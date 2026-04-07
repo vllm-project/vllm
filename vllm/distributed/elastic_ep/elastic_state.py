@@ -437,25 +437,20 @@ class ElasticEPScalingState:
             alive_rank_0 = self._first_alive_rank()
             if self.old_dp_group.rank() == alive_rank_0:
                 self.old_dp_store.delete_key("eep_barrier_engine_count")
+
             if self.dead_dp_ranks:
-                # Fault-triggered: old EPLB NCCL group was aborted (dead
-                # rank can't participate). Skip weight reshuffle — experts
-                # on the dead rank are lost. After standby groups are
-                # created the system continues with reduced expert coverage.
                 if self.old_dp_group.rank() == alive_rank_0:
                     logger.info(
                         "[Elastic EP] Skipping EPLB reshuffle (fault-"
                         "triggered, dead ranks: %s)", self.dead_dp_ranks)
             else:
                 self._eplb_reshuffle_before_scale_down()
+
             self.state = ScaleDownRemainingEngineState.SWITCH_AND_PREPARE
             self._create_standby_groups()
             self._switch_and_prepare()
             self._update_parallel_config()
-            # NOTE: reassign_missing_experts is now called inside
-            # _apply_new_config (before compile_or_warm_up_model) to
-            # avoid crashes during CUDA graph capture when logical
-            # experts are missing from the p2l map.
+
             self.state = ScaleDownRemainingEngineState.COMPLETE
             return True
 

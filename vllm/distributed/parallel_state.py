@@ -1249,15 +1249,16 @@ def _abort_and_replace_active_groups(
                     "[Fault Tolerance] Failed to abort cpu_group",
                     exc_info=True,
                 )
-            # Destroy device communicator last — this is a local cleanup
-            # that doesn't require peer coordination.
+            # Abort device communicator last — uses ncclCommAbort
+            # (not ncclCommDestroy) to avoid triggering an implicit
+            # ncclCommFinalize collective that would hang.
             try:
                 if (hasattr(group, "device_communicator")
                         and group.device_communicator):
-                    group.device_communicator.destroy()
+                    group.device_communicator.abort()
             except Exception:
                 logger.warning(
-                    "[Fault Tolerance] Failed to destroy "
+                    "[Fault Tolerance] Failed to abort "
                     "device_communicator",
                     exc_info=True,
                 )
