@@ -7,9 +7,9 @@ vLLM provides a pluggable weight transfer system for synchronizing model weights
 The weight transfer system follows a **four-phase protocol** with a pluggable backend design:
 
 1. **Initialization** (`init_weight_transfer_engine`): Establishes the communication channel between the trainer and inference workers. Called once before the training loop begins.
-2. **Start** (`start_weight_update`): Prepares the model for a weight update sequence. Accepts `is_checkpoint_format` to indicate whether weights need layerwise processing. Called once before each weight update.
+2. **Start** (`start_weight_update`): Prepares the inference engine for a weight update sequence.
 3. **Weight Update** (`update_weights`): Transfers updated weights from the trainer to the inference engine. May be called one or more times (e.g., for chunked transfers).
-4. **Finish** (`finish_weight_update`): Finalizes the weight update (e.g., runs post-processing for checkpoint-format weights). Called once after all weight chunks have been transferred.
+4. **Finish** (`finish_weight_update`): Finalizes the weight update (e.g., runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
 ## Available Backends
 

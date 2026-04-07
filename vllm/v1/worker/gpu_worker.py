@@ -1002,7 +1002,7 @@ class Worker(WorkerBase):
 
         model = self.model_runner.model
 
-        if typed_update_info.is_checkpoint_format:
+        if self._is_checkpoint_format:
             self.weight_transfer_engine.receive_weights(
                 typed_update_info,
                 load_weights=model.load_weights,
