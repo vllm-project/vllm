@@ -6225,7 +6225,11 @@ class GPUModelRunner(
         )
 
         # Check if attention backend supports PCP&DCP and related features.
-        check_attention_cp_compatibility(self.vllm_config)
+        # Exclude draft model layers that may use incompatible backends.
+        draft_excluded = self._get_drafter_excluded_layer_names(
+            "get_cp_compatibility_excluded_layer_names"
+        )
+        check_attention_cp_compatibility(self.vllm_config, draft_excluded or None)
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
@@ -6801,6 +6805,29 @@ class GPUModelRunner(
                 else:
                     break
 
+    def _get_drafter_excluded_layer_names(self, method_name: str) -> set[str]:
+        """Get excluded layer names from the drafter via the named method."""
+        drafter = getattr(self, "drafter", None)
+        if drafter is None:
+            return set()
+        fn = getattr(drafter, method_name, None)
+        return set(fn()) if callable(fn) else set()
+
+    def _get_kv_caches_for_transfer(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Filter out draft model KV caches before NIXL registration."""
+        excluded = self._get_drafter_excluded_layer_names(
+            "get_transfer_excluded_layer_names"
+        )
+        if not excluded:
+            return kv_caches
+        filtered = {k: v for k, v in kv_caches.items() if k not in excluded}
+        found = sorted(excluded & kv_caches.keys())
+        if found:
+            logger.info("Excluding drafter KV caches from transfer: %s", found)
+        return filtered
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -6854,7 +6881,9 @@ class GPUModelRunner(
                     self.cross_layers_kv_cache, self.cross_layers_attn_backend
                 )
             else:
-                kv_transfer_group.register_kv_caches(kv_caches)
+                kv_transfer_group.register_kv_caches(
+                    self._get_kv_caches_for_transfer(kv_caches)
+                )
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def _get_attention_kv_cache_gid(self) -> int:

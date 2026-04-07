@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -22,6 +23,8 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -47,10 +50,29 @@ class KVConnector:
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+        self,
+        vllm_config: VllmConfig,
+        kv_caches_dict: dict[str, torch.Tensor],
+        excluded_layer_names: set[str] | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
+
+        # Filter out draft model KV caches (e.g., EAGLE draft attention
+        # layers) before registering with the connector. This prevents
+        # P/D mismatches when speculative decoding adds extra layers on
+        # the decode side.
+        if excluded_layer_names:
+            found = sorted(excluded_layer_names & kv_caches_dict.keys())
+            if found:
+                logger.info(
+                    "Excluding draft KV caches from transfer: %s",
+                    found,
+                )
+            kv_caches_dict = {
+                k: v for k, v in kv_caches_dict.items() if k not in excluded_layer_names
+            }
+
         # Register kv caches with KV Connector if applicable.
         # TODO: support cross_layers_kv_cache
         # (see https://github.com/vllm-project/vllm/pull/27743)
@@ -123,10 +145,11 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+    vllm_config: VllmConfig,
+    kv_caches_dict: dict[str, torch.Tensor],
+    excluded_layer_names: set[str] | None = None,
 ) -> KVConnector:
     if not has_kv_transfer_group():
-        # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict)
+    return ActiveKVConnector(vllm_config, kv_caches_dict, excluded_layer_names)

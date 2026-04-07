@@ -333,6 +333,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
 
+    def _get_speculator_excluded_layer_names(self, method_name: str) -> set[str]:
+        """Get excluded layer names from the speculator, if present."""
+        if self.speculator is None:
+            return set()
+        fn = getattr(self.speculator, method_name, None)
+        return set(fn()) if callable(fn) else set()
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -364,7 +371,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_backends, self.attn_groups = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
-        check_attention_cp_compatibility(self.vllm_config)
+        draft_excluded = self._get_speculator_excluded_layer_names(
+            "get_cp_compatibility_excluded_layer_names"
+        )
+        check_attention_cp_compatibility(self.vllm_config, draft_excluded or None)
         if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -382,7 +392,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.cache_config.cache_dtype,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        transfer_excluded = self._get_speculator_excluded_layer_names(
+            "get_transfer_excluded_layer_names"
+        )
+        self.kv_connector = get_kv_connector(
+            self.vllm_config, kv_caches_dict, transfer_excluded or None
+        )
 
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)

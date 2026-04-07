@@ -125,6 +125,18 @@ class EagleSpeculator:
             target_attn_layer_names
         )
 
+    def get_transfer_excluded_layer_names(self) -> set[str]:
+        """Layer names whose KV caches should not be transferred."""
+        return set(getattr(self, "draft_attn_layer_names", set()))
+
+    def get_cp_compatibility_excluded_layer_names(self) -> set[str]:
+        """Layer names to skip during DCP/PCP compatibility checks."""
+        return self.get_transfer_excluded_layer_names()
+
+    def get_cudagraph_excluded_layer_names(self) -> set[str]:
+        """Layer names to exclude from cudagraph backend selection."""
+        return self.get_cp_compatibility_excluded_layer_names()
+
     def set_attn(
         self,
         model_state: ModelState,

@@ -314,6 +314,18 @@ class SpecDecodeBaseProposer:
                 "does not support M-RoPE yet"
             )
 
+    def get_transfer_excluded_layer_names(self) -> set[str]:
+        """Layer names whose KV caches should NOT be transferred via NIXL."""
+        return set(getattr(self, "_draft_attn_layer_names", set()))
+
+    def get_cp_compatibility_excluded_layer_names(self) -> set[str]:
+        """Layer names to skip during DCP/PCP compatibility checks."""
+        return self.get_transfer_excluded_layer_names()
+
+    def get_cudagraph_excluded_layer_names(self) -> set[str]:
+        """Layer names to exclude from cudagraph backend selection."""
+        return self.get_cp_compatibility_excluded_layer_names()
+
     def _init_parallel_drafting_params(self):
         # For parallel drafting, we need the token ID to use for masked slots
         # And for EAGLE + parallel drafting, we need the hidden state tensor to use

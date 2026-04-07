@@ -12,11 +12,12 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
+import regex as re
 import torch
 import zmq
 
@@ -103,6 +104,64 @@ NIXL_CONNECTOR_VERSION: int = 2
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
+
+# Pattern to extract layer index from attention layer names like
+# "model.layers.61.self_attn" or "model.layers.0.self_attn"
+_LAYER_IDX_RE = re.compile(r"\.layers\.(\d+)\.")
+
+
+def _extract_layer_idx(layer_name: str) -> int | None:
+    """Extract the numeric layer index from a layer name, or None."""
+    m = _LAYER_IDX_RE.search(layer_name)
+    return int(m.group(1)) if m else None
+
+
+def _filter_draft_kv_cache_groups(
+    kv_cache_config: "KVCacheConfig",
+    vllm_config: VllmConfig,
+) -> tuple["KVCacheConfig", set[int]]:
+    """Remove draft model KV cache groups and return filtered config + excluded
+    group indices.
+
+    Draft layers are appended after target model layers, so their layer indices
+    are >= target_num_layers. They are validated to be in the same KV cache
+    group by eagle.py:validate_same_kv_cache_group.
+
+    Returns:
+        (filtered_config, draft_group_indices) where draft_group_indices is the
+        set of original group indices that were removed.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None:
+        return kv_cache_config, set()
+
+    target_num_layers = vllm_config.model_config.get_num_layers(
+        vllm_config.parallel_config
+    )
+
+    draft_group_indices: set[int] = set()
+    filtered_groups = []
+    for i, group in enumerate(kv_cache_config.kv_cache_groups):
+        layer_indices = [_extract_layer_idx(n) for n in group.layer_names]
+        if layer_indices and all(
+            idx is not None and idx >= target_num_layers for idx in layer_indices
+        ):
+            draft_group_indices.add(i)
+            logger.info(
+                "Filtering draft KV cache group %d (%d layers) from NIXL "
+                "transfer config",
+                i,
+                len(group.layer_names),
+            )
+        else:
+            filtered_groups.append(group)
+
+    if not draft_group_indices:
+        return kv_cache_config, set()
+
+    filtered = replace(kv_cache_config, kv_cache_groups=filtered_groups)
+    return filtered, draft_group_indices
+
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
@@ -364,15 +423,28 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
+
+        # Filter out draft model KV cache groups so NIXL only sees target
+        # model layers. This prevents P/D group count mismatches when
+        # speculative decoding adds draft attention layers on the D side.
+        transfer_kv_cache_config, self._draft_group_indices = (
+            _filter_draft_kv_cache_groups(kv_cache_config, vllm_config)
+        )
+
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: NixlConnectorScheduler | None = (
-                NixlConnectorScheduler(vllm_config, self.engine_id, kv_cache_config)
+                NixlConnectorScheduler(
+                    vllm_config,
+                    self.engine_id,
+                    transfer_kv_cache_config,
+                    draft_group_indices=self._draft_group_indices,
+                )
             )
             self.connector_worker: NixlConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = NixlConnectorWorker(
-                vllm_config, self.engine_id, kv_cache_config
+                vllm_config, self.engine_id, transfer_kv_cache_config
             )
 
     ############################################################
@@ -438,6 +510,13 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
+        # Filter out draft group block_ids before the scheduler sees them.
+        if self._draft_group_indices:
+            block_ids = tuple(
+                bids
+                for i, bids in enumerate(block_ids)
+                if i not in self._draft_group_indices
+            )
         return self.connector_scheduler.request_finished(request, block_ids)
 
     def set_xfer_handshake_metadata(
@@ -555,9 +634,14 @@ class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(
-        self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig"
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig",
+        draft_group_indices: set[int] | None = None,
     ):
         self.vllm_config = vllm_config
+        self._draft_group_indices: set[int] = draft_group_indices or set()
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
@@ -620,6 +704,16 @@ class NixlConnectorScheduler:
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
+
+    def _filter_draft_block_ids(self, block_ids: BlockIds) -> BlockIds:
+        """Remove block ID entries for draft model KV cache groups."""
+        if not self._draft_group_indices or not block_ids:
+            return block_ids
+        return tuple(
+            bids
+            for i, bids in enumerate(block_ids)
+            if i not in self._draft_group_indices
+        )
 
     def shutdown(self):
         self._stop_event.set()
@@ -842,6 +936,11 @@ class NixlConnectorScheduler:
                         blocks.get_unhashed_block_ids_all_groups()
                         if num_external_tokens > 0
                         else ()
+                    )
+                    # Filter out draft groups before SW clipping and
+                    # transfer so P/D group counts match.
+                    unhashed_local_block_ids = self._filter_draft_block_ids(
+                        unhashed_local_block_ids
                     )
                     local_block_ids = self.get_sw_clipped_blocks(
                         unhashed_local_block_ids
