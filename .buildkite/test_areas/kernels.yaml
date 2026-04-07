@@ -186,7 +186,6 @@ steps:
   timeout_in_minutes: 90
   device: h100
   num_devices: 2
-  optional: true
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -203,7 +202,6 @@ steps:
   timeout_in_minutes: 90
   device: b200
   num_devices: 2
-  optional: true
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
