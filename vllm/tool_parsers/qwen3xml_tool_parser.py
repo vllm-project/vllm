@@ -857,8 +857,29 @@ class StreamingXMLToolCallParser:
             # convert complete parameter value by param_type
             converted_value = self._convert_param_value(param_value, param_type)
 
+            # If the converted value is null, emit the JSON literal
+            # ``null``.  During streaming the value may have been
+            # partially emitted (e.g. as an empty string for object
+            # types), so we emit the full literal here at param end
+            # where we know the value is complete.
+            if converted_value is None:
+                # Nothing was streamed for the value yet (object type
+                # with "None"/"null" input), so emit "null" directly.
+                if not self.start_quote_emitted:
+                    delta = DeltaMessage(
+                        tool_calls=[
+                            DeltaToolCall(
+                                index=self.tool_call_index - 1,
+                                id=self.current_call_id,
+                                type="function",
+                                function=DeltaFunctionCall(name=None, arguments="null"),
+                            )
+                        ]
+                    )
+                    self._emit_delta(delta)
+
             # Decide whether to add end quote based on parameter type
-            if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
+            elif param_type in ["string", "str", "text", "varchar", "char", "enum"]:
                 # For empty string parameters, need special handling
                 if not param_value and not self.start_quote_emitted:
                     # No start quote output,
@@ -1017,9 +1038,14 @@ class StreamingXMLToolCallParser:
                     if param_name in properties and isinstance(
                         properties[param_name], dict
                     ):
-                        return self.repair_param_type(
-                            str(properties[param_name].get("type", "string"))
-                        )
+                        prop = properties[param_name]
+                        # anyOf / oneOf have no top-level "type";
+                        # treat as object so the value goes through
+                        # json.loads / ast.literal_eval rather than
+                        # being wrapped in string quotes.
+                        if "anyOf" in prop or "oneOf" in prop:
+                            return "object"
+                        return self.repair_param_type(str(prop.get("type", "string")))
                 elif isinstance(params, dict) and param_name in params:
                     param_config = params[param_name]
                     if isinstance(param_config, dict):
@@ -1066,7 +1092,10 @@ class StreamingXMLToolCallParser:
         Returns:
             Converted value
         """
-        if param_value.lower() == "null":
+        # Accept both JSON-style "null" and Python-style "None".
+        # Qwen3.5's chat template uses ``| string`` for scalar args,
+        # producing Python repr (``None``) instead of JSON (``null``).
+        if param_value.lower() in ("null", "none"):
             return None
 
         param_type = param_type.strip().lower()
