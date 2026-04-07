@@ -198,6 +198,3 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             shared_experts_input=shared_experts_input,
         )
 
-    @property
-    def supports_eplb(self) -> bool:
-        return True
