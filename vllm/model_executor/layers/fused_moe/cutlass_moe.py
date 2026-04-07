@@ -942,29 +942,39 @@ def run_cutlass_moe_w4a8_fp8(
 class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
     def __init__(
         self,
-        out_dtype: torch.dtype | None,
-        a_strides1: torch.Tensor,
-        a_strides2: torch.Tensor,
-        b_strides1: torch.Tensor,
-        b_strides2: torch.Tensor,
-        c_strides1: torch.Tensor,
-        c_strides2: torch.Tensor,
-        s_strides1: torch.Tensor,
-        s_strides2: torch.Tensor,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        b_strides1: torch.Tensor,
+        b_strides2: torch.Tensor,
         group_size: int,
     ):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
-        self.out_dtype = out_dtype
-        self.a_strides1 = a_strides1
-        self.a_strides2 = a_strides2
+
+        e = moe_config.num_local_experts
+        n = moe_config.intermediate_size_per_partition
+        k = moe_config.hidden_dim
+        device = moe_config.device
+
+        self.out_dtype = moe_config.in_dtype
+
+        # A, C strides (computed from dimensions).
+        a_strides1_c_strides2 = torch.full((e,), k, device=device, dtype=torch.int64)
+        self.a_strides1 = a_strides1_c_strides2
+        self.a_strides2 = torch.full((e,), n, device=device, dtype=torch.int64)
+        self.c_strides1 = torch.full((e,), 2 * n, device=device, dtype=torch.int64)
+        self.c_strides2 = a_strides1_c_strides2
+
+        # B strides (from weight reordering).
         self.b_strides1 = b_strides1
         self.b_strides2 = b_strides2
-        self.c_strides1 = c_strides1
-        self.c_strides2 = c_strides2
-        self.s_strides1 = s_strides1
-        self.s_strides2 = s_strides2
+
+        # S strides (group-wise scale strides).
+        # sizeof(StrideS) = 16 bytes, encoded as 2xint64.
+        self.s_strides1 = torch.zeros((e, 2), device=device, dtype=torch.int64)
+        self.s_strides1[:, 0] = 2 * n
+        self.s_strides2 = torch.zeros((e, 2), device=device, dtype=torch.int64)
+        self.s_strides2[:, 0] = k
+
         self.group_size = group_size
 
     @staticmethod
@@ -973,41 +983,33 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return cutlass_group_gemm_supported()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return False
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        # W4A8 uses its own quant scheme (int4 weights, fp8 activations).
+        # The oracle passes None for both keys.
+        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        # W4A8 CUTLASS only supports standard (non-batched) activation format.
+        return not moe_parallel_config.use_batched_activation_format
 
     def supports_expert_map(self) -> bool:
         return True
