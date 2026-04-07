@@ -111,15 +111,9 @@ def convert_to_w4a8_moe_kernel_format(
         quant_fp8, layer.w2_weight_scale
     )
 
-    # Register channel scales on the layer.
-    layer.register_parameter(
-        "w13_weight_chan_scale",
-        torch.nn.Parameter(w13_weight_chan_scale, requires_grad=False),
-    )
-    layer.register_parameter(
-        "w2_weight_chan_scale",
-        torch.nn.Parameter(w2_weight_chan_scale, requires_grad=False),
-    )
+    # Replace channel scales on the layer (pre-registered in create_weights).
+    replace_parameter(layer, "w13_weight_chan_scale", w13_weight_chan_scale)
+    replace_parameter(layer, "w2_weight_chan_scale", w2_weight_chan_scale)
 
     # Permute and pack group-wise scales for the kernel.
     # Scales are stored as (E, N, K // 128) but the kernel expects

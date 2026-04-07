@@ -155,6 +155,24 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w13_weight_shape", w13_weight_shape)
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
+        # per-channel (per-output-row) scales derived from group scales at
+        # load time; pre-registered here so they appear in the parameter list.
+        w13_weight_chan_scale = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=torch.float32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_chan_scale", w13_weight_chan_scale)
+
+        w2_weight_chan_scale = torch.nn.Parameter(
+            torch.ones(num_experts, hidden_size, dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_chan_scale", w2_weight_chan_scale)
+
         # don't use input scales
         layer.w13_input_scale = None
         layer.w2_input_scale = None
