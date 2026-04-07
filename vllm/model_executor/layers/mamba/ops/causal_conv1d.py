@@ -592,7 +592,6 @@ def causal_conv1d_fn(
         stride_istate_seq = conv_states.stride(0)
         stride_istate_dim = conv_states.stride(1)
         stride_istate_token = conv_states.stride(2)
-        assert stride_istate_dim == 1
     if out.dim() == 2:
         stride_o_dim = out.stride(0)
         stride_o_token = out.stride(1)
@@ -1149,9 +1148,6 @@ def causal_conv1d_update(
 
     if validate_data:
         assert dim == weight.size(0)
-        assert conv_state.stride(-2) == 1, (
-            f"ERROR: expect contiguous along feat-dim of conv_state (currently stride={conv_state.stride()})"
-        )
         assert state_len >= width - 1
         # when above happens, we don't shift-left to keep any records in conv_state
         assert dim == conv_state.size(1)

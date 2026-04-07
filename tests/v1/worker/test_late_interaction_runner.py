@@ -4,12 +4,12 @@
 import pytest
 import torch
 
+from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
-    compute_maxsim_score,
 )
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 
