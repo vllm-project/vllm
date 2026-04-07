@@ -275,7 +275,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 event.synchronize()
 
     def shutdown(self) -> None:
-        self._transfers.clear()
+        while self._transfers:
+            transfer = self._transfers.popleft()
+            transfer.end_event.synchronize()
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()

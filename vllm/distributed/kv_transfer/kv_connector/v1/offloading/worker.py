@@ -399,4 +399,8 @@ class OffloadingConnectorWorker:
         # Drop deferred store jobs: CPU cache is non-persistent,
         # so submitting stores on shutdown is pointless.
         self._unsubmitted_store_jobs.clear()
+        self._jobs.clear()
+        self._load_job.clear()
+        self._store_jobs.clear()
+        self._finished_reqs_waiting_for_store.clear()
         self.worker.shutdown()
