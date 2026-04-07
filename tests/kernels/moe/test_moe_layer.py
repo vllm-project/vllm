@@ -1721,7 +1721,7 @@ def test_moe_layer(
             world_size,
             _parallel_worker,
             vllm_config,
-            dict(),
+            None,
             test_configs,
             verbosity,
         )
