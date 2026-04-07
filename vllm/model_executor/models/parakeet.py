@@ -159,5 +159,7 @@ class ParakeetExtractor(ParakeetFeatureExtractor):
         outputs["audio_num_clips"] = audio_num_clips
         return outputs
 
-    def audio_length(self, audio_tokens: int) -> int:
-        return int(audio_tokens * self.config.subsampling_factor * self.hop_length)
+    @staticmethod
+    def audio_length(raw_config: PretrainedConfig, audio_tokens: int) -> int:
+        config = ExtractorConfig.from_hf_config(raw_config)
+        return int(audio_tokens * config.subsampling_factor * config.hop_length)
