@@ -7,8 +7,7 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.model_executor.kernels.linear import (
-    FP8ScaledMMLinearLayerConfig,
-    choose_wfp8_a16_linear_kernel,
+    init_wfp8_a16_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
@@ -60,20 +59,11 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         activation_quant_key = (
             kFp8StaticTensorSym if is_static_input_scheme else kFp8DynamicTensorSym
         )
-        linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+
+        self.linear_kernel = init_wfp8_a16_linear_kernel(
             weight_quant_key=weight_quant_key,
             activation_quant_key=activation_quant_key,
             out_dtype=None,
-        )
-        kernel_type = choose_wfp8_a16_linear_kernel(linear_kernel_config)
-        self.linear_kernel = kernel_type(
-            linear_kernel_config,
-            layer_param_names=[
-                "weight",
-                "weight_scale",
-                "input_scale",
-                "input_scale_ub",
-            ],
         )
 
     @classmethod

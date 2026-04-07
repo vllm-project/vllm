@@ -478,32 +478,34 @@ def choose_mp_linear_kernel(
     )
 
 
-# TODO: add force_kernel option to choose_mp_linear_kernel and use it in
-# init_mp_linear_kernel, # similar to init_fp8_linear_kernel and
-# init_int8_linear_kernel, to allow forcing a specific kernel for testing and
-# debugging purposes.
-def choose_wfp8_a16_linear_kernel(
-    config: FP8ScaledMMLinearLayerConfig, compute_capability: int | None = None
-) -> type[FP8ScaledMMLinearKernel]:
-    if compute_capability is None:
-        if current_platform is None:
-            raise ValueError("Cannot determine compute capability")
-        _cc = current_platform.get_device_capability()
-        if _cc is not None:
-            compute_capability = _cc[0] * 10 + _cc[1]
+def init_wfp8_a16_linear_kernel(
+    weight_quant_key: QuantKey,
+    activation_quant_key: QuantKey,
+    out_dtype: torch.dtype,
+    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    module_name: str | None = None,
+) -> FP8ScaledMMLinearKernel:
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
+        out_dtype=out_dtype,
+    )
 
-    failure_reason_list = []
-    for kernel in _POSSIBLE_WFP8A16_KERNELS[current_platform._enum]:
-        is_supported_and_can_implement, failure_reason = (
-            is_supported_and_can_implement_kernel(kernel, config, compute_capability)
+    kernel_type = choose_scaled_mm_linear_kernel(
+        config, _POSSIBLE_WFP8A16_KERNELS, force_kernel=force_kernel
+    )
+
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
         )
-        if is_supported_and_can_implement:
-            return kernel
-        failure_reason_list.append(failure_reason)
 
-    raise ValueError(
-        "Failed to find a kernel that can implement the "
-        "WFP8A16 linear layer. Reasons: \n" + "\n".join(failure_reason_list)
+    return kernel_type(
+        config,
+        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
     )
 
 
@@ -632,7 +634,7 @@ __all__ = [
     "init_nvfp4_linear_kernel",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
-    "choose_wfp8_a16_linear_kernel",
+    "init_wfp8_a16_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
     "ScaledMMLinearKernel",
