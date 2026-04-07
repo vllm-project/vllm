@@ -976,10 +976,6 @@ class Worker(WorkerBase):
                 "already active. Call finish_weight_update first."
             )
 
-        # Store state so update_weights/finish_weight_update can check
-        self._is_checkpoint_format = is_checkpoint_format
-        self._weight_update_active = True
-
         if is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (
                 initialize_layerwise_reload,
@@ -988,6 +984,10 @@ class Worker(WorkerBase):
             model = self.model_runner.model
             with torch.device(self.device):
                 initialize_layerwise_reload(model)
+
+        # Store state so update_weights/finish_weight_update can check
+        self._is_checkpoint_format = is_checkpoint_format
+        self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
         """
