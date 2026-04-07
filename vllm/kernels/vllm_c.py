@@ -15,7 +15,7 @@ rms_no_var_size = (
     lambda x, weight, epsilon, variance_size=None: variance_size is None
     and (weight is None or weight.dtype == x.dtype)
 )
-"""vLLM kernel does not support variance_size parameter or mismatched weight dtype."""
+"""vLLM kernel requires no variance_size override and matching input/weight dtype."""
 
 
 @ir.ops.rms_norm.register_impl(
