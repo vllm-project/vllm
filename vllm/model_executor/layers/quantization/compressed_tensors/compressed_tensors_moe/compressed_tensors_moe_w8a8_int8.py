@@ -165,7 +165,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    ) -> FusedMoEQuantConfig:
         return make_int8_moe_quant_config(
             int8_backend=self.int8_backend,
             w1_scale=layer.w13_weight_scale,
