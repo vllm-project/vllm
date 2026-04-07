@@ -44,7 +44,8 @@ DECODER_ZE_AFFINITY_MASK=${DECODER_ZE_AFFINITY_MASK:-$(generate_affinity_mask "$
 
 
 # execution env
-GIT_ROOT=$(git rev-parse --show-toplevel)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 EXP_ROOT="${GIT_ROOT}/tests/v1/kv_connector/nixl_integration"
 
 OUTPUT_FILE=${OUTPUT_FILE:-"${EXP_ROOT}/.xpu_accuracy_test_outputs.txt"}
