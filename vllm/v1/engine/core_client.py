@@ -35,6 +35,7 @@ from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
+    EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
@@ -456,6 +457,19 @@ class ElasticScalingCache:
     pending_notifications: dict[EEPNotificationType, set[int]]
 
 
+_ready_response_decoder = msgspec.msgpack.Decoder(EngineCoreReadyResponse)
+
+
+def _apply_ready_response(payload: bytes, vllm_config: VllmConfig) -> None:
+    """Decode an EngineCoreReadyResponse and sync any post-initialization
+    config changes (e.g. auto-fitted max_model_len) back to the frontend."""
+    if not payload:
+        return
+    response = _ready_response_decoder.decode(payload)
+    if response.max_model_len is not None:
+        vllm_config.model_config.max_model_len = response.max_model_len
+
+
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.
@@ -591,17 +605,7 @@ class MPClient(EngineCoreClient):
                     )
                 identity, payload = sync_input_socket.recv_multipart()
                 identities.remove(identity)
-                if payload:
-                    try:
-                        metadata = msgspec.msgpack.decode(payload)
-                        if isinstance(metadata, dict):
-                            max_model_len = metadata.get("max_model_len")
-                            if max_model_len is not None:
-                                vllm_config.model_config.max_model_len = int(
-                                    max_model_len)
-                    except Exception:
-                        # Backward compatibility: old engine sends empty marker.
-                        pass
+                _apply_ready_response(payload, vllm_config)
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -1593,8 +1597,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     f"timeout, set the environment variable: "
                     f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                 )
-            identity, _ = sync_input_socket.recv_multipart()
+            identity, payload = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)
+            _apply_ready_response(payload, self.vllm_config)
 
         # NOTE(yongji): Before we schedule any requests on the new workers,
         # we should wait for them to switch to the new setup.
