@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The request function for API endpoints."""
 
+import codecs
 import io
 import json
 import os
@@ -25,11 +26,12 @@ class StreamedResponseHandler:
 
     def __init__(self):
         self.buffer = ""
+        self._decoder = codecs.getincrementaldecoder("utf-8")()
 
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
         messages."""
-        chunk_str = chunk_bytes.decode("utf-8")
+        chunk_str = self._decoder.decode(chunk_bytes)
         self.buffer += chunk_str
 
         messages = []
