@@ -441,9 +441,11 @@ class TestExtractToolCallsStreaming:
     # --- Fallback format streaming ---
 
     def test_fallback_streaming_hangup_empty_args(self, parser):
-        """Exact reported bug: <tool_call>hangup_call{}</tool_call> streamed."""
+        """Exact reported bug: <tool_call>call:hangup_call{}</tool_call> streamed."""
         deltas = [
             "<tool_call>",
+            "call",
+            ":",
             "hangup_call",
             "{}",
             "</tool_call>",

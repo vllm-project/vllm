@@ -76,9 +76,10 @@ _NATIVE_REGEX = re.compile(
 
 # Regex for fallback format (complete match, non-streaming)
 #   <tool_call>func_name{...}</tool_call>
+#   <tool_call>call:func_name{...}</tool_call>
 #   Works for empty args too:  <tool_call>hangup_call{}</tool_call>
 _FALLBACK_REGEX = re.compile(
-    r"<tool_call>([\w\-\.]+)\{(.*?)\}</tool_call>",
+    r"<tool_call>(?:call:)?([\w\-\.]+)\{(.*?)\}</tool_call>",
     re.DOTALL,
 )
 # ---------------------------------------------------------------------------
@@ -707,6 +708,10 @@ class Gemma4ToolParser(ToolParser):
         if FALLBACK_TOOL_CALL_END in partial_call:
             partial_call = partial_call.split(FALLBACK_TOOL_CALL_END)[0]
 
+          # Strip optional "call:" prefix
+        if partial_call.startswith("call:"):
+            partial_call = partial_call[5:]
+        
         # Fallback format: func_name{args...}  (NO "call:" prefix)
         if "{" not in partial_call:
             return None
