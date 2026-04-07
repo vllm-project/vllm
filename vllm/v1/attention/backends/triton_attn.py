@@ -86,19 +86,22 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     _mm_prefix_range_tensor_cache: torch.Tensor | None = None
+    _mm_prefix_range_hash: int | None = None  # Hash of mm_prefix_range when cache was created
 
-    def __setattr__(self, name: str, value) -> None:
-        """Override __setattr__ to invalidate cached tensor when mm_prefix_range changes.
+    @staticmethod
+    def _hash_mm_prefix_range(mm_prefix_range: dict[int, list[tuple[int, int]]] | None) -> int:
+        """Compute hash of mm_prefix_range for cache validation.
         
-        NOTE: This ensures cache consistency when metadata objects are reused
-        across scheduler steps (e.g., via update_block_table), where mm_prefix_range
-        may change due to requests being added/removed in the batch.
+        Uses frozenset for dict and tuples are already hashable.
+        Returns a consistent hash even if dict iteration order changes.
         """
-        if name == "mm_prefix_range" and hasattr(self, "_mm_prefix_range_tensor_cache"):
-            # Invalidate the cached tensor to force recomputation on next access.
-            object.__setattr__(self, "_mm_prefix_range_tensor_cache", None)
-        object.__setattr__(self, name, value)
-
+        if mm_prefix_range is None:
+            return hash(None)
+        # Convert dict to frozenset of (key, tuple(ranges)) for stable hashing
+        return hash(frozenset(
+            (k, tuple(v)) for k, v in mm_prefix_range.items()
+        ))
+    
     @property
     def mm_prefix_range_tensor(self) -> torch.Tensor | None:
         """Convert mm_prefix_range dict to padded tensor for Triton kernel.
@@ -106,12 +109,22 @@ class TritonAttentionMetadata:
         Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty
         ranges. Cached after first call so that repeated access across layers
         does not trigger redundant H2D / D2D copies.
+                
+        Cache is automatically invalidated when mm_prefix_range changes,
+        detected via hash comparison.
         """
-        if self._mm_prefix_range_tensor_cache is not None:
+        # Compute current hash of mm_prefix_range for cache validation
+        current_hash = self._hash_mm_prefix_range(self.mm_prefix_range)
+        
+        # Check if cache is valid
+        if (self._mm_prefix_range_tensor_cache is not None 
+            and self._mm_prefix_range_hash == current_hash):
             return self._mm_prefix_range_tensor_cache
-
+        
+        # Cache miss or invalidated - recompute
         result = self._compute_mm_prefix_range_tensor()
         self._mm_prefix_range_tensor_cache = result
+        self._mm_prefix_range_hash = current_hash
         return result
 
     def _compute_mm_prefix_range_tensor(self) -> torch.Tensor | None:
