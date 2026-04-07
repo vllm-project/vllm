@@ -154,6 +154,40 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
         constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
+def _disable_rope_auto_validation() -> None:
+    """Remove the Transformers v5 ``validate_rope`` auto-validator.
+
+    Transformers v5 runs ``validate_rope`` during
+    ``PretrainedConfig.__init__()`` via ``__class_validators__``.  Some
+    upstream configs (e.g. Ernie-4.5) assign ``rope_theta`` after
+    ``super().__init__()``, so the validator fires before the value exists
+    and raises a ``KeyError``.
+
+    vLLM calls ``validate_rope()`` explicitly in
+    :func:`patch_rope_parameters` after all RoPE fields are propagated,
+    so the auto-validation is redundant.
+    """
+    if Version(version("transformers")) < Version("5.0.0"):
+        return
+    validators = getattr(PretrainedConfig, "__class_validators__", None)
+    if not validators:
+        return
+    groups: list[list] = (
+        list(validators.values())
+        if isinstance(validators, dict)
+        else [validators]
+    )
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for i in range(len(group) - 1, -1, -1):
+            if getattr(group[i], "__name__", None) == "validate_rope":
+                group.pop(i)
+
+
+_disable_rope_auto_validation()
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -414,11 +448,11 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         # Standardize and validate RoPE parameters
         config.standardize_rope_params()
         # standardize_rope_params uses setdefault and won't overwrite an
-        # existing None value. This can happen when rope_parameters is
+        # existing None value.  This can happen when rope_parameters is
         # populated via the rope_scaling property setter (Transformers v5
         # maps rope_scaling -> rope_parameters) before self.rope_theta is
-        # assigned in the subclass __init__ — causing rope_theta: None to
-        # be set by an earlier standardize call, which setdefault won't fix.
+        # assigned in the subclass __init__, causing rope_theta=None to
+        # persist from an earlier standardize call.
         if rope_theta is not None:
             rp = getattr(config, "rope_parameters", None)
             if (
