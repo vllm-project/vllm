@@ -73,5 +73,25 @@
             "temperature": 0,
             "num_prompts": 200 
         }
+    },
+    {
+        "test_name": "serving_qwen3vl8b_tp1_random_mm",
+        "qps_list": [1, 4, 16, "inf"],
+        "server_parameters": {
+            "model": "Qwen/Qwen3-VL-8B-Instruct",
+            "tensor_parallel_size": 1,
+            "disable_log_stats": "",
+            "load_format": "dummy",
+            "limit_mm_per_prompt.image": 1
+        },
+        "client_parameters": {
+            "model": "Qwen/Qwen3-VL-8B-Instruct",
+            "backend": "openai-chat",
+            "dataset_name": "random-mm",
+            "temperature": 0,
+            "num_prompts": 200,
+            "random_mm_base_items_per_request": 1,
+            "random_mm_num_mm_items_range_ratio": 0
+        }
     }
 ]

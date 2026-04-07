@@ -33,6 +33,7 @@
 - CPU Models: llama-3.1 8B.
 - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
 - For CPU, we added random dataset tests to benchmark fixed input/output length with 100 prompts.
+- We also added a multi-modal serving test for Qwen3-VL 8B Instruct on GPU using the `random-mm` dataset with deterministic 1-image synthetic requests.
 
 {serving_tests_markdown_table}
 
