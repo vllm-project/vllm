@@ -6,13 +6,13 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.multiprocessing import spawn
-
-from tests.utils import ensure_current_vllm_config, init_test_distributed_environment
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.minimax_rms_norm.rms_norm_tp import (
     MiniMaxQKNormWrapper,
     MiniMaxText01RMSNormTP,
 )
+
+from tests.utils import ensure_current_vllm_config, init_test_distributed_environment
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed

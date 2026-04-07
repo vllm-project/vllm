@@ -46,9 +46,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.minimax_rms_norm.rms_norm_tp import (
-    MiniMaxText01RMSNormTP,
-)
+from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (

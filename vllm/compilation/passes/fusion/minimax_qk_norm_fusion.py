@@ -285,7 +285,7 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
         tp_rank = get_tensor_model_parallel_rank()
         # Allocate Lamport workspace first.
         from vllm.distributed.parallel_state import get_tp_group
-        from vllm.model_executor.layers.minimax_rms_norm.lamport_workspace import (
+        from vllm.model_executor.layers.mamba.lamport_workspace import (
             get_allreduce_workspace,
         )
 
