@@ -819,7 +819,7 @@ class ModelConfig:
         if is_runai_obj_uri(tokenizer):
             object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
             object_storage_tokenizer.pull_files(
-                model,
+                tokenizer,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
             )
             self.tokenizer = object_storage_tokenizer.dir
