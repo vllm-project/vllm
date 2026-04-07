@@ -13,10 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 def has_io_processor(
-        vllm_config: VllmConfig,
-
+    vllm_config: VllmConfig,
     plugin_from_init: str | None = None,
-                         ):
+):
     if plugin_from_init:
         model_plugin = plugin_from_init
     else:
@@ -28,7 +27,6 @@ def has_io_processor(
         model_plugin = config_plugin
 
     return model_plugin is not None
-
 
 
 def get_io_processor(

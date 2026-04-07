@@ -42,11 +42,6 @@ def init_pooling_io_processors(
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
-    if "token_embed" in supported_tasks:
-        from vllm.entrypoints.pooling.embed.io_processor import TokenEmbedIOProcessor
-
-        processors["token_embed"] = TokenEmbedIOProcessor
-
     if has_io_processor(
         vllm_config,
         model_config.io_processor_plugin,

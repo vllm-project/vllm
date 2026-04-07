@@ -1084,7 +1084,9 @@ class LLM:
 
         if isinstance(prompts, dict) and "data" in prompts:
             if pooling_task != "plugin":
-                raise ValueError()
+                raise ValueError(
+                    "The 'data' field is only supported for the 'plugin' pooling task."
+                )
 
             if "plugin" not in self.pooling_io_processors:
                 raise ValueError(
@@ -1521,7 +1523,7 @@ class LLM:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
                 raise ValueError(
-                    f"The lengths of prompts ({params}) "
+                    f"The lengths of prompts ({num_requests}) "
                     f"and params ({len(params)}) must be the same."
                 )
 
