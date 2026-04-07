@@ -467,7 +467,10 @@ def _apply_ready_response(payload: bytes, vllm_config: VllmConfig) -> None:
         return
     response = _ready_response_decoder.decode(payload)
     if response.max_model_len is not None:
-        vllm_config.model_config.max_model_len = response.max_model_len
+        vllm_config.model_config.max_model_len = min(
+            vllm_config.model_config.max_model_len,
+            response.max_model_len,
+        )
 
 
 class MPClient(EngineCoreClient):
