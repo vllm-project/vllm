@@ -466,7 +466,7 @@ def _run_eagle_correctness(
             model_impl=model_impl,
             attention_config=attention_config,
         )
-        # EAGLE/EAGLE3 auto-enables async scheduling; assert it is active.
+        # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
