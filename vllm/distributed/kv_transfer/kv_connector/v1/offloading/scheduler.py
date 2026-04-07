@@ -343,8 +343,9 @@ class OffloadingConnectorScheduler:
                             remaining = self._reqs_being_stored.get(req_id)
                             if remaining is not None:
                                 remaining -= block_hashes
-                                if not remaining:
-                                    del self._reqs_being_stored[req_id]
+                                # Keep the empty set so request_finished()
+                                # still returns True, ensuring _free_blocks
+                                # waits for finished_sending.
                 else:
                     self._store_job_pending_counts[job_id] = total
 
