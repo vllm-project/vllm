@@ -14,6 +14,10 @@ class Event:
     timestamp: float
     attributes: dict[str, Any] | None = None
 
+    @property
+    def timestamp_ns(self) -> int:
+        return int(self.timestamp * 1e9)
+
 
 @dataclass
 class ObservableContext:
