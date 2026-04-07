@@ -182,6 +182,11 @@ class ServingTokens(OpenAIServing):
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
+                routed_experts=(
+                    output.routed_experts.tolist()
+                    if output.routed_experts is not None
+                    else None
+                ),
             )
 
             choices.append(choice_data)
