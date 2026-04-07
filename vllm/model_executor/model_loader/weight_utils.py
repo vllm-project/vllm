@@ -296,6 +296,13 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
+        if model_config.quantization_config is not None:
+            raise ValueError(
+                "Setting `quantization_config` for online "
+                "quantization when the model checkpoint already "
+                "has a `quantization_config` is not supported"
+            )
+
         # For modelopt_mixed, config.json's quantization_config may or may
         # not contain the per-layer quantized_layers map.  Newer checkpoints
         # embed it directly; older ones keep it only in hf_quant_config.json.
@@ -319,6 +326,12 @@ def get_quant_config(
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
+            if model_config.quantization_config is not None:
+                raise ValueError(
+                    "Setting `quantization_config` for online "
+                    "quantization when the model checkpoint already "
+                    "has a `quantization_config` is not supported"
+                )
             return quant_cls.from_config_file(quantization_config_file)
         else:
             raise NotImplementedError(
@@ -329,6 +342,12 @@ def get_quant_config(
     quantization_config_json = hf_overrides.get("quantization_config_dict_json", None)
     if quantization_config_json is not None:
         if hasattr(quant_cls, "from_config_dict_json"):
+            if model_config.quantization_config is not None:
+                raise ValueError(
+                    "Setting `quantization_config` for online "
+                    "quantization when the model checkpoint already "
+                    "has a `quantization_config` is not supported"
+                )
             return quant_cls.from_config_dict_json(quantization_config_json)
         else:
             raise NotImplementedError(
@@ -336,6 +355,19 @@ def get_quant_config(
                 "but quant_cls.from_config_dict_json is not implemented in "
                 f"{quant_cls}"
             )
+
+    # Online quantization doesn't read from checkpoint configs — it quantizes
+    # fp16/bf16 weights on the fly during loading.
+    if model_config.quantization_config is not None:
+        from vllm.config.quantization import OnlineQuantizationConfigArgs
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        assert isinstance(
+            model_config.quantization_config, OnlineQuantizationConfigArgs
+        )
+        return OnlineQuantizationConfig(args=model_config.quantization_config)
 
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":

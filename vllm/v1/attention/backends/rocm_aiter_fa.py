@@ -228,7 +228,6 @@ if current_platform.is_rocm():
         num_kv_heads,
         BLOCK_SIZE: tl.constexpr,
         QUANT: tl.constexpr,
-        IS_FNUZ: tl.constexpr,
     ):
         tid = tl.program_id(0)
         head_id = tl.program_id(1)
@@ -314,7 +313,6 @@ if current_platform.is_rocm():
             num_kv_heads,
             BLOCK_SIZE=head_size,
             QUANT=QUANT,
-            IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
         )
 
 
