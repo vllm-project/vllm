@@ -339,7 +339,7 @@ def _rocm_aiter_fused_topk_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = x.shape[0]
     topk_weights = torch.empty(num_tokens, top_k, dtype=torch.float32, device=x.device)
-    topk_indices = torch.empty(num_tokens, top_k, dtype=torch.int64, device=x.device)
+    topk_indices = torch.empty(num_tokens, top_k, dtype=torch.int32, device=x.device)
     return topk_weights, topk_indices
 
 
