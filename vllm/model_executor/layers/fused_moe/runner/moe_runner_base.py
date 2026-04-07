@@ -378,9 +378,6 @@ class MoERunnerBase(MoERunner):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        # Run this before quant_method to avoid inplace issues.
-        # TODO(bnell): probably not needed anymore since inplace is
-        # disabled when shared experts are present.
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
@@ -398,7 +395,7 @@ class MoERunnerBase(MoERunner):
             )
 
             # Passing shared_experts_input in case SharedExpertsOrder is
-            # NO_OVERLAP or MK_INTERNAL_OVERLAPPED.
+            # MK_INTERNAL_OVERLAPPED.
             fused_out = self.quant_method.apply(
                 layer=layer,
                 x=hidden_states,

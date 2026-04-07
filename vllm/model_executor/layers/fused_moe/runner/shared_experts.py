@@ -88,7 +88,7 @@ class SharedExperts:
                 )
 
     @property
-    def _disable_shared_expert_overlap(self) -> bool:
+    def _disable_shared_experts_overlap(self) -> bool:
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
         parallel_config = self._moe_config.moe_parallel_config
@@ -101,7 +101,7 @@ class SharedExperts:
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
-        if self._disable_shared_expert_overlap:
+        if self._disable_shared_experts_overlap:
             return SharedExpertsOrder.NO_OVERLAP
 
         if self._quant_method.mk_owns_shared_expert:
