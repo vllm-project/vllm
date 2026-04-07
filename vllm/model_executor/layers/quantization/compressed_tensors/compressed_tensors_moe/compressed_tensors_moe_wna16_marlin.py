@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import enum
-from enum import Enum
-
 import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
 )
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -18,12 +14,15 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    int4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    BatchedMarlinExperts,
-    MarlinExperts,
     fused_marlin_moe,
+)
+from vllm.model_executor.layers.fused_moe.oracle.wna16 import (
+    WNA16MoeBackend,
+    make_wna16_moe_kernel,
+    make_wna16_moe_quant_config,
+    select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
@@ -32,8 +31,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_TYPES_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
-    flashinfer_trtllm_mxint4_moe,
-    is_flashinfer_mxint4_moe_available,
     prepare_static_weights_for_trtllm_mxint4_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -45,11 +42,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
-
-
-class GPTQMarlinState(Enum):
-    REPACK = enum.auto()
-    READY = enum.auto()
 
 
 class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
@@ -76,18 +68,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
 
         self.marlin_input_dtype = get_marlin_input_dtype(layer_name)
-        self.use_flashinfer_mxint4_moe = (
-            is_flashinfer_mxint4_moe_available()
-            and self.group_size == 32
-            and weight_quant.num_bits == 4
-        )
-        self.kernel_backend = (
-            "Flashinfer" if self.use_flashinfer_mxint4_moe else "Marlin"
-        )
-        logger.info_once(
-            f"Using {self.kernel_backend} backend for WNA16 MoE "
-            f"(group_size={self.group_size}, num_bits={self.num_bits})",
-            scope="local",
+
+        # Select WNA16 MoE backend via oracle.
+        self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
+            config=self.moe,
+            num_bits=self.num_bits,
+            group_size=self.group_size or -1,
         )
 
     def get_weight_shape(
@@ -114,6 +100,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "num_groups_w2 must be provided for weight scales"
             )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
+        is_flashinfer = self.wna16_backend == WNA16MoeBackend.FLASHINFER
         shape_map = {
             "w13_weight": {
                 "Flashinfer": (
@@ -156,7 +143,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "Marlin": (num_experts, num_groups_w2, hidden_size),
             },
         }
-        return shape_map[weight_name][self.kernel_backend]
+        backend_key = "Flashinfer" if is_flashinfer else "Marlin"
+        return shape_map[weight_name][backend_key]
 
     def create_weights(
         self,
@@ -172,7 +160,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
-        is_transposed = self.kernel_backend != "Flashinfer"
+        is_transposed = self.wna16_backend != WNA16MoeBackend.FLASHINFER
         extra_weight_attrs.update(
             {"is_transposed": is_transposed, "quant_method": self.strategy}
         )
@@ -319,12 +307,11 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
         layer.a13_scale = None
         layer.a2_scale = None
-        layer.marlin_state = GPTQMarlinState.REPACK
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_weight_g_idx.shape[0]
         device = layer.w13_weight_g_idx.device
-        if self.kernel_backend == "Flashinfer":
+        if self.wna16_backend == WNA16MoeBackend.FLASHINFER:
             dict_weights_mxint4 = prepare_static_weights_for_trtllm_mxint4_moe(
                 layer.w13_weight_packed,
                 layer.w13_weight_scale,
@@ -343,7 +330,24 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(
                 layer, "w2_weight_scale", dict_weights_mxint4["gemm2_scales"]
             )
-            return None
+            # Alias packed weights to w13_weight/w2_weight for the modular
+            # kernel interface.
+            layer.w13_weight = layer.w13_weight_packed
+            layer.w2_weight = layer.w2_weight_packed
+
+            # Setup moe_kernel for the Flashinfer monolithic path.
+            assert self.experts_cls is not None
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            self.moe_kernel = make_wna16_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                backend=self.wna16_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
+            return
 
         is_a_8bit = (
             self.marlin_input_dtype is not None
@@ -458,60 +462,42 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
         layer.workspace = marlin_make_workspace_new(device, 4)
 
+        # Alias packed weights to w13_weight/w2_weight for the modular
+        # kernel interface.
+        layer.w13_weight = layer.w13_weight_packed
+        layer.w2_weight = layer.w2_weight_packed
+
+        # Setup moe_kernel for the 4-bit Marlin path.
+        if self.num_bits == 4 and self.experts_cls is not None:
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            self.moe_kernel = make_wna16_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                backend=self.wna16_backend,
+                experts_cls=self.experts_cls,
+                w13_g_idx=layer.w13_weight_g_idx,
+                w2_g_idx=layer.w2_weight_g_idx,
+                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         if self.num_bits != 4:
             return None
-        return int4_w4a16_moe_quant_config(
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            w1_zp=None,
-            w2_zp=None,
-            block_shape=[0, self.group_size],
+        return make_wna16_moe_quant_config(
+            layer=layer,
+            group_size=self.group_size,
         )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
-    ) -> mk.FusedMoEExpertsModular:
-        assert self.num_bits == 4, "only supporting w4"
-        layer.w13_weight = layer.w13_weight_packed
-        layer.w2_weight = layer.w2_weight_packed
-        assert all([w is not None for w in [layer.w13_weight, layer.w2_weight]])
-        assert self.moe_quant_config is not None
-        if (
-            prepare_finalize.activation_format
-            == mk.FusedMoEActivationFormat.BatchedExperts
-        ):
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-            return BatchedMarlinExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=layer.w13_weight_g_idx,
-                w2_g_idx=layer.w2_weight_g_idx,
-                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
-        else:
-            return MarlinExperts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=layer.w13_weight_g_idx,
-                w2_g_idx=layer.w2_weight_g_idx,
-                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
 
     @property
     def is_monolithic(self) -> bool:
-        return self.kernel_backend == "Flashinfer"
+        return self.wna16_backend == WNA16MoeBackend.FLASHINFER
 
     def apply_monolithic(
         self,
@@ -519,23 +505,21 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert self.kernel_backend == "Flashinfer"
-        return flashinfer_trtllm_mxint4_moe(
-            x=x,
-            router_logits=router_logits,
-            w13_weight_packed=layer.w13_weight_packed,
-            w13_weight_scale=layer.w13_weight_scale,
-            w2_weight_packed=layer.w2_weight_packed,
-            w2_weight_scale=layer.w2_weight_scale,
+        assert self.wna16_backend == WNA16MoeBackend.FLASHINFER
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
             global_num_experts=layer.global_num_experts,
-            top_k=layer.top_k,
-            intermediate_size_per_partition=layer.intermediate_size_per_partition,
-            local_num_experts=layer.local_num_experts,
-            ep_rank=layer.ep_rank,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             num_expert_group=layer.num_expert_group,
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
-            routing_method_type=layer.routing_method_type,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )
 
     def apply(
@@ -546,7 +530,22 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        assert self.kernel_backend == "Marlin"
+        assert not self.is_monolithic
+        if self.moe_kernel is not None:
+            # 4-bit Marlin: use the modular kernel abstraction.
+            return self.moe_kernel.apply(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                shared_experts_input=shared_experts_input,
+            )
+        # Non-4-bit Marlin fallback: call fused_marlin_moe() directly.
         return fused_marlin_moe(
             x,
             layer.w13_weight_packed,
