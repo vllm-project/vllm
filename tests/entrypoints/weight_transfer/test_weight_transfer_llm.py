@@ -232,6 +232,9 @@ def test_update_weights_calls_engine():
             assert dtypes == test_dtypes
             assert shapes == test_shapes
 
+        # Finish weight update
+        llm.finish_weight_update()
+
 
 @create_new_process_for_each_test()
 def test_full_weight_transfer_flow():
