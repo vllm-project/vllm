@@ -20,7 +20,6 @@ from mistral_common.protocol.instruct.tool_calls import (
 from mistral_common.protocol.instruct.tool_calls import (
     ToolChoiceEnum as MistralToolChoiceEnum,
 )
-from pydantic import Field
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -31,7 +30,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
-    ToolCall,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -41,10 +39,9 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.mistral_tool_types import MistralToolCall
 from vllm.utils.mistral import (
-    generate_mistral_tool_call_id,
     is_mistral_tokenizer,
-    is_valid_mistral_tool_call_id,
 )
 
 logger = init_logger(__name__)
@@ -66,18 +63,6 @@ class StreamingState(Enum):
     PARSING_ARGUMENTS_COMPLETED = auto()
     TOOL_COMPLETE = auto()
     ALL_TOOLS_COMPLETE = auto()
-
-
-class MistralToolCall(ToolCall):
-    id: str = Field(default_factory=lambda: MistralToolCall.generate_random_id())
-
-    @staticmethod
-    def generate_random_id():
-        return generate_mistral_tool_call_id()
-
-    @staticmethod
-    def is_valid_id(id: str) -> bool:
-        return is_valid_mistral_tool_call_id(id)
 
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
