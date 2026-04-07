@@ -325,7 +325,7 @@ class Gemma4MoE(nn.Module):
             topk: int,
             renormalize: bool,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            if current_platform.is_cuda_alike():
+            if current_platform.is_cuda_alike() or current_platform.is_xpu():
                 return gemma4_fused_routing_kernel_triton(
                     gating_output, topk, per_expert_scale
                 )
