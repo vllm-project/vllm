@@ -214,7 +214,10 @@ def test_ngram_gpu_default_with_async_scheduling(
         async_scheduling=async_scheduling,
     )
     # Assert the resolved async_scheduling config matches what was requested.
-    if spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling != async_scheduling: # noqa
+    if (
+        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+        != async_scheduling
+    ):  # noqa
         raise AsyncSchedulingNotEnabledError(
             f"Expected async_scheduling={async_scheduling}, got "
             f"{spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling}"
