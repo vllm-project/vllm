@@ -187,6 +187,14 @@ steps:
   device: h100
   num_devices: 2
   optional: true
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
 
@@ -196,5 +204,13 @@ steps:
   device: b200
   num_devices: 2
   optional: true
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
