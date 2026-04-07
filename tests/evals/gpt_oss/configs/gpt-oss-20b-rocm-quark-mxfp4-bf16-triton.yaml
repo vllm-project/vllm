@@ -3,4 +3,4 @@
 model_name: amd/gpt-oss-20b-w-mxfp4-a-bf16
 metric_threshold: 0.568
 reasoning_effort: low
-server_args: "--attention-backend ROCM_AITER_UNIFIED_ATTN --moe-backend triton"
+server_args: "--attention-backend ROCM_AITER_UNIFIED_ATTN --moe-backend triton --tokenizer openai/gpt-oss-20b --tensor-parallel-size 2"
