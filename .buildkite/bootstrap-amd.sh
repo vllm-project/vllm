@@ -112,10 +112,10 @@ upload_pipeline() {
     if [[ $BUILDKITE_PIPELINE_SLUG == "fastcheck" ]]; then
         AMD_MIRROR_HW="amdtentative"
         curl -o .buildkite/test-template.j2 \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
+            "https://raw.githubusercontent.com/dhonnappa-amd/vllm/main/.buildkite/test-template-amd.j2?$(date +%s)"
     else
         curl -o .buildkite/test-template.j2 \
-            "https://raw.githubusercontent.com/vllm-project/ci-infra/$VLLM_CI_BRANCH/buildkite/test-template-amd.j2?$(date +%s)"
+            "https://raw.githubusercontent.com/dhonnappa-amd/vllm/main/.buildkite/test-template-amd.j2?$(date +%s)"
     fi
 
 
