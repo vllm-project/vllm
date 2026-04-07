@@ -289,7 +289,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
             raise ValueError(
-                "Failed to transform choices into a grammar: {err}"
+                f"Failed to transform choices into a grammar: {err}"
             ) from err
         so_params.choice = None
         so_params.grammar = choice_grammar

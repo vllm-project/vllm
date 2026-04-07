@@ -624,6 +624,7 @@ async def benchmark(
     lora_modules: Iterable[str] | None,
     extra_headers: dict | None,
     extra_body: dict | None,
+    lora_assignment: Literal["random", "round-robin"] = "random",
     ramp_up_strategy: Literal["linear", "exponential"] | None = None,
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
@@ -731,10 +732,20 @@ async def benchmark(
     print("Starting main benchmark run...")
 
     if lora_modules:
-        # For each input request, choose a LoRA module at random.
-        lora_modules = iter(
-            [random.choice(lora_modules) for _ in range(len(input_requests))]
-        )
+        lora_modules_list = list(lora_modules)
+        if lora_assignment == "round-robin":
+            # Deterministic round-robin assignment across requests.
+            lora_modules = iter(
+                [
+                    lora_modules_list[i % len(lora_modules_list)]
+                    for i in range(len(input_requests))
+                ]
+            )
+        else:
+            # For each input request, choose a LoRA module at random.
+            lora_modules = iter(
+                [random.choice(lora_modules_list) for _ in range(len(input_requests))]
+            )
 
     if profile:
         print("Starting profiler...")
@@ -1523,7 +1534,18 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="A subset of LoRA module names passed in when "
         "launching the server. For each request, the "
-        "script chooses a LoRA module at random.",
+        "script chooses a LoRA module at random by default. "
+        "Use --lora-assignment to control selection strategy.",
+    )
+
+    parser.add_argument(
+        "--lora-assignment",
+        type=str,
+        default="random",
+        choices=["random", "round-robin"],
+        help="Strategy for assigning LoRA modules to requests. "
+        "'random' (default) selects a LoRA at random for each request. "
+        "'round-robin' cycles through LoRA modules deterministically.",
     )
 
     parser.add_argument(
@@ -1788,6 +1810,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         goodput_config_dict=goodput_config_dict,
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
+        lora_assignment=args.lora_assignment,
         extra_headers=headers,
         extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,

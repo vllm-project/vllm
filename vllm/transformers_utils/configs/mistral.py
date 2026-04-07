@@ -257,7 +257,6 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             encoder_attention_heads=encoder_args["n_heads"],
             encoder_head_dim=encoder_args["head_dim"],
             vocab_size=encoder_args["vocab_size"],
-            max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
             is_causal=encoder_args.get("causal", False),
             sliding_window=encoder_args.get("sliding_window", None),
@@ -270,6 +269,10 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             max_position_embeddings=block_pool_size * config["max_position_embeddings"],
         ),
     }
+    # Sometimes max_source_positions is explicitly set to None in params.json but this
+    # is not a valid value for WhisperConfig (or downstream code that uses it).
+    if (max_source_positions := encoder_args.get("max_source_positions")) is not None:
+        config["audio_config"].max_source_positions = max_source_positions
     if quant_config:
         config["quantization_config"] = quant_config
     return config

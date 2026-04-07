@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
@@ -44,8 +45,12 @@ class Llama3JsonToolParser(ToolParser):
     llama4_json are set.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        tools: list[Tool] | None = None,
+    ):
+        super().__init__(tokenizer, tools)
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode

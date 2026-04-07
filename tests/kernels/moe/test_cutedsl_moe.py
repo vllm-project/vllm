@@ -17,7 +17,7 @@ from flashinfer import fp4_quantize
 from torch.nn import functional as F
 
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
     flashinfer_cutedsl_moe_masked,
 )
 from vllm.utils.flashinfer import (

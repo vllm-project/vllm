@@ -17,8 +17,8 @@ constexpr int block_size_n() { return 2 * TILE_N; }
 template <typename T> inline bool can_use_brgemm(int M);
 template <> inline bool can_use_brgemm<at::BFloat16>(int M) { return M > 4; }
 template <> inline bool can_use_brgemm<at::Half>(int M) { return true; }
-// TODO: add u8s8 brgemm, this requires PyTorch 2.7
-template <> inline bool can_use_brgemm<int8_t>(int M) { return false; }
+template <> inline bool can_use_brgemm<int8_t>(int M) { return M > 4; }
+template <> inline bool can_use_brgemm<uint8_t>(int M) { return M > 4; }
 template <> inline bool can_use_brgemm<at::Float8_e4m3fn>(int M) { return M > 4; }
 template <> inline bool can_use_brgemm<at::quint4x2>(int M) { return M > 4; }
 
@@ -40,8 +40,16 @@ inline int64_t get_row_size(int64_t K, bool use_int8_w8a8) {
   return use_int8_w8a8 ? K + sizeof(int32_t) : K;
 }
 
-// pack weight to vnni format
+inline int64_t get_4bit_block_k_size(int64_t group_size) {
+  return group_size > 128 ? 128 : group_size;
+}
+
+// pack weight into vnni format
 at::Tensor convert_weight_packed(at::Tensor& weight);
+
+// pack weight to vnni format for int4 (adapted from sglang)
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+convert_weight_packed_scale_zp(at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
 
 // moe implementations for int8 w8a8
 template <typename scalar_t>
@@ -232,6 +240,31 @@ void tinygemm_kernel(
     int64_t strideBz,
     int64_t strideBs,
     bool brg);
+
+// int4 scaled GEMM (adapted from sglang)
+at::Tensor int4_scaled_mm_cpu(
+    at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros, at::Tensor& w_scales, std::optional<at::Tensor> bias);
+
+// int4 tinygemm kernel interface(adapted from sglang)
+template <typename scalar_t>
+void tinygemm_kernel(
+    scalar_t* C,
+    float* C_temp,
+    const uint8_t* A,
+    const float* scales_a,
+    const int32_t* qzeros_a,
+    const uint8_t* B,
+    const float* scales_b,
+    const int8_t* qzeros_b,
+    const int32_t* compensation,
+    int8_t* dqB_tmp,
+    int64_t M,
+    int64_t K,
+    int64_t lda,
+    int64_t ldc_f,
+    int64_t ldc_s,
+    bool store_out,
+    bool use_brgemm);
 
 // TODO: debug print, remove me later
 inline void print_16x32i(const __m512i x) {

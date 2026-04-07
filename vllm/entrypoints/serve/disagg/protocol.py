@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
-from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -33,19 +33,20 @@ class MultiModalFeatures(BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
     Carries hashes (for cache lookup / identification) and placeholder
-    positions so the downstream ``/generate`` service knows *where* in
+    positions so the downstream `/generate` service knows *where* in
     the token sequence each multimodal item lives.
 
-    .. note:: Phase 1 — metadata only.
-       Phase 2 should add ``mm_kwargs`` (processed tensor data) using a
-       binary transport so the ``/generate`` side can skip re-processing.
-       The ``/generate`` endpoint must also be updated to inject these
-       features into ``ProcessorInputs`` before passing to
-       ``InputProcessor.process_inputs``.
+    Note:
+        Phase 1 — metadata only.
+        Phase 2 should add `mm_kwargs` (processed tensor data) using a
+        binary transport so the ``/generate` side can skip re-processing.
+        The `/generate` endpoint must also be updated to inject these
+        features into `EngineInput` before passing to
+        `InputProcessor.process_inputs`.
     """
 
     mm_hashes: dict[str, list[str]]
-    """Per-modality item hashes, e.g. ``{"image": ["abc", "def"]}``."""
+    """Per-modality item hashes, e.g. `{"image": ["abc", "def"]}`."""
 
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
     """Per-modality placeholder ranges in the token sequence."""
@@ -119,6 +120,26 @@ class GenerateResponseChoice(BaseModel):
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
     token_ids: list[int] | None = None
+
+
+class GenerateResponseStreamChoice(BaseModel):
+    index: int
+    logprobs: ChatCompletionLogProbs | None = None
+    finish_reason: str | None = None
+    token_ids: list[int] | None = None
+
+
+class GenerateStreamResponse(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    choices: list[GenerateResponseStreamChoice]
+    usage: UsageInfo | None = Field(default=None)
 
 
 class GenerateResponse(BaseModel):

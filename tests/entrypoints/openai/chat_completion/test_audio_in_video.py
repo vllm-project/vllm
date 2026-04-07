@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import json
 
 import openai
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 
 from tests.conftest import VideoTestAssets
-from tests.utils import RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 
@@ -22,6 +22,7 @@ def server():
         "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 3, "video": 3}),
+        *ROCM_EXTRA_ARGS,
     ]
 
     with RemoteOpenAIServer(
@@ -63,11 +64,12 @@ async def test_online_audio_in_video(
     ]
 
     # multi-turn to test mm processor cache as well
-    for _ in range(2):
+    for turn in range(2):
         chat_completion = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            max_tokens=16,
+            max_tokens=8,
+            temperature=0.0,
             extra_body={
                 "mm_processor_kwargs": {
                     "use_audio_in_video": True,
@@ -77,6 +79,12 @@ async def test_online_audio_in_video(
 
         assert len(chat_completion.choices) == 1
         choice = chat_completion.choices[0]
+        print(
+            f"[DEBUG][single-video] turn={turn} "
+            f"finish_reason={choice.finish_reason!r} "
+            f"content={choice.message.content!r} "
+            f"usage={chat_completion.usage}"
+        )
         assert choice.finish_reason == "length"
 
 
@@ -110,11 +118,12 @@ async def test_online_audio_in_video_multi_videos(
     ]
 
     # multi-turn to test mm processor cache as well
-    for _ in range(2):
+    for turn in range(2):
         chat_completion = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            max_tokens=16,
+            max_tokens=8,
+            temperature=0.0,
             extra_body={
                 "mm_processor_kwargs": {
                     "use_audio_in_video": True,
@@ -124,6 +133,12 @@ async def test_online_audio_in_video_multi_videos(
 
         assert len(chat_completion.choices) == 1
         choice = chat_completion.choices[0]
+        print(
+            f"[DEBUG][multi-video] turn={turn} "
+            f"finish_reason={choice.finish_reason!r} "
+            f"content={choice.message.content!r} "
+            f"usage={chat_completion.usage}"
+        )
         assert choice.finish_reason == "length"
 
 

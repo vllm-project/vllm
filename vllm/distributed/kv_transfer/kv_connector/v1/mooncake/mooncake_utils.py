@@ -8,7 +8,6 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
 from vllm.logger import init_logger
 
@@ -38,7 +37,7 @@ class MooncakeBootstrapServer:
     Prefiller workers register their connection info (IP, port, ranks) here.
     """
 
-    def __init__(self, vllm_config: VllmConfig, host: str, port: int):
+    def __init__(self, host: str, port: int):
         self.workers: dict[int, EngineEntry] = {}
 
         self.host = host

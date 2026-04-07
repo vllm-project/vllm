@@ -15,13 +15,13 @@ def test_text_input():
     assert prompt_to_seq(["foo", "bar"]) == ["foo", "bar"]
 
 
-def test_token_input():
+def test_tokens_input():
     assert prompt_to_seq([1, 2]) == [[1, 2]]
     assert prompt_to_seq([[1, 2]]) == [[1, 2]]
     assert prompt_to_seq([[1, 2], [3, 4]]) == [[1, 2], [3, 4]]
 
 
-def test_text_token_input():
+def test_text_tokens_input():
     assert prompt_to_seq([[1, 2], "foo"]) == [[1, 2], "foo"]
     assert prompt_to_seq(["foo", [1, 2]]) == ["foo", [1, 2]]
 

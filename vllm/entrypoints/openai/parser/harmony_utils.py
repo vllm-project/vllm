@@ -52,7 +52,7 @@ MCP_BUILTIN_TOOLS: set[str] = set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
 def has_custom_tools(tool_types: set[str]) -> bool:
     """
     Checks if the given tool types are custom tools
-    (i.e. any tool other than MCP buildin tools)
+    (i.e. any tool other than MCP builtin tools)
     """
     return not tool_types.issubset(MCP_BUILTIN_TOOLS)
 

@@ -91,6 +91,7 @@ class QuantFP8(CustomOp):
 
         if (
             self.is_group_quant
+            and self.use_ue8m0
             and self.use_deep_gemm_supported
             and (DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0)
         ):
@@ -164,6 +165,16 @@ class QuantFP8(CustomOp):
 
         # Fallback to CUDA implementation
         return self.forward_cuda(x, scale, scale_ub)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+        use_triton: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # XPU can use same code path as CUDA.
+        return self.forward_cuda(x, scale, scale_ub, use_triton)
 
     def forward_native(
         self,

@@ -227,7 +227,9 @@ class MMEncoderAttention(CustomOp):
         if self.attn_backend == AttentionBackendEnum.FLASHINFER:
             _get_flashinfer_workspace_buffer()
 
-        logger.info_once(f"Using {self.attn_backend} for MMEncoderAttention.")
+        logger.info_once(
+            f"Using {self.attn_backend} for MMEncoderAttention.", scope="local"
+        )
 
     @classmethod
     def enabled(cls) -> bool:

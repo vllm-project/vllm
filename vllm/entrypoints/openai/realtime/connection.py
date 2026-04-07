@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 from uuid import uuid4
 
 import numpy as np
+import pybase64 as base64
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
@@ -102,7 +102,14 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            self._check_model(event["model"])
+            model = event.get("model")
+            if model is None:
+                await self.send_error("Missing required field: model", "invalid_event")
+                return
+            err = self._check_model(model)
+            if err is not None:
+                await self.send_error(err.error.message, "model_not_found")
+                return
             self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
@@ -140,6 +147,7 @@ class RealtimeConnection:
                     err_msg,
                     "model_not_validated",
                 )
+                return
 
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished

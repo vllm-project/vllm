@@ -103,7 +103,6 @@ def _should_log_with_scope(scope: LogScope) -> bool:
         from vllm.distributed.parallel_state import is_local_first_rank
 
         return is_local_first_rank()
-    # default "process" scope: always log
     return True
 
 
@@ -116,9 +115,7 @@ class _VllmLogger(Logger):
         `intel_extension_for_pytorch.utils._logger`.
     """
 
-    def debug_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
-    ) -> None:
+    def debug_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
         """
         As [`debug`][logging.Logger.debug], but subsequent calls with
         the same message are silently dropped.
@@ -127,7 +124,7 @@ class _VllmLogger(Logger):
             return
         _print_debug_once(self, msg, *args)
 
-    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "process") -> None:
+    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
         """
         As [`info`][logging.Logger.info], but subsequent calls with
         the same message are silently dropped.
@@ -137,7 +134,7 @@ class _VllmLogger(Logger):
         _print_info_once(self, msg, *args)
 
     def warning_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
+        self, msg: str, *args: Hashable, scope: LogScope = "local"
     ) -> None:
         """
         As [`warning`][logging.Logger.warning], but subsequent calls with

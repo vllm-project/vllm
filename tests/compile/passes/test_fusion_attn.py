@@ -9,7 +9,10 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.passes.fusion.attn_quant_fusion import ATTN_OP, AttnFusionPass
+from vllm.compilation.passes.fusion.attn_quant_fusion import (
+    ATTN_OP,
+    AttnQuantFusionPass,
+)
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -53,6 +56,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         kv_cache_dtype: torch.dtype,
         device: torch.device,
         vllm_config: VllmConfig,
+        block_size: int,
         **kwargs,
     ):
         super().__init__()
@@ -74,7 +78,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         self.attn._k_scale = self.attn._k_scale.to(device)
         self.attn._v_scale = self.attn._v_scale.to(device)
 
-        self.block_size = 16
+        self.block_size = block_size
 
         # Initialize attn MetadataBuilder
         self.builder = self.attn.attn_backend.get_builder_cls()(
@@ -127,7 +131,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         raw_tensor = raw_tensor.view(kv_cache_shape)
         kv_cache = raw_tensor.permute(*inv_order)
 
-        self.attn.kv_cache = [kv_cache]
+        self.attn.kv_cache = kv_cache
 
         # Build attn metadata
         self.attn_metadata = self.builder.build(
@@ -299,6 +303,9 @@ def test_attention_quant_pattern(
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
+    backend_cls = backend.get_class()
+    block_size = backend_cls.get_preferred_block_size(16)
+
     model_config = ModelConfig(
         model=model_name,
         max_model_len=2048,
@@ -342,6 +349,7 @@ def test_attention_quant_pattern(
             kv_cache_dtype=FP8_DTYPE,
             device=device,
             vllm_config=vllm_config_unfused,
+            block_size=block_size,
         )
         model_unfused = model_unfused.to(device)
         result_unfused_0 = model_unfused(q, k, v)  # noqa: F841  HACK: See #131044
@@ -370,6 +378,7 @@ def test_attention_quant_pattern(
             device=device,
             vllm_config=vllm_config,
             w=model_unfused.w,
+            block_size=block_size,
         )
         model_fused = model_fused.to(device)
 
@@ -378,7 +387,7 @@ def test_attention_quant_pattern(
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
-        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
+        attn_pass = LazyInitPass(AttnQuantFusionPass, vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
         test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
@@ -428,7 +437,7 @@ def test_attention_quant_pattern(
     # Only output quant ops are fused into attention.
     test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
-    # access the underlying `AttnFusionPass` on the `LazyInitPass`
+    # access the underlying `AttnQuantFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
     # Check attention ops in the graph before and after fusion

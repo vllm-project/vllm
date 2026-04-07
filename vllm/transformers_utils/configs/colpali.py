@@ -27,7 +27,6 @@ class ColPaliConfig(PaliGemmaConfig):
         embedding_dim: int | None = None,
         embed_dim: int | None = None,
         dim: int | None = None,
-        projection_dim: int | None = None,
         colbert_dim: int | None = None,
         pooling: str | None = None,
         vlm_config: dict | None = None,
@@ -37,7 +36,6 @@ class ColPaliConfig(PaliGemmaConfig):
         self.embedding_dim = embedding_dim
         self.embed_dim = embed_dim
         self.dim = dim
-        self.projection_dim = projection_dim
         self.colbert_dim = colbert_dim
         self.pooling = pooling
 

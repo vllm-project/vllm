@@ -117,6 +117,14 @@ inline void parallel_for(int n, const func_t& f) {
 #endif
 }
 
+inline int get_thread_num() {
+#if defined(_OPENMP)
+  return omp_get_thread_num();
+#else
+  return 0;
+#endif
+}
+
 // for 1d parallel, use `actual_nth`
 // for 2d parallel, use even nths, e.g. 43->42
 int inline adjust_num_threads(int m) {

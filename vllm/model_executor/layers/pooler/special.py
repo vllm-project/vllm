@@ -52,13 +52,6 @@ class DispatchPooler(Pooler):
                     pooler_config,
                     pooling=pooling,
                     classifier=classifier,
-                    act_fn="classify",
-                ),
-                "score": pooler_for_classify(
-                    pooler_config,
-                    pooling=pooling,
-                    classifier=classifier,
-                    act_fn="score",
                 ),
             }
         )
@@ -115,7 +108,7 @@ class DispatchPooler(Pooler):
 
 class IdentityPooler(Pooler):
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"plugin", "score"}
+        return {"plugin"}
 
     def forward(
         self,
@@ -153,21 +146,61 @@ class BOSEOSFilter(Pooler):
     ) -> PoolerOutput:
         pooled_outputs = self.pooler(hidden_states, pooling_metadata)
         assert isinstance(pooled_outputs, list)
+        prompt_token_ids = pooling_metadata.get_prompt_token_ids_cpu()
 
-        for i, prompt_len in enumerate(pooling_metadata.prompt_lens):
+        for i, (prompt_len, token_ids) in enumerate(
+            zip(pooling_metadata.prompt_lens, prompt_token_ids)
+        ):
             pooled_data = pooled_outputs[i]
             assert (
                 isinstance(pooled_data, torch.Tensor)
                 and pooled_data.shape[0] == prompt_len
             )
-            token_ids = pooling_metadata.prompt_token_ids[i, :prompt_len]
-            if token_ids[0] == self.bos_token_id:
+            if int(token_ids[0]) == self.bos_token_id:
                 pooled_data = pooled_data[1:]
-            if token_ids[-1] == self.eos_token_id:
+            if int(token_ids[-1]) == self.eos_token_id:
                 pooled_data = pooled_data[:-1]
             pooled_outputs[i] = pooled_data.squeeze(-1)
 
         return pooled_outputs
 
 
-__all__ = ["BOSEOSFilter", "DispatchPooler", "IdentityPooler"]
+class BgeM3Pooler(Pooler):
+    def __init__(self, token_classify_pooler: Pooler, embed_pooler: Pooler) -> None:
+        super().__init__()
+        self.token_classify_pooler = token_classify_pooler
+        self.embed_pooler = embed_pooler
+
+    def forward(
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
+    ) -> PoolerOutput:
+        embed_outputs = self.embed_pooler(hidden_states, pooling_metadata)
+        token_classify_outputs = self.token_classify_pooler(
+            hidden_states, pooling_metadata
+        )
+        pooler_outputs: list[torch.Tensor] = []
+        for embed_output, token_classify_output in zip(
+            embed_outputs, token_classify_outputs
+        ):
+            pooler_outputs.append(
+                torch.cat(
+                    [embed_output.view(-1), token_classify_output.view(-1)], dim=-1
+                )
+            )
+
+        return pooler_outputs
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"embed&token_classify"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return self.embed_pooler.get_pooling_updates(
+            "embed"
+        ) | self.token_classify_pooler.get_pooling_updates("token_classify")
+
+    def extra_repr(self) -> str:
+        s = f"supported_task={self.get_supported_tasks()}"
+        return s
+
+
+__all__ = ["BOSEOSFilter", "DispatchPooler", "IdentityPooler", "BgeM3Pooler"]

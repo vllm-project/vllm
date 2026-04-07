@@ -361,7 +361,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
         else:
-            quant_scales = None
+            quant_scales = []
             a1q_scale = None
             fc1_expert_weights = w1
             fc2_expert_weights = w2

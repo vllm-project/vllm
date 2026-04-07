@@ -17,8 +17,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .utils import maybe_prefix
 
-SQRT2 = 2**0.5
-
 
 class MLPSpeculatorLayerNorm(nn.Module):
     """
@@ -170,57 +168,6 @@ class MLPSpeculator(nn.Module):
         self.logits_processor = LogitsProcessor(
             config.vocab_size, config.vocab_size, 1.0
         )
-
-    # NOTE(woosuk): This method is commented out because it is old code
-    # using V0. We should either port it to V1 or remove it.
-
-    # def generate_proposals(
-    #     self,
-    #     input_ids: torch.Tensor,
-    #     previous_hidden_states: torch.Tensor,
-    #     num_predict_tokens: int,
-    #     sampling_metadata: SamplingMetadata,
-    # ) -> list[SamplerOutput]:
-    #     if num_predict_tokens > self.max_speculative_tokens:
-    #         raise ValueError(f"Max speculative tokens for model is "
-    #                          f"{self.max_speculative_tokens}, but "
-    #                          f"{num_predict_tokens} were requested")
-
-    #     # b x 1 x d
-    #     previous_hidden_states = previous_hidden_states.unsqueeze(1)
-
-    #     if self.scale_input:
-    #         previous_hidden_states = self.ln0(previous_hidden_states) / SQRT2
-
-    #     # b x 1
-    #     last_tokens = input_ids.unsqueeze(1)
-
-    #     next_tokens = []
-
-    #     for head_index in range(num_predict_tokens):
-
-    #         # Project and predict
-    #         z = self.emb[head_index](last_tokens)  # b k d
-    #         states = self.proj[head_index](previous_hidden_states)
-
-    #         # Weighted add of state_weight*state and emb_weight*z
-    #         # Let subsequent LN take care of denominator
-    #         # state_weight is close to 1, so shouldn't be any precision issues
-    #         states.add_(z, alpha=self.emb_weight / self.state_weight)
-
-    #         states = self.activation(self.ln[head_index](states))  # b k d
-    #         previous_hidden_states = states
-    #         # TODO: not yet supporting top_k_tokens_per_head
-    #         states = states.flatten(0, 1)
-
-    #         logits = self.logits_processor(self.head[head_index], states,
-    #                                        sampling_metadata)
-
-    #         output = self.sampler(logits, sampling_metadata)
-    #         last_tokens = output.sampled_token_ids
-    #         next_tokens.append(output)
-
-    #     return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())

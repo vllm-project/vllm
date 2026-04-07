@@ -1,15 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    eplb_map_to_physical_and_record,
+)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.models.llama4 import Llama4MoE
+from vllm.platforms import current_platform
+
+
+def _is_aiter_capable() -> bool:
+    """Check if the platform supports AITER (gfx942/gfx950)."""
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import _ON_MI3XX
+
+        return _ON_MI3XX
+    except ImportError:
+        return False
+
 
 # Test parameters
 MK_S = [(32, 256), (64, 512)]
@@ -39,11 +58,13 @@ def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerSta
     logical_replica_count = torch.ones(
         global_num_experts, dtype=torch.int64, device="cuda"
     )
+    should_record_tensor = torch.ones((), dtype=torch.bool, device="cuda")
 
     return EplbLayerState(
         expert_load_view=expert_load_view,
         logical_to_physical_map=logical_to_physical_map,
         logical_replica_count=logical_replica_count,
+        should_record_tensor=should_record_tensor,
     )
 
 
@@ -94,6 +115,60 @@ def assert_routing_results_close(
     torch.testing.assert_close(
         topk_weights_sorted, baseline_weights_sorted, rtol=rtol, atol=atol
     )
+
+
+def assert_aiter_routing_valid(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    num_experts: int,
+    renormalize: bool,
+    routed_scaling_factor: float = 1.0,
+):
+    """Validate AITER routing outputs are structurally correct.
+
+    AITER grouped_topk is a fundamentally different implementation from
+    the Python baseline (different group selection, scoring internals),
+    so numerical comparison is not meaningful. Instead we verify the
+    outputs satisfy the routing contract: correct shapes, valid expert
+    IDs, non-negative weights, and proper normalization."""
+    n_tokens = topk_weights.shape[0]
+
+    # Shape
+    assert topk_weights.shape == (n_tokens, top_k), (
+        f"weights shape {topk_weights.shape} != ({n_tokens}, {top_k})"
+    )
+    assert topk_ids.shape == (n_tokens, top_k), (
+        f"ids shape {topk_ids.shape} != ({n_tokens}, {top_k})"
+    )
+
+    # Expert IDs in valid range
+    assert (topk_ids >= 0).all() and (topk_ids < num_experts).all(), (
+        f"expert IDs out of range [0, {num_experts}): "
+        f"min={topk_ids.min().item()}, max={topk_ids.max().item()}"
+    )
+
+    # No duplicate expert IDs per token
+    for i in range(n_tokens):
+        ids = topk_ids[i]
+        assert ids.unique().numel() == top_k, (
+            f"token {i}: duplicate expert IDs {ids.tolist()}"
+        )
+
+    # Weights are non-negative
+    assert (topk_weights >= 0).all(), "negative routing weights"
+
+    # If renormalized, weights should sum to ~scaling_factor per token
+    # (renormalization to 1.0 happens before scaling)
+    if renormalize:
+        expected_sum = routed_scaling_factor
+        sums = topk_weights.sum(dim=-1)
+        torch.testing.assert_close(
+            sums,
+            torch.full_like(sums, expected_sum),
+            atol=1e-3,
+            rtol=1e-3,
+        )
 
 
 def baseline_fused_topk(
@@ -400,10 +475,7 @@ def test_grouped_topk(
 
     hidden_states, router_logits = make_test_data(m, k, global_num_experts)
 
-    # Get router output
-    topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
-
-    # Compute baseline
+    # Compute baseline (pure Python implementation)
     baseline_weights, baseline_ids = baseline_grouped_topk(
         router_logits,
         top_k,
@@ -415,8 +487,32 @@ def test_grouped_topk(
         routed_scaling_factor,
     )
 
-    # Compare results
-    assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
+    # Test 1: Python/Triton path against baseline (exact match)
+    with patch(
+        "vllm.model_executor.layers.fused_moe.router.grouped_topk_router.rocm_aiter_ops.is_fused_moe_enabled",
+        return_value=False,
+    ):
+        py_weights, py_ids = router.select_experts(hidden_states, router_logits)
+    assert_routing_results_close(py_weights, py_ids, baseline_weights, baseline_ids)
+
+    # Test 2: AITER path — verify outputs are structurally valid.
+    # AITER grouped_topk is a different implementation so we can't
+    # compare numerically against the Python baseline.
+    if _is_aiter_capable():
+        # Force-enable AITER for gfx942/gfx950 regardless of env var,
+        # so CI always exercises this path on capable hardware.
+        with patch.object(rocm_aiter_ops, "_AITER_ENABLED", True):
+            aiter_weights, aiter_ids = router.select_experts(
+                hidden_states, router_logits
+            )
+        assert_aiter_routing_valid(
+            aiter_weights,
+            aiter_ids,
+            top_k,
+            global_num_experts,
+            renormalize,
+            routed_scaling_factor,
+        )
 
 
 @pytest.mark.parametrize("m,k", MK_S)
@@ -490,3 +586,152 @@ def test_custom(
 
 #     hidden_states, router_logits = make_test_data(m, k, global_num_experts)
 #     topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
+
+
+# ---------------------------------------------------------------------------
+# Tests for eplb_map_to_physical_and_record
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("record_enabled", [True, False])
+@pytest.mark.parametrize(
+    "l2p_map, replica_count, num_physical, topk_ids, expected_out, expected_load",
+    [
+        pytest.param(
+            # logical i → physical i
+            [[0], [1], [2], [3]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2]],
+            [[0, 1], [2, 3], [0, 2]],
+            [2, 1, 2, 1],
+            id="identity",
+        ),
+        pytest.param(
+            # logical 0→3, 1→0, 2→1, 3→2
+            [[3], [0], [1], [2]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2]],
+            [[3, 0], [1, 2], [3, 1]],
+            [1, 2, 1, 2],
+            id="shuffled",
+        ),
+        pytest.param(
+            # logical 0→5, 1→2, 2→7, 3→0 in a larger physical space
+            [[5], [2], [7], [0]],
+            [1, 1, 1, 1],
+            8,
+            [[0, 1], [2, 3]],
+            [[5, 2], [7, 0]],
+            [1, 0, 1, 0, 0, 1, 0, 1],
+            id="sparse",
+        ),
+    ],
+)
+def test_eplb_map_no_redundancy(
+    record_enabled,
+    l2p_map,
+    replica_count,
+    num_physical,
+    topk_ids,
+    expected_out,
+    expected_load,
+):
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
+    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    rec = torch.tensor(record_enabled, dtype=torch.bool, device="cuda")
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+
+    out = eplb_map_to_physical_and_record(
+        topk_ids=ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+    )
+
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    torch.testing.assert_close(out, exp_out)
+
+    if record_enabled:
+        exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+        torch.testing.assert_close(load, exp_load)
+    else:
+        assert load.sum().item() == 0
+
+
+@pytest.mark.parametrize("record_enabled", [True, False])
+@pytest.mark.parametrize(
+    "l2p_map, replica_count, num_physical, topk_ids, expected_out, expected_load",
+    [
+        pytest.param(
+            # experts 0,1 have 2 replicas; 2,3 have 1
+            [[0, 4], [1, 5], [2, -1], [3, -1]],
+            [2, 2, 1, 1],
+            6,
+            [[0, 1], [2, 3], [0, 2]],
+            # offs: 0→0%2=0→p0, 1→1%2=1→p5, 2→2%1=0→p2,
+            #        3→3%1=0→p3, 4→4%2=0→p0, 5→5%1=0→p2
+            [[0, 5], [2, 3], [0, 2]],
+            [2, 0, 2, 1, 0, 1],
+            id="partial",
+        ),
+        pytest.param(
+            # all 4 experts have 2 replicas
+            [[0, 4], [1, 5], [2, 6], [3, 7]],
+            [2, 2, 2, 2],
+            8,
+            [[0, 1], [2, 3], [0, 2]],
+            # offs: 0→0%2=0→p0, 1→1%2=1→p5, 2→2%2=0→p2,
+            #        3→3%2=1→p7, 4→4%2=0→p0, 5→5%2=1→p6
+            [[0, 5], [2, 7], [0, 6]],
+            [2, 0, 1, 0, 0, 1, 1, 1],
+            id="full",
+        ),
+        pytest.param(
+            # expert 0: 4 replicas, experts 1,2: 2 replicas
+            [[0, 3, 5, 7], [1, 4, -1, -1], [2, 6, -1, -1]],
+            [4, 2, 2],
+            8,
+            [[0, 1], [2, 0], [1, 2]],
+            # offs: 0→0%4=0→p0, 1→1%2=1→p4, 2→2%2=0→p2,
+            #        3→3%4=3→p7, 4→4%2=0→p1, 5→5%2=1→p6
+            [[0, 4], [2, 7], [1, 6]],
+            [1, 1, 1, 0, 1, 0, 1, 1],
+            id="uneven",
+        ),
+    ],
+)
+def test_eplb_map_with_redundancy(
+    record_enabled,
+    l2p_map,
+    replica_count,
+    num_physical,
+    topk_ids,
+    expected_out,
+    expected_load,
+):
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
+    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    rec = torch.tensor(record_enabled, dtype=torch.bool, device="cuda")
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+
+    out = eplb_map_to_physical_and_record(
+        topk_ids=ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+    )
+
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    torch.testing.assert_close(out, exp_out)
+
+    if record_enabled:
+        exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+        torch.testing.assert_close(load, exp_load)
+    else:
+        assert load.sum().item() == 0

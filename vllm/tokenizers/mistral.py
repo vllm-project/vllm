@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
+from mistral_common.guidance.grammar_factory import GrammarFactory
+from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
@@ -45,6 +48,7 @@ except ImportError:
     )
 
 if TYPE_CHECKING:
+    import llguidance
     from transformers import BatchEncoding
 
 logger = init_logger(__name__)
@@ -574,3 +578,24 @@ class MistralTokenizer(TokenizerLike):
             ]
 
         return tokens
+
+    @property
+    def supports_grammar(self) -> bool:
+        return GrammarFactory.is_supported(self.mistral)
+
+    @cached_property
+    def grammar_factory(self) -> GrammarFactory:
+        if not self.supports_grammar:
+            raise AttributeError(
+                "This tokenizer does not support `grammar_factory`. "
+                "This is only supported for tekken tokenizers with "
+                "version >= 11."
+            )
+        # Cache grammar factory to avoid creating a llguidance tokenizer at every usage.
+        return GrammarFactory(self.mistral)
+
+    @cached_property
+    def llg_tokenizer(self) -> "llguidance.LLTokenizer":
+        if not self.is_tekken:
+            raise ValueError("`llg_tokenizer` is only supported for Tekkenizers.")
+        return from_mistral_tokenizer(self.mistral)

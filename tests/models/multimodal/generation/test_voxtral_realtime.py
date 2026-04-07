@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from dataclasses import asdict
 
 import pytest
 import pytest_asyncio
@@ -75,7 +74,7 @@ def tokenizer() -> MistralTokenizer:
 @pytest.fixture
 def engine():
     engine_args = EngineArgs(**ENGINE_CONFIG)
-    llm = LLM(**asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     try:
         yield llm
     finally:

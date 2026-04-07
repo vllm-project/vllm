@@ -5,8 +5,8 @@
 set -ex
 
 # allow to bind to different cores
-CORE_RANGE=${CORE_RANGE:-0-16}
-OMP_CORE_RANGE=${OMP_CORE_RANGE:-0-16}
+CORE_RANGE=${CORE_RANGE:-0-31}
+OMP_CORE_RANGE=${OMP_CORE_RANGE:-0-31}
 
 export CMAKE_BUILD_PARALLEL_LEVEL=16
 
@@ -40,6 +40,11 @@ function cpu_tests() {
   docker exec cpu-test bash -c "
     set -e
     pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model"
+
+  # Run quantized model tests
+  docker exec cpu-test bash -c "
+    set -e
+    pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 
   # Run kernel tests
   docker exec cpu-test bash -c "

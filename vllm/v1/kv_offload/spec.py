@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
@@ -16,6 +16,56 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class CanonicalKVCacheTensor:
+    """
+    A canonicalized KV cache tensor whose first dimension is num_blocks.
+
+    For attention backends where the raw tensor has num_blocks at a
+    non-leading physical dimension (e.g. FlashAttention's
+    (2, num_blocks, ...) layout), the tensor is split so that each
+    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
+    """
+
+    # The KV cache tensor with shape (num_blocks, ...)
+    tensor: torch.Tensor
+    # The (possibly padded) page size per block in bytes
+    page_size_bytes: int
+
+
+@dataclass
+class CanonicalKVCacheRef:
+    """
+    Per-layer (or group of layers) reference to a specific (by index)
+    CanonicalKVCacheTensor and records the un-padded page size used by that layer.
+    """
+
+    # Index into the list of CanonicalKVCacheTensor objects
+    tensor_idx: int
+    # The un-padded page size per block in bytes
+    page_size_bytes: int
+
+
+@dataclass
+class CanonicalKVCaches:
+    """
+    Canonicalized block-level representation of the KV caches.
+
+    Composed of:
+        - Unique list of KV cache data tensors,
+          each with shape (num_blocks, page_size_in_bytes) and int8 dtype.
+        - Per-group data references of the tensors.
+          i.e. how each KV cache group maps to the tensors.
+    """
+
+    # Ordered list of unique block tensors, each with shape
+    # (num_blocks, ...).
+    tensors: list[CanonicalKVCacheTensor]
+    # Per-KV-cache-group list of data references that map each layer
+    # in the group to the appropriate entry in the tensors list.
+    group_data_refs: list[list[CanonicalKVCacheRef]]
 
 
 class OffloadingSpec(ABC):
@@ -43,7 +93,12 @@ class OffloadingSpec(ABC):
         )
 
         for block_size in self.gpu_block_size:
-            assert block_size % self.hash_block_size == 0
+            assert block_size % self.hash_block_size == 0, (
+                f"gpu_block_size={block_size} not divisible by "
+                f"hash_block_size={self.hash_block_size}. "
+                f"Hybrid models (e.g. Mamba+Attention) need "
+                f"--enable-prefix-caching to align block sizes."
+            )
 
         # offloaded_block_size / gpu_block_size
         self.block_size_factor: int = 1
@@ -73,16 +128,13 @@ class OffloadingSpec(ABC):
 
     @abstractmethod
     def get_handlers(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
+        self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         """
         Get offloading handlers along with their respective src and dst types.
 
         Args:
-            kv_caches: A dictionary of layer_name -> gpu_kv_cache tensor.
-            attn_backends: A dictionary of layer_name -> AttentionBackend.
+            kv_caches: Canonicalized KV caches.
 
         Yields:
             Tuples of (src_type, dst_type, offloading_handler).

@@ -1,0 +1,8 @@
+model_name: "amd/Qwen3.5-35B-A3B-MXFP4"
+accuracy_threshold: 0.82
+tolerance: 0.03
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --max-model-len 4096
+  --tensor-parallel-size 2

@@ -145,6 +145,13 @@ class PyNcclCommunicator:
             stream.synchronize()
             del data
 
+    def destroy(self):
+        if self.available and not self.disabled:
+            with torch.accelerator.device_index(self.device.index):
+                self.nccl.ncclCommDestroy(self.comm)
+            self.available = False
+            self.disabled = True
+
     def all_reduce(
         self,
         in_tensor: torch.Tensor,

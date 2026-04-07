@@ -154,8 +154,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         self.data.copy_(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_offset = kwargs.get("shard_offset")
-        shard_size = kwargs.get("shard_size")
+        shard_offset: int = kwargs["shard_offset"]
+        shard_size: int = kwargs["shard_size"]
 
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if (
@@ -176,10 +176,10 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data.copy_(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_offset = kwargs.get("shard_offset")
-        shard_size = kwargs.get("shard_size")
-        shard_id = kwargs.get("shard_id")
-        num_heads = kwargs.get("num_heads")
+        shard_offset: int = kwargs["shard_offset"]
+        shard_size: int = kwargs["shard_size"]
+        shard_id: str = kwargs["shard_id"]
+        num_heads: int = kwargs["num_heads"]
 
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if (
@@ -191,10 +191,10 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             )
 
         param_data = self.data
-        shard_id = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
+        shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.narrow(
-            self.output_dim, shard_id * shard_size, shard_size
+            self.output_dim, shard_id_int * shard_size, shard_size
         )
 
         assert param_data.shape == loaded_weight.shape

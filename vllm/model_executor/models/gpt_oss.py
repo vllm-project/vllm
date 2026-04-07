@@ -273,7 +273,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,

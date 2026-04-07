@@ -5,10 +5,12 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    NvFp4LinearBackend,
     apply_nvfp4_linear,
     convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
@@ -19,6 +21,9 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 
+logger = init_logger(__name__)
+
+
 __all__ = ["CompressedTensorsW4A4Fp4"]
 
 
@@ -26,6 +31,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
         self.backend = select_nvfp4_linear_backend()
         self.group_size = 16
+
+        self.swizzle = None
+        if self.backend == NvFp4LinearBackend.EMULATION:
+            self.swizzle = False
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -89,6 +98,19 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # Rename CT checkpoint names to standardized names
         layer.weight = layer.weight_packed
         del layer.weight_packed
+
+        if (
+            torch.unique(layer.input_global_scale).numel() != 1
+            or torch.unique(layer.weight_global_scale).numel() != 1
+        ):
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for input or weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely result in reduced accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for fused layers."
+            )
+
         # Process global scales (CT stores as divisors, i.e. 1/scale)
         input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(
@@ -121,4 +143,5 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer=layer,
             x=x,
             bias=bias,
+            swizzle=self.swizzle,
         )

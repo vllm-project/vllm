@@ -281,8 +281,16 @@ class PromptTokenStats:
 
         self.computed += prompt_len - num_cached_tokens
         self.external_kv_transfer += num_external_computed_tokens
-        self.local_cache_hit += (
-            num_cached_tokens + recomputed - num_external_computed_tokens
+        # FIXME(yifan): local_cache_hit can go negative after preemption.
+        # num_cached_tokens is a one-time snapshot from first scheduling and
+        # is never reset on preemption, while num_external_computed_tokens is
+        # overwritten on re-scheduling. If CPU offload finds more tokens on
+        # the second pass than the original total, the subtraction underflows.
+        # A fundamental fix is to track the first-time num_external_computed_tokens
+        # as a separate metric rather than reusing num_external_computed_tokens
+        # for metric directly.
+        self.local_cache_hit += max(
+            0, (num_cached_tokens + recomputed - num_external_computed_tokens)
         )
         self.cached_tokens += num_cached_tokens
         self.recomputed_tokens += recomputed

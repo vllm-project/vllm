@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
+import vllm.ir
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -197,8 +198,6 @@ class ForwardContext:
     for each microbatch.
     Set dynamically for each forward pass
     """
-    # TODO: remove after making all virtual_engines share the same kv cache
-    virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
@@ -265,7 +264,6 @@ def is_forward_context_available() -> bool:
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
@@ -282,7 +280,6 @@ def create_forward_context(
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
-        virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
@@ -313,7 +310,6 @@ def override_forward_context(forward_context: ForwardContext | None):
 def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -362,7 +358,6 @@ def set_forward_context(
     additional_kwargs = current_platform.set_additional_forward_context(
         attn_metadata=attn_metadata,
         vllm_config=vllm_config,
-        virtual_engine=virtual_engine,
         dp_metadata=dp_metadata,
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
@@ -374,7 +369,6 @@ def set_forward_context(
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
-        virtual_engine,
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,
@@ -385,7 +379,13 @@ def set_forward_context(
     )
 
     try:
-        with override_forward_context(forward_context):
+        with (
+            override_forward_context(forward_context),
+            vllm_config.kernel_config.ir_op_priority.set_priority(),
+            vllm.ir.enable_torch_wrap(
+                vllm_config.compilation_config.ir_enable_torch_wrap
+            ),
+        ):
             yield
     finally:
         global last_logging_time, batchsize_logging_interval
