@@ -2,16 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing_extensions import TypedDict
-
-
-class ServerConfig(TypedDict, total=False):
-    model: str
-    arguments: list[str]
-    system_prompt: str | None
-    supports_parallel: bool | None
-    supports_rocm: bool | None
-
+from tests.tool_use.utils import ServerConfig
 
 ARGS: list[str] = ["--max-model-len", "1024"]
 

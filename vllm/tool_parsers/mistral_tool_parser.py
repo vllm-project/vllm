@@ -367,7 +367,7 @@ class MistralToolParser(ToolParser):
                 ):
                     reasoning_ended = True
                     current_token_ids = reasoning_parser.extract_content_ids(
-                        output_token_ids
+                        list(output_token_ids)
                     )
                     if delta_message and delta_message.content:
                         current_text = delta_message.content
