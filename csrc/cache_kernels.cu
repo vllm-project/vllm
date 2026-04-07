@@ -124,7 +124,7 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
   if (batch_fn != nullptr) {
     CUmemcpyAttributes attr = {};
-    attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+    attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_ANY;
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
     CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data),
