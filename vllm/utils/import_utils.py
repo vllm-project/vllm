@@ -461,3 +461,8 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+def has_fbgemm_gpu() -> bool:
+    """Whether the optional `fbgemm_gpu` package is available."""
+    return _has_module("fbgemm_gpu")
