@@ -129,6 +129,7 @@ class MoEMixin(MixtureOfExperts):
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        should_record_tensor: torch.Tensor,
     ):
         for moe_layer_idx, mlp_layer in enumerate(self.mlp_moe_layers):
             mlp_layer.experts.set_eplb_state(
@@ -136,6 +137,7 @@ class MoEMixin(MixtureOfExperts):
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
+                should_record_tensor=should_record_tensor,
             )
 
     def update_physical_experts_metadata(

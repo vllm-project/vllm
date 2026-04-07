@@ -195,6 +195,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
 
         logical_to_physical_map = torch.stack(logical_to_physical_map_list)
 
+        should_record = torch.ones((), dtype=torch.bool, device=device)
         for lidx, fml in enumerate(fml_layers):
             logical_replica_count = torch.ones(
                 (test_config.num_layers, num_global_experts),
@@ -211,6 +212,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 ),
                 logical_to_physical_map,
                 logical_replica_count,
+                should_record,
             )
 
         out_after_shuffle = []
