@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from enum import Enum
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -23,6 +24,21 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+
+class EagleMode(Enum):
+    """How EAGLE-specific prefix-cache logic should be applied.
+
+    `PRIMARY` applies the full EAGLE adjustment for a group. This should only
+    happen once per group during a hybrid fixed-point search.
+    `SECONDARY` means the group is being revisited after another group already
+    tightened the common cache-hit length, so the EAGLE adjustment must not be
+    applied again.
+    """
+
+    NONE = "none"
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -315,7 +331,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -325,9 +341,10 @@ class SingleTypeKVCacheManager(ABC):
         `max_length`. The prefix should be a common prefix hit for all the
         kv cache groups in `kv_cache_group_ids`. If no cache hit is found,
         return an empty list.
-        If eagle is enabled, drop the last matched block to force recompute the
-        last block to get the required hidden states for eagle drafting head.
-        Need to be customized for each attention type.
+        If `eagle_mode` is `PRIMARY`, apply the one-time EAGLE-specific
+        prefix-cache adjustment for this group. If it is `SECONDARY`, recompute
+        against a shorter common hit length without applying that adjustment a
+        second time.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -335,7 +352,7 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
+            eagle_mode: How EAGLE-specific logic should be applied.
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens). By default, it should
                 be set to the block_size.
@@ -425,7 +442,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -454,7 +471,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        if use_eagle and computed_blocks[0]:
+        if eagle_mode is EagleMode.PRIMARY and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
             for computed in computed_blocks:
                 computed.pop()
@@ -490,7 +507,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -506,7 +523,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         sliding_window_contiguous_blocks = cdiv(
             kv_cache_spec.sliding_window - 1, kv_cache_spec.block_size
         )
-        if use_eagle:
+        if eagle_mode is EagleMode.PRIMARY:
             # Need to drop the last matched block if eagle is enabled. For
             # sliding window layer, we achieve this by increasing the number of
             # contiguous blocks needed for prefix cache hit by one and dropping
@@ -564,7 +581,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 for computed in computed_blocks:
                     computed.pop()
-        if use_eagle and computed_blocks[0]:
+        if eagle_mode is EagleMode.PRIMARY and computed_blocks[0]:
             assert kv_cache_spec.block_size == alignment_tokens, (
                 "aligned_length is not compatible with eagle now"
             )
@@ -623,7 +640,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -654,7 +671,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
+            eagle_mode: How EAGLE-specific logic should be applied.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
@@ -667,7 +684,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
         )
-        assert use_eagle is False, (
+        assert eagle_mode is not EagleMode.PRIMARY, (
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
@@ -783,7 +800,7 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -1065,7 +1082,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
+        eagle_mode: EagleMode,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,

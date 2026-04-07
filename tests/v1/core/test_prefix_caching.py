@@ -890,10 +890,20 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 
 
 # Test cases with eagle enabled: Only test a single simple case for now.
-# - 2 groups: 1 full + 1 other
+# Includes:
+# - simple hybrid (2 attention-group types)
+# - complex hybrid (3 attention-group types), which exercises the fixed-point
+#   retry path in HybridKVCacheCoordinator.
 _EAGLE_HYBRID_MODEL_TEST_CASES = [
     # 2 groups: 1 full + 1 other
     pytest.param(["full", "sliding_window"], 2, id="2g-full+sw"),
+    # 3 groups: 1 full + 2 others (different types)
+    pytest.param(["full", "sliding_window", "mamba"], 2, id="3g-full+sw+mamba"),
+    pytest.param(
+        ["full", "sliding_window", "sliding_window_large"],
+        1,
+        id="3g-full+sw+sw_large",
+    ),
 ]
 
 
@@ -902,8 +912,11 @@ def test_prefill_hybrid_model_combinations_eagle(
     spec_types: list[str], expect_hit_length: int
 ):
     """
-    Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
-    More complex hybrid models with EAGLE are not yet supported (see issue #32802).
+    Test prefix caching with hybrid models with EAGLE.
+
+    Complex hybrids need to revisit some attention groups after another group
+    tightens the common cache-hit length. This should not re-apply the EAGLE
+    block-drop adjustment on every retry.
     """
     block_size = 16
     num_groups = len(spec_types)
@@ -941,6 +954,11 @@ def test_prefill_hybrid_model_combinations_eagle(
     assert blocks is not None
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
+
+    # Start a new scheduling step so step-local cache metadata (for example,
+    # Mamba's cached_blocks_this_step) does not artificially constrain the next
+    # request in the regression cases below.
+    manager.new_step_starts()
 
     # Second request: should hit cached blocks for common prefix
     all_token_ids = common_token_ids + [6] * 5
