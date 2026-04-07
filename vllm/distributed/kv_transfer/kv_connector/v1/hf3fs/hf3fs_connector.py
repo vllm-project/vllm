@@ -3,7 +3,8 @@
 """
 HF3FS KV Connector Implementation for vLLM.
 
-This module implements a KV connector that uses the 3FS for storing and retrieving KV cache data.
+This module implements a KV connector that uses
+the 3FS for storing and retrieving KV cache data.
 
 Key components:
 1. HF3FSConnector: Main connector implementation
@@ -15,15 +16,19 @@ Key components:
 
 import atexit
 import concurrent
-from concurrent.futures import Future
+import copy
 import hashlib
 import os
 import queue
-from queue import Empty
 import signal
 import threading
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from concurrent.futures import Future
+from dataclasses import dataclass
+from queue import Empty
+from typing import Any, Optional
+
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
@@ -32,53 +37,55 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server import (
+    Hf3fsGlobalMetadataClient as Hf3fsMetadataClient,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils import (
     gather_scatter_helper,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
     AtomicCounter,
-    RequestSchedulingState,
-    HF3FSRequestMetadata,
     HF3FSConnectorMetadata,
+    HF3FSRequestMetadata,
     LoadBlockInfo,
+    RequestSchedulingState,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.gather_scatter_helper import (
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.gather_scatter_helper import (  # noqa: E501
     CopyBufferAllocator,
 )
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-from vllm.logger import init_logger
-from vllm.v1.core.sched.output import SchedulerOutput
-
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.forward_context import ForwardContext
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.request import Request
-
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
     PromMetric,
     PromMetricT,
 )
-from dataclasses import dataclass
-import copy
-import numpy as np
-
-from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server import (
-    Hf3fsGlobalMetadataClient as Hf3fsMetadataClient,
-)
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+from vllm.forward_context import ForwardContext
+from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.request import Request
 
 HF3FS_AVAILABLE = True
+Hf3fsClient = None
 try:
-    from hf3fs_fuse.io import deregister_fd
+    from hf3fs_fuse.io import deregister_fd  # noqa: F401
+
     from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
-        Hf3fsClient,
+        Hf3fsClient as _RealClient,
     )
-except Exception as e:
+
+    Hf3fsClient = _RealClient
+except Exception:
     HF3FS_AVAILABLE = False
-    from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
-        Hf3fsClient,
+    from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (  # noqa: E501
+        Hf3fsClient as _MockClient,
     )
+
+    Hf3fsClient = _MockClient  # type: ignore
 
 # Constants
 DEFAULT_MAX_IO_ENTRIES = 8
@@ -108,9 +115,9 @@ class AsyncOperationManager:
         self._max_device_buffer_count = connector._max_device_buffer_count
 
         # Operation tracking
-        self._save_futures: Dict[str, List[Future]] = {}
-        self._load_futures: Dict[str, Future] = {}
-        self._pending_finished_requests: Set[str] = set()
+        self._save_futures: dict[str, list[Future]] = {}
+        self._load_futures: dict[str, Future] = {}
+        self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
         self._init_cuda_resources()
@@ -146,8 +153,8 @@ class AsyncOperationManager:
         """Initialize worker threads and I/O executor."""
         # Thread synchronization
         self._stop_event = threading.Event()
-        self._save_queue = queue.Queue()
-        self._load_queue = queue.Queue()
+        self._save_queue: queue.Queue[Any] = queue.Queue()
+        self._load_queue: queue.Queue[Any] = queue.Queue()
 
         # I/O thread pool
         self._io_executor = concurrent.futures.ThreadPoolExecutor(
@@ -163,7 +170,7 @@ class AsyncOperationManager:
 
     def submit_save_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a save operation for async execution."""
-        future = Future()
+        future: Future[Any] = Future()
         main_stream_event = torch.cuda.Event()
         main_stream_event.record()
         task = (request_id, block_ids, block_hashes, future, main_stream_event)
@@ -176,15 +183,15 @@ class AsyncOperationManager:
 
     def submit_load_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a load operation for async execution."""
-        future = Future()
+        future: Future[Any] = Future()
         task = (request_id, block_ids, block_hashes, future)
         self._load_queue.put(task)
         self._load_futures[request_id] = future
         return future
 
     def get_finished_operations(
-        self, finished_req_ids: Set[str]
-    ) -> Tuple[Set[str], Set[str]]:
+        self, finished_req_ids: set[str]
+    ) -> tuple[set[str], set[str]]:
         completed_saves = self._check_completed_saves(finished_req_ids)
         completed_loads = self._check_completed_loads()
 
@@ -197,7 +204,7 @@ class AsyncOperationManager:
 
         return completed_saves, completed_loads
 
-    def _check_completed_saves(self, finished_req_ids: Set[str]) -> Set[str]:
+    def _check_completed_saves(self, finished_req_ids: set[str]) -> set[str]:
         """Check for completed save operations."""
         completed = set()
 
@@ -221,7 +228,7 @@ class AsyncOperationManager:
 
         return completed
 
-    def _check_completed_loads(self) -> Set[str]:
+    def _check_completed_loads(self) -> set[str]:
         """Check for completed load operations."""
         completed = set()
         for request_id in list(self._load_futures):
@@ -236,7 +243,7 @@ class AsyncOperationManager:
 
     def _save_worker(self) -> None:
         """Background worker for handling save operations."""
-        torch.cuda.set_device(self._device)
+        torch.accelerator.set_device_index(self._device)
         while not self._stop_event.is_set():
             try:
                 task = self._save_queue.get(block=True, timeout=1)
@@ -248,7 +255,7 @@ class AsyncOperationManager:
 
     def _load_worker(self) -> None:
         """Background worker for handling load operations."""
-        torch.cuda.set_device(self._device)
+        torch.accelerator.set_device_index(self._device)
         while not self._stop_event.is_set():
             try:
                 task = self._load_queue.get(block=True, timeout=1)
@@ -273,7 +280,9 @@ class AsyncOperationManager:
             )
 
             if any(result[1] < 0 for result in allocation_results):
-                return self._fail_task("Saved", "Page allocation failed", request_id, future)
+                return self._fail_task(
+                    "Saved", "Page allocation failed", request_id, future
+                )
 
             page_indices = [result[1] for result in allocation_results]
             offsets = [idx * self._bytes_per_page for idx in page_indices]
@@ -331,12 +340,16 @@ class AsyncOperationManager:
                     self._rank, [], page_indices
                 )
                 self._save_buffer_allocator.free_buffer(buffers)
-                return self._fail_task("Saved", "Write operation failed", request_id, future)
+                return self._fail_task(
+                    "Saved", "Write operation failed", request_id, future
+                )
 
         except Exception as e:
             if buffers is not None:
                 self._save_buffer_allocator.free_buffer(buffers)
-            return self._fail_task("Saved", f"Task execution error: {e}", request_id, future)
+            return self._fail_task(
+                "Saved", f"Task execution error: {e}", request_id, future
+            )
 
     def _handle_load_task(self, task) -> None:
         """Handle individual load task."""
@@ -383,7 +396,9 @@ class AsyncOperationManager:
 
             if not read_success:
                 self._load_buffer_allocator.free_buffer(buffers)
-                return self._fail_task("Loaded", "Read operation failed", request_id, future)
+                return self._fail_task(
+                    "Loaded", "Read operation failed", request_id, future
+                )
 
             # Step3: Scatter data back to KV cache
             with torch.cuda.stream(self._load_stream):
@@ -400,20 +415,18 @@ class AsyncOperationManager:
         except Exception as e:
             if buffers is not None:
                 self._load_buffer_allocator.free_buffer(buffers)
-            return self._fail_task("Loaded", f"Task execution error: {e}", request_id, future)
+            return self._fail_task(
+                "Loaded", f"Task execution error: {e}", request_id, future
+            )
 
     def _fail_task(
-        self, 
-        operation: str,
-        error_msg: str, 
-        request_id: str, 
-        future: Future
+        self, operation: str, error_msg: str, request_id: str, future: Future
     ) -> None:
         """Helper to fail task with error logging."""
         logger.error(
-            "%s for %s request %s", 
+            "%s for %s request %s",
             error_msg,
-            operation, 
+            operation,
             request_id,
         )
         self.hf3fs_stats.record_failed_task_count(operation)
@@ -457,15 +470,13 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     """HF3FS KV Connector implementation."""
 
     def __init__(
-        self, 
-        vllm_config: "VllmConfig", 
+        self,
+        vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
-            vllm_config=vllm_config,
-            role=role,
-            kv_cache_config=kv_cache_config
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
 
         # Core configuration
@@ -479,6 +490,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
         # HF3FS configuration
         kv_config = vllm_config.kv_transfer_config
+        assert kv_config is not None
+
         self._storage_path = kv_config.get_from_extra_config(
             "hf3fs_storage_path", "/vllm-workspace/mnt/hf3fs"
         )
@@ -497,7 +510,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         )
 
         if self._role == KVConnectorRole.SCHEDULER:
-            self._scheduling_states: Dict[str, RequestSchedulingState] = {}
+            self._scheduling_states: dict[str, RequestSchedulingState] = {}
             self._metadata_client = Hf3fsMetadataClient()
             self._metadata_client.initialize(0, role="scheduler")
 
@@ -516,7 +529,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     # Worker Side Methods
     ############################################################
 
-    def register_kv_caches(self, kv_caches: Dict[str, torch.Tensor]) -> None:
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         self._kv_caches = kv_caches
         self._setup_kv_cache_config()
         self._setup_storage_clients()
@@ -575,6 +588,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         try:
             # Initialize HF3FS clients
             self._ac = AtomicCounter(self._numjobs)
+            assert Hf3fsClient is not None
             self._clients = [
                 Hf3fsClient(
                     path=file_path,
@@ -651,8 +665,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         pass
 
     def get_finished(
-        self, finished_req_ids: Set[str]
-    ) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
+        self, finished_req_ids: set[str]
+    ) -> tuple[set[str] | None, set[str] | None]:
         return self._async_manager.get_finished_operations(finished_req_ids)
 
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
@@ -660,9 +674,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         Get the KV connector stats collected during the last interval.
         """
         # Clear stats for next iteration
-        if hasattr(self, "_async_manager"):
-            if not self._async_manager.hf3fs_stats.is_empty():
-                return self._async_manager.hf3fs_stats.clone_and_reset()
+        if (
+            hasattr(self, "_async_manager")
+            and not self._async_manager.hf3fs_stats.is_empty()
+        ):
+            return self._async_manager.hf3fs_stats.clone_and_reset()
         return None
 
     ############################################################
@@ -673,16 +689,17 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         return True, None
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
-    ) -> Tuple[int, bool]:
+    ) -> tuple[int, bool]:
         """Get number of new tokens that can be loaded from external cache."""
         try:
             state = self._get_or_create_scheduling_state(request.request_id)
             state.request = request
+            assert request.prompt_token_ids is not None
 
             num_tokens_to_check = self._align_to_block_size(
                 len(request.prompt_token_ids) - 1
@@ -718,7 +735,12 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             )
 
             logger.info(
-                "Token matching for %s: %d matched (%d blocks), %d new hits, prompt len %d",
+                (
+                    "Token matching for %s: "
+                    "%d matched (%d blocks), "
+                    "%d new hits, "
+                    "prompt len %d"
+                ),
                 request.request_id,
                 matched_tokens,
                 matched_blocks,
@@ -744,11 +766,13 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             return
 
         # Validate block allocation
+        assert state.load_op is not None
         expected_blocks = state.load_op.num_blocks_to_load
         actual_blocks = num_external_tokens // self._block_size
-        assert (
-            actual_blocks == expected_blocks
-        ), f"Block count mismatch for {request.request_id}: expected {expected_blocks}, got {actual_blocks}"
+        assert actual_blocks == expected_blocks, (
+            f"Block count mismatch for {request.request_id}: "
+            f"expected {expected_blocks}, got {actual_blocks}"
+        )
 
         # Update load operation with allocated block IDs
         if actual_blocks > 0:
@@ -779,7 +803,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         for state in list(self._scheduling_states.values()):
             if not state.is_ready_to_load():
                 continue
-
+            assert state.load_op is not None
+            assert (
+                state.request is not None and state.request.prompt_token_ids is not None
+            )
             # Create load request metadata
             num_cached_blocks = (
                 state.load_op.num_computed_blocks + state.load_op.num_blocks_to_load
@@ -838,6 +865,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, request_id in enumerate(cached_reqs.req_ids):
             state = self._get_or_create_scheduling_state(request_id)
+            assert state.request is not None
 
             # Update with new tokens and blocks
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
@@ -878,7 +906,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return HF3FSPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
@@ -926,10 +954,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
     def _generate_block_hashes(
         self,
-        token_ids: List[int],
+        token_ids: list[int],
         start_block_id: int,
-        max_blocks_count: Optional[int] = None,
-    ) -> List[str]:
+        max_blocks_count: int | None = None,
+    ) -> list[str]:
         """Generate block hashes for token sequence."""
         block_hashes = []
         previous_hash = ""
@@ -954,7 +982,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         return block_hashes
 
     def _gather_or_scatter_kv_caches(
-        self, block_ids: List[int], block_buffers, operation: str
+        self, block_ids: list[int], block_buffers, operation: str
     ):
         for buffer_tensor, block_id in zip(block_buffers, block_ids):
             start_idx = block_id * self._local_block_size
@@ -977,7 +1005,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
 
     def _compute_prefix_hash(
-        self, token_ids: List[int], previous_hash: str = ""
+        self, token_ids: list[int], previous_hash: str = ""
     ) -> str:
         """Compute prefix hash for token block."""
         combined_string = f"{previous_hash}_{token_ids}"
@@ -987,9 +1015,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         """Align token count to block size."""
         return (num_tokens // self._block_size) * self._block_size
 
+
 @dataclass
 class HF3FSKVConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
+
     def __post_init__(self):
         if not self.data:
             # Empty container init, no data is passed in.
@@ -997,21 +1027,21 @@ class HF3FSKVConnectorStats(KVConnectorStats):
 
     def reset(self):
         # Must be serializable
-        self.data: dict[str, float | list[float]] = {
+        self.data: dict[str, Any] = {
             "save_duration": [],
             "load_duration": [],
             "num_failed_save": 0,
             "num_failed_load": 0,
             "num_transfer_task": 0,
         }
-    
+
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         if not other.is_empty():
             for k, v in other.data.items():
                 accumulator = self.data[k]
                 if isinstance(accumulator, list):
                     accumulator.extend(v)
-                else: # int
+                else:  # int
                     self.data[k] += v
         return self
 
@@ -1020,15 +1050,17 @@ class HF3FSKVConnectorStats(KVConnectorStats):
         if self.is_empty():
             return {
                 "Num transfers task": 0,
-                "Num save task (success/failed)": "0/0",
-                "Num load task (success/failed)": "0/0",
+                "Num save task success": 0,
+                "Num save task failed": 0,
+                "Num load task success": 0,
+                "Num load task failed": 0,
                 "Avg save duration (ms)": 0,
                 "P90 save duration (ms)": 0,
                 "Avg load duration (ms)": 0,
                 "P90 load duration (ms)": 0,
             }
-        num_success_save = len(self.data["save_duration"])
-        num_success_load = len(self.data["load_duration"])
+        num_success_save = len(self.data["save_duration"] or [])
+        num_success_load = len(self.data["load_duration"] or [])
         num_failed_save = self.data["num_failed_save"]
         num_failed_load = self.data["num_failed_load"]
         if num_success_save == 0:
@@ -1042,8 +1074,10 @@ class HF3FSKVConnectorStats(KVConnectorStats):
 
         return {
             "Num transfers task": self.data["num_transfer_task"],
-            "Num save task (success/failed)": f"{num_success_save}/{num_failed_save}",
-            "Num load task (success/failed)": f"{num_success_load}/{num_failed_load}",
+            "Num save task success": num_success_save,
+            "Num save task failed": num_failed_save,
+            "Num load task success": num_success_load,
+            "Num load task failed": num_failed_load,
             "Avg save duration (ms)": round(save_duration.mean() * 1e3, 3),
             "P90 save duration (ms)": round(np.percentile(save_duration, 90) * 1e3, 3),
             "Avg load duration (ms)": round(load_duration.mean() * 1e3, 3),
@@ -1052,14 +1086,14 @@ class HF3FSKVConnectorStats(KVConnectorStats):
 
     def is_empty(self) -> bool:
         return self.data["num_transfer_task"] == 0
-        
+
     def record_success_task_duration(self, operation, duration):
         if operation == "Saved":
             self.data["save_duration"].append(duration)
         elif operation == "Loaded":
             self.data["load_duration"].append(duration)
         self.data["num_transfer_task"] += 1
- 
+
     def record_failed_task_count(self, operation):
         if operation == "Saved":
             self.data["num_failed_save"] += 1
@@ -1072,13 +1106,14 @@ class HF3FSKVConnectorStats(KVConnectorStats):
         self.reset()
         return old
 
+
 class HF3FSPromMetrics(KVConnectorPromMetrics):
     def __init__(
         self,
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
         buckets = [
@@ -1102,31 +1137,39 @@ class HF3FSPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.hf3fs_save_duration = self.make_per_engine(hf3fs_save_duration)
-        
+        self.hf3fs_save_duration = create_metric_per_engine(
+            hf3fs_save_duration, self.per_engine_labelvalues
+        )
+
         hf3fs_load_duration = self._histogram_cls(
             name="vllm:hf3fs_load_duration_seconds",
             documentation="Histogram of load duration for HF3FSKVConnector.",
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.hf3fs_load_duration = self.make_per_engine(hf3fs_load_duration)
-        
+        self.hf3fs_load_duration = create_metric_per_engine(
+            hf3fs_load_duration, self.per_engine_labelvalues
+        )
+
         hf3fs_num_failed_save = self._counter_cls(
             name="vllm:hf3fs_num_failed_save",
             documentation="Number of failed HF3FS KV save.",
             labelnames=labelnames,
         )
-        self.hf3fs_num_failed_save = self.make_per_engine(hf3fs_num_failed_save)
-        
+        self.hf3fs_num_failed_save = create_metric_per_engine(
+            hf3fs_num_failed_save, self.per_engine_labelvalues
+        )
+
         hf3fs_num_failed_load = self._counter_cls(
             name="vllm:hf3fs_num_failed_load",
             documentation="Number of failed HF3FS KV load.",
             labelnames=labelnames,
         )
-        self.hf3fs_num_failed_load = self.make_per_engine(hf3fs_num_failed_load)
+        self.hf3fs_num_failed_load = create_metric_per_engine(
+            hf3fs_num_failed_load, self.per_engine_labelvalues
+        )
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
-        
         for prom_obj, list_item_key in zip(
             [
                 self.hf3fs_save_duration,

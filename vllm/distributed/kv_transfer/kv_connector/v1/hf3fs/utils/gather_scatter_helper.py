@@ -1,10 +1,9 @@
-from typing import List, Optional
-
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -127,7 +126,7 @@ def scatter_kv_caches(
     kv_caches_ptrs: torch.Tensor,
     total_token_in_kvcache: int,
     src_tensor: torch.Tensor,
-    token_indices: List[int],
+    token_indices: list[int],
     is_mla: bool = False,
 ) -> None:
     """Scatter KV cache data from source tensor to KV cache storage.
@@ -146,15 +145,15 @@ def scatter_kv_caches(
 
     if is_mla:
         # MLA: src_tensor is [num_layers, num_tokens_in_block, hidden_size]
-        assert (
-            len(src_tensor.shape) == 3
-        ), f"MLA src_tensor should be 3D, got {src_tensor.shape}"
+        assert len(src_tensor.shape) == 3, (
+            f"MLA src_tensor should be 3D, got {src_tensor.shape}"
+        )
         hidden_size = src_tensor.shape[2]
     else:
         # MHA: src_tensor is [num_layers, 2, num_tokens_in_block, hidden_size]
-        assert (
-            len(src_tensor.shape) == 4
-        ), f"MHA src_tensor should be 4D, got {src_tensor.shape}"
+        assert len(src_tensor.shape) == 4, (
+            f"MHA src_tensor should be 4D, got {src_tensor.shape}"
+        )
         hidden_size = src_tensor.shape[3]
 
     device = src_tensor.device
@@ -182,7 +181,7 @@ def gather_kv_caches(
     kv_caches_ptrs: torch.Tensor,
     total_token_in_kvcache: int,
     dst_tensor: torch.Tensor,
-    token_indices: List[int],
+    token_indices: list[int],
     is_mla: bool = False,
 ) -> None:
     """Gather KV cache data from KV cache storage to destination tensor.
@@ -201,30 +200,30 @@ def gather_kv_caches(
 
     if is_mla:
         # MLA: dst_tensor is [num_layers, num_tokens_in_block, hidden_size]
-        assert (
-            len(dst_tensor.shape) == 3
-        ), f"MLA dst_tensor should be 3D, got {dst_tensor.shape}"
-        assert (
-            dst_tensor.shape[0] == num_layers
-        ), f"Layer count mismatch: {dst_tensor.shape[0]} vs {num_layers}"
-        assert (
-            dst_tensor.shape[1] == num_tokens_in_block
-        ), f"Token count mismatch: {dst_tensor.shape[1]} vs {num_tokens_in_block}"
+        assert len(dst_tensor.shape) == 3, (
+            f"MLA dst_tensor should be 3D, got {dst_tensor.shape}"
+        )
+        assert dst_tensor.shape[0] == num_layers, (
+            f"Layer count mismatch: {dst_tensor.shape[0]} vs {num_layers}"
+        )
+        assert dst_tensor.shape[1] == num_tokens_in_block, (
+            f"Token count mismatch: {dst_tensor.shape[1]} vs {num_tokens_in_block}"
+        )
         hidden_size = dst_tensor.shape[2]
     else:
         # MHA: dst_tensor is [num_layers, 2, num_tokens_in_block, hidden_size]
-        assert (
-            len(dst_tensor.shape) == 4
-        ), f"MHA dst_tensor should be 4D, got {dst_tensor.shape}"
-        assert (
-            dst_tensor.shape[0] == num_layers
-        ), f"Layer count mismatch: {dst_tensor.shape[0]} vs {num_layers}"
-        assert (
-            dst_tensor.shape[1] == 2
-        ), f"MHA should have 2 (K,V) components, got {dst_tensor.shape[1]}"
-        assert (
-            dst_tensor.shape[2] == num_tokens_in_block
-        ), f"Token count mismatch: {dst_tensor.shape[2]} vs {num_tokens_in_block}"
+        assert len(dst_tensor.shape) == 4, (
+            f"MHA dst_tensor should be 4D, got {dst_tensor.shape}"
+        )
+        assert dst_tensor.shape[0] == num_layers, (
+            f"Layer count mismatch: {dst_tensor.shape[0]} vs {num_layers}"
+        )
+        assert dst_tensor.shape[1] == 2, (
+            f"MHA should have 2 (K,V) components, got {dst_tensor.shape[1]}"
+        )
+        assert dst_tensor.shape[2] == num_tokens_in_block, (
+            f"Token count mismatch: {dst_tensor.shape[2]} vs {num_tokens_in_block}"
+        )
         hidden_size = dst_tensor.shape[3]
 
     device = dst_tensor.device
@@ -252,7 +251,7 @@ class CopyBufferAllocator:
     """Memory pool for tensor buffers to avoid frequent allocation/deallocation."""
 
     def __init__(
-        self, device: torch.device, dtype: torch.dtype, shape: tuple, max_count: int
+        self, device: torch.device, dtype: torch.dtype, shape: list, max_count: int
     ):
         self._shape = shape
         self._max_count = max_count
@@ -262,7 +261,7 @@ class CopyBufferAllocator:
         ]
         self._inuse_count = 0
 
-    def alloc_buffer(self, count: int) -> Optional[List[torch.Tensor]]:
+    def alloc_buffer(self, count: int) -> list[torch.Tensor] | None:
         """Allocate buffers from the pool."""
         if count == 0:
             return []
@@ -274,7 +273,7 @@ class CopyBufferAllocator:
             return result
         return None
 
-    def free_buffer(self, buffers: List[torch.Tensor]) -> None:
+    def free_buffer(self, buffers: list[torch.Tensor]) -> None:
         """Return buffers to the pool."""
         if not buffers:
             return

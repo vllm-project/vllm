@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.v1.request import Request
@@ -29,7 +31,7 @@ class LoadBlockInfo:
 
     num_computed_blocks: int
     num_blocks_to_load: int
-    need_fetch_block_ids: List[int]
+    need_fetch_block_ids: list[int]
 
 
 @dataclass
@@ -44,15 +46,15 @@ class RequestSchedulingState:
     """Unified request scheduling state management."""
 
     request_id: str
-    request: Optional["Request"] = None
+    request: Request | None = None
 
     # Token and block tracking
-    token_ids: List[int] = field(default_factory=list)
-    allocated_block_ids: List[int] = field(default_factory=list)
+    token_ids: list[int] = field(default_factory=list)
+    allocated_block_ids: list[int] = field(default_factory=list)
     num_saved_blocks: int = 0
 
     # Load operation info
-    load_op: Optional[LoadBlockInfo] = None
+    load_op: LoadBlockInfo | None = None
 
     # Scheduling phase
     phase: str = "NEW"  # NEW -> WAITING_TO_LOAD -> ACTIVE -> FINISHED
@@ -65,7 +67,7 @@ class RequestSchedulingState:
         """Check if request is ready for loading."""
         return self.phase == "WAITING_TO_LOAD" and self.needs_loading()
 
-    def update_tokens_and_blocks(self, new_token_ids: List[int], new_block_ids) -> None:
+    def update_tokens_and_blocks(self, new_token_ids: list[int], new_block_ids) -> None:
         """Update with new tokens and blocks."""
         if new_token_ids:
             self.token_ids.extend(new_token_ids)
@@ -74,7 +76,7 @@ class RequestSchedulingState:
             normalized_block_ids = self._normalize_block_ids(new_block_ids)
             self.allocated_block_ids.extend(normalized_block_ids)
 
-    def _normalize_block_ids(self, block_ids) -> List[int]:
+    def _normalize_block_ids(self, block_ids) -> list[int]:
         """Normalize block_ids to list format."""
         if not block_ids:
             return []
@@ -90,17 +92,17 @@ class HF3FSRequestMetadata:
     """Metadata for a single request in HF3FS connector."""
 
     request_id: str
-    token_ids: List[int]
-    block_ids: List[int]
-    load_block_op: Optional[LoadBlockInfo] = None
-    save_block_op: Optional[SaveBlockInfo] = None
+    token_ids: list[int]
+    block_ids: list[int]
+    load_block_op: LoadBlockInfo | None = None
+    save_block_op: SaveBlockInfo | None = None
 
     @staticmethod
     def from_scheduling_state(
         state: "RequestSchedulingState",
         block_size: int,
-        load_op: Optional[LoadBlockInfo] = None,
-        skip_leading_blocks: Optional[int] = None,
+        load_op: LoadBlockInfo | None = None,
+        skip_leading_blocks: int | None = None,
     ) -> Optional["HF3FSRequestMetadata"]:
         """Create request metadata from scheduling state."""
         token_count = len(state.token_ids)
@@ -130,7 +132,7 @@ class HF3FSConnectorMetadata(KVConnectorMetadata):
     """Container for HF3FS connector metadata."""
 
     def __init__(self):
-        self.requests: List[HF3FSRequestMetadata] = []
+        self.requests: list[HF3FSRequestMetadata] = []
 
     def add_request(self, request_metadata: HF3FSRequestMetadata) -> None:
         """Add request to metadata."""

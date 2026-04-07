@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import os
-from typing import List
 
 import torch
 
@@ -26,7 +27,7 @@ class Hf3fsClient:
             with open(self._file_path, "w+b") as f:
                 f.truncate(self._size)
 
-    def batch_read(self, offsets: List[int], tensors: List[torch.Tensor]) -> List[int]:
+    def batch_read(self, offsets: list[int], tensors: list[torch.Tensor]) -> list[int]:
         """Read data from file at specified offsets into tensors."""
         results = []
 
@@ -74,8 +75,8 @@ class Hf3fsClient:
             return torch.frombuffer(buffer_data, dtype=dtype)
 
     def batch_write(
-        self, offsets: List[int], tensors: List[torch.Tensor], event: torch.cuda.Event
-    ) -> List[int]:
+        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.cuda.Event
+    ) -> list[int]:
         """Write data from tensors to file at specified offsets."""
         results = []
 

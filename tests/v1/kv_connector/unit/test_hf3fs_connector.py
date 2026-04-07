@@ -19,7 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client 
     Hf3fsClient as MockHf3fsClient,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -80,7 +79,9 @@ class TestHf3fsMockClient:
         tensor_read = torch.zeros(numel, dtype=dtype)
         results = client.batch_read([0], [tensor_read])
         assert results == [bytes_per_page], f"Read should succeed, got {results}"
-        assert torch.equal(tensor_write, tensor_read), "Read tensor should match written tensor"
+        assert torch.equal(tensor_write, tensor_read), (
+            "Read tensor should match written tensor"
+        )
         client.close()
 
     def test_batch_read_empty_file_returns_error(self, tmp_path):
@@ -118,7 +119,10 @@ class TestHf3fsMockClient:
         n = 4
         path = str(tmp_path / "multi_rw")
         client = MockHf3fsClient(
-            path=path, size=bytes_per_page * n * 2, bytes_per_page=bytes_per_page, entries=8
+            path=path,
+            size=bytes_per_page * n * 2,
+            bytes_per_page=bytes_per_page,
+            entries=8,
         )
         tensors_write = [
             torch.full((bytes_per_page // 4,), float(i), dtype=torch.float32)
@@ -130,7 +134,9 @@ class TestHf3fsMockClient:
         results = client.batch_write(offsets, tensors_write, event)
         assert all(r == bytes_per_page for r in results)
 
-        tensors_read = [torch.zeros(bytes_per_page // 4, dtype=torch.float32) for _ in range(n)]
+        tensors_read = [
+            torch.zeros(bytes_per_page // 4, dtype=torch.float32) for _ in range(n)
+        ]
         results = client.batch_read(offsets, tensors_read)
         assert all(r == bytes_per_page for r in results)
 
@@ -210,7 +216,8 @@ class TestHF3FSKVConnectorStats:
         stats.record_success_task_duration("Saved", 1.0)
         stats.record_success_task_duration("Saved", 3.0)
         result = stats.reduce()
-        assert result["Num save task (success/failed)"] == "2/0"
+        assert result["Num save task success"] == pytest.approx(2.0, rel=0.01)
+        assert result["Num save task failed"] == pytest.approx(0.0, rel=0.01)
         assert result["Avg save duration (ms)"] == pytest.approx(2000.0, rel=0.01)
 
     def test_clone_and_reset(self, hf3fs_stats):

@@ -3,12 +3,14 @@
 """
 Tests for resource management in hf3fs_client.py: constructor failure cleanup
 and idempotent close().  Tests use mock to replace real I/O operations
-(hf3fs_fuse.io, SharedMemory, os, CUDA).  
+(hf3fs_fuse.io, SharedMemory, os, CUDA).
 Requires hf3fs_fuse.io to be installed; skipped otherwise.
 """
 
-import pytest
+from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 HF3FS_AVAILABLE = True
 try:
@@ -18,6 +20,10 @@ try:
         make_ioring,
         make_iovec,
         register_fd,
+    )
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
+        Hf3fsClient,
     )
 except Exception:
     HF3FS_AVAILABLE = False
@@ -80,7 +86,7 @@ class TestHf3fsClientResourceManagement:
         fake_shm_r = _FakeShm()
         fake_shm_w = _FakeShm()
 
-        patcher_list = [
+        patcher_list: list[Any] = [
             patch(f"{self._MOD}.HF3FS_AVAILABLE", True),
             patch(f"{self._MOD}.register_fd"),
             patch(f"{self._MOD}.deregister_fd"),
@@ -103,9 +109,6 @@ class TestHf3fsClientResourceManagement:
             p.start()
 
         try:
-            from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
-                Hf3fsClient,
-            )
             client = Hf3fsClient(
                 path=str(tmp_path / "test.bin"),
                 size=1024,
@@ -181,17 +184,14 @@ class TestHf3fsClientResourceManagement:
             patch("os.ftruncate"),
             patch("os.close") as mock_os_close,
             patch("torch.cuda.Stream", return_value=MagicMock()),
+            pytest.raises(RuntimeError, match="mount point not found"),
         ):
-            from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
-                Hf3fsClient,
+            Hf3fsClient(
+                path=str(tmp_path / "fail.bin"),
+                size=1024,
+                bytes_per_page=256,
+                entries=4,
             )
-            with pytest.raises(RuntimeError, match="mount point not found"):
-                Hf3fsClient(
-                    path=str(tmp_path / "fail.bin"),
-                    size=1024,
-                    bytes_per_page=256,
-                    entries=4,
-                )
 
         mock_os_close.assert_called_once_with(55)
 
@@ -220,20 +220,21 @@ class TestHf3fsClientResourceManagement:
             ),
             patch(f"{self._MOD}.make_iovec", return_value=MagicMock()),
             patch("torch.cuda.Stream", return_value=MagicMock()),
+            pytest.raises(RuntimeError, match="ioring init failed"),
         ):
-            from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
-                Hf3fsClient,
+            Hf3fsClient(
+                path=str(tmp_path / "fail2.bin"),
+                size=1024,
+                bytes_per_page=256,
+                entries=4,
             )
-            with pytest.raises(RuntimeError, match="ioring init failed"):
-                Hf3fsClient(
-                    path=str(tmp_path / "fail2.bin"),
-                    size=1024,
-                    bytes_per_page=256,
-                    entries=4,
-                )
 
-        assert fake_shm_r.closed is True, "shm_r was not closed after constructor failure"
-        assert fake_shm_w.closed is True, "shm_w was not closed after constructor failure"
+        assert fake_shm_r.closed is True, (
+            "shm_r was not closed after constructor failure"
+        )
+        assert fake_shm_w.closed is True, (
+            "shm_w was not closed after constructor failure"
+        )
 
     def test_constructor_failure_does_not_close_unallocated_shm(self, tmp_path):
         """Failure before SharedMemory is created must not raise AttributeError
@@ -250,17 +251,14 @@ class TestHf3fsClientResourceManagement:
             patch("os.ftruncate"),
             patch("os.close"),
             patch("torch.cuda.Stream", return_value=MagicMock()),
+            pytest.raises(RuntimeError, match="early failure"),
         ):
-            from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
-                Hf3fsClient,
+            Hf3fsClient(
+                path=str(tmp_path / "early_fail.bin"),
+                size=1024,
+                bytes_per_page=256,
+                entries=4,
             )
-            with pytest.raises(RuntimeError, match="early failure"):
-                Hf3fsClient(
-                    path=str(tmp_path / "early_fail.bin"),
-                    size=1024,
-                    bytes_per_page=256,
-                    entries=4,
-                )
 
     # ------------------------------------------------------------------
     # _release_resources on already-cleared state must be a no-op

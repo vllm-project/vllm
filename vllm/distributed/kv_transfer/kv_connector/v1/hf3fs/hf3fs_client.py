@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import multiprocessing
 import os
 import threading
 from functools import wraps
 from pathlib import Path
-from typing import List
 
 import torch
 import torch.utils.cpp_extension
@@ -148,10 +149,12 @@ class Hf3fsClient:
             self._release_resources()
             raise
 
-        logger.debug("Initialized HF3FS client with file: %s, size: %s bytes", path, size)
+        logger.debug(
+            "Initialized HF3FS client with file: %s, size: %s bytes", path, size
+        )
 
     def _release_resources(self) -> None:
-        """Release all acquired resources safely """
+        """Release all acquired resources safely"""
         # iov must be released before ioring and shm
         for attr in ("iov_r", "iov_w", "ior_r", "ior_w"):
             obj = getattr(self, attr, None)
@@ -180,7 +183,7 @@ class Hf3fsClient:
             self.file = None
 
     @rsynchronized()
-    def batch_read(self, offsets: List[int], tensors: List[torch.Tensor]) -> List[int]:
+    def batch_read(self, offsets: list[int], tensors: list[torch.Tensor]) -> list[int]:
         """Read data from the file at specified offsets into tensors.
 
         Args:
@@ -191,6 +194,8 @@ class Hf3fsClient:
             List of operation results (0 for success, non-zero for error)
         """
         self.check(offsets, tensors)
+        assert self.ior_r is not None
+        assert self.iov_r is not None
 
         # prepare
         current = 0
@@ -216,8 +221,8 @@ class Hf3fsClient:
 
     @wsynchronized()
     def batch_write(
-        self, offsets: List[int], tensors: List[torch.Tensor], event: torch.cuda.Event
-    ) -> List[int]:
+        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.cuda.Event
+    ) -> list[int]:
         """Write data from tensors to the file at specified offsets.
 
         Args:
@@ -229,6 +234,9 @@ class Hf3fsClient:
         """
 
         self.check(offsets, tensors)
+        assert self.ior_w is not None
+        assert self.iov_w is not None
+
         # prepare
         with torch.cuda.stream(self.stream):
             self.stream.wait_event(event)
@@ -253,7 +261,7 @@ class Hf3fsClient:
 
         return results
 
-    def check(self, offsets: List[int], tensors: List[torch.Tensor]) -> None:
+    def check(self, offsets: list[int], tensors: list[torch.Tensor]) -> None:
         sizes = [t.numel() * t.itemsize for t in tensors]
         if any(
             [
@@ -267,7 +275,7 @@ class Hf3fsClient:
             ]
         ):
             self.close()
-            raise ValueError(f"Hf3fsClient.check Failed")
+            raise ValueError("Hf3fsClient.check Failed")
 
     def get_size(self) -> int:
         """Get the total size of the storage file.

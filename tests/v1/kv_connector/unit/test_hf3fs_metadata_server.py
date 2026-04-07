@@ -15,7 +15,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server im
     RankFileMetadata,
 )
 
-
 # ===========================================================================
 # TestRankFileMetadata
 # ===========================================================================
@@ -49,9 +48,9 @@ class TestRankFileMetadata:
     def test_release_pages_no_duplicates(self):
         """Releasing the same page twice must not create duplicates."""
         rank_meta = RankFileMetadata(rank_id=0, num_pages=3, free_pages=list(range(3)))
-        rank_meta.allocate_pages(1)          # takes page 0
+        rank_meta.allocate_pages(1)  # takes page 0
         rank_meta.release_pages([0])
-        rank_meta.release_pages([0])         # second release of the same page
+        rank_meta.release_pages([0])  # second release of the same page
         assert rank_meta.get_free_page_count() == 3
 
 
@@ -177,9 +176,7 @@ class TestGlobalMetadataStateAllocation:
 
         results = state.allocate_pages_for_keys(0, [("K1", ""), ("K2", "")])
         # allocate_pages uses all-or-nothing: 2 needed but only 1 available → []
-        assert all(v == -1 for v in results.values()), (
-            f"Expected all -1, got {results}"
-        )
+        assert all(v == -1 for v in results.values()), f"Expected all -1, got {results}"
 
     def test_confirm_write_releases_pages(self):
         """confirm_write_for_keys with pages_to_release returns them to pool."""

@@ -9,22 +9,21 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 try:
     import orjson
 
     HAS_ORJSON = True
 except ImportError:
-    import json as orjson
+    import json as orjson  # type: ignore
 
     HAS_ORJSON = False
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import ORJSONResponse
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -38,9 +37,9 @@ class RankFileMetadata:
 
     rank_id: int
     num_pages: int
-    free_pages: List[int]
+    free_pages: list[int]
 
-    def allocate_pages(self, num_pages: int) -> List[int]:
+    def allocate_pages(self, num_pages: int) -> list[int]:
         """Allocate specified number of free pages."""
         if len(self.free_pages) < num_pages:
             return []
@@ -49,7 +48,7 @@ class RankFileMetadata:
         self.free_pages = self.free_pages[num_pages:]
         return allocated
 
-    def release_pages(self, page_indices: List[int]) -> None:
+    def release_pages(self, page_indices: list[int]) -> None:
         """Release pages back to free pool."""
         for page_idx in page_indices:
             if page_idx not in self.free_pages:
@@ -65,18 +64,18 @@ class KeyMetadata:
     """Manages metadata for a single key across multiple ranks."""
 
     key: str
-    rank_to_page: Dict[int, int]  # rank -> allocated page index
+    rank_to_page: dict[int, int]  # rank -> allocated page index
     tp_world_size: int
 
     def add_rank_page(self, rank: int, page_index: int) -> None:
         """Add page allocation for a specific rank."""
         self.rank_to_page[rank] = page_index
 
-    def get_all_pages(self) -> List[Tuple[int, int]]:
+    def get_all_pages(self) -> list[tuple[int, int]]:
         """Get all (rank, page) pairs for this key."""
         return [(rank, page) for rank, page in self.rank_to_page.items()]
 
-    def get_rank_page(self, rank: int) -> Optional[int]:
+    def get_rank_page(self, rank: int) -> int | None:
         """Get page index for a specific rank."""
         return self.rank_to_page.get(rank)
 
@@ -90,8 +89,8 @@ class GlobalMetadataState:
 
     def __init__(self):
         self.global_lock = threading.RLock()
-        self.rank_metadata: Dict[int, RankFileMetadata] = {}
-        self.key_metadata: Dict[str, KeyMetadata] = {}
+        self.rank_metadata: dict[int, RankFileMetadata] = {}
+        self.key_metadata: dict[str, KeyMetadata] = {}
 
     def clear(self) -> None:
         """Clear all metadata state."""
@@ -110,8 +109,8 @@ class GlobalMetadataState:
                 logger.info("Initialized rank %s with %s pages", rank, num_pages)
 
     def allocate_pages_for_keys(
-        self, rank: int, keys: List[Tuple[str, str]]
-    ) -> Dict[str, int]:
+        self, rank: int, keys: list[tuple[str, str]]
+    ) -> dict[str, int]:
         """Allocate one page for each key on the specified rank.
 
         Args:
@@ -132,9 +131,9 @@ class GlobalMetadataState:
             if len(allocated_pages) < num_pages_needed:
                 logger.warning(
                     "Rank %s only allocated %s pages for %s keys",
-                    rank, 
-                    len(allocated_pages), 
-                    num_pages_needed
+                    rank,
+                    len(allocated_pages),
+                    num_pages_needed,
                 )
 
             allocation_results = {}
@@ -159,8 +158,8 @@ class GlobalMetadataState:
     def confirm_write_for_keys(
         self,
         rank: int,
-        key_confirmations: List[Tuple[str, int]],
-        pages_to_release: List[int] = None,
+        key_confirmations: list[tuple[str, int]],
+        pages_to_release: list[int] | None = None,
     ) -> None:
         """Confirm write operations for keys and update metadata.
 
@@ -185,12 +184,12 @@ class GlobalMetadataState:
                 self.rank_metadata[rank].release_pages(pages_to_release)
                 logger.debug(
                     "Released %s pages on rank %s: %s",
-                    len(pages_to_release), 
-                    rank, 
-                    pages_to_release
+                    len(pages_to_release),
+                    rank,
+                    pages_to_release,
                 )
 
-    def batch_key_exists(self, keys: List[str]) -> List[bool]:
+    def batch_key_exists(self, keys: list[str]) -> list[bool]:
         """Check if keys exist in metadata and all ranks have confirmed writes.
 
         Args:
@@ -210,7 +209,7 @@ class GlobalMetadataState:
                     results.append(key_meta.is_complete())
             return results
 
-    def get_key_locations(self, rank: int, keys: List[str]) -> List[Optional[int]]:
+    def get_key_locations(self, rank: int, keys: list[str]) -> list[int | None]:
         """Get page indices for keys on a specific rank.
 
         Args:
@@ -243,7 +242,7 @@ class GlobalMetadataState:
 class Hf3fsMetadataServer:
     """HF3FS Metadata Server with improved key-based organization."""
 
-    def __init__(self, persistence_path: Optional[str] = None, save_interval: int = 60):
+    def __init__(self, persistence_path: str | None = None, save_interval: int = 60):
         self.state = GlobalMetadataState()
         if HAS_ORJSON:
             self.app = FastAPI(default_response_class=ORJSONResponse)
@@ -280,7 +279,7 @@ class Hf3fsMetadataServer:
 
         if role == "scheduler":
             return self._json_response(
-                {"message": f"Scheduler role does not require initialization"}
+                {"message": "Scheduler role does not require initialization"}
             )
 
         if role == "worker" and num_pages > 0:
@@ -313,7 +312,9 @@ class Hf3fsMetadataServer:
             response = {"rank": rank, "results": list(results.items())}
             return self._json_response(response)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Allocation failed: {str(e)}")
+            raise HTTPException(
+                status_code=500, detail=f"Allocation failed: {str(e)}"
+            ) from e
 
     async def confirm_write_for_keys(self, request: Request):
         """Confirm write operations for keys."""
@@ -338,7 +339,7 @@ class Hf3fsMetadataServer:
             logger.error("Confirm write for keys failed: %s", e)
             raise HTTPException(
                 status_code=500, detail=f"Confirmation failed: {str(e)}"
-            )
+            ) from e
 
     async def batch_key_exists(self, request: Request):
         """Check if multiple keys exist in metadata."""
@@ -354,7 +355,7 @@ class Hf3fsMetadataServer:
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Key existence check failed: {str(e)}"
-            )
+            ) from e
 
     async def get_key_locations(self, request: Request):
         """Get page indices for keys on a specific rank."""
@@ -375,7 +376,7 @@ class Hf3fsMetadataServer:
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Failed to get key locations: {str(e)}"
-            )
+            ) from e
 
     async def clear(self, request: Request):
         """Clear the metadata server."""
@@ -400,7 +401,9 @@ class Hf3fsMetadataInterface(ABC):
         pass
 
     @abstractmethod
-    def allocate_pages_for_keys(self, rank: int, keys: List[str]) -> Dict[str, int]:
+    def allocate_pages_for_keys(
+        self, rank: int, keys: list[tuple[str, str]]
+    ) -> list[tuple[str, int]]:
         """Allocate one page for each key on the specified rank."""
         pass
 
@@ -408,19 +411,19 @@ class Hf3fsMetadataInterface(ABC):
     def confirm_write_for_keys(
         self,
         rank: int,
-        key_confirmations: List[Tuple[str, int]],
-        pages_to_release: List[int] = None,
+        key_confirmations: list[tuple[str, int]],
+        pages_to_release: list[int] | None = None,
     ) -> None:
         """Confirm write operations for keys and optionally release pages."""
         pass
 
     @abstractmethod
-    def batch_key_exists(self, keys: List[str]) -> List[bool]:
+    def batch_key_exists(self, keys: list[str]) -> list[bool]:
         """Check if keys exist and are complete across all ranks."""
         pass
 
     @abstractmethod
-    def get_key_locations(self, rank: int, keys: List[str]) -> List[Optional[int]]:
+    def get_key_locations(self, rank: int, keys: list[str]) -> list[int]:
         """Get page indices for keys on a specific rank."""
         pass
 
@@ -470,8 +473,8 @@ class Hf3fsGlobalMetadataClient(Hf3fsMetadataInterface):
         self._post(f"rank/{rank}/initialize", {"num_pages": num_pages, "role": role})
 
     def allocate_pages_for_keys(
-        self, rank: int, keys: List[Tuple[str, str]]
-    ) -> List[Tuple[str, int]]:
+        self, rank: int, keys: list[tuple[str, str]]
+    ) -> list[tuple[str, int]]:
         """Allocate pages for keys on the specified rank."""
         response = self._post("keys/batch_allocate", {"rank": rank, "keys": keys})
 
@@ -481,8 +484,8 @@ class Hf3fsGlobalMetadataClient(Hf3fsMetadataInterface):
     def confirm_write_for_keys(
         self,
         rank: int,
-        key_confirmations: List[Tuple[str, int]],
-        pages_to_release: List[int] = None,
+        key_confirmations: list[tuple[str, int]],
+        pages_to_release: list[int] | None = None,
     ) -> None:
         """Confirm write operations for keys and optionally release pages."""
         payload = {
@@ -493,12 +496,12 @@ class Hf3fsGlobalMetadataClient(Hf3fsMetadataInterface):
 
         self._post("keys/confirm_write", payload)
 
-    def batch_key_exists(self, keys: List[str]) -> List[bool]:
+    def batch_key_exists(self, keys: list[str]) -> list[bool]:
         """Check if keys exist and are complete across all ranks."""
         response = self._post("keys/batch_exists", {"keys": keys})
         return response.get("exists", [])
 
-    def get_key_locations(self, rank: int, keys: List[str]) -> List[int]:
+    def get_key_locations(self, rank: int, keys: list[str]) -> list[int]:
         """Get page indices for keys on a specific rank."""
         response = self._post("keys/get_locations", {"rank": rank, "keys": keys})
         return response.get("locations", [])
