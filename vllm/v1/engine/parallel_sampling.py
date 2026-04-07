@@ -26,8 +26,6 @@ class ParentRequest:
 
     # To aggregate child completions when not streaming
     output_aggregator: list[CompletionOutput]
-    # To store kv_transfer_params for child request
-    output_kv_transfer_params_list: list[dict[str, Any]]
 
     # To find the max number of generated tokens across all children
     max_num_generation_tokens: int
@@ -136,16 +134,6 @@ class ParentRequest:
 
         finished = not self.child_requests
         return outputs, finished
-
-    def aggre_kv_transfer_params(
-        self,
-        child_request_id: str,
-        completion_output: CompletionOutput,
-        kv_transfer_params: dict[str, Any],
-    ) -> tuple[list[CompletionOutput], bool, list[dict[str, Any]]]:
-        outputs, finished = self.get_outputs(child_request_id, completion_output)
-        self.output_kv_transfer_params_list.append(kv_transfer_params)
-        return outputs, finished, self.output_kv_transfer_params_list
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(
