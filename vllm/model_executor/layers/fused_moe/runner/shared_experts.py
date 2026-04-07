@@ -94,13 +94,9 @@ class SharedExperts:
         #   - we are using flashinfer with DP, since there nothing to gain
         parallel_config = self._moe_config.moe_parallel_config
         return (
-            (
-                parallel_config.enable_eplb
-                and parallel_config.all2all_backend != "allgather_reducescatter"
-            )
-            or parallel_config.use_fi_nvl_one_sided_kernels
-            or parallel_config.use_fi_nvl_two_sided_kernels
-        )
+            parallel_config.enable_eplb
+            and parallel_config.all2all_backend != "allgather_reducescatter"
+        ) or parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
         self,
