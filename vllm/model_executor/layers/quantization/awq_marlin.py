@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -505,6 +504,14 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         self.input_dtype = None
         self.use_marlin = True
 
+        from vllm.model_executor.layers.fused_moe.oracle.mixed_input import (
+            select_mixed_input_moe_backend,
+        )
+
+        self.marlin_backend, self.experts_cls = select_mixed_input_moe_backend(
+            config=self.moe,
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -722,6 +729,28 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
             layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
 
+        # Build modular kernel via the oracle.
+        from vllm.model_executor.layers.fused_moe.oracle.mixed_input import (
+            make_mixed_input_moe_kernel,
+        )
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_mixed_input_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            backend=self.marlin_backend,
+            w13_g_idx=getattr(layer, "w13_g_idx", None),
+            w2_g_idx=getattr(layer, "w2_g_idx", None),
+            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
+            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
+            is_k_full=self.is_k_full,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+        )
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -742,73 +771,19 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
+            a1_gscale=getattr(layer, "w13_input_global_scale", None),
+            a2_gscale=getattr(layer, "w2_input_global_scale", None),
         )
 
-    def select_gemm_impl(
+    def maybe_make_prepare_finalize(
         self,
-        prepare_finalize,
-        layer: torch.nn.Module,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | None = None,
     ):
-        """
-        Select the GEMM implementation for AWQ-Marlin MoE.
-        Returns MarlinExperts configured for AWQ quantization.
-        This is ONLY used when LoRA is enabled.
-        Without LoRA, AWQ uses its own apply() method.
-        """
-        # Only use modular kernels when LoRA is enabled
-        # Without LoRA, AWQ's own apply() method works fine and is more efficient
-        if not self.moe.is_lora_enabled:
-            raise NotImplementedError(
-                "AWQ-Marlin uses its own apply() method when LoRA is not enabled. "
-                "Modular kernels are only used for LoRA support."
-            )
-
-        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-            BatchedMarlinExperts,
-            MarlinExperts,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
-
-        # Ensure quant config is initialized
-        assert self.moe_quant_config is not None, (
-            "moe_quant_config must be initialized before select_gemm_impl"
-        )
-
-        w13_g_idx = getattr(layer, "w13_g_idx", None)
-        w2_g_idx = getattr(layer, "w2_g_idx", None)
-        w13_g_idx_sort_indices = getattr(layer, "w13_g_idx_sort_indices", None)
-        w2_g_idx_sort_indices = getattr(layer, "w2_g_idx_sort_indices", None)
-
-        # Check if using batched expert format (for Expert Parallelism)
-        if (
-            prepare_finalize.activation_format
-            == mk.FusedMoEActivationFormat.BatchedExperts
-        ):
-            # For batched format, use BatchedMarlinExperts
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-            return BatchedMarlinExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
-        else:
-            # Standard Marlin experts for AWQ
-            return MarlinExperts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
 
     def apply(
         self,
@@ -818,25 +793,17 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        return fused_marlin_moe(
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-            layer.w13_scales,
-            layer.w2_scales,
+            layer.w13_weight,
+            layer.w2_weight,
             topk_weights,
             topk_ids,
-            input_global_scale1=getattr(layer, "w13_input_global_scale", None),
-            input_global_scale2=getattr(layer, "w2_input_global_scale", None),
-            quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
-            w1_zeros=layer.w13_qzeros,
-            w2_zeros=layer.w2_qzeros,
-            workspace=layer.workspace,
-            input_dtype=self.input_dtype,
-            inplace=not self.moe.disable_inplace,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
         )
