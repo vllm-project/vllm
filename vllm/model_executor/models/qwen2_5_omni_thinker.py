@@ -211,15 +211,12 @@ def merge_interleaved_embeddings(
 
     # Scatter each modality to its positions
     if video_embeds:
-        video_positions = is_video.nonzero(as_tuple=True)[0]
-        inputs_embeds[video_positions] = torch.cat(video_embeds, dim=0)
+        inputs_embeds[is_video] = torch.cat(video_embeds, dim=0)
     if audio_embeds:
-        audio_positions = is_audio.nonzero(as_tuple=True)[0]
-        inputs_embeds[audio_positions] = torch.cat(audio_embeds, dim=0)
+        inputs_embeds[is_audio] = torch.cat(audio_embeds, dim=0)
     if other_embeds:
         other_mask = is_multimodal & ~is_video & ~is_audio
-        other_positions = other_mask.nonzero(as_tuple=True)[0]
-        inputs_embeds[other_positions] = torch.cat(other_embeds, dim=0)
+        inputs_embeds[other_mask] = torch.cat(other_embeds, dim=0)
 
     return inputs_embeds
 
@@ -1457,8 +1454,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
-        is_video = is_multimodal & (input_ids == video_token_id)
-        is_audio = is_multimodal & (input_ids == audio_token_id)
+        input_ids_cpu = input_ids.cpu()
+        is_video = is_multimodal & (input_ids_cpu == video_token_id)
+        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
 
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()

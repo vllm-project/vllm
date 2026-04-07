@@ -10,12 +10,12 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
@@ -177,7 +177,7 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(kv_cache_dtype):
             return flash_attn_supports_fp8()
         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 
@@ -389,8 +389,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
 
-        # the overhead of the aot schedule is not worth it for spec-decode
-        aot_schedule = self.aot_schedule and not fast_build
+        # Disable AOT schedule for spec-decode proposer (not worth the overhead)
+        # and for batch invariance (schedule varies with max_seqlen_q/k).
+        aot_schedule = (
+            self.aot_schedule and not fast_build and not envs.VLLM_BATCH_INVARIANT
+        )
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
@@ -427,7 +430,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
         ):
             cache_dtype = self.cache_config.cache_dtype
-            if cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(cache_dtype):
                 qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                     cache_dtype
                 )
@@ -723,7 +726,7 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype
@@ -975,7 +978,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
