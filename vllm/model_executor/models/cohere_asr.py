@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType
+from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -32,7 +32,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -1704,6 +1703,12 @@ class ConformerEncoder(nn.Module):
 # ----- Encoder END -----
 
 
+# This subclass is specific to vLLM in order for
+# `_mark_composite_model` to target this module
+class CohereASRProjector(nn.Linear):
+    pass
+
+
 class CohereASRModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1714,7 +1719,7 @@ class CohereASRModel(nn.Module):
         )
 
         if self.encoder.d_model != self.decoder.hidden_size:
-            self.encoder_decoder_proj = torch.nn.Linear(
+            self.encoder_decoder_proj = CohereASRProjector(
                 self.encoder.d_model, self.decoder.hidden_size
             )
 
@@ -1983,7 +1988,7 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     info=CohereASRProcessingInfo,
     dummy_inputs=CohereASRDummyInputsBuilder,
 )
-class CohereASRForConditionalGeneration(
+class CohereAsrForConditionalGeneration(
     nn.Module, SupportsTranscription, SupportsMultiModal
 ):
     packed_modules_mapping = {
@@ -2041,14 +2046,11 @@ class CohereASRForConditionalGeneration(
             f"<|noitn|><|notimestamp|><|nodiarize|>"
         )
         prompt_text = request_prompt if request_prompt else default_prompt
-        prompt = {
-            "prompt": prompt_text,
-            "multi_modal_data": {
-                "audio": (audio, stt_config.sample_rate),
-            },
-        }
 
-        return cast(PromptType, prompt)
+        return TextPrompt(
+            prompt=prompt_text,
+            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -2096,18 +2098,25 @@ class CohereASRForConditionalGeneration(
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 
-        self.model = CohereASRModel(vllm_config=vllm_config, prefix=prefix)
-        lm_head_config = config.head
-        self.unpadded_vocab_size = lm_head_config["num_classes"]
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=CohereASRDecoder,
+            tower_targets={"audio": (ConformerEncoder, CohereASRProjector)},
+        ):
+            self.model = CohereASRModel(vllm_config=vllm_config, prefix=prefix)
+
+        head_config = config.head
+
         self.proj_out = ParallelLMHead(
-            lm_head_config["num_classes"],
-            lm_head_config["hidden_size"],
+            head_config["num_classes"],
+            head_config["hidden_size"],
             quant_config=quant_config,
             bias=True,
         )  # NOTE: bias is True
-        logit_scale = getattr(lm_head_config, "logit_scale", 1.0)
+
+        logit_scale = getattr(head_config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, lm_head_config["num_classes"], logit_scale
+            head_config["num_classes"], scale=logit_scale
         )
 
     def forward(

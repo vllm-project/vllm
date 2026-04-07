@@ -32,9 +32,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
@@ -199,7 +197,7 @@ class Parser:
             request: The request object used to generate the output.
 
         Returns:
-            A tuple of (reasoning_content, response_content).
+            A tuple of (reasoning, response_content).
         """
 
     @abstractmethod
@@ -229,7 +227,9 @@ class Parser:
 
     # ========== Tool Parser Methods ==========
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """
         Adjust the request parameters for tool calling.
 

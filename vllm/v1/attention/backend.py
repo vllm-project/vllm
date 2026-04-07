@@ -10,6 +10,11 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+)
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -17,7 +22,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+
+from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -221,6 +228,17 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        """Check if backend supports non-causal (bidirectional) attention
+        for decoder models.
+
+        Unlike ENCODER_ONLY attention type which implies a different
+        execution model, this refers to non-causal attention within the
+        standard paged-KV-cache decoder path.
+        """
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -261,6 +279,7 @@ class AttentionBackend(ABC):
         use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
+        use_non_causal: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -293,6 +312,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
             invalid_reasons.append(f"attention type {attn_type} not supported")
+        if use_non_causal and not cls.supports_non_causal():
+            invalid_reasons.append("non-causal attention not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -310,6 +331,10 @@ class AttentionBackend(ABC):
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
+
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return False
 
 
 class AttentionMetadata:
@@ -361,6 +386,11 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
+
+    is_prefilling: torch.Tensor | None = None
+    """(batch_size,) bool tensor: True if request is still in prefill phase
+    (num_computed_tokens < num_prompt_tokens). Used by some backends to
+    distinguish actual decodes from short extends."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -443,6 +473,7 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            is_prefilling=maybe_slice_reqs(self.is_prefilling),
         )
 
 
@@ -716,6 +747,13 @@ class AttentionImplBase(ABC, Generic[T]):
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
 
+    kv_cache_dtype: str
+
+    @property
+    def kv_quant_mode(self) -> "KVQuantMode":
+        """Return the KV cache quantization mode for this layer."""
+        return get_kv_quant_mode(self.kv_cache_dtype)
+
     @abstractmethod
     def __init__(
         self,
@@ -840,6 +878,14 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+        """
+        Does this attention implementation support fused output quantization.
+        Since MLA quantization is done manually in forward_impl (common code),
+        all MLA backends support it by default.
+        """
+        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
+
     def do_kv_cache_update(
         self,
         kv_c_normed: torch.Tensor,
@@ -869,6 +915,14 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     Sparse MLA implementations only support decode (MQA-style) attention.
     They do not support prefill (MHA-style) attention.
     """
+
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+        """
+        Does this attention implementation support fused output quantization.
+        Since MLA quantization is done manually in forward_impl (common code),
+        all MLA backends support it by default.
+        """
+        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
 
     @abstractmethod
     def __init__(
@@ -928,10 +982,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(

@@ -5,6 +5,8 @@
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.scoring.io_processor import ScoringIOProcessors
+from vllm.entrypoints.pooling.utils import enable_scoring_api
 from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
 
@@ -23,7 +25,12 @@ def init_pooling_io_processors(
     if "embed" in supported_tasks:
         from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
 
-        processors.append(("classify", EmbedIOProcessor))
+        processors.append(("embed", EmbedIOProcessor))
+
+    if enable_scoring_api(supported_tasks, model_config):
+        score_type = model_config.score_type
+        if score_type is not None and score_type in ScoringIOProcessors:
+            processors.append((score_type, ScoringIOProcessors[score_type]))
 
     return {
         task: processor_cls(

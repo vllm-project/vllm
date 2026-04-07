@@ -370,7 +370,7 @@ def log_response_diagnostics(
 def default_server_args():
     return [
         "--max-model-len",
-        "8192",
+        "18192",
         "--enforce-eager",  # For faster startup.
         "--enable-auto-tool-choice",
         "--structured-outputs-config.backend",

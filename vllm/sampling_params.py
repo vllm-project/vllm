@@ -12,6 +12,7 @@ from typing import Any
 import msgspec
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -152,6 +153,10 @@ class RequestOutputKind(Enum):
     FINAL_ONLY = 2
 
 
+def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
+    return is_mistral_tokenizer(tokenizer) and not tokenizer.is_tekken
+
+
 class SamplingParams(
     PydanticMsgspecMixin,
     msgspec.Struct,
@@ -168,6 +173,9 @@ class SamplingParams(
 
     n: int = 1
     """Number of outputs to return for the given prompt request.
+
+    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    environment variable (default: 16384).
 
     NOTE:
         `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
@@ -228,6 +236,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    logprob_token_ids: list[int] | None = None
+    """Specific token IDs to return logprobs for. More efficient than
+    logprobs=-1 when you only need logprobs for a small set of tokens.
+    When set, logprobs for exactly these token IDs will be returned,
+    in addition to the sampled token. This is useful for scoring tasks
+    where you want to compare probabilities of specific label tokens."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -281,6 +295,8 @@ class SamplingParams(
     _bad_words_token_ids: list[list[int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
+    thinking_token_budget: int | None = None
+    """Maximum number of tokens allowed for thinking operations."""
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -304,6 +320,7 @@ class SamplingParams(
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
+        thinking_token_budget: int | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -344,6 +361,7 @@ class SamplingParams(
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
+            thinking_token_budget=thinking_token_budget,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -421,6 +439,13 @@ class SamplingParams(
             raise ValueError(f"n must be an int, but is of type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        max_n = envs.VLLM_MAX_N_SEQUENCES
+        if self.n > max_n:
+            raise ValueError(
+                f"n must be at most {max_n}, got {self.n}. "
+                "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
+                "environment variable."
+            )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -780,16 +805,17 @@ class SamplingParams(
             # xgrammar with no fallback
             validate_xgrammar_grammar(self)
         elif backend.startswith("guidance"):
+            if _is_non_tekken_mistral(tokenizer=tokenizer):
+                raise ValueError(
+                    "Non-tekken Mistral tokenizers are not supported for the 'guidance'"
+                    " structured output backend. Please either use a more recent "
+                    "Mistral model, the ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
-                    "Mistral tokenizer is not supported for the 'guidance' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
             validate_guidance_grammar(self, tokenizer=None)
         elif backend == "outlines":
             # outlines backend
@@ -818,19 +844,20 @@ class SamplingParams(
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
 
+                skip_guidance = _is_non_tekken_mistral(tokenizer)
+
                 # Check if schema has features unsupported by guidance
                 so_params = self.structured_outputs
-                skip_guidance = False
-                if so_params.json:
+                if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
                         schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if is_mistral_tokenizer(tokenizer) or skip_guidance:
-                    # Fall back to outlines if the tokenizer is Mistral
-                    # or if schema contains features unsupported by guidance
+                if skip_guidance:
+                    # Fall back to outlines if the tokenizer is non-tekken Mistral or
+                    # the schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
@@ -858,6 +885,7 @@ class SamplingParams(
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
+            f"thinking_token_budget={self.thinking_token_budget}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "

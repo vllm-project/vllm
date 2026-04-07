@@ -31,13 +31,13 @@ def qwen3_tokenizer():
 
 
 @pytest.fixture
-def qwen3_tool_parser(qwen3_tokenizer):
-    return Qwen3CoderToolParser(qwen3_tokenizer)
+def qwen3_tool_parser(qwen3_tokenizer, sample_tools):
+    return Qwen3CoderToolParser(qwen3_tokenizer, tools=sample_tools)
 
 
 @pytest.fixture
-def qwen3_xml_tool_parser(qwen3_tokenizer):
-    return Qwen3XMLToolParser(qwen3_tokenizer)
+def qwen3_xml_tool_parser(qwen3_tokenizer, sample_tools):
+    return Qwen3XMLToolParser(qwen3_tokenizer, tools=sample_tools)
 
 
 @pytest.fixture(params=["xml"])
@@ -376,7 +376,7 @@ TX
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(qwen3_tool_parser_parametrized):
+def test_extract_tool_calls_type_conversion(qwen3_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -417,10 +417,9 @@ hello world
 </function>
 </tool_call>"""
 
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
@@ -859,7 +858,7 @@ TX
 
 
 def test_extract_tool_calls_complex_type_with_single_quote(
-    qwen3_tool_parser_parametrized,
+    qwen3_tokenizer,
 ):
     """Test parameter type conversion based on tool schema"""
     tools = [
@@ -889,10 +888,9 @@ def test_extract_tool_calls_complex_type_with_single_quote(
 </function>
 </tool_call>"""
 
+    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["obj_param"] == {"key": "value"}
@@ -976,3 +974,157 @@ fahrenheit
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
     assert args["unit"] == "fahrenheit"
+
+
+def test_malformed_xml_no_gt_delimiter(qwen3_tool_parser, sample_tools):
+    """Regression: malformed XML without '>' must not crash (PR #36774)."""
+    model_output = (
+        "<tool_call>\n"
+        "<function=get_current_weather\n"
+        "<parameter=city>Dallas</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
+    assert result is not None
+    assert isinstance(result.tool_calls, list)
+    assert all(tc is not None for tc in result.tool_calls)
+
+
+def test_none_tool_calls_filtered(qwen3_tool_parser, sample_tools):
+    """Regression: None tool calls filtered from output (PR #36774)."""
+    model_output = (
+        "<tool_call>\n"
+        "<function=bad_func_no_gt\n"
+        "</function>\n"
+        "</tool_call>\n"
+        "<tool_call>\n"
+        "<function=get_current_weather>\n"
+        "<parameter=city>Dallas</parameter>\n"
+        "<parameter=state>TX</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
+    assert all(tc is not None for tc in result.tool_calls)
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_current_weather"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+
+
+def test_anyof_parameter_not_double_encoded(qwen3_tokenizer):
+    """Regression: anyOf parameters must not be double-encoded (PR #36032)."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "update_record",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "data": {
+                            "anyOf": [{"type": "object"}, {"type": "null"}],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+
+    model_output = (
+        "<tool_call>\n"
+        "<function=update_record>\n"
+        '<parameter=data>{"key": "value", "count": 42}</parameter>\n'
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = parser.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert isinstance(args["data"], dict)
+    assert args["data"] == {"key": "value", "count": 42}
+
+
+def test_streaming_multi_param_single_chunk(
+    qwen3_tool_parser, qwen3_tokenizer, sample_tools
+):
+    """Regression: speculative decode delivering multiple params at once (PR #35615)."""
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>",
+        "\n",  # triggers json_started -> sends "{"
+        # This single delta delivers all three parameters at once
+        "<parameter=city>\nDallas\n</parameter>"
+        "\n<parameter=state>\nTX\n</parameter>"
+        "\n<parameter=unit>\nfahrenheit\n</parameter>",
+        "\n</function>",
+        "\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"
+
+
+def test_no_double_serialization_string_args(qwen3_tool_parser):
+    """Regression: string arguments must not be double-serialized (PR #35615)."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "greet",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = (
+        "<tool_call>\n"
+        "<function=greet>\n"
+        "<parameter=message>hello world</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    raw_arguments = result.tool_calls[0].function.arguments
+    args = json.loads(raw_arguments)
+    assert args["message"] == "hello world"
+    assert '\\"hello world\\"' not in raw_arguments

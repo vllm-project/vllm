@@ -4,18 +4,13 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    fp8_mqa_logits,
-    fp8_mqa_logits_torch,
-    fp8_paged_mqa_logits,
-    fp8_paged_mqa_logits_torch,
-    is_deep_gemm_supported,
-)
+from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits, has_deep_gemm
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -57,6 +52,14 @@ def sparse_attn_indexer(
             ((total_seq_lens, head_dim), torch.float8_e4m3fn),
             ((total_seq_lens, 4), torch.uint8),
         )
+
+        # Dummy allocation to simulate for peak logits tensor memory during inference.
+        # FP8 elements so elements == bytes
+        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        _ = torch.empty(
+            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+        )
+
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -96,6 +99,7 @@ def sparse_attn_indexer(
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata is not None
 
         # Get the full shared workspace buffers once (will allocate on first use)
         workspace_manager = current_workspace_manager()
@@ -106,30 +110,24 @@ def sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            ops.cp_gather_indexer_k_quant_cache(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
+
+            if not chunk.skip_kv_gather:
+                ops.cp_gather_indexer_k_quant_cache(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                )
+
+            logits = fp8_mqa_logits(
+                q_fp8[chunk.token_start : chunk.token_end],
+                (k_fp8, k_scale.view(torch.float32).flatten()),
+                weights[chunk.token_start : chunk.token_end],
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                clean_logits=False,
             )
-            if is_deep_gemm_supported():
-                logits = fp8_mqa_logits(
-                    q_fp8[chunk.token_start : chunk.token_end],
-                    (k_fp8, k_scale.view(torch.float32).flatten()),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    clean_logits=False,
-                )
-            else:
-                logits = fp8_mqa_logits_torch(
-                    q_fp8[chunk.token_start : chunk.token_end],
-                    (k_fp8, k_scale.view(torch.float32).flatten()),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                )
             num_rows = logits.shape[0]
 
             topk_indices = topk_indices_buffer[
@@ -170,6 +168,8 @@ def sparse_attn_indexer(
 
     if has_decode:
         decode_metadata = attn_metadata.decode
+        assert decode_metadata is not None
+        # kv_cache shape [
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
         # we only have [num_block, block_size, head_dim],
         kv_cache = kv_cache.unsqueeze(-2)
@@ -191,26 +191,16 @@ def sparse_attn_indexer(
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
-        if is_deep_gemm_supported():
-            logits = fp8_paged_mqa_logits(
-                padded_q_fp8_decode_tokens,
-                kv_cache,
-                weights[:num_padded_tokens],
-                decode_metadata.seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                clean_logits=False,
-            )
-        else:
-            logits = fp8_paged_mqa_logits_torch(
-                padded_q_fp8_decode_tokens,
-                kv_cache,
-                weights[:num_padded_tokens],
-                decode_metadata.seq_lens,
-                decode_metadata.block_table,
-                max_model_len=max_model_len,
-            )
+        logits = fp8_paged_mqa_logits(
+            padded_q_fp8_decode_tokens,
+            kv_cache,
+            weights[:num_padded_tokens],
+            decode_metadata.seq_lens,
+            decode_metadata.block_table,
+            decode_metadata.schedule_metadata,
+            max_model_len=max_model_len,
+            clean_logits=False,
+        )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
@@ -330,12 +320,9 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
-        if current_platform.is_cuda() and not is_deep_gemm_supported():
-            logger.warning_once(
-                "DeepGEMM is not supported or available. SparseAttnIndexer will use a "
-                "less efficient PyTorch implementation. "
-                "Please make sure you have the required hardware and software setup "
-                "for DeepGEMM to achieve optimal performance."
+        if current_platform.is_cuda() and not has_deep_gemm():
+            raise RuntimeError(
+                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
             )
 
     def forward_native(
@@ -365,7 +352,7 @@ class SparseAttnIndexer(CustomOp):
         return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
             self.k_cache.prefix,
-            self.k_cache.kv_cache[0],
+            self.k_cache.kv_cache,
             q_fp8,
             k,
             weights,
@@ -389,7 +376,7 @@ class SparseAttnIndexer(CustomOp):
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 self.k_cache.prefix,
-                self.k_cache.kv_cache[0],
+                self.k_cache.kv_cache,
                 q_fp8,
                 k,
                 weights,

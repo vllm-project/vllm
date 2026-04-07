@@ -6,9 +6,6 @@ from copy import deepcopy
 
 from tblib import pickling_support
 
-# Import fixture
-from tests.v1.entrypoints.conftest import sample_json_schema  # noqa
-
 # ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
@@ -80,6 +77,55 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+@pytest.fixture
+def sample_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+            "skills": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                },
+            },
+            "grade": {
+                "type": "string",
+                "pattern": "^[A-D]$",
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
+            },
+            "work_history": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "company": {"type": "string"},
+                        "duration": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 100.0,
+                        },
+                        "position": {"type": "string"},
+                    },
+                    "required": ["company", "duration", "position"],
+                    "additionalProperties": False,
+                },
+                "minItems": 0,
+                "maxItems": 3,
+            },
+        },
+        "required": ["name", "age", "skills", "grade", "email", "work_history"],
+        "additionalProperties": False,
+        "minProperties": 1,
+        "maxProperties": 10,
+    }
+
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -1576,3 +1622,26 @@ def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+@pytest.fixture(scope="function")
+def disable_log_dedup(monkeypatch):
+    """
+    Disable log deduplication such that warning_once and info_once always print.
+    """
+
+    # Patch logger._print_warning_once to remove the lru_cache decorator
+    from vllm import logger
+
+    original_print_warning_once = logger._print_warning_once
+    original_print_info_once = logger._print_info_once
+    original_print_debug_once = logger._print_debug_once
+
+    logger._print_warning_once = original_print_warning_once.__wrapped__
+    logger._print_info_once = original_print_info_once.__wrapped__
+    logger._print_debug_once = original_print_debug_once.__wrapped__
+
+    yield
+    logger._print_warning_once = original_print_warning_once
+    logger._print_info_once = original_print_info_once
+    logger._print_debug_once = original_print_debug_once

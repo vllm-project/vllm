@@ -7,15 +7,16 @@
 # Copyright (c) 2025 Skywork
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
@@ -24,29 +25,20 @@ from vllm.model_executor.models.intern_vit import (
     InternVisionPatchModel,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalDataDict,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.multimodal.parse import (
-    ImageEmbeddingItems,
-    ImageProcessorItems,
-    ImageSize,
-    MultiModalDataItems,
-)
-from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-)
+from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.skyworkr1v import SkyworkR1VProcessor
+from vllm.transformers_utils.processors.internvl import (
+    InternVLImageProcessor,
+    InternVLProcessor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .internvl import (
+    BaseInternVLDummyInputsBuilder,
+    BaseInternVLMultiModalProcessor,
+    BaseInternVLProcessingInfo,
+)
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
@@ -95,53 +87,35 @@ SkyworkR1VImageInputs: TypeAlias = (
 )
 
 
-class SkyworkR1VProcessingInfo(BaseProcessingInfo):
-    def get_hf_processor(self, **kwargs: object) -> SkyworkR1VProcessor:
-        return self.ctx.init_processor(
-            SkyworkR1VProcessor,
-            config=self.get_hf_config(),
+class SkyworkR1VProcessingInfo(BaseInternVLProcessingInfo):
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs.setdefault("image_size", vision_config.image_size)
+        kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
+        kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
+        kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
+        kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+
+        return InternVLImageProcessor(**kwargs)
+
+    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_processor = self.get_image_processor(**kwargs)
+        image_size = image_processor.image_size
+        patch_size = vision_config.patch_size
+        downsample_ratio = config.downsample_ratio
+        image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
+
+        return InternVLProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=image_processor,
+            image_seq_length=image_seq_length,
         )
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: SkyworkR1VProcessor,
-    ) -> int:
-        return processor.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
-        )
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        processor = self.get_hf_processor()
-
-        base_size = processor.image_size
-        target_ratios = processor.resolve_target_ratios()
-
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for wr, hr in target_ratios:
-            width, height = base_size * wr, base_size * hr
-
-            feat_size = self.get_num_image_tokens(
-                image_width=width,
-                image_height=height,
-                processor=processor,
-            )
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width, height=height)
-
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
-
-        return largest_feature_pinpoint
 
 
 class SkyworkR1VDummyInputsBuilder(BaseDummyInputsBuilder[SkyworkR1VProcessingInfo]):
@@ -171,102 +145,10 @@ class SkyworkR1VDummyInputsBuilder(BaseDummyInputsBuilder[SkyworkR1VProcessingIn
         }
 
 
-class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[SkyworkR1VProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        image_token_id = hf_processor.image_token_id
-
-        # Since there may be extra tokens in the feature placeholders,
-        # we need to pass the image token ID to the model to select the
-        # tokens to merge from the vision encoder outputs
-        processed_outputs["image_token_id"] = torch.tensor(image_token_id)
-
-        return processed_outputs
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
-        num_images = len(image_num_patches)
-
-        return dict(
-            pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_num_patches
-            ),
-            image_num_patches=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-            image_token_id=MultiModalFieldConfig.shared("image", num_images),
-        )
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        out_mm_data = out_mm_kwargs.get_data()
-        if "image_num_patches" in out_mm_data:
-            image_num_patches = out_mm_data["image_num_patches"]
-            assert isinstance(image_num_patches, torch.Tensor)
-            image_num_patches = image_num_patches.tolist()
-        elif "image_embeds" in out_mm_data:
-            # TODO: Use image size information in dictionary embedding inputs
-            # to compute num_patches (similar to Qwen2-VL)
-            image_num_patches = [None] * len(out_mm_data["image_embeds"])
-        else:
-            image_num_patches = []
-
-        def get_replacement_skyworkr1v(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems)
-            )
-
-            if isinstance(images, ImageEmbeddingItems):
-                feature_size = images.get_feature_size(item_idx)
-            else:
-                image_size = images.get_image_size(item_idx)
-                feature_size = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    processor=hf_processor,
-                )
-
-            num_patches = image_num_patches[item_idx]
-            if num_patches is not None:
-                assert isinstance(num_patches, int)
-
-            return hf_processor.get_image_repl(feature_size, num_patches)
-
-        return [
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=get_replacement_skyworkr1v,
-            )
-        ]
-
-
 @MULTIMODAL_REGISTRY.register_processor(
-    SkyworkR1VMultiModalProcessor,
+    BaseInternVLMultiModalProcessor,
     info=SkyworkR1VProcessingInfo,
-    dummy_inputs=SkyworkR1VDummyInputsBuilder,
+    dummy_inputs=BaseInternVLDummyInputsBuilder,
 )
 class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     @classmethod

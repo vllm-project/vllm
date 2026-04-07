@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from datetime import timedelta
-from functools import cache, wraps
+from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
@@ -19,9 +19,11 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+import vllm._C_stable_libtorch  # noqa
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -29,6 +31,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -46,6 +49,32 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
+    """Get number of CUDA devices, caching based on the value of CUDA_VISIBLE_DEVICES
+    at the time of call.
+
+    This should be used instead of torch.accelerator.device_count() unless
+    CUDA_VISIBLE_DEVICES has already been set to the desired value.
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+
+    if not torch.cuda._is_compiled():
+        return 0
+    raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    return r
+
+
 @cache
 def _get_backend_priorities(
     use_mla: bool,
@@ -59,7 +88,7 @@ def _get_backend_priorities(
             # Sparse MLA backend priorities
             # See https://github.com/vllm-project/vllm/issues/35807 for
             # benchmark results
-            if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
+            if kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
                 # Prefer FlashInfer for fp8 kv cache
                 sparse_backends = [
                     AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
@@ -387,7 +416,8 @@ class CudaPlatformBase(Platform):
                     )
                 if is_backend_supported:
                     logger.info_once(
-                        f"Using backend {vit_attn_backend} for vit attention"
+                        f"Using backend {vit_attn_backend} for vit attention",
+                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:
@@ -454,7 +484,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def device_count(cls) -> int:
-        return cuda_device_count_stateless()
+        return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -510,12 +540,37 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """Currently, only Hopper and Blackwell GPUs are supported."""
+        return cls.is_device_capability(90) or cls.is_device_capability_family(100)
+
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # Use oink if enabled for rms_norm
+        # TODO(Laurawly/luka): remove this env var,
+        #  users can just use IR op priority directly
+        rms_norm = default
+        if envs.VLLM_USE_OINK_OPS:
+            rms_norm = ["oink"] + default
+
+        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
 
 
 # NVML utils

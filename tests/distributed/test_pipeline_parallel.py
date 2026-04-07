@@ -319,9 +319,6 @@ def _compare_tp(
         pp_env = {
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
-        # Temporary. Currently when zeromq + SPMD is used, it does not properly
-        # terminate because of a Ray Compiled Graph issue.
-        common_args.append("--disable-frontend-multiprocessing")
     elif distributed_backend == "mp":
         pp_env = None
     else:
