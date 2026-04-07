@@ -450,13 +450,14 @@ class DPCoordinatorProc:
                     # ALL_PAUSED once every engine has acknowledged.
                     if outputs.pause_ack:
                         self.pause_acks.add(eng_index)
+                        active_indices = set(range(len(self.engines)))
                         logger.debug(
                             "Pause ack from engine %d (%d/%d).",
                             eng_index,
                             len(self.pause_acks),
                             len(self.engines),
                         )
-                        if len(self.pause_acks) >= len(self.engines):
+                        if active_indices <= self.pause_acks:
                             logger.debug("All engines paused, broadcasting ALL_PAUSED.")
                             self._send_all_paused(publish_back)
                             self.pause_acks.clear()

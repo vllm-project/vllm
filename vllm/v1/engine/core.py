@@ -1674,6 +1674,12 @@ class DPEngineCoreProc(EngineCoreProc):
         if not self.has_coordinator:
             return super().pause_scheduler(mode=mode, clear_cache=clear_cache)
 
+        # If a barrier is already in flight, the pause is already in
+        # progress — return the existing future so all callers resolve
+        # together when ALL_PAUSED arrives.
+        if self._pause_barrier_future is not None:
+            return self._pause_barrier_future
+
         # With a coordinator we barrier-sync the pause: each engine sends
         # a PAUSE_ACK after its local pause completes, and the coordinator
         # broadcasts ALL_PAUSED once every engine has acknowledged. The
@@ -1693,12 +1699,12 @@ class DPEngineCoreProc(EngineCoreProc):
         self.scheduler.set_pause_state(pause_state)
 
         barrier_future: Future[Any] = Future()
+        self._pause_barrier_future = barrier_future
 
         def _on_idle(engine: "DPEngineCoreProc") -> None:
             if clear_cache:
                 engine._reset_caches()
             engine.output_queue.put_nowait((-1, EngineCoreOutputs(pause_ack=True)))
-            engine._pause_barrier_future = barrier_future
 
         if not self.has_work():
             _on_idle(self)
