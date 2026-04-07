@@ -781,10 +781,12 @@ def test_mtp_correctness(
             attention_backend=attn_backend,
         )
         # MTP auto-enables async scheduling; assert it is active.
-        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
-            "Expected async_scheduling=True for MTP spec decode, "
-            f"got False. method={method}"
-        )
+        if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
+            raise AsyncSchedulingNotEnabledError(
+                "Expected async_scheduling=True for MTP spec decode, "
+                f"got False. method={method}"
+                " See https://github.com/vllm-project/vllm/issues/38929"
+            )
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
