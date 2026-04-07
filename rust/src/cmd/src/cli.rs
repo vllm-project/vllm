@@ -107,6 +107,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
+    /// Disable periodic logging of engine statistics (throughput, queue depth, cache usage).
+    #[arg(long)]
+    #[serde(default)]
+    pub disable_log_stats: bool,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet implemented in Rust.
     #[educe(Debug(ignore))]
     #[command(flatten)]
@@ -146,6 +151,7 @@ impl SharedRuntimeArgs {
             reasoning_parser: self.reasoning_parser,
             max_model_len: self.max_model_len,
             enable_log_requests: self.enable_log_requests,
+            disable_log_stats: self.disable_log_stats,
         }
     }
 
@@ -175,6 +181,7 @@ impl SharedRuntimeArgs {
             reasoning_parser: self.reasoning_parser,
             max_model_len: self.max_model_len,
             enable_log_requests: self.enable_log_requests,
+            disable_log_stats: self.disable_log_stats,
         }
     }
 }

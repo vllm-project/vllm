@@ -41,6 +41,8 @@ pub struct Config {
     pub max_model_len: Option<u32>,
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// When `true`, suppress periodic stats logging (throughput, queue depth, cache usage).
+    pub disable_log_stats: bool,
 }
 
 impl Config {

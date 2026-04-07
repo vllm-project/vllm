@@ -378,10 +378,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub structured_outputs_config: Option<Unsupported>,
 
-    /// Disable logging statistics.
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub disable_log_stats: Option<Unsupported>,
-
     /// Log aggregate rather than per-engine statistics when using data parallelism.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub aggregate_engine_logging: Option<Unsupported>,

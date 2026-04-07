@@ -39,6 +39,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             512,
                         ),
                         enable_log_requests: false,
+                        disable_log_stats: false,
                     },
                     python_args: [
                         "--dtype",
@@ -202,6 +203,7 @@ fn frontend_args_accept_json() {
                         reasoning_parser: None,
                         max_model_len: None,
                         enable_log_requests: false,
+                        disable_log_stats: false,
                     },
                 },
             ),
@@ -555,6 +557,7 @@ fn serve_args_accept_handshake_aliases() {
                         reasoning_parser: None,
                         max_model_len: None,
                         enable_log_requests: false,
+                        disable_log_stats: false,
                     },
                     python_args: [],
                 },
@@ -626,6 +629,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             reasoning_parser: None,
             max_model_len: None,
             enable_log_requests: false,
+            disable_log_stats: false,
         }
     "#]]
     .assert_debug_eq(&config);

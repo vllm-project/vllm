@@ -1,6 +1,7 @@
 use vllm_engine_core_client::EngineCoreClient;
 
 mod error;
+mod log_stats;
 mod output;
 mod request;
 mod request_metrics;
@@ -13,6 +14,7 @@ pub use output::{
 pub use request::GenerateRequest;
 pub use vllm_engine_core_client::protocol::{Logprobs, PositionLogprobs, TokenLogprob};
 
+use crate::log_stats::StatsLogger;
 use crate::request_metrics::RequestMetricsTracker;
 
 /// Thin generate-only facade over [`EngineCoreClient`].
@@ -22,15 +24,27 @@ use crate::request_metrics::RequestMetricsTracker;
 pub struct Llm {
     client: EngineCoreClient,
     randomize_request_id: bool,
+    _stats_logger: Option<StatsLogger>,
 }
 
 impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core client.
     pub fn new(client: EngineCoreClient) -> Self {
+        let stats_logger =
+            StatsLogger::start(client.model_name().to_string(), client.engine_count());
         Self {
             client,
             randomize_request_id: true,
+            _stats_logger: Some(stats_logger),
         }
+    }
+
+    /// Disable periodic stats logging (equivalent to `--disable-log-stats`).
+    pub fn with_disable_log_stats(mut self, disable: bool) -> Self {
+        if disable {
+            self._stats_logger = None;
+        }
+        self
     }
 
     /// Control whether external request ids are randomized before reaching engine-core.

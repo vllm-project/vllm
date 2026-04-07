@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         reasoning_parser: None,
         max_model_len: None,
         enable_log_requests: false,
+        disable_log_stats: false,
     };
 
     let bind_address = format!("127.0.0.1:{port}");
