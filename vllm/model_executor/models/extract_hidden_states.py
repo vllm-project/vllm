@@ -354,9 +354,7 @@ class ExtractHiddenStatesModel(nn.Module):
         cache_config = vllm_config.cache_config
 
         # Hidden states dtype should be independent of KV cache dtype.
-        if cache_config is not None and is_quantized_kv_cache(
-            cache_config.cache_dtype
-        ):
+        if cache_config is not None and is_quantized_kv_cache(cache_config.cache_dtype):
             cache_config = replace(cache_config, cache_dtype="auto")
 
         # Create a single cache-only attention layer
