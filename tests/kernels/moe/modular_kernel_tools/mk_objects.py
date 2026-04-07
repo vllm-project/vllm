@@ -199,10 +199,10 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
@@ -240,7 +240,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
-    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_two_sided_prepare_finalize import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
         FlashInferNVLinkTwoSidedPrepareAndFinalize,
     )
 
@@ -271,7 +271,7 @@ if (
     and has_flashinfer_cutlass_fused_moe()
     and current_platform.has_device_capability(100)
 ):
-    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_one_sided_prepare_finalize import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided import (  # noqa: E501
         FlashInferNVLinkOneSidedPrepareAndFinalize,
     )
 

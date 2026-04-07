@@ -6,13 +6,13 @@ OpenAI: https://platform.openai.com/docs/api-reference/embeddings
 Cohere: https://docs.cohere.com/reference/embed
 """
 
-import base64
 import builtins
 import struct
 import time
 from collections.abc import Sequence
 from typing import Literal, TypeAlias
 
+import pybase64 as base64
 from pydantic import BaseModel, Field
 
 from vllm import PoolingParams

@@ -23,6 +23,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import (
+    WORKER_SPECIFIC_ENV_VARS,
     FutureWrapper,
     RayWorkerWrapper,
     initialize_ray_cluster,
@@ -61,17 +62,6 @@ class RayWorkerMetaData:
 
 class RayDistributedExecutor(Executor):
     """Ray-based distributed executor"""
-
-    # These env vars are worker-specific, therefore are NOT copied
-    # from the driver to the workers
-    WORKER_SPECIFIC_ENV_VARS = {
-        "VLLM_HOST_IP",
-        "VLLM_HOST_PORT",
-        "LOCAL_RANK",
-        "CUDA_VISIBLE_DEVICES",
-        "HIP_VISIBLE_DEVICES",
-        "ROCR_VISIBLE_DEVICES",
-    }
 
     uses_ray: bool = True
     supports_pp: bool = True
@@ -335,7 +325,7 @@ class RayDistributedExecutor(Executor):
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
-            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
             additional_vars=set(current_platform.additional_env_vars),
             destination="workers",
         )
@@ -382,9 +372,10 @@ class RayDistributedExecutor(Executor):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
-        if not is_eep_new_worker:
-            self.collective_rpc("init_device")
+        self.collective_rpc("init_device")
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.collective_rpc("elastic_ep_execute", args=("load_model",))
+        else:
             self.collective_rpc("load_model")
 
         def _update_block_size(worker):

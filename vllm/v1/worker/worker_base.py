@@ -122,7 +122,7 @@ class WorkerBase:
 
         return format_model_inspection(self.get_model())
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError
 
@@ -195,8 +195,8 @@ class WorkerWrapperBase:
         All workers have rpc_rank=0, but they have different ranks in the TP
         group.
         """
-        self.rpc_rank = rpc_rank
-        self.global_rank = self.rpc_rank if global_rank is None else global_rank
+        self.rpc_rank: int = rpc_rank
+        self.global_rank: int = self.rpc_rank if global_rank is None else global_rank
 
         # Initialized after init_worker is called
         self.worker: WorkerBase

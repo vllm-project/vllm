@@ -379,7 +379,11 @@ def _fused_moe_lora_kernel(
             )
             a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
 
-        accumulator += tl.dot(a, b)
+        # Cast operands to matching dtype for tl.dot. On ROCm, Triton's
+        # compiler may infer different types for a and b when merging
+        # if/else branches (TMA desc path returns fp32, tl.load returns
+        # the pointer's element type).
+        accumulator += tl.dot(a.to(tl.bfloat16), b.to(tl.bfloat16))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)

@@ -18,7 +18,7 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
-- `multi_modal_data`: This is a dictionary that follows the schema defined in [vllm.multimodal.inputs.MultiModalDataDict][].
+- `multi_modal_data`: This is a dictionary that follows the schema defined in [vllm.inputs.MultiModalDataDict][].
 
 ### Image Inputs
 

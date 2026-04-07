@@ -82,7 +82,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         model_case.model_id,
         tensor_parallel_size=model_case.tp,
         load_format="dummy",
-        cudagraph_capture_sizes=[16],
+        compilation_config={"cudagraph_capture_sizes": [16]},
     ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):

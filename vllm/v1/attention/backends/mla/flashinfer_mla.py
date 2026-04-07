@@ -16,6 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -76,17 +77,17 @@ class FlashInferMLABackend(MLACommonBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128]
+        # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, 192]
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-            if qk_nope_head_dim not in [64, 128]:
+            if qk_nope_head_dim not in [64, 128, 192]:
                 return (
-                    f"FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128], "
-                    f"but got {qk_nope_head_dim}"
+                    "FlashInfer MLA kernel requires qk_nope_head_dim "
+                    f"in [64, 128, 192], but got {qk_nope_head_dim}"
                 )
         return None
 
@@ -177,9 +178,14 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+
         if self.bmm2_scale is None:
-            self.bmm2_scale = layer._v_scale_float
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._k_scale_float
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,

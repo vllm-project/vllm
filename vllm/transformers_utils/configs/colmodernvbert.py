@@ -20,7 +20,6 @@ class ColModernVBertConfig(PretrainedConfig):
         vlm_config: dict | None = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
         self.embedding_dim = embedding_dim
 
         if vlm_config is None:
@@ -55,6 +54,7 @@ class ColModernVBertConfig(PretrainedConfig):
             intermediate_size=vis_cfg.get("intermediate_size", 3072),
             num_attention_heads=vis_cfg.get("num_attention_heads", 12),
         )
+        super().__init__(**kwargs)
 
     @property
     def image_seq_len(self) -> int:
