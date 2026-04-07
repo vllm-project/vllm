@@ -19,7 +19,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
-    Int8MoeBackend,
     make_int8_moe_kernel,
     make_int8_moe_quant_config,
     select_int8_moe_backend,
