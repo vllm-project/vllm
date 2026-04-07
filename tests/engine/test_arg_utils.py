@@ -525,6 +525,36 @@ def test_human_readable_model_len():
             parser.parse_args(["--max-model-len", invalid])
 
 
+def test_human_readable_batched_tokens():
+    """Test that --max-num-batched-tokens accepts 'auto' and human-readable
+    integers, mirroring --max-model-len behavior."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
+
+    # Default is None
+    args = parser.parse_args([])
+    assert args.max_num_batched_tokens is None
+
+    # Plain integer
+    args = parser.parse_args(["--max-num-batched-tokens", "2048"])
+    assert args.max_num_batched_tokens == 2048
+
+    # Human-readable suffixes
+    args = parser.parse_args(["--max-num-batched-tokens", "8k"])
+    assert args.max_num_batched_tokens == 8_000
+    args = parser.parse_args(["--max-num-batched-tokens", "8K"])
+    assert args.max_num_batched_tokens == 8 * 1024
+
+    # Special value -1 for auto
+    args = parser.parse_args(["--max-num-batched-tokens", "-1"])
+    assert args.max_num_batched_tokens == -1
+
+    # 'auto' is an alias for -1
+    args = parser.parse_args(["--max-num-batched-tokens", "auto"])
+    assert args.max_num_batched_tokens == -1
+    args = parser.parse_args(["--max-num-batched-tokens", "AUTO"])
+    assert args.max_num_batched_tokens == -1
+
+
 def test_ir_op_priority():
     from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
 

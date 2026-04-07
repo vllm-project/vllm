@@ -318,10 +318,10 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, set):
             kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
-            if name == "max_model_len":
+            if name == "max_model_len" or name == "max_num_batched_tokens":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in ("max_num_batched_tokens", "kv_cache_memory_bytes"):
+            elif name == "kv_cache_memory_bytes":
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
@@ -2230,6 +2230,10 @@ class EngineArgs:
             default_max_num_batched_tokens,
             default_max_num_seqs,
         ) = self.get_batch_defaults(world_size)
+
+        # Treat -1 (auto) the same as None (unset) for auto-detection.
+        if self.max_num_batched_tokens is not None and self.max_num_batched_tokens < 0:
+            self.max_num_batched_tokens = None
 
         orig_max_num_batched_tokens = self.max_num_batched_tokens
         orig_max_num_seqs = self.max_num_seqs
