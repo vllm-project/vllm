@@ -1940,7 +1940,12 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             or p.is_xpu()
         )
 
-        # Int8 W8A8 is supported on all platforms (no fp8 capability required).
+        # Int8 W8A8 requires DP4A / int8 tensor core support (CC >= 7.5 on CUDA,
+        # gfx9 on ROCm).
+        device_supports_int8 = is_rocm_on_gfx9 or (
+            p.is_cuda() and p.has_device_capability((7, 5))
+        )
+
         INT8_SUPPORTED_W_A = [
             (kInt8StaticChannelSym, kInt8DynamicTokenSym),
         ]
@@ -1948,7 +1953,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         if not device_supports_fp8:
             return (weight_key, activation_key) in [
                 (None, None),
-                *INT8_SUPPORTED_W_A,
+                *(INT8_SUPPORTED_W_A if device_supports_int8 else []),
             ]
 
         SUPPORTED_W_A = [
@@ -1958,7 +1963,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticTensorSym, kFp8DynamicTokenSym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            *INT8_SUPPORTED_W_A,
+            *(INT8_SUPPORTED_W_A if device_supports_int8 else []),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
