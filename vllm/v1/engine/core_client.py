@@ -1584,7 +1584,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 cur_data_parallel_size, new_data_parallel_size
             )
         if self.enable_fault_tolerance:
-            await self.client_sentinel.scale_elastic_ep(new_data_parallel_size)
+            await self.client_sentinel.refresh_engine_status(new_data_parallel_size)
 
     async def _eep_wait_for_setup_switch_complete(self) -> None:
         """

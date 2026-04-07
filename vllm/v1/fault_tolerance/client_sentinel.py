@@ -114,7 +114,7 @@ class ClientSentinel(BaseSentinel):
         await asyncio.sleep(self.ft_config.engine_recovery_timeout_sec)
         self.instance_shutdown_callback()
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int):
+    async def refresh_engine_status(self, new_data_parallel_size: int):
         # Update the engine status dict and publish the new status.
         for engine, status in self.engine_status_dict.items():
             if status["status"] != "healthy":
