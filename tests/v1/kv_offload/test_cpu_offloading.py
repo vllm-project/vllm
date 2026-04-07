@@ -22,17 +22,20 @@ ATTN_BACKENDS = []
 
 if current_platform.is_cuda():
     ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
-elif current_platform.is_rocm():
-    ATTN_BACKENDS = ["TRITON_ATTN"]
-elif current_platform.is_xpu():
+elif current_platform.is_rocm() or current_platform.is_xpu():
     ATTN_BACKENDS = ["TRITON_ATTN"]
 
 # Maximum time (seconds) to wait for the async CPU offload transfer
 # to complete before giving up.
-_RESET_CACHE_TIMEOUT = 30 if current_platform.is_rocm() or current_platform.is_xpu() else 10
+_RESET_CACHE_TIMEOUT = (
+    30 if current_platform.is_rocm() or current_platform.is_xpu() else 10
+)
+
 
 # ZMQ poll timeout (ms) for the first event.
-_FIRST_EVENT_POLL_MS = 10_000 if current_platform.is_rocm() or current_platform.is_xpu() else 1000
+_FIRST_EVENT_POLL_MS = (
+    10_000 if current_platform.is_rocm() or current_platform.is_xpu() else 1000
+)
 
 # Hard ceiling (seconds) on how long get_new_cpu_stored_events may loop,
 # to prevent hangs if non-CPU events keep arriving indefinitely.
@@ -227,8 +230,8 @@ def test_cpu_offloading(cpu_block_size: int, attn_backend: str) -> None:
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
         attention_config={"backend": attn_backend},
-        # ROCm/XPU: batch size 1 to reduce variability
-        **({"max_num_seqs": 1} if current_platform.is_rocm() or current_platform.is_xpu() else {}),
+        # ROCm: batch size 1 to reduce variability
+        **({"max_num_seqs": 1} if current_platform.is_rocm() else {}),
     )
 
     events_endpoint = events_endpoint.replace("*", "127.0.0.1")

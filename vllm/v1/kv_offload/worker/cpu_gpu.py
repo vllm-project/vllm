@@ -202,16 +202,8 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
         stream = self._stream_pool.pop() if self._stream_pool else _new_stream()
-        start_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else _new_event()
-        )
-        end_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else _new_event()
-        )
+        start_event = self._event_pool.pop() if self._event_pool else _new_event()
+        end_event = self._event_pool.pop() if self._event_pool else _new_event()
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
