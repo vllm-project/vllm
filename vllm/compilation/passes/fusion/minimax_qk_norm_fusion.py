@@ -63,7 +63,7 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
         max_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm.distributed.parallel_state import get_tp_group
-        from vllm.model_executor.layers.minimax_rms_norm.lamport_workspace import (
+        from vllm.model_executor.layers.mamba.lamport_workspace import (
             get_allreduce_workspace,
         )
 
