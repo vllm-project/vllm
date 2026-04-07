@@ -394,3 +394,9 @@ class OffloadingConnectorWorker:
         kv_connector_stats = self.kv_connector_stats
         self.kv_connector_stats = OffloadingConnectorStats()
         return kv_connector_stats
+
+    def shutdown(self) -> None:
+        # Drop deferred store jobs: CPU cache is non-persistent,
+        # so submitting stores on shutdown is pointless.
+        self._unsubmitted_store_jobs.clear()
+        self.worker.shutdown()

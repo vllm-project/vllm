@@ -69,6 +69,9 @@ class OffloadingHandler1To2(OffloadingHandler):
             if spec:
                 assert spec.finished
 
+    def shutdown(self) -> None:
+        pass
+
 
 class OffloadingHandler2To1(OffloadingHandler):
     def __init__(self):
@@ -95,6 +98,9 @@ class OffloadingHandler2To1(OffloadingHandler):
             spec = self.transfers.get(job_id)
             if spec:
                 assert spec.finished
+
+    def shutdown(self) -> None:
+        pass
 
 
 def test_offloading_worker():
