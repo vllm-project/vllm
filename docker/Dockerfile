@@ -547,9 +547,10 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
 # Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 # LIBRARY_PATH is needed for compile-time linking (e.g. Triton JIT compilation with
-# GCC). Without it, GCC's linker cannot find libcuda.so.1 on platforms like GKE where
-# NVIDIA drivers are mounted at /usr/local/nvidia/lib64 at runtime.
-ENV LIBRARY_PATH=/usr/local/nvidia/lib64:${LIBRARY_PATH:-}
+# GCC). We make it consistent with LD_LIBRARY_PATH so that any JIT-compiled code can
+# find CUDA libraries at link time. /usr/local/nvidia/lib64 is where container providers
+# (GKE, etc.) mount host NVIDIA drivers at runtime.
+ENV LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/cuda/lib64:${LIBRARY_PATH:-}
 
 # Copy examples and benchmarks at the end to minimize cache invalidation
 COPY examples examples
