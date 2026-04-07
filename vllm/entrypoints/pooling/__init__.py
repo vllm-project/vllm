@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.pooling.utils import enable_scoring_api
 from vllm.logger import init_logger
 

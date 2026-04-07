@@ -90,7 +90,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 @dataclass
 class OfflineInputsContext:
     prompts: PromptType | Sequence[PromptType] | DataPrompt | ScoringData
-    pooling_params: PoolingParams | list[PoolingParams] | None = None
+    pooling_params: PoolingParams | Sequence[PoolingParams] | None = None
     tokenization_kwargs: dict[str, Any] | None = None
     chat_template: str | None = None
 

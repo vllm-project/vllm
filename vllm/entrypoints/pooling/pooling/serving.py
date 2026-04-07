@@ -95,7 +95,10 @@ class ServingPooling(PoolingServingBase):
                 )
             request.task = "plugin"
 
-        io_processor = self.io_processors[request.task]
+        pooling_task = request.task
+        assert pooling_task is not None
+
+        io_processor = self.io_processors[pooling_task]
         await io_processor.pre_process_online_async(ctx)
 
         if ctx.pooling_params is None:
