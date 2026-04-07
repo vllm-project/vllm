@@ -4,8 +4,8 @@
 from collections.abc import Sequence
 from typing import Any, Final
 
-from vllm import PoolingRequestOutput, PromptType
-from vllm.config import ModelConfig
+from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateConfig,
@@ -33,11 +33,12 @@ class PoolingIOProcessor:
 
     def __init__(
         self,
-        model_config: ModelConfig,
+        vllm_config: VllmConfig,
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
     ):
-        self.model_config = model_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
         self.renderer = renderer
 
         self.chat_template = chat_template_config.chat_template
@@ -243,3 +244,19 @@ class PoolingIOProcessor:
                 "Refused request with untrusted chat template."
             )
         return None
+
+    def _params_to_seq(
+        self,
+        params: PoolingParams | Sequence[PoolingParams],
+        num_requests: int,
+    ) -> Sequence[PoolingParams]:
+        if isinstance(params, Sequence):
+            if len(params) != num_requests:
+                raise ValueError(
+                    f"The lengths of prompts ({params}) "
+                    f"and params ({len(params)}) must be the same."
+                )
+
+            return params
+
+        return [params] * num_requests

@@ -398,12 +398,11 @@ class LLM:
         self.runner_type = self.model_config.runner_type
         self.renderer = self.llm_engine.renderer
         self.chat_template = load_chat_template(chat_template)
-        self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
         self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
         self.pooling_io_processors = init_pooling_io_processors(
             supported_tasks=supported_tasks,
-            model_config=self.model_config,
+            vllm_config=self.llm_engine.vllm_config,
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
@@ -1084,7 +1083,10 @@ class LLM:
         self._verify_pooling_task(pooling_task)
 
         if isinstance(prompts, dict) and "data" in prompts:
-            if self.io_processor is None:
+            if pooling_task != "plugin":
+                raise ValueError()
+
+            if "plugin" not in self.pooling_io_processors:
                 raise ValueError(
                     "No IOProcessor plugin installed. Please refer "
                     "to the documentation and to the "
@@ -1092,107 +1094,42 @@ class LLM:
                     "offline inference example for more details."
                 )
 
-            # Validate the request data is valid for the loaded plugin
-            prompt_data = prompts.get("data")
-            if prompt_data is None:
-                raise ValueError(
-                    "The 'data' field of the prompt is expected to contain "
-                    "the prompt data and it cannot be None. "
-                    "Refer to the documentation of the IOProcessor "
-                    "in use for more details."
-                )
-            validated_prompt = self.io_processor.parse_data(prompt_data)
+        if pooling_params is None:
+            # Use default pooling params.
+            pooling_params = PoolingParams()
 
-            # obtain the actual model prompts from the pre-processor
-            prompts = self.io_processor.pre_process(prompt=validated_prompt)
-            prompts_seq = prompt_to_seq(prompts)
+        prompts_seq = prompt_to_seq(prompts)
+        params_seq = self._params_to_seq(pooling_params, len(prompts_seq))
 
-            params_seq: Sequence[PoolingParams] = [
-                self.io_processor.merge_pooling_params(param)
-                for param in self._params_to_seq(
-                    pooling_params,
-                    len(prompts_seq),
-                )
-            ]
-            for p in params_seq:
-                if p.task is None:
-                    p.task = "plugin"
+        for param in params_seq:
+            if param.task is None:
+                param.task = pooling_task
+            elif param.task != pooling_task:
+                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                raise ValueError(msg)
 
-            outputs = self._run_completion(
-                prompts=prompts_seq,
-                params=params_seq,
-                output_type=PoolingRequestOutput,
-                use_tqdm=use_tqdm,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
+        assert pooling_task is not None and pooling_task in self.pooling_io_processors
+
+        io_processor = self.pooling_io_processors[pooling_task]
+        processor_inputs = io_processor.pre_process_offline(
+            ctx=OfflineInputsContext(
+                prompts=prompts_seq, tokenization_kwargs=tokenization_kwargs
             )
+        )
+        seq_lora_requests = self._lora_request_to_seq(lora_request, len(prompts_seq))
+        seq_priority = self._priority_to_seq(None, len(prompts))
 
-            # get the post-processed model outputs
-            assert self.io_processor is not None
-            processed_outputs = self.io_processor.post_process(outputs)
+        self._render_and_add_requests(
+            prompts=processor_inputs,
+            params=params_seq,
+            lora_requests=seq_lora_requests,
+            priorities=seq_priority,
+        )
 
-            return [
-                PoolingRequestOutput[Any](
-                    request_id="",
-                    outputs=processed_outputs,
-                    num_cached_tokens=getattr(
-                        processed_outputs, "num_cached_tokens", 0
-                    ),
-                    prompt_token_ids=[],
-                    finished=True,
-                )
-            ]
-        else:
-            if pooling_params is None:
-                # Use default pooling params.
-                pooling_params = PoolingParams()
-
-            prompts_seq = prompt_to_seq(prompts)
-            params_seq = self._params_to_seq(pooling_params, len(prompts_seq))
-
-            for param in params_seq:
-                if param.task is None:
-                    param.task = pooling_task
-                elif param.task != pooling_task:
-                    msg = (
-                        f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                    )
-                    raise ValueError(msg)
-
-            if pooling_task in self.pooling_io_processors:
-                io_processor = self.pooling_io_processors[pooling_task]
-                processor_inputs = io_processor.pre_process_offline(
-                    ctx=OfflineInputsContext(
-                        prompts=prompts_seq, tokenization_kwargs=tokenization_kwargs
-                    )
-                )
-                seq_lora_requests = self._lora_request_to_seq(
-                    lora_request, len(prompts_seq)
-                )
-                seq_priority = self._priority_to_seq(None, len(prompts))
-
-                self._render_and_add_requests(
-                    prompts=processor_inputs,
-                    params=params_seq,
-                    lora_requests=seq_lora_requests,
-                    priorities=seq_priority,
-                )
-
-                outputs = self._run_engine(
-                    use_tqdm=use_tqdm, output_type=PoolingRequestOutput
-                )
-                outputs = io_processor.post_process_offline(
-                    ctx=OfflineOutputsContext(outputs=outputs)
-                )
-            else:
-                outputs = self._run_completion(
-                    prompts=prompts_seq,
-                    params=params_seq,
-                    output_type=PoolingRequestOutput,
-                    use_tqdm=use_tqdm,
-                    lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
-                )
+        outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
+        outputs = io_processor.post_process_offline(
+            ctx=OfflineOutputsContext(outputs=outputs)
+        )
         return outputs
 
     def _verify_pooling_task(self, pooling_task: PoolingTask | None):

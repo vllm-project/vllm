@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from starlette.datastructures import Headers
 
 from vllm import PoolingParams, PoolingRequestOutput, envs
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateConfig,
@@ -64,14 +64,14 @@ class PoolingServing:
             trust_request_chat_template=trust_request_chat_template,
         )
         self.io_processor = self.init_io_processor(
-            model_config=models.model_config,
+            vllm_config=engine_client.vllm_config,
             renderer=models.renderer,
             chat_template_config=self.chat_template_config,
         )
 
     def init_io_processor(
         self,
-        model_config: ModelConfig,
+        vllm_config: VllmConfig,
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
     ) -> PoolingIOProcessor:

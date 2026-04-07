@@ -8,8 +8,6 @@ from typing import Literal, TypeAlias, cast
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
@@ -33,7 +31,6 @@ from vllm.entrypoints.pooling.utils import (
 )
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.renderers import BaseRenderer
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 logger = init_logger(__name__)
@@ -49,17 +46,8 @@ class ServingEmbedding(PoolingServing):
     request_id_prefix = "embd"
     io_processor: EmbedIOProcessor
 
-    def init_io_processor(
-        self,
-        model_config: ModelConfig,
-        renderer: BaseRenderer,
-        chat_template_config: ChatTemplateConfig,
-    ) -> EmbedIOProcessor:
-        return EmbedIOProcessor(
-            model_config=model_config,
-            renderer=renderer,
-            chat_template_config=chat_template_config,
-        )
+    def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
+        return EmbedIOProcessor(*args, **kwargs)
 
     async def _build_response(
         self,
