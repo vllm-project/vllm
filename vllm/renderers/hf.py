@@ -492,7 +492,14 @@ def safe_apply_chat_template(
     if tools is not None:
         try:
             import jsonref
-            tools = jsonref.replace_refs(tools)  # type: ignore[assignment]
+
+            def _no_remote_loader(uri):
+                raise ValueError(
+                    "Remote references are not allowed in tool schemas: "
+                    f"{uri}")
+
+            tools = jsonref.replace_refs(  # type: ignore[assignment]
+                tools, loader=_no_remote_loader)
         except ImportError:
             pass
 
