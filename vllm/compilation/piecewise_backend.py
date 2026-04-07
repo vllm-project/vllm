@@ -383,10 +383,7 @@ class PiecewiseBackend:
         # Two list dereferences: size → index, index → RangeEntry.
         cache = self.vllm_backend._size_to_range_index
         if 0 <= runtime_shape < len(cache):
-            idx = cache[runtime_shape]
-            if idx < 0:  # -1 means no compile range covers this size
-                return None
-            return self._range_index_to_entry[idx]
+            return self._range_index_to_entry[cache[runtime_shape]]
 
         # runtime_shape exceeds preallocated cache (rare — e.g. encoder shapes
         # beyond max_num_batched_tokens). Fall back to a linear scan.

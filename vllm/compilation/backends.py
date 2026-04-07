@@ -806,7 +806,8 @@ class VllmBackend:
     inductor_config: dict[str, Any]
     # Shared size → range-entry index map, eagerly built once at init time.
     # _size_to_range_index[runtime_shape] gives a non-negative index into each
-    # PiecewiseBackend's _range_index_to_entry list, or -1 for no match.
+    # PiecewiseBackend's _range_index_to_entry list. Compile ranges always
+    # cover [1, max_tokens] so every valid in-bounds shape has a valid index.
     # Preallocated to max_num_batched_tokens+1 so lookup is a plain list index.
     _size_to_range_index: list[int]
     _num_range_entries: int
@@ -849,8 +850,8 @@ class VllmBackend:
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
 
         # Build the shared size → range-entry index mapping eagerly.
-        # Every possible runtime_shape in [0, max_tokens] is mapped to the
-        # index of its matching compile range / exact size (or -1 for miss).
+        # Every possible runtime_shape in [1, max_tokens] is mapped to the
+        # index of its matching compile range / exact size.
         # Each PiecewiseBackend then keeps a parallel index → RangeEntry array
         # so dispatch is two plain list dereferences — zero hashing.
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -880,9 +881,10 @@ class VllmBackend:
 
         self._num_range_entries = next_idx
 
-        # Map every size → index (-1 = no match).
-        # Iterate in reverse so that earlier ranges (lower index) overwrite
-        # later ones, preserving first-match-wins semantics for overlaps.
+        # Map every size in [1, max_tokens] to its range index.
+        # Compile ranges cover the full domain so every valid shape gets a
+        # non-negative index. Iterate in reverse so earlier ranges (lower
+        # index) overwrite later ones, preserving first-match-wins semantics.
         self._size_to_range_index: list[int] = [-1] * (max_tokens + 1)
         for i in range(len(compile_ranges) - 1, -1, -1):
             cr = compile_ranges[i]
