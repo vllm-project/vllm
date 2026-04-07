@@ -35,6 +35,7 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        kv_transfer_params: The params for remote K/V transfer.
     """
 
     index: int
@@ -46,6 +47,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    kv_transfer_params: dict[str, Any] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -59,7 +61,8 @@ class CompletionOutput:
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
-            f"stop_reason={self.stop_reason})"
+            f"stop_reason={self.stop_reason}, "
+            f"kv_transfer_params={self.kv_transfer_params})"
         )
 
 
@@ -103,7 +106,6 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
-        kv_transfer_params: The params for remote K/V transfer.
     """
 
     def __init__(
@@ -119,8 +121,6 @@ class RequestOutput:
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
-        *,
-        kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -141,17 +141,20 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params_list = []
-        if kv_transfer_params:
-            if isinstance(kv_transfer_params, list):
-                self.kv_transfer_params_list = kv_transfer_params
-            else:
-                self.kv_transfer_params_list = [kv_transfer_params]
+        for output in outputs:
+            if output.kv_transfer_params:
+                self.kv_transfer_params_list.append(output.kv_transfer_params)
 
     @property
     def kv_transfer_params(self) -> dict[str, Any] | list[dict[str, Any]] | None:
         if len(self.kv_transfer_params_list) == 1:
+            # keep backward compatibility for the common case where there is
+            # only one output and its kv_transfer_params is a dict
             return self.kv_transfer_params_list[0]
         if len(self.kv_transfer_params_list):
+            # for the case where there are multiple outputs, we return a list of
+            # kv_transfer_params dicts. This is for parallel sampling (n > 1)
+            # where each child request may have different kv_transfer_params.
             return self.kv_transfer_params_list
         return None
 
@@ -159,7 +162,6 @@ class RequestOutput:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
-
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
                 if completion.index == next_completion.index:
@@ -183,7 +185,7 @@ class RequestOutput:
                     break
             else:
                 self.outputs.append(next_completion)
-                self.kv_transfer_params_list.extend(next_output.kv_transfer_params_list)
+                self.kv_transfer_params_list.extend(next_completion.kv_transfer_params)
 
     def __repr__(self) -> str:
         return (
@@ -197,7 +199,8 @@ class RequestOutput:
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
             f"lora_request={self.lora_request}, "
-            f"num_cached_tokens={self.num_cached_tokens})"
+            f"num_cached_tokens={self.num_cached_tokens}, "
+            f"kv_transfer_params={self.kv_transfer_params})"
         )
 
 
