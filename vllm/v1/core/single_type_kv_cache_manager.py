@@ -32,8 +32,9 @@ class EagleMode(Enum):
     `PRIMARY` applies the full EAGLE adjustment for a group. This should only
     happen once per group during a hybrid fixed-point search.
     `SECONDARY` means the group is being revisited after another group already
-    tightened the common cache-hit length, so the EAGLE adjustment must not be
-    applied again.
+    tightened the common cache-hit length. In this mode, `max_length` is
+    already EAGLE-adjusted, so the manager should validate it by searching one
+    extra block and then applying the usual single-block drop once.
     """
 
     NONE = "none"
@@ -341,10 +342,10 @@ class SingleTypeKVCacheManager(ABC):
         `max_length`. The prefix should be a common prefix hit for all the
         kv cache groups in `kv_cache_group_ids`. If no cache hit is found,
         return an empty list.
-        If `eagle_mode` is `PRIMARY`, apply the one-time EAGLE-specific
-        prefix-cache adjustment for this group. If it is `SECONDARY`, recompute
-        against a shorter common hit length without applying that adjustment a
-        second time.
+        If `eagle_mode` is `PRIMARY`, apply the initial EAGLE-specific
+        prefix-cache adjustment for this group. If it is `SECONDARY`, treat
+        `max_length` as already EAGLE-adjusted and validate it with one-block
+        slack, without compounding the drop on every retry.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -459,7 +460,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
-        max_num_blocks = max_length // block_size
+        search_max_length = max_length
+        if eagle_mode is EagleMode.SECONDARY:
+            search_max_length += block_size
+        max_num_blocks = search_max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
@@ -471,7 +475,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        if eagle_mode is EagleMode.PRIMARY and computed_blocks[0]:
+        if eagle_mode is not EagleMode.NONE and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
             for computed in computed_blocks:
                 computed.pop()
@@ -523,7 +527,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         sliding_window_contiguous_blocks = cdiv(
             kv_cache_spec.sliding_window - 1, kv_cache_spec.block_size
         )
-        if eagle_mode is EagleMode.PRIMARY:
+        if eagle_mode is not EagleMode.NONE:
             # Need to drop the last matched block if eagle is enabled. For
             # sliding window layer, we achieve this by increasing the number of
             # contiguous blocks needed for prefix cache hit by one and dropping
@@ -535,7 +539,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # O(max_num_blocks / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        max_num_blocks = max_length // kv_cache_spec.block_size
+        search_max_length = max_length
+        if eagle_mode is EagleMode.SECONDARY:
+            search_max_length += kv_cache_spec.block_size
+        max_num_blocks = min(
+            search_max_length // kv_cache_spec.block_size,
+            len(block_hashes),
+        )
         computed_blocks = tuple(
             [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
@@ -581,7 +591,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 for computed in computed_blocks:
                     computed.pop()
-        if eagle_mode is EagleMode.PRIMARY and computed_blocks[0]:
+        if eagle_mode is not EagleMode.NONE and computed_blocks[0]:
             assert kv_cache_spec.block_size == alignment_tokens, (
                 "aligned_length is not compatible with eagle now"
             )
@@ -684,7 +694,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
         )
-        assert eagle_mode is not EagleMode.PRIMARY, (
+        assert eagle_mode is EagleMode.NONE, (
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
@@ -815,7 +825,10 @@ class MambaManager(SingleTypeKVCacheManager):
         )
 
         block_size = kv_cache_spec.block_size
-        max_num_blocks = max_length // block_size
+        search_max_length = max_length
+        if eagle_mode is EagleMode.SECONDARY:
+            search_max_length += block_size
+        max_num_blocks = min(search_max_length // block_size, len(block_hashes))
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
@@ -837,6 +850,12 @@ class MambaManager(SingleTypeKVCacheManager):
                     computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
                 break  # we just need the last match - early stopping
+
+        if eagle_mode is not EagleMode.NONE and computed_blocks[0]:
+            # Mamba also needs to recompute the last matched block for EAGLE so
+            # the drafting path can consume the updated hidden/state outputs.
+            for computed in computed_blocks:
+                computed.pop()
 
         return computed_blocks
 

@@ -898,7 +898,7 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
     # 2 groups: 1 full + 1 other
     pytest.param(["full", "sliding_window"], 2, id="2g-full+sw"),
     # 3 groups: 1 full + 2 others (different types)
-    pytest.param(["full", "sliding_window", "mamba"], 2, id="3g-full+sw+mamba"),
+    pytest.param(["full", "sliding_window", "mamba"], 1, id="3g-full+sw+mamba"),
     pytest.param(
         ["full", "sliding_window", "sliding_window_large"],
         1,
@@ -986,6 +986,47 @@ def test_prefill_hybrid_model_combinations_eagle(
     manager.free(req1)
 
 
+def test_prefill_hybrid_model_eagle_secondary_retry():
+    """Regression test for the EAGLE fixed-point retry path.
+
+    Evicting the first Mamba block forces a second fixed-point iteration for a
+    full+sliding-window+mamba hybrid. The later retry should treat the updated
+    candidate length as already EAGLE-adjusted instead of dropping yet another
+    block and spiraling to zero.
+    """
+    block_size = 16
+    spec_types = ["full", "sliding_window", "mamba"]
+    manager = KVCacheManager(
+        _make_hybrid_kv_cache_config(block_size, 30, spec_types),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    common_token_ids = [i for i in range(4) for _ in range(block_size)]
+    all_token_ids = common_token_ids + [4] * 7
+    req0 = make_request("0", all_token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    manager.allocate_slots(
+        req0, len(all_token_ids), num_computed_tokens, computed_blocks
+    )
+
+    block_hashes = req0.block_hashes
+    manager.free(req0)
+    manager.new_step_starts()
+
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        len(block_hashes),
+        "secondary_retry",
+        common_token_ids + [6] * 5,
+        [make_block_hash_with_group_id(block_hashes[0], 2)],
+        1,
+    )
+
+
 def test_prefill_hybrid_model_mamba_align():
     """Test that MambaManager.cache_blocks() handles null blocks in align mode.
 
@@ -1024,6 +1065,53 @@ def test_prefill_hybrid_model_mamba_align():
     assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
 
     manager.free(req0)
+
+
+def test_eagle_with_mamba():
+    """Test Eagle behavior for unitary Mamba prefix caching."""
+    block_size = 16
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    MambaSpec(
+                        block_size=block_size,
+                        shapes=(1, 1),
+                        dtypes=(torch.float32,),
+                    ),
+                )
+            ],
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+    )
+
+    # Request with 3 full blocks (48 tokens)
+    token_ids = [0] * (3 * block_size)
+    req = make_request("mamba_divisible_request", token_ids, block_size, sha256)
+
+    # Prime the cache.
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    manager.allocate_slots(
+        req,
+        len(token_ids),
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
+    )
+    manager.free(req)
+
+    req_eagle = make_request("mamba_eagle", token_ids, block_size, sha256)
+    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+
+    # max_cache_hit_length trims the last full block already; EAGLE then drops
+    # one more matched Mamba block so the last state is recomputed.
+    assert len(computed_blocks.blocks[0]) == 1
+    assert num_tokens == block_size
 
 
 def test_prefill_plp():
