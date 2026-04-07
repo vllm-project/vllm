@@ -198,4 +198,3 @@ class QuantFP8(CustomOp):
             out = F.pad(out, (0, 0, 0, padding), "constant", 0.0)
 
         return out, scale
-

@@ -84,7 +84,7 @@ direct_register_aiter_op(
 def _static_per_tensor_quant_fp8_impl(x: Tensor, scale: Tensor) -> Tensor:
     from aiter.ops.quant import per_tensor_quant_hip
 
-    return per_tensor_quant_hip(x, scale, _FP8_DTYPE)[0] # Drop the scale
+    return per_tensor_quant_hip(x, scale, _FP8_DTYPE)[0]  # Drop the scale
 
 
 def _static_per_tensor_quant_fp8_fake(x: Tensor, scale: Tensor) -> Tensor:
@@ -98,8 +98,7 @@ direct_register_aiter_op(
 )
 
 _static_quant_fp8_16bit_per_tensor = (
-    lambda x, scale: scale.numel() == 1
-    and x.dtype in (torch.float16, torch.bfloat16)
+    lambda x, scale: scale.numel() == 1 and x.dtype in (torch.float16, torch.bfloat16)
 )
 """AITER static_quant_fp8 requires a scalar (per-tensor) scale and 16-bit activations.
 Per-token scales fall through to native."""
@@ -173,7 +172,8 @@ _dynamic_quant_fp8_16bit_no_ub = (
     lambda x, per_token, scale_ub=None: scale_ub is None
     and x.dtype in (torch.float16, torch.bfloat16)
 )
-"""AITER dynamic_quant_fp8 requires float16/bfloat16, contiguous input, and no scale upper bound."""
+"""AITER dynamic_quant_fp8 requires float16/bfloat16, contiguous input,
+ and no scale upper bound."""
 
 
 @ir.ops.dynamic_quant_fp8.register_impl(
@@ -205,7 +205,11 @@ def _dynamic_group_quant_fp8_fake(x: Tensor, group_size: int) -> tuple[Tensor, T
     N = orig_shape[-1]
     return (
         torch.empty(orig_shape, dtype=_FP8_DTYPE, device=x.device),
-        torch.empty(orig_shape[:-1] + ((N + group_size - 1) // group_size,), dtype=torch.float32, device=x.device),
+        torch.empty(
+            orig_shape[:-1] + ((N + group_size - 1) // group_size,),
+            dtype=torch.float32,
+            device=x.device,
+        ),
     )
 
 
@@ -227,9 +231,15 @@ _dynamic_group_quant_fp8_128_rowmajor = (
     )
 )
 """AITER dynamic_group_quant_fp8 requires group_size=128, row-major scales,
-no ue8m0 exponent format, contiguous input, hidden dim divisible by 128, and 16-bit activations."""
+no ue8m0 exponent format, contiguous input, hidden dim divisible by 128, 
+and 16-bit activations."""
 
 
+@ir.ops.dynamic_group_quant_fp8.register_impl(
+    "aiter",
+    supports_args=_dynamic_group_quant_fp8_128_rowmajor,
+    supported=AITER_SUPPORTED,
+)
 def dynamic_group_quant_fp8(
     x: Tensor,
     group_shape: list[int],
