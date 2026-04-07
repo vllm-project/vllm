@@ -2083,8 +2083,16 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
-                input_len=args.random_input_len,
-                output_len=args.random_output_len,
+                input_len=(
+                    args.random_input_len
+                    if args.random_input_len is not None
+                    else RandomDataset.DEFAULT_INPUT_LEN
+                ),
+                output_len=(
+                    args.random_output_len
+                    if args.random_output_len is not None
+                    else RandomDataset.DEFAULT_OUTPUT_LEN
+                ),
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
@@ -2099,8 +2107,16 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
                 range_ratio=args.random_range_ratio,
-                input_len=args.random_input_len,
-                output_len=args.random_output_len,
+                input_len=(
+                    args.random_input_len
+                    if args.random_input_len is not None
+                    else RandomDataset.DEFAULT_INPUT_LEN
+                ),
+                output_len=(
+                    args.random_output_len
+                    if args.random_output_len is not None
+                    else RandomDataset.DEFAULT_OUTPUT_LEN
+                ),
                 base_items_per_request=args.random_mm_base_items_per_request,
                 limit_mm_per_prompt=args.random_mm_limit_mm_per_prompt,
                 num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
@@ -2116,7 +2132,11 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
-                input_len=args.random_input_len,
+                input_len=(
+                    args.random_input_len
+                    if args.random_input_len is not None
+                    else RandomDataset.DEFAULT_INPUT_LEN
+                ),
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
