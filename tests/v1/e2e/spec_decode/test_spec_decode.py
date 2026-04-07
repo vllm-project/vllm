@@ -30,6 +30,13 @@ from vllm.v1.metrics.reader import Metric
 MTP_SIMILARITY_RATE = 0.8
 
 
+class AsyncSchedulingNotEnabledError(AssertionError):
+    """Raised when async_scheduling is expected to be True for draft_model
+    spec decode but is False. Tracked in:
+    https://github.com/vllm-project/vllm/issues/38929
+    """
+
+
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
     """Skip test if available GPUs < tp_size on ROCm."""
     available_gpus = torch.accelerator.device_count()
@@ -206,6 +213,16 @@ def test_ngram_gpu_default_with_async_scheduling(
         max_model_len=4096,
         async_scheduling=async_scheduling,
     )
+    # Assert the resolved async_scheduling config matches what was requested.
+    if (
+        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+        != async_scheduling
+    ):  # noqa
+        raise AsyncSchedulingNotEnabledError(
+            f"Expected async_scheduling={async_scheduling}, got "
+            f"{spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling}"
+            " See https://github.com/vllm-project/vllm/issues/38929"
+        )
     evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
     del spec_llm
     cleanup_dist_env_and_memory()
@@ -457,6 +474,13 @@ def _run_eagle_correctness(
             model_impl=model_impl,
             attention_config=attention_config,
         )
+        # EAGLE/EAGLE3 auto-enables async scheduling; assert it is active.
+        if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
+            raise AsyncSchedulingNotEnabledError(
+                "Expected async_scheduling=True for EAGLE spec decode, "
+                f"got False. method={method}"
+                " See https://github.com/vllm-project/vllm/issues/38929"
+            )
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
@@ -760,6 +784,13 @@ def test_mtp_correctness(
             max_model_len=2048,
             attention_backend=attn_backend,
         )
+        # MTP auto-enables async scheduling; assert it is active.
+        if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
+            raise AsyncSchedulingNotEnabledError(
+                "Expected async_scheduling=True for MTP spec decode, "
+                f"got False. method={method}"
+                " See https://github.com/vllm-project/vllm/issues/38929"
+            )
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
@@ -829,12 +860,22 @@ cases = [
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
+# TODO: Fix async_scheduling & engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     args.enforce_eager = enforce_eager
     assert_draft_model_correctness(args)
 
 
 @single_gpu_only
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_realistic_example():
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -850,6 +891,11 @@ def test_draft_model_realistic_example():
 
 
 @single_gpu_only
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_parallel_drafting():
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -876,6 +922,11 @@ def test_draft_model_parallel_drafting():
 )
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
     tgt_model, draft_model = models
     sd_case = ArgsTest(
@@ -888,6 +939,11 @@ def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
 
 
 @multi_gpu_only(num_gpus=2)
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_tensor_parallelism():
     """Ensure spec decode works when running with TP > 1."""
     _skip_if_insufficient_gpus_for_tp(2)
@@ -1062,6 +1118,7 @@ def assert_draft_model_correctness(args: ArgsTest):
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
     )
+
     # we don't check the outputs, only check the metrics
     spec_llm.chat(test_prompts, args.sampling_config)
     metrics = spec_llm.get_metrics()
@@ -1073,10 +1130,6 @@ def assert_draft_model_correctness(args: ArgsTest):
         spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
     )
 
-    del spec_llm  # CLEANUP
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
     print(
         f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
         f"temperature={args.sampling_config.temperature:.2f}, "
@@ -1086,6 +1139,19 @@ def assert_draft_model_correctness(args: ArgsTest):
 
     assert acceptance_rate >= args.expected_acceptance_rate
     assert acceptance_len >= args.expected_acceptance_len
+    # draft_model auto-enables async scheduling; assert it is active.
+    # Raise AsyncSchedulingNotEnabledError (a subclass of AssertionError) so that
+    # @pytest.mark.xfail(raises=AsyncSchedulingNotEnabledError) catches only this
+    # specific failure — leaving all other assertion failures (e.g. correctness or
+    # acceptance-rate checks above) visible as real test failures.
+    if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
+        raise AsyncSchedulingNotEnabledError(
+            "Expected async_scheduling=True for draft_model spec decode, got False."
+            " See https://github.com/vllm-project/vllm/issues/38929"
+        )
+    del spec_llm  # CLEANUP
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
