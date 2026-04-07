@@ -356,7 +356,7 @@ def _chunk_scan_fwd_kernel(
         )
         # If there's seq_idx, we already set cb[i, j] = 0 for seq_idx[i] != seq_idx[j].
         # So we don't need masking wrt seq_idx here.
-        cb *= fast_exp(dA_cs_m[:, None] - dA_cs_k[None, :])
+        cb *= fast_exp(tl.minimum(dA_cs_m[:, None] - dA_cs_k[None, :], 0.0))
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size - k, other=0.0).to(tl.float32)
         cb *= dt_k
         if IS_CAUSAL:

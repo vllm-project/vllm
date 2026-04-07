@@ -82,9 +82,20 @@ class PoolingServing:
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
+        ctx = await self._init_ctx(request, raw_request)
+        await self.io_processor.pre_process_online_async(ctx)
+        await self._prepare_generators(ctx)
+        await self._collect_batch(ctx)
+        await self.io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)
+
+    async def _init_ctx(
+        self,
+        request: AnyPoolingRequest,
+        raw_request: Request | None = None,
+    ):
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
-
         await self._check_model(request)
 
         ctx = PoolingServeContext(
@@ -96,11 +107,7 @@ class PoolingServing:
 
         self._validate_request(ctx)
         self._maybe_get_adapters(ctx)
-        await self.io_processor.pre_process_online_async(ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        await self.io_processor.post_process_online_async(ctx)
-        return await self._build_response(ctx)
+        return ctx
 
     async def _prepare_generators(
         self,
@@ -117,8 +124,16 @@ class PoolingServing:
             else await self._get_trace_headers(ctx.raw_request.headers)
         )
 
-        pooling_params = self.io_processor.create_pooling_params(ctx.request)
-        pooling_params.verify(self.model_config)
+        if ctx.pooling_params is None:
+            pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        else:
+            pooling_params = ctx.pooling_params
+
+        if isinstance(pooling_params, list):
+            for params in pooling_params:
+                params.verify(self.model_config)
+        else:
+            pooling_params.verify(self.model_config)
 
         for i, engine_input in enumerate(ctx.engine_inputs):
             prompt_request_id = (
@@ -127,16 +142,22 @@ class PoolingServing:
                 else ctx.prompt_request_ids[i]
             )
 
+            params = (
+                pooling_params[i]
+                if isinstance(pooling_params, list)
+                else pooling_params
+            )
+
             self._log_inputs(
                 prompt_request_id,
                 engine_input,
-                params=pooling_params,
+                params=params,
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
                 engine_input,
-                pooling_params,
+                params,
                 prompt_request_id,
                 lora_request=ctx.lora_request,
                 trace_headers=trace_headers,
@@ -224,7 +245,7 @@ class PoolingServing:
             raise ValueError(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
-                " Please, select a smaller truncation size."
+                " Please request a smaller truncation size."
             )
         return None
 

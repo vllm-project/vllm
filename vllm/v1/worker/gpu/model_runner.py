@@ -130,7 +130,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
-        self.output_copy_event = torch.cuda.Event()
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -163,12 +162,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
-        use_strict_rejection_sampling = False
         if self.speculative_config is not None:
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
-            use_strict_rejection_sampling = (
-                self.speculative_config.rejection_sample_method == "strict"
-            )
 
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -217,11 +212,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.num_speculative_steps + 1,
             )
-            self.rejection_sampler = RejectionSampler(
-                self.sampler,
-                num_speculative_steps=self.num_speculative_steps,
-                use_strict_rejection_sampling=use_strict_rejection_sampling,
-            )
+            if self.speculative_config is not None:
+                self.rejection_sampler = RejectionSampler(
+                    self.sampler,
+                    self.speculative_config,
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
             self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
@@ -395,12 +390,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         *args,
-        skip_attn: bool = True,
+        skip_attn: bool = False,
         uniform_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if skip_attn and not is_profile:
+            raise ValueError(
+                "skip_attn must only be True for initial memory profiling."
+            )
+
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
@@ -992,6 +992,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
             else:
+                assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
+                    "Attention metadata must be prepared for dummy runs when using "
+                    "FULL cudagraph mode."
+                )
                 block_tables = None
                 slot_mappings = None
             # FIXME(woosuk): Fix warmup for LoRA.
@@ -1175,7 +1179,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
-            copy_event=self.output_copy_event,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1265,7 +1268,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_valid=is_valid,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
-            copy_event=self.output_copy_event,
         )
 
         self.postprocess_pool(input_batch)

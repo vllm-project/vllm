@@ -102,10 +102,6 @@ class CPUModelRunner(GPUModelRunner):
         # so stale KV cache data never affects computation.
         pass
 
-    def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
-        # Note: For CPU backend, dp padding is not required for now.
-        return 0, None
-
 
 @contextmanager
 def _torch_cuda_wrapper():
