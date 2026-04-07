@@ -8,7 +8,7 @@ from functools import partial
 from typing import Literal, cast
 
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
@@ -26,6 +26,7 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_bytes,
     encode_pooling_output_base64,
     encode_pooling_output_float,
+    get_json_response_cls,
 )
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -54,6 +55,7 @@ class ServingPooling(PoolingServingBase):
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
+        self.JSONResponseCLS = get_json_response_cls()
 
     async def __call__(
         self,
@@ -151,7 +153,7 @@ class ServingPooling(PoolingServingBase):
         encoding_format: Literal["float", "base64"],
         embed_dtype: EmbedDType,
         endianness: Endianness,
-    ) -> PoolingResponse:
+    ) -> JSONResponse:
         encode_fn = cast(
             Callable[[PoolingRequestOutput], list[float] | str],
             (
@@ -183,13 +185,14 @@ class ServingPooling(PoolingServingBase):
             total_tokens=num_prompt_tokens,
         )
 
-        return PoolingResponse(
+        response = PoolingResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             data=items,
             usage=usage,
         )
+        return self.JSONResponseCLS(content=response.model_dump())
 
     def request_output_to_pooling_bytes_response(
         self,
@@ -200,7 +203,7 @@ class ServingPooling(PoolingServingBase):
         encoding_format: Literal["bytes", "bytes_only"],
         embed_dtype: EmbedDType,
         endianness: Endianness,
-    ) -> PoolingBytesResponse:
+    ) -> StreamingResponse:
         content, items, usage = encode_pooling_bytes(
             pooling_outputs=final_res_batch,
             embed_dtype=embed_dtype,
@@ -223,4 +226,10 @@ class ServingPooling(PoolingServingBase):
             }
         )
 
-        return PoolingBytesResponse(content=content, headers=headers)
+        response = PoolingBytesResponse(content=content, headers=headers)
+
+        return StreamingResponse(
+            content=response.content,
+            headers=response.headers,
+            media_type=response.media_type,
+        )

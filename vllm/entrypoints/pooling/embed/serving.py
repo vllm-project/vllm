@@ -35,7 +35,6 @@ from vllm.utils.serial_utils import EmbedDType, Endianness
 
 logger = init_logger(__name__)
 
-JSONResponseCLS = get_json_response_cls()
 
 EmbeddingServeContext: TypeAlias = PoolingServeContext[EmbeddingRequest]
 
@@ -45,6 +44,11 @@ class ServingEmbedding(PoolingServing):
 
     request_id_prefix = "embd"
     io_processor: EmbedIOProcessor
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.JSONResponseCLS = get_json_response_cls()
 
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
@@ -137,7 +141,7 @@ class ServingEmbedding(PoolingServing):
             data=items,
             usage=usage,
         )
-        return JSONResponseCLS(content=response.model_dump())
+        return self.JSONResponseCLS(content=response.model_dump())
 
     def _openai_bytes_response(
         self,
@@ -206,4 +210,4 @@ class ServingEmbedding(PoolingServing):
                 ),
             ),
         )
-        return JSONResponse(content=response.model_dump(exclude_none=True))
+        return self.JSONResponse(content=response.model_dump(exclude_none=True))
