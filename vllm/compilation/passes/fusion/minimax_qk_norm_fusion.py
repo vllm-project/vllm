@@ -197,6 +197,33 @@ class MiniMaxQKNormPattern:
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
+        # Second pattern: three separate split_with_sizes nodes (one per output),
+        # each with _users=1. This occurs when the QKV projection uses a
+        # functional GEMM kernel (e.g. cutlass_scaled_mm via auto_functionalized),
+        # which causes inductor to generate one split per consumer.
+        def pattern_split3(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q = qkv.split([q_size, kv_size, kv_size], dim=-1)[0]
+            k = qkv.split([q_size, kv_size, kv_size], dim=-1)[1]
+            v = qkv.split([q_size, kv_size, kv_size], dim=-1)[2]
+            q_fp32 = q.to(torch.float32)
+            k_fp32 = k.to(torch.float32)
+            q_var = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+            k_var = k_fp32.pow(2).mean(dim=-1, keepdim=True)
+            qk_var = torch.cat([q_var, k_var], dim=-1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / tp_world
+            q_var, k_var = qk_var.chunk(2, dim=-1)
+            q_out = (q_fp32 * torch.rsqrt(q_var + eps) * q_weight).to(dtype)
+            k_out = (k_fp32 * torch.rsqrt(k_var + eps) * k_weight).to(dtype)
+            return q_out, k_out, v
+
+        pm.register_replacement(
+            pattern_split3, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
 
 class MiniMaxQKNormPass(VllmPatternMatcherPass):
     """
@@ -251,11 +278,12 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
         q_size = num_heads_per_rank * head_dim
         kv_size = num_kv_heads_per_rank * head_dim
 
-        # Max tokens for which Lamport is beneficial
-        self.max_token_num = MAX_TOKEN_NUM
+        self.max_token_num = min(
+            MAX_TOKEN_NUM, config.scheduler_config.max_num_batched_tokens
+        )
 
         tp_rank = get_tensor_model_parallel_rank()
-        # Allocate (or reuse cached) Lamport workspace.
+        # Allocate Lamport workspace first.
         from vllm.distributed.parallel_state import get_tp_group
         from vllm.model_executor.layers.minimax_rms_norm.lamport_workspace import (
             get_allreduce_workspace,

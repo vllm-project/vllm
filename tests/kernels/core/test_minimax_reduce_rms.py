@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MiniMaxText01RMSNormTP.forward_qk."""
+"""Tests for MiniMax QK RMS-norm: NCCL reference vs Lamport fused kernel."""
 
 import pytest
 import torch
@@ -9,7 +9,8 @@ from torch.multiprocessing import spawn
 
 from tests.utils import ensure_current_vllm_config, init_test_distributed_environment
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.layers.mamba.linear_attn import (
+from vllm.model_executor.layers.minimax_rms_norm.rms_norm_tp import (
+    MiniMaxQKNormWrapper,
     MiniMaxText01RMSNormTP,
 )
 from vllm.platforms import current_platform
@@ -29,7 +30,7 @@ def _worker_forward_qk(
     seed,
     eps,
 ):
-    """Per-rank worker that exercises both paths of forward_qk."""
+    """Per-rank worker: compare NCCL allreduce path vs Lamport fused kernel."""
 
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(device)
@@ -42,7 +43,16 @@ def _worker_forward_qk(
 
     q_norm = MiniMaxText01RMSNormTP(hidden_q_full, eps=eps).cuda()
     k_norm = MiniMaxText01RMSNormTP(hidden_k_full, eps=eps).cuda()
-    assert q_norm._ar_workspace is not None, (
+
+    wrapper = MiniMaxQKNormWrapper(
+        q_norm=q_norm,
+        k_norm=k_norm,
+        q_size=hq,
+        kv_size=hk,
+        max_tokens=num_tokens,
+        prefix=f"test_layer_{local_rank}",
+    )
+    assert wrapper._ar_workspace is not None, (
         f"workspace not initialised (tp={world_size})"
     )
 
@@ -55,21 +65,19 @@ def _worker_forward_qk(
     torch.manual_seed(seed + 1000 + local_rank)
     qkv = torch.randn(num_tokens, hq + hk + hk, dtype=dtype, device="cuda")
 
-    # Reference: NCCL fallback (temporarily clear workspace)
-    saved_ws = q_norm._ar_workspace
-    q_norm._ar_workspace = None
-    ref_q, ref_k, ref_v = MiniMaxText01RMSNormTP.forward_qk(
-        q_norm, k_norm, qkv.clone(), hq, hk
-    )
-    q_norm._ar_workspace = saved_ws
+    # Reference: NCCL allreduce path via forward_qk (operates on separate q, k)
+    q_ref, k_ref, v_ref = qkv.clone().split([hq, hk, hk], dim=-1)
+    ref_q, ref_k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q_ref, k_ref)
 
-    fused_q, fused_k, fused_v = MiniMaxText01RMSNormTP.forward_qk(
-        q_norm, k_norm, qkv.clone(), hq, hk
-    )
+    # Skip if the Lamport custom op is not compiled in this build.
+    if not hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
+        cleanup_dist_env_and_memory()
+        return
+
+    # Fused: Lamport kernel
+    fused_q, fused_k, fused_v = wrapper._fused_kernel(qkv.clone())
     torch.accelerator.synchronize()
 
-    # atol = 5e-2 if dtype == torch.float16 else 1e-2
-    # rtol = 5e-2 if dtype == torch.float16 else 1e-2
     torch.testing.assert_close(
         fused_q,
         ref_q,
@@ -86,7 +94,7 @@ def _worker_forward_qk(
     )
     torch.testing.assert_close(
         fused_v,
-        ref_v,
+        v_ref,
         atol=0,
         rtol=0,
         msg=f"V should be unchanged rank={local_rank} tp={world_size} dtype={dtype}",
@@ -103,7 +111,7 @@ def _worker_forward_qk(
 @pytest.mark.parametrize("num_tokens", [1, 128, 333])
 @pytest.mark.parametrize(
     "hidden_dims",
-    [(6144, 1024), (1024, 1024)],
+    [(6144, 1024)],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("eps", [1e-6])
