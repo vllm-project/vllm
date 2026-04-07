@@ -245,6 +245,8 @@ class TorchProfilerWrapper(WorkerProfiler):
         sort_key: str,
         row_limit: int | None = None,
     ) -> str:
+        if row_limit is None: # use profiler default row limit of 100
+            return self.profiler.key_averages().table(sort_by=sort_key)
         return self.profiler.key_averages().table(
             sort_by=sort_key,
             row_limit=row_limit,
