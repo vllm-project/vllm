@@ -25,6 +25,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
@@ -39,8 +41,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.group_size = MXFP8_BLOCK_SIZE
-        self.weight_block_size = [1, self.group_size]
+        self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
         self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
 
     def create_weights(
@@ -61,7 +62,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
                 num_experts,
                 w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
-                dtype=torch.float8_e4m3fn,
+                dtype=MXFP8_VALUE_DTYPE,
             ),
             requires_grad=False,
         )
@@ -73,7 +74,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
-                dtype=torch.float8_e4m3fn,
+                dtype=MXFP8_VALUE_DTYPE,
             ),
             requires_grad=False,
         )
@@ -84,8 +85,8 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(
                 num_experts,
                 w13_num_shards * intermediate_size_per_partition,
-                hidden_size // self.group_size,
-                dtype=torch.uint8,
+                hidden_size // MXFP8_BLOCK_SIZE,
+                dtype=MXFP8_SCALE_DTYPE,
             ),
             requires_grad=False,
         )
@@ -99,8 +100,8 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // self.group_size,
-                dtype=torch.uint8,
+                intermediate_size_per_partition // MXFP8_BLOCK_SIZE,
+                dtype=MXFP8_SCALE_DTYPE,
             ),
             requires_grad=False,
         )

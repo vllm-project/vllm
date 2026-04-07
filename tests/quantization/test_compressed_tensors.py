@@ -636,8 +636,8 @@ def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(100),
-    reason="MXFP8 requires Blackwell (sm_100+).",
+    not current_platform.is_cuda() or not current_platform.has_device_capability(75),
+    reason="MXFP8 requires Turing (sm_75+) or newer.",
 )
 def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
     """Verify MXFP8 scheme, dtypes, and generation for a MoE model."""

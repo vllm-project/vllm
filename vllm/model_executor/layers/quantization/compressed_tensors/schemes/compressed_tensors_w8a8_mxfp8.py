@@ -9,6 +9,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
     Mxfp8LinearOp,
 )
 from vllm.model_executor.parameter import (
@@ -33,12 +35,11 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
     """
 
     def __init__(self):
-        self.group_size = MXFP8_BLOCK_SIZE
         self.mxfp8_linear = Mxfp8LinearOp()
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     def create_weights(
         self,
@@ -59,7 +60,7 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
+                dtype=MXFP8_VALUE_DTYPE,
             ),
             input_dim=1,
             output_dim=0,
@@ -70,8 +71,8 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
         weight_scale = GroupQuantScaleParameter(
             data=torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.group_size,
-                dtype=torch.uint8,
+                input_size_per_partition // MXFP8_BLOCK_SIZE,
+                dtype=MXFP8_SCALE_DTYPE,
             ),
             input_dim=1,
             output_dim=0,
