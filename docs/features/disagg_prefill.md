@@ -16,15 +16,6 @@ into different instances for execution, thereby achieving:
 - Lower latency (Decode focuses on step-by-step generation)
 - More flexible resource scheduling (enabling tiered GPU utilization)
 
-## When to Use Disaggregated Prefilling?
-
-If you have any of the following needs, you may consider using the PD (Prefill–Decode) disaggregation approach:
-
-- **Tuning time-to-first-token (TTFT) and inter-token-latency (ITL) independently**. Disaggregated prefilling separates the prefill and decode phase of LLM inference into different vLLM instances. This allows you apply different parallelization strategies (e.g. `tp` and `pp`) to optimize TTFT without impacting ITL, or optimize ITL without affecting TTFT.
-- **Controlling tail ITL**. Without disaggregated prefilling, vLLM may interleave prefill jobs during the decoding phase of a request, which can increase tail latency. Disaggregated prefilling helps mitigate this issue and provides better control over tail ITL. While chunked prefill with an appropriate chunk size can achieve a similar effect, determining the optimal chunk size in practice is often difficult. Therefore, disaggregated prefilling is generally a more reliable approach for controlling tail ITL.
-
-!!! note
-    Disaggregated prefilling does NOT improve overall throughput. Its primary goal is to optimize latency (e.g., TTFT and tail ITL), not throughput.
 
 ## How Disaggregated Prefilling Works
 Disaggregated prefilling separates the LLM inference pipeline into two independent stages—Prefill and Decode—and executes them on different vLLM instances.
