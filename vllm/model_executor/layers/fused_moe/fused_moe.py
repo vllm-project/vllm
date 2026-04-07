@@ -1946,26 +1946,18 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             p.is_cuda() and p.has_device_capability((7, 5))
         )
 
-        INT8_SUPPORTED_W_A = [
-            (kInt8StaticChannelSym, kInt8DynamicTokenSym),
-        ]
-
-        if not device_supports_fp8:
-            return (weight_key, activation_key) in [
-                (None, None),
-                *(INT8_SUPPORTED_W_A if device_supports_int8 else []),
+        supported = [(None, None)]
+        if device_supports_int8:
+            supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
+        if device_supports_fp8:
+            supported += [
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+                (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             ]
-
-        SUPPORTED_W_A = [
-            (None, None),
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            *(INT8_SUPPORTED_W_A if device_supports_int8 else []),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        return (weight_key, activation_key) in supported
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
