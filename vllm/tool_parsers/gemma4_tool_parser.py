@@ -718,6 +718,41 @@ class Gemma4ToolParser(ToolParser):
 
         return self._emit_name_then_args(func_name, args_part)
 
+    def _emit_name_then_args(
+        self, func_name: str, args_part: str
+    ) -> DeltaMessage | None:
+        """Emit function name delta (once), then argument deltas."""
+        if not func_name:
+            return None
+
+        # Step 1: send function name once
+        if not self.current_tool_name_sent:
+            self.current_tool_name_sent = True
+            self.prev_tool_call_arr[self.current_tool_id] = {
+                "name": func_name,
+                "arguments": {},
+            }
+            return DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        type="function",
+                        id=make_tool_call_id(),
+                        function=DeltaFunctionCall(
+                            name=func_name,
+                            arguments="",
+                        ).model_dump(exclude_none=True),
+                    )
+                ]
+            )
+
+        # Step 2: diff and stream arguments
+        if args_part:
+            return self._emit_argument_diff(args_part)
+
+        return None
+
+
     def _handle_tool_call_end(self,  current_text: str,regex: re.Pattern,start_token: str) -> DeltaMessage | None:
         """Handle streaming when a tool call has just completed.
 
