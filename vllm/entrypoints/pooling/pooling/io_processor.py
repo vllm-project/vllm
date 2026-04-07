@@ -52,6 +52,7 @@ class PluginIOProcessor(PoolingIOProcessor):
         for p in params_seq:
             if p.task is None:
                 p.task = "plugin"
+
         ctx.pooling_params = params_seq
         ctx.prompts = prompts_seq
         return super().pre_process_offline(ctx)

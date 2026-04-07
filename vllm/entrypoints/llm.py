@@ -1094,33 +1094,39 @@ class LLM:
                     "offline inference example for more details."
                 )
 
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
+        assert pooling_task is not None and pooling_task in self.pooling_io_processors
+        io_processor = self.pooling_io_processors[pooling_task]
 
-        prompts_seq = prompt_to_seq(prompts)
-        params_seq = self._params_to_seq(pooling_params, len(prompts_seq))
+        ctx = OfflineInputsContext(
+            prompts=prompts,
+            pooling_params=pooling_params,
+            tokenization_kwargs=tokenization_kwargs,
+        )
+
+        engine_inputs = io_processor.pre_process_offline(ctx)
+        n_inputs = len(engine_inputs)
+
+        if ctx.pooling_params is None:
+            ctx.pooling_params = PoolingParams()
+
+        params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
 
         for param in params_seq:
             if param.task is None:
                 param.task = pooling_task
+            elif pooling_task == "plugin":
+                # `plugin` task uses io_processor.parse_request to verify inputs.
+                # We actually allow plugin to overwrite pooling_task.
+                pass
             elif param.task != pooling_task:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
                 raise ValueError(msg)
 
-        assert pooling_task is not None and pooling_task in self.pooling_io_processors
-
-        io_processor = self.pooling_io_processors[pooling_task]
-        processor_inputs = io_processor.pre_process_offline(
-            ctx=OfflineInputsContext(
-                prompts=prompts_seq, tokenization_kwargs=tokenization_kwargs
-            )
-        )
-        seq_lora_requests = self._lora_request_to_seq(lora_request, len(prompts_seq))
-        seq_priority = self._priority_to_seq(None, len(prompts))
+        seq_lora_requests = self._lora_request_to_seq(lora_request, n_inputs)
+        seq_priority = self._priority_to_seq(None, n_inputs)
 
         self._render_and_add_requests(
-            prompts=processor_inputs,
+            prompts=engine_inputs,
             params=params_seq,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
@@ -1403,15 +1409,14 @@ class LLM:
             n_queries=n_queries,
         )
 
-        processor_inputs = io_processor.pre_process_offline(ctx)
+        engine_inputs = io_processor.pre_process_offline(ctx)
+        n_inputs = len(engine_inputs)
 
-        seq_lora_requests = self._lora_request_to_seq(
-            lora_request, len(processor_inputs)
-        )
+        seq_lora_requests = self._lora_request_to_seq(lora_request, n_inputs)
 
         if ctx.pooling_params is None:
             ctx.pooling_params = PoolingParams()
-        params_seq = self._params_to_seq(ctx.pooling_params, len(processor_inputs))
+        params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
 
         for param in params_seq:
             if param.task is None:
@@ -1420,10 +1425,10 @@ class LLM:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
                 raise ValueError(msg)
 
-        seq_priority = self._priority_to_seq(None, len(processor_inputs))
+        seq_priority = self._priority_to_seq(None, n_inputs)
 
         self._render_and_add_requests(
-            prompts=processor_inputs,
+            prompts=engine_inputs,
             params=params_seq,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
