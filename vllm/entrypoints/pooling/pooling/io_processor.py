@@ -23,16 +23,22 @@ class PluginIOProcessor(PoolingIOProcessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.io_processor = get_io_processor(
+        io_processor = get_io_processor(
             self.vllm_config,
             self.renderer,
             self.model_config.io_processor_plugin,
         )
 
+        assert io_processor is not None
+        self.io_processor = io_processor
+
     #######################################
     # offline APIs
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        assert isinstance(ctx.prompts, dict) and "data" in ctx.prompts
+        assert ctx.pooling_params is not None
+
         # Validate the request data is valid for the loaded plugin
         prompt_data = ctx.prompts.get("data")
         if prompt_data is None:

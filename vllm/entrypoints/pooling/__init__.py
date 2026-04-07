@@ -73,11 +73,7 @@ def init_pooling_state(
     from vllm.tasks import POOLING_TASKS
 
     model_config = engine_client.model_config
-    chat_template_config = ChatTemplateConfig(
-        chat_template=load_chat_template(args.chat_template),
-        chat_template_content_format=args.chat_template_content_format,
-        trust_request_chat_template=args.trust_request_chat_template,
-    )
+    resolved_chat_template = load_chat_template(args.chat_template)
 
     state.serving_pooling = (
         (
@@ -86,7 +82,9 @@ def init_pooling_state(
                 state.openai_serving_models,
                 supported_tasks=supported_tasks,
                 request_logger=request_logger,
-                chat_template_config=chat_template_config,
+                chat_template=resolved_chat_template,
+                chat_template_content_format=args.chat_template_content_format,
+                trust_request_chat_template=args.trust_request_chat_template,
             )
         )
         if any(t in supported_tasks for t in POOLING_TASKS)
@@ -97,7 +95,9 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template_config=chat_template_config,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
         )
         if "embed" in supported_tasks
         else None
@@ -107,7 +107,9 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template_config=chat_template_config,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
         )
         if "classify" in supported_tasks
         else None
@@ -117,7 +119,9 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template_config=chat_template_config,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
             enable_flash_late_interaction=getattr(
                 args, "enable_flash_late_interaction", True
             ),

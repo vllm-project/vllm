@@ -101,7 +101,9 @@ class PoolingIOProcessor:
     # offline APIs
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
-        assert not isinstance(ctx.prompts, ScoringData)
+        assert not isinstance(ctx.prompts, ScoringData) and not (
+            isinstance(ctx.prompts, dict) and "data" in ctx.prompts
+        )
 
         prompts_seq = prompt_to_seq(ctx.prompts)
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(

@@ -21,7 +21,7 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponse,
     PoolingResponseData,
 )
-from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
 from vllm.entrypoints.pooling.utils import (
     encode_pooling_bytes,
     encode_pooling_output_base64,
@@ -57,9 +57,11 @@ class ServingPooling(PoolingServingBase):
 
     async def __call__(
         self,
-        request: PoolingRequest,
+        request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
+        assert isinstance(request, PoolingRequest)
+
         ctx = await self._init_ctx(request, raw_request)
 
         if request.task is None:
